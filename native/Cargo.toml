@@ -1,0 +1,22 @@
+[package]
+name = "microvoxel-game"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+microvoxel = { path = ".." }
+wgpu = "24.0.5"
+winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+glam = "0.29"
+png = "0.17"
+
+[dev-dependencies]
+naga = { version = "24", features = ["wgsl-in"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

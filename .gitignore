@@ -1,0 +1,15 @@
+# Build outputs
+/target/
+/native/target/
+/build/
+
+# Generated artifacts; PNG assets in source/asset directories remain trackable.
+/output/
+/screenshots/
+/worlds/
+/*.pgm
+/*.obj
+/*.png
+/native/*.png
+*.mvw
+*.tmp
