@@ -3,3 +3,8 @@
 pub mod lod;
 pub mod surface;
 pub mod terrain;
+pub mod triangulation;
+
+pub mod ray;
+
+pub mod octree;

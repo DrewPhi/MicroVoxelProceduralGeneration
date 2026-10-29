@@ -2,14 +2,18 @@
 //!
 //! Spatial state uses integer 1/16-meter cells. Continuous terrain mathematics
 //! are private generation details; a cell's value never depends on camera LOD.
-//! No physical/biological material properties or gameplay systems are populated.
+//! A kinematic voxel player is included; physical/biological material property
+//! maps remain empty and no general rigid-body or fluid solver is populated.
 
+pub mod character;
 pub mod generation;
 pub mod grid;
 pub mod materials;
 pub mod meshing;
 pub mod painting;
 pub mod persistence;
+pub mod physics;
+pub mod player;
 pub mod queries;
 pub mod render;
 pub mod simulation;

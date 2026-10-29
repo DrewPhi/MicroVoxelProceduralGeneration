@@ -13,3 +13,10 @@
 /native/*.png
 *.mvw
 *.tmp
+
+# Local renderer preferences
+/native/settings.conf
+
+# Machine-local executable launcher and desktop entry (rebuild from tools/).
+/MicroVoxel
+/MicroVoxel.desktop

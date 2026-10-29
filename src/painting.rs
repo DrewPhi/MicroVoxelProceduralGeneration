@@ -33,6 +33,33 @@ pub fn appearance(pos: CellPos, seed: u64) -> Appearance {
     ) >> 56) as u16;
     Appearance((tone << 8) | grain)
 }
+/// Store the selected tone in the cell value, so moving a voxel preserves color.
+pub fn environment_appearance(
+    pos: CellPos,
+    seed: u64,
+    material: MaterialId,
+    environment: crate::generation::EnvironmentSample,
+) -> Appearance {
+    let original = appearance(pos, seed);
+    let patch = (original.0 >> 8) as f32 / 255.;
+    let tone = if material == MaterialId::GRASS {
+        (0.72 * environment.moisture + 0.28 * environment.ground_wetness + (patch - 0.5) * 0.12)
+            .clamp(0., 1.)
+    } else if material == MaterialId::SANDSTONE || material == MaterialId::LIMESTONE {
+        // Broad, gently warped layers; interpolate between strata instead of
+        // independently repainting a sharp horizontal band every two meters.
+        let layer = pos.y as f64 / 192. + (patch as f64 - 0.5) * 0.65;
+        let index = layer.floor() as i64;
+        let t = layer - layer.floor();
+        let t = t * t * (3. - 2. * t);
+        let tone = |y: i64| (hash(seed ^ hash(y as u64)) >> 40) as f64 / 16777215.;
+        let stratum = tone(index) * (1. - t) + tone(index + 1) * t;
+        0.88 * patch + 0.12 * stratum as f32
+    } else {
+        patch
+    };
+    Appearance((((tone * 255.).round() as u16) << 8) | (original.0 & 255))
+}
 pub fn default_palette(material: MaterialId) -> [[u8; 3]; 2] {
     match material {
         MaterialId::ROCK => [[138, 143, 138], [161, 153, 138]],
@@ -41,7 +68,12 @@ pub fn default_palette(material: MaterialId) -> [[u8; 3]; 2] {
         MaterialId::GRAVEL => [[125, 133, 128], [150, 150, 138]],
         MaterialId::WATER => [[41, 102, 128], [43, 105, 130]],
         MaterialId::SNOW => [[227, 232, 227], [240, 242, 237]],
-        MaterialId::GRASS => [[82, 120, 66], [112, 135, 77]],
+        MaterialId::GRASS => [[155, 143, 77], [62, 119, 65]],
+        MaterialId::SANDSTONE => [[143, 100, 66], [198, 154, 106]],
+        MaterialId::LIMESTONE => [[155, 154, 137], [190, 189, 168]],
+        MaterialId::BASALT => [[68, 75, 75], [101, 108, 103]],
+        MaterialId::MUD => [[79, 75, 52], [106, 99, 67]],
+        MaterialId::SILT => [[141, 124, 84], [166, 151, 110]],
         _ => [[204, 26, 179], [204, 26, 179]],
     }
 }

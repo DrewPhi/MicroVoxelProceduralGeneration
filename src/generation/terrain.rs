@@ -1,16 +1,19 @@
-//! Preserved terrain mathematics. Only the discrete generator adapter exposes it.
+//! Regional geology, climate-conditioned erosion and native surface refinement.
+use super::{
+    climate::{self, ClimateCell},
+    environment::{EnvironmentSample, Geology, TerrainConfig},
+    landforms::{self, LandscapeCell},
+    noise::*,
+};
+use crate::materials::MaterialId;
 use std::{cmp::Reverse, collections::BinaryHeap};
-const REGION_SIZE: f64 = 10000.0;
-const REGIONAL_SPACING: f64 = 16.0;
+pub(super) const REGION_SIZE: f64 = 10000.0;
+pub(super) const REGIONAL_SPACING: f64 = 16.0;
 const HEIGHT_SCALE: f64 = 1024.0;
 const EROSION_STEPS: usize = 24;
 const CELL_AREA: f64 = REGIONAL_SPACING * REGIONAL_SPACING;
 const RIVER_THRESHOLD: f64 = 100_000.0; // Rainfall-weighted catchment area, m².
 const BIN_SIZE: f64 = 64.0;
-const ROCK: u8 = 0;
-const SOIL: u8 = 1;
-const SAND: u8 = 2;
-const GRAVEL: u8 = 3;
 const NEIGHBORS: [(isize, isize); 8] = [
     (-1, -1),
     (0, -1),
@@ -30,12 +33,14 @@ pub(crate) struct Region {
     soil: Vec<f64>,
     resistance: Vec<f64>,
     rainfall: Vec<f64>,
-    erosion: Vec<f64>,
     lakes: Vec<f64>,
     flow: Vec<f64>,
     channels: Vec<Channel>,
     bins: Vec<Vec<usize>>,
     budget: SedimentBudget,
+    config: TerrainConfig,
+    climate: Vec<ClimateCell>,
+    landscapes: Vec<LandscapeCell>,
 }
 
 #[derive(Default)]
@@ -66,110 +71,10 @@ pub(crate) struct Surface {
     pub(crate) height: f64,
     pub(crate) water: f64,
     pub(crate) bedrock: f64,
-    pub(crate) material: u8,
-}
-
-// ---- Smooth deterministic noise. Distances throughout this file are meters. ----
-
-fn mix(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e3779b97f4a7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
-    value ^ (value >> 31)
-}
-
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a + t * (b - a)
-}
-fn fade(t: f64) -> f64 {
-    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-}
-fn smoothstep(a: f64, b: f64, value: f64) -> f64 {
-    let t = ((value - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn gradient_dot(x: i64, z: i64, dx: f64, dz: f64, seed: u64) -> f64 {
-    let hash = mix(seed ^ mix(x as u64) ^ mix(z as u64).rotate_left(32));
-    let d = std::f64::consts::FRAC_1_SQRT_2;
-    match hash & 7 {
-        0 => dx,
-        1 => -dx,
-        2 => dz,
-        3 => -dz,
-        4 => (dx + dz) * d,
-        5 => (dx - dz) * d,
-        6 => (-dx + dz) * d,
-        _ => (-dx - dz) * d,
-    }
-}
-
-fn perlin(x: f64, z: f64, seed: u64) -> f64 {
-    let gx = x.floor() as i64;
-    let gz = z.floor() as i64;
-    let dx = x - x.floor();
-    let dz = z - z.floor();
-    let top = lerp(
-        gradient_dot(gx, gz, dx, dz, seed),
-        gradient_dot(gx + 1, gz, dx - 1.0, dz, seed),
-        fade(dx),
-    );
-    let bottom = lerp(
-        gradient_dot(gx, gz + 1, dx, dz - 1.0, seed),
-        gradient_dot(gx + 1, gz + 1, dx - 1.0, dz - 1.0, seed),
-        fade(dx),
-    );
-    lerp(top, bottom, fade(dz)) * std::f64::consts::SQRT_2
-}
-
-fn noise(x: f64, z: f64, wavelength: f64, seed: u64) -> f64 {
-    perlin(x / wavelength, z / wavelength, seed)
-}
-
-// Rotated, offset octaves avoid lining up every layer's lattice corners.
-fn octave_position(x: f64, z: f64) -> (f64, f64) {
-    (0.8 * x - 0.6 * z + 19.19, 0.6 * x + 0.8 * z + 73.73)
-}
-
-// ---- Regional structure: plains, foothills, ridges, and coordinate warping. ----
-
-fn mountain_mask(x: f64, z: f64, seed: u64) -> f64 {
-    let broad = noise(x + 731.0, z + 271.0, 1800.0, seed ^ 11);
-    smoothstep(-0.22, 0.35, broad)
-}
-
-fn warped_position(x: f64, z: f64, seed: u64) -> (f64, f64) {
-    (
-        x + 120.0 * noise(x, z, 900.0, seed ^ 21),
-        z + 120.0 * noise(x + 513.0, z - 291.0, 900.0, seed ^ 22),
-    )
-}
-
-fn ridged_mountains(mut x: f64, mut z: f64, seed: u64) -> f64 {
-    let mut wavelength = 700.0;
-    let mut amplitude = 1.0;
-    let mut weight = 1.0;
-    let mut sum = 0.0;
-    let mut normalization = 0.0;
-    for octave in 0..5 {
-        let ridge = (1.0 - noise(x, z, wavelength, seed ^ (100 + octave)).abs()).max(0.0);
-        let signal = ridge * ridge * weight;
-        sum += signal * amplitude;
-        normalization += amplitude;
-        weight = (signal * 2.0).min(1.0);
-        amplitude *= 0.48;
-        wavelength *= 0.5;
-        (x, z) = octave_position(x, z);
-    }
-    sum / normalization
-}
-
-fn base_height(x: f64, z: f64, seed: u64) -> f64 {
-    let (wx, wz) = warped_position(x, z, seed);
-    let mountains = mountain_mask(wx, wz, seed);
-    let plains = 38.0 + 22.0 * noise(wx, wz, 1200.0, seed ^ 31);
-    let foothills = 30.0 * noise(wx, wz, 280.0, seed ^ 32);
-    plains + mountains * (70.0 + 650.0 * ridged_mountains(wx, wz, seed) + foothills)
+    pub(super) environment: EnvironmentSample,
+    pub(super) rock: MaterialId,
+    pub(super) surface: MaterialId,
+    pub(super) subsoil: MaterialId,
 }
 
 // ---- Regional geology and hydrology. No fluid simulation per microvoxel. ----
@@ -186,51 +91,140 @@ impl Region {
             soil,
             resistance: vec![0.15; count],
             rainfall: vec![1.0; count],
-            erosion: vec![0.0; count],
             lakes: vec![0.0; count],
             flow: vec![0.0; count],
             channels: Vec::new(),
             bins: Vec::new(),
             budget: SedimentBudget::default(),
+            config: TerrainConfig::default(),
+            climate: vec![ClimateCell::default(); count],
+            landscapes: vec![LandscapeCell::default(); count],
         }
     }
 
-    pub(crate) fn generate(seed: u64) -> Self {
+    pub(crate) fn generate(seed: u64, config: TerrainConfig) -> Self {
         let side = (REGION_SIZE / REGIONAL_SPACING) as usize + 1;
-        let original: Vec<f64> = (0..side * side)
+        let land: Vec<_> = (0..side * side)
             .map(|i| {
-                base_height(
+                landforms::landscape(
                     (i % side) as f64 * REGIONAL_SPACING,
                     (i / side) as f64 * REGIONAL_SPACING,
                     seed,
                 )
             })
             .collect();
-        let mut region = Self::from_heights(side, original.clone());
-        for i in 0..region.heights.len() {
+        let heights: Vec<_> = land.iter().map(|p| p.height).collect();
+        let mut region = Self::from_heights(side, heights);
+        region.config = config;
+        region.climate = climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+        for (i, land) in land.into_iter().enumerate() {
             let (x, z) = region.position(i);
-            region.soil[i] = 1.5 + 4.0 * (1.0 - mountain_mask(x, z, seed));
+            let c = region.climate[i];
+            region.landscapes[i] = land.cell;
+            region.soil[i] = (land.soil * (0.75 + 0.5 * c.moisture as f64)).min(region.heights[i]);
             region.bedrock[i] = region.heights[i] - region.soil[i];
-            // Higher resistance values here mean a larger fraction can erode.
-            region.resistance[i] = 0.06 + 0.14 * (0.5 + 0.5 * noise(x, z, 700.0, seed ^ 401));
-            region.rainfall[i] = 1.0 + 0.35 * noise(x, z, 2200.0, seed ^ 402);
+            let frost = if c.cold < 0. && c.warm > 0. { 1.2 } else { 1. };
+            region.resistance[i] = land.cell.geology.erodibility()
+                * frost
+                * (0.9 + 0.2 * noise(x, z, 700., seed ^ 401));
         }
-        for _ in 0..EROSION_STEPS {
+        for step in 0..EROSION_STEPS {
+            if step % 8 == 0 {
+                if step > 0 {
+                    region.climate =
+                        climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+                }
+                region.assign_runoff();
+            }
             let drainage = region.drainage_tree(seed);
             region.transport_sediment(&drainage);
             region.relax_slopes();
         }
+        region.climate = climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+        region.assign_runoff();
         let drainage = region.drainage_tree(seed);
         region.preserve_lakes(&drainage);
         region.build_channels(&drainage, seed);
         region.flow = drainage.area;
-        region.erosion = region
-            .heights
-            .iter()
-            .zip(original)
-            .map(|(new, old)| new - old)
-            .collect();
+        climate::finish(
+            &mut region.climate,
+            &region.heights,
+            &region.soil,
+            &region.flow,
+            &region.lakes,
+            side,
+            REGIONAL_SPACING,
+        );
         region
+    }
+    fn assign_runoff(&mut self) {
+        for (rain, c) in self.rainfall.iter_mut().zip(&self.climate) {
+            let fraction = 0.18 + 0.52 * c.moisture as f64;
+            *rain = (c.rain as f64 / 1000. * fraction).max(0.);
+        }
+    }
+    pub(super) fn environment_at(&self, x: f64, z: f64) -> EnvironmentSample {
+        let (indices, weights) = self.interpolation(x, z);
+        let get = |f: fn(ClimateCell) -> f32| {
+            indices
+                .iter()
+                .zip(weights)
+                .map(|(&i, w)| f(self.climate[i]) as f64 * w)
+                .sum::<f64>() as f32
+        };
+        let mut landform_weights = [0f32; 5];
+        for (&i, w) in indices.iter().zip(weights) {
+            for (k, value) in landform_weights.iter_mut().enumerate() {
+                *value += self.landscapes[i].weights[k] * w as f32;
+            }
+        }
+        let nearest = indices[weights
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0];
+        EnvironmentSample {
+            elevation_m: self.field_at(&self.heights, x, z) as f32,
+            soil_depth_m: self.field_at(&self.soil, x, z).max(0.) as f32,
+            slope: get(|c| c.slope),
+            temperature_c: get(|c| c.mean),
+            cold_season_c: get(|c| c.cold),
+            warm_season_c: get(|c| c.warm),
+            rainfall_mm_year: get(|c| c.rain),
+            potential_evaporation_mm_year: get(|c| c.pet),
+            moisture: get(|c| c.moisture),
+            ground_wetness: get(|c| c.wetness),
+            atmospheric_humidity: get(|c| c.humidity),
+            orographic_exposure: get(|c| c.exposure),
+            drainage_area_m2: self.field_at(&self.flow, x, z) as f32,
+            prevailing_wind: self.config.wind(),
+            landform_weights,
+            geology: self.landscapes[nearest].geology,
+        }
+    }
+    pub(super) fn memory_bytes(&self) -> usize {
+        [
+            &self.heights,
+            &self.bedrock,
+            &self.soil,
+            &self.resistance,
+            &self.rainfall,
+            &self.lakes,
+            &self.flow,
+        ]
+        .iter()
+        .map(|v| v.capacity() * 8)
+        .sum::<usize>()
+            + self.climate.capacity() * std::mem::size_of::<ClimateCell>()
+            + self.landscapes.capacity() * std::mem::size_of::<LandscapeCell>()
+            + self.channels.capacity() * std::mem::size_of::<Channel>()
+            + self.bins.capacity() * std::mem::size_of::<Vec<usize>>()
+            + self
+                .bins
+                .iter()
+                .map(|b| b.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
     }
 
     fn position(&self, i: usize) -> (f64, f64) {
@@ -383,7 +377,8 @@ impl Region {
                 } // Each undirected edge exactly once.
                 let difference = self.heights[i] - self.heights[j];
                 let (source, target) = if difference > 0.0 { (i, j) } else { (j, i) };
-                let excess = (difference.abs() - 0.75 * length).max(0.0);
+                let talus = 0.85 - 0.25 * self.climate[source].moisture as f64;
+                let excess = (difference.abs() - talus * length).max(0.0);
                 // Each cell has <=8 neighbors, so simultaneous transfers cannot
                 // exhaust more than its available soil. Bedrock stays exposed.
                 let transfer = (excess * 0.10).min(self.soil[source] / 8.0);
@@ -398,30 +393,46 @@ impl Region {
     }
 
     fn preserve_lakes(&mut self, drainage: &Drainage) {
-        let mut visited = vec![false; self.heights.len()];
+        let mut visited = vec![0usize; self.heights.len()];
         for start in 0..self.heights.len() {
-            if visited[start] || drainage.spill[start] - self.heights[start] < 0.75 {
+            if visited[start] != 0 || drainage.spill[start] - self.heights[start] < 0.75 {
                 continue;
             }
             let level = drainage.spill[start];
             let mut cells = vec![start];
-            visited[start] = true;
+            let basin = start + 1;
+            visited[start] = basin;
             let mut cursor = 0;
             while cursor < cells.len() {
                 let i = cells[cursor];
                 cursor += 1;
                 for (j, _) in self.neighbors(i) {
-                    if !visited[j]
+                    if visited[j] == 0
                         && drainage.spill[j] - self.heights[j] >= 0.75
                         && (drainage.spill[j] - level).abs() < 0.01
                     {
-                        visited[j] = true;
+                        visited[j] = basin;
                         cells.push(j);
                     }
                 }
             }
-            // Exclude tiny pits; selected basins are full to their spillway.
-            if cells.len() >= 4 {
+            // A static annual water-balance screen prevents every desert basin
+            // from becoming a permanent lake. External runoff is in weighted
+            // m² at 1 m/year reference rainfall, numerically m³/year. Direct
+            // rain on the basin supplies water without the soil runoff factor.
+            let mut supply = 0.;
+            let mut evaporation = 0.;
+            for &i in &cells {
+                supply += self.climate[i].rain as f64 * 0.001 * CELL_AREA;
+                evaporation += self.climate[i].pet as f64 * 0.001 * CELL_AREA;
+                for (j, _) in self.neighbors(i) {
+                    if visited[j] != basin && drainage.receiver[j] == i {
+                        supply += drainage.area[j];
+                    }
+                }
+            }
+            // Binary full/dry approximation, not a reservoir or lake-level solver.
+            if cells.len() >= 4 && supply > 0. && supply >= evaporation {
                 for i in cells {
                     self.lakes[i] = level;
                 }
@@ -574,13 +585,16 @@ fn surface_detail(mut x: f64, mut z: f64, spacing: f64, seed: u64, roughness: f6
 }
 
 pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, seed: u64) -> Surface {
-    let base = base_height(x, z, seed) + region.field_at(&region.erosion, x, z);
+    let mut environment = region.environment_at(x, z);
+    let base = environment.elevation_m as f64;
     let soil = region.field_at(&region.soil, x, z).max(0.0);
     let runoff = region.field_at(&region.flow, x, z);
     let wet_valley = smoothstep(RIVER_THRESHOLD * 0.3, RIVER_THRESHOLD * 2.0, runoff);
     // Deposited soil and alluvial lowlands are smoother than exposed bedrock.
     let rockiness = 1.0 - smoothstep(0.25, 2.5, soil);
-    let roughness = lerp(0.25, 5.0, rockiness) * lerp(1.0, 0.2, wet_valley);
+    let mountain = environment.landform_weights[4] as f64;
+    let roughness =
+        lerp(0.12, 3.0, rockiness) * (0.3 + 0.7 * mountain) * lerp(1.0, 0.2, wet_valley);
     let detail = surface_detail(x, z, spacing, seed, roughness);
     let mut height = base + detail;
     let mut water: f64 = 0.0;
@@ -637,28 +651,68 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
     if water <= height + 0.02 {
         water = 0.0;
     }
-    let material = if bank > 0.25 {
-        if water > 0.0 {
-            GRAVEL
-        } else {
-            SAND
-        }
-    } else if soil < 0.6 {
-        ROCK
-    } else if soil > 5.0 && wet_valley > 0.25 {
-        SAND
-    } else {
-        SOIL
-    };
     // Rock outcrops follow fine rock detail; channel carving can strip soil.
     let bedrock = (base - soil + detail * rockiness * (1.0 - bank))
         .min(height)
         .max(0.0);
+    environment.temperature_c -= ((height - base) * 0.0062) as f32;
+    environment.cold_season_c -= ((height - base) * 0.0062) as f32;
+    environment.warm_season_c -= ((height - base) * 0.0062) as f32;
+    environment.elevation_m = height as f32;
+    environment.soil_depth_m = (height - bedrock).max(0.) as f32;
+    if bank > 0.25 {
+        environment.ground_wetness = environment.ground_wetness.max(0.72);
+    }
+    if water > height {
+        environment.ground_wetness = 1.;
+    }
+    let rock = match environment.geology {
+        Geology::Granite => MaterialId::ROCK,
+        Geology::Sandstone => MaterialId::SANDSTONE,
+        Geology::Limestone => MaterialId::LIMESTONE,
+        Geology::Basalt => MaterialId::BASALT,
+    };
+    let subsoil = if environment.ground_wetness > 0.78 {
+        MaterialId::MUD
+    } else if environment.moisture < 0.20 {
+        MaterialId::SAND
+    } else if soil > 4. && wet_valley > 0.3 {
+        MaterialId::SILT
+    } else {
+        MaterialId::SOIL
+    };
+    let surface = if bank > 0.25 && water > 0. {
+        MaterialId::GRAVEL
+    } else if bank > 0.25 {
+        MaterialId::SILT
+    } else {
+        let coverage = environment.surface_cover(rock);
+        // Stable per-voxel coverage sampling. No translucent materials or
+        // fractional world cells; filtering belongs exclusively to display LOD.
+        let sample = (mix(seed
+            ^ mix((x * 16.).floor() as i64 as u64)
+            ^ mix((z * 16.).floor() as i64 as u64).rotate_left(29))
+            >> 11) as f64
+            / (1u64 << 53) as f64;
+        let mut cumulative = 0.;
+        let mut material = MaterialId::GRASS;
+        for (candidate, weight) in coverage {
+            cumulative += weight as f64;
+            if sample < cumulative {
+                material = candidate;
+                break;
+            }
+        }
+        material
+    };
     Surface {
         height,
         water,
         bedrock,
-        material,
+        environment,
+        rock,
+        surface,
+        subsoil,
     }
 }
 
@@ -746,7 +800,7 @@ mod tests {
         let sample = terrain_surface(&region, 8.0, 0.0, 0.0625, 42);
         assert!((sample.height - 10.0).abs() < 0.04);
         assert_eq!(sample.water, 11.0);
-        assert_eq!(sample.material, GRAVEL);
+        assert_eq!(sample.surface, MaterialId::GRAVEL);
         assert!(sample.bedrock <= sample.height);
     }
 
@@ -773,6 +827,22 @@ mod tests {
             assert!(channel.level[0] >= channel.level[1] - 0.001);
             assert!(channel.depth > 0.04);
         }
+    }
+
+    #[test]
+    fn a_dry_closed_basin_does_not_create_water() {
+        let mut region = Region::from_heights(5, vec![10.; 25]);
+        for i in [6, 7, 11, 12] {
+            region.heights[i] = 1.;
+        }
+        region.rainfall.fill(0.);
+        for c in &mut region.climate {
+            c.rain = 0.;
+        }
+        let drainage = region.drainage_tree(42);
+        region.preserve_lakes(&drainage);
+        assert!(region.lakes.iter().all(|h| *h == 0.));
+        assert_eq!(region.heights[6], 1.);
     }
 
     #[test]

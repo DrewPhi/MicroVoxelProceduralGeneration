@@ -16,6 +16,7 @@ pub struct Camera {
     pub pitch: f64,
     pub speed: f64,
     pub fov: f64,
+    pub reverse: bool,
     pub keys: HashSet<KeyCode>,
     credit: [f64; 3],
 }
@@ -71,7 +72,8 @@ impl Camera {
             yaw: -0.95,
             pitch: -0.13,
             speed: 4.0,
-            fov: 75f64.to_radians(),
+            fov: 65f64.to_radians(),
+            reverse: false,
             keys: HashSet::new(),
             credit: [0.; 3],
         }
@@ -80,10 +82,11 @@ impl Camera {
         self.cell.meters()
     }
     pub fn direction(&self) -> [f64; 3] {
+        let sign = if self.reverse { -1. } else { 1. };
         [
-            self.yaw.cos() * self.pitch.cos(),
-            self.pitch.sin(),
-            self.yaw.sin() * self.pitch.cos(),
+            sign * self.yaw.cos() * self.pitch.cos(),
+            sign * self.pitch.sin(),
+            sign * self.yaw.sin() * self.pitch.cos(),
         ]
     }
     pub fn rotate(&mut self, dx: f64, dy: f64) {
@@ -204,6 +207,7 @@ mod tests {
                 pitch: 0.,
                 speed: 4.,
                 fov: 1.,
+                reverse: false,
                 keys: [KeyCode::KeyW].into(),
                 credit: [0.; 3],
             };

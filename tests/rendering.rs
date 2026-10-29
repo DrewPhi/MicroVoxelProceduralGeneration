@@ -259,3 +259,103 @@ fn boundary_neighbors_and_revisions_are_part_of_mesh_identity() {
         key(12, 10, 10, [13, 12, 12, 12], 0)
     );
 }
+
+#[test]
+fn local_lod_patches_converge_without_holes_or_unbalanced_neighbors() {
+    let eye = [5000., 100., 5000.];
+    let quality = lod::Quality {
+        pixels: 2.,
+        native_radius: 4.,
+        direction: [1., 0., 0.],
+        ..Default::default()
+    };
+    let desired =
+        lod::select_quality(eye, 720, 75f64.to_radians(), &Layout::root(), 512, quality).layout;
+    let mut active = Layout::root();
+    for _ in 0..1000 {
+        let Some(next) = lod::next_patch(&active, &desired, eye) else {
+            break;
+        };
+        for &tile in &next.tiles {
+            assert!(next
+                .neighbors(tile)
+                .iter()
+                .all(|n| n.abs_diff(tile.level) <= 1));
+            let [x, z] = tile.origin();
+            assert_eq!(next.at(x, z), Some(tile));
+            assert!(!next.tiles.iter().any(|other| tile.parent() == Some(*other)));
+        }
+        for z in (0..160000).step_by(10000) {
+            for x in (0..160000).step_by(10000) {
+                assert!(next.at(x, z).is_some());
+            }
+        }
+        active = next;
+    }
+    assert_eq!(active, desired);
+    let desired = lod::select_quality(
+        [9000., 100., 2000.],
+        720,
+        75f64.to_radians(),
+        &active,
+        256,
+        lod::Quality {
+            pixels: 8.,
+            ..quality
+        },
+    )
+    .layout;
+    for _ in 0..2000 {
+        if let Some(next) = lod::next_patch(&active, &desired, eye) {
+            active = next;
+        } else {
+            break;
+        }
+    }
+    assert_eq!(
+        active, desired,
+        "coarsening must free old detailed regions before refinement"
+    );
+}
+#[test]
+fn quality_reports_budget_limits_and_prioritizes_the_view() {
+    let eye = [5000., 100., 5000.];
+    let q = lod::Quality {
+        pixels: 1.,
+        native_radius: 4.,
+        direction: [1., 0., 0.],
+        ..Default::default()
+    };
+    let limited = lod::select_quality(eye, 720, 75f64.to_radians(), &Layout::root(), 200, q);
+    assert!(limited.budget_limited);
+    assert!(limited.achieved_pixels > limited.requested_pixels);
+    let high = lod::select_quality(eye, 720, 75f64.to_radians(), &Layout::root(), 8000, q);
+    assert!(high.layout.tiles.len() > limited.layout.tiles.len());
+    let front = high.layout.at(81600, 80000).unwrap().level;
+    let back = high.layout.at(78400, 80000).unwrap().level;
+    assert!(front > back, "front {front} behind {back}");
+}
+
+#[test]
+fn nearby_refinement_precedes_unrelated_coarsening_when_residency_allows() {
+    let eye = [5000., 100., 5000.];
+    let q = lod::Quality {
+        native_radius: 6.,
+        ..Default::default()
+    };
+    let active =
+        lod::select_quality(eye, 720, 65f64.to_radians(), &lod::Layout::root(), 768, q).layout;
+    let moved = [5008., 100., 5000.];
+    let desired = lod::select_quality(moved, 720, 65f64.to_radians(), &active, 768, q).layout;
+    let next = lod::next_patch_budget(
+        &active,
+        &desired,
+        moved,
+        active.tiles.len().max(desired.tiles.len()) + 64,
+    )
+    .unwrap();
+    assert!(
+        next.tiles.len() > active.tiles.len(),
+        "urgent refinement must precede far coarsening"
+    );
+}

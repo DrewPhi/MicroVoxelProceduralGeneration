@@ -26,6 +26,10 @@ pub struct Quad {
     pub face: u32,
     pub size: [u32; 2],
     pub color_offset: u32,
+    /// Native-cell water plane, zero for ordinary solid geometry.
+    pub water_level: u16,
+    /// Atlas alpha packs filtered slope illumination and near AO.
+    pub slope_light: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Surface {
@@ -48,11 +52,21 @@ pub struct FaceCollector {
 }
 impl FaceCollector {
     pub fn add(&mut self, face: u32, position: [i64; 3], color: [u8; 3]) -> Result<(), String> {
+        self.add_shaded(face, position, color, 255)
+    }
+    /// Alpha stores presentation lighting, independently of canonical RGB.
+    pub fn add_shaded(
+        &mut self,
+        face: u32,
+        position: [i64; 3],
+        color: [u8; 3],
+        ambient: u8,
+    ) -> Result<(), String> {
         if self.count >= 262_144 {
             return Err("surface color budget exceeded (262144 exposed faces)".into());
         }
         let [axis, u, v] = AXES[face as usize];
-        let packed = u32::from_le_bytes([color[0], color[1], color[2], 255]);
+        let packed = u32::from_le_bytes([color[0], color[1], color[2], ambient]);
         let old = self
             .planes
             .entry((face, position[axis]))
@@ -102,6 +116,8 @@ impl FaceCollector {
                     face,
                     size: [width as u32, height as u32],
                     color_offset: offset,
+                    water_level: 0,
+                    slope_light: false,
                 });
             }
         }

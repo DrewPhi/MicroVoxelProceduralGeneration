@@ -1,5 +1,5 @@
 //! A complete, non-overlapping quadtree cover. Adjacent leaves differ by at most
-//! one level; a changed cover is installed only after its mesh jobs are complete.
+//! one level; local patches include all changed neighbor dependencies.
 use std::collections::{BTreeMap, BTreeSet};
 pub const SIDE: i64 = 32;
 pub const ROOT: i64 = 262_144;
@@ -81,7 +81,7 @@ impl Layout {
         ]
         .map(|p| self.at(p[0], p[1]).map_or(key.level, |n| n.level))
     }
-    fn split(&mut self, key: TileKey) {
+    pub fn split(&mut self, key: TileKey) {
         self.tiles.remove(&key);
         for child in key.children() {
             let [x, z] = child.origin();
@@ -90,7 +90,7 @@ impl Layout {
             }
         }
     }
-    fn balance(&mut self) {
+    pub fn balance(&mut self) {
         loop {
             let mut split = BTreeSet::new();
             for &key in &self.tiles {
@@ -118,9 +118,75 @@ impl Layout {
         }
     }
 }
-/// Uses screen-space error, a guaranteed native neighborhood, and hysteresis.
-/// Coverage includes the full finite region. Frustum culling happens at draw time.
+/// Display quality is independent of canonical voxel resolution. The error is
+/// projected display-cell size, not a proven geometric terrain-error bound.
+#[derive(Clone, Copy, Debug)]
+pub struct Quality {
+    pub pixels: f64,
+    pub native_radius: f64,
+    pub direction: [f64; 3],
+    pub visibility: f64,
+}
+impl Default for Quality {
+    fn default() -> Self {
+        Self {
+            pixels: 2.0,
+            native_radius: 6.0,
+            direction: [0., 0., -1.],
+            visibility: 24000.,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Selection {
+    pub layout: Layout,
+    pub requested_pixels: f64,
+    pub achieved_pixels: f64,
+    pub budget_limited: bool,
+}
+/// Backwards-compatible deterministic selection for tools.
 pub fn select(eye: [f64; 3], height: u32, fov: f64, previous: &Layout, budget: usize) -> Layout {
+    select_quality(
+        eye,
+        height,
+        fov,
+        previous,
+        budget,
+        Quality {
+            pixels: 4.,
+            native_radius: 4.,
+            ..Quality::default()
+        },
+    )
+    .layout
+}
+pub fn select_quality(
+    eye: [f64; 3],
+    height: u32,
+    fov: f64,
+    previous: &Layout,
+    budget: usize,
+    quality: Quality,
+) -> Selection {
+    select_adaptive(eye, height, fov, previous, budget, quality, |_| None)
+}
+/// Approximate terrain bounds in meters, and sampled height interpolation error.
+/// Selection remains conservative in footprint even when terrain data is absent.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainError {
+    pub low: f64,
+    pub high: f64,
+    pub deviation: f64,
+}
+pub fn select_adaptive(
+    eye: [f64; 3],
+    height: u32,
+    fov: f64,
+    previous: &Layout,
+    budget: usize,
+    quality: Quality,
+    mut terrain: impl FnMut(TileKey) -> Option<TerrainError>,
+) -> Selection {
     let mut previous_splits = BTreeSet::new();
     for &key in &previous.tiles {
         let mut k = key;
@@ -130,8 +196,18 @@ pub fn select(eye: [f64; 3], height: u32, fov: f64, previous: &Layout, budget: u
         }
     }
     let focal = height as f64 / (2.0 * (fov / 2.0).tan());
-    let mut threshold = 4.0;
-    for attempt in 0..16 {
+    let requested = if quality.pixels.is_finite() {
+        quality.pixels.clamp(1., 16.)
+    } else {
+        2.
+    };
+    let radius = if quality.native_radius.is_finite() {
+        quality.native_radius.clamp(2., 32.)
+    } else {
+        6.
+    };
+    let mut threshold = requested;
+    for attempt in 0..24 {
         let mut result = Layout::root();
         let mut pending = vec![*result.tiles.first().unwrap()];
         while let Some(key) = pending.pop() {
@@ -146,25 +222,171 @@ pub fn select(eye: [f64; 3], height: u32, fov: f64, previous: &Layout, budget: u
             let dz = (z as f64 / 16.0 - eye[2])
                 .max(0.0)
                 .max(eye[2] - (z + e).min(EXTENT) as f64 / 16.0);
-            let distance = dx.hypot(dz).max(0.1);
+            let horizontal = dx.hypot(dz);
+            if horizontal > quality.visibility.max(radius * 2.) {
+                continue;
+            }
+            let bounds = terrain(key);
+            let vertical = bounds.map_or(0., |b| (b.low - eye[1]).max(0.).max(eye[1] - b.high));
+            let distance = horizontal.hypot(vertical).max(0.1);
+            let importance = bounds.map_or(1., |b| {
+                1. + (b.deviation / (key.step() as f64 / 16.).max(1.)).clamp(0., 1.)
+            });
+            let center = [
+                (x + e / 2) as f64 / 16. - eye[0],
+                (z + e / 2) as f64 / 16. - eye[2],
+            ];
+            let length = center[0].hypot(center[1]).max(0.1);
+            let facing =
+                (center[0] * quality.direction[0] + center[1] * quality.direction[2]) / length;
+            // Retain detail around the player for turning. Far behind the camera
+            // use four times the projected size, while retaining complete coverage.
+            let peripheral = if distance < radius * 2. || length < e as f64 / 16. {
+                1.
+            } else {
+                1. + 3. * ((-facing).max(0.)).min(1.)
+            };
             let limit = threshold
+                * peripheral
                 * if previous_splits.contains(&key) {
-                    0.8
+                    0.85
                 } else {
-                    1.2
+                    1.15
                 };
-            if distance < 4.0 || key.step() as f64 / 16.0 * focal / distance > limit {
+            if horizontal < radius
+                || importance * key.step() as f64 / 16.0 * focal / distance > limit
+            {
                 result.split(key);
                 pending.extend(key.children().filter(|k| result.tiles.contains(k)));
             }
         }
         result.balance();
-        if result.tiles.len() <= budget || attempt == 15 {
-            return result;
+        if result.tiles.len() <= budget || attempt == 23 {
+            return Selection {
+                layout: result,
+                requested_pixels: requested,
+                achieved_pixels: threshold,
+                budget_limited: attempt != 0,
+            };
         }
-        threshold *= 1.35;
+        threshold *= 1.25;
     }
     unreachable!()
+}
+/// One balanced local step toward a desired cover. A patch includes the changed
+/// neighbor mesh keys, so swapping it cannot leave stale boundary geometry.
+/// Fine tiles outside the desired cover coarsen first to free residency.
+pub fn next_patch(active: &Layout, desired: &Layout, eye: [f64; 3]) -> Option<Layout> {
+    next_patch_budget(
+        active,
+        desired,
+        eye,
+        active.tiles.len().max(desired.tiles.len()) + 64,
+    )
+}
+/// Refinement has first claim on spare residency; coarsen only to free space.
+pub fn next_patch_budget(
+    active: &Layout,
+    desired: &Layout,
+    eye: [f64; 3],
+    budget: usize,
+) -> Option<Layout> {
+    if active == desired {
+        return None;
+    }
+    let mut merges = BTreeSet::new();
+    for &key in &active.tiles {
+        if let Some(parent) = key.parent() {
+            let [x, z] = parent.origin();
+            if desired.at(x, z).is_some_and(|d| d.level <= parent.level)
+                && parent
+                    .children()
+                    .filter(|c| {
+                        let [x, z] = c.origin();
+                        x < EXTENT && z < EXTENT
+                    })
+                    .all(|c| active.tiles.contains(&c))
+            {
+                merges.insert(parent);
+            }
+        }
+    }
+    let distance = |key: TileKey| {
+        let [x, z] = key.origin();
+        let e = key.edge();
+        ((x + e / 2) as f64 / 16. - eye[0]).hypot((z + e / 2) as f64 / 16. - eye[2])
+    };
+    let mut splits: Vec<_> = active
+        .tiles
+        .iter()
+        .copied()
+        .filter(|key| {
+            let [x, z] = key.origin();
+            key.level < FINEST
+                && !desired.tiles.contains(key)
+                && desired.at(x, z).is_some_and(|d| d.level > key.level)
+        })
+        .collect();
+    splits.sort_by(|a, b| distance(*a).total_cmp(&distance(*b)));
+    if active.tiles.len() + 3 <= budget {
+        if let Some(key) = splits.first() {
+            let mut next = active.clone();
+            next.split(*key);
+            next.balance();
+            if next.tiles.len() <= budget {
+                return Some(next);
+            }
+        }
+    }
+    let mut candidates: Vec<_> = merges.into_iter().collect();
+    candidates.sort_by(|a, b| distance(*b).total_cmp(&distance(*a)));
+    for parent in candidates {
+        let [x, z] = parent.origin();
+        let e = parent.edge();
+        let too_fine = [e / 4, 3 * e / 4].into_iter().any(|offset| {
+            [
+                [x - 1, z + offset],
+                [x + e, z + offset],
+                [x + offset, z - 1],
+                [x + offset, z + e],
+            ]
+            .into_iter()
+            .any(|[nx, nz]| {
+                active
+                    .at(nx, nz)
+                    .is_some_and(|n| n.level > parent.level + 1)
+            })
+        });
+        if too_fine {
+            continue;
+        }
+        let mut next = active.clone();
+        for child in parent.children() {
+            next.tiles.remove(&child);
+        }
+        next.tiles.insert(parent);
+        // The neighbor check makes this merge balanced by construction. Avoid
+        // cloning/rebalancing every rejected candidate on the rendering thread.
+        return Some(next);
+    }
+    let mut splits: Vec<_> = active
+        .tiles
+        .iter()
+        .copied()
+        .filter(|key| {
+            let [x, z] = key.origin();
+            key.level < FINEST
+                && !desired.tiles.contains(key)
+                && desired.at(x, z).is_some_and(|d| d.level > key.level)
+        })
+        .collect();
+    splits.sort_by(|a, b| distance(*a).total_cmp(&distance(*b)));
+    splits.first().map(|key| {
+        let mut next = active.clone();
+        next.split(*key);
+        next.balance();
+        next
+    })
 }
 /// Neighbor levels are part of mesh identity: a boundary changes when its LOD
 /// neighbor changes, even if the tile's own level remains unchanged.

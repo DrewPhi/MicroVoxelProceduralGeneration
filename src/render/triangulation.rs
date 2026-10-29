@@ -1,0 +1,313 @@
+//! Conforming greedy rectangles. Only rectangles with actual T-junctions or
+//! independently meshed tile borders need explicit triangles. Others stay quads.
+use super::surface::{Quad, Surface, AXES};
+use std::collections::{HashMap, VecDeque};
+type Point = [i64; 3];
+type Line = (usize, i64, i64);
+fn line(p: Point, axis: usize) -> Line {
+    (axis, p[(axis + 1) % 3], p[(axis + 2) % 3])
+}
+fn corners(q: &Quad, step: i64) -> [Point; 4] {
+    let [_, u, v] = AXES[q.face as usize];
+    let a = q.origin.map(i64::from);
+    let mut b = a;
+    b[u] += q.size[0] as i64 * step;
+    let mut c = b;
+    c[v] += q.size[1] as i64 * step;
+    let mut d = a;
+    d[v] = c[v];
+    [a, b, c, d]
+}
+fn at_border(q: &Quad, step: i64, edge: i64) -> bool {
+    corners(q, step)
+        .iter()
+        .any(|p| p[0] == 0 || p[0] == edge || p[2] == 0 || p[2] == edge)
+}
+/// Points on axis-aligned lines, shared across the main mesh and its finer
+/// stitch parts. Sorting once avoids testing every edge against every vertex.
+pub struct Junctions {
+    lines: HashMap<Line, Vec<i64>>,
+}
+impl Junctions {
+    pub fn new<'a>(parts: impl Iterator<Item = (&'a Surface, i64)>) -> Self {
+        let mut lines: HashMap<Line, Vec<i64>> = HashMap::new();
+        for (surface, step) in parts {
+            for q in &surface.quads {
+                for p in corners(q, step) {
+                    for axis in 0..3 {
+                        lines.entry(line(p, axis)).or_default().push(p[axis]);
+                    }
+                }
+            }
+        }
+        for points in lines.values_mut() {
+            points.sort_unstable();
+            points.dedup();
+        }
+        Self { lines }
+    }
+    fn edge(&self, a: Point, b: Point, step: i64, extent: i64, neighbors: [i64; 4]) -> Vec<Point> {
+        let axis = (0..3)
+            .find(|&i| a[i] != b[i])
+            .expect("nonempty rectangle edge");
+        let low = a[axis].min(b[axis]);
+        let high = a[axis].max(b[axis]);
+        let mut points = vec![low, high];
+        if let Some(on_line) = self.lines.get(&line(a, axis)) {
+            let first = on_line.partition_point(|v| *v <= low);
+            let last = on_line.partition_point(|v| *v < high);
+            points.extend_from_slice(&on_line[first..last]);
+        }
+        // Every independently meshed border uses the same finer grid spacing.
+        // Only that edge refines; other edges retain their own junction list.
+        let mut spacing = step;
+        let mut border = false;
+        for (fixed, plane, n) in [
+            (0, 0, neighbors[0]),
+            (0, extent, neighbors[1]),
+            (2, 0, neighbors[2]),
+            (2, extent, neighbors[3]),
+        ] {
+            if a[fixed] == plane && b[fixed] == plane {
+                spacing = spacing.min(n);
+                border = true;
+            }
+        }
+        if border {
+            points.extend((low..=high).step_by(spacing as usize));
+        }
+        points.sort_unstable();
+        points.dedup();
+        if a[axis] > b[axis] {
+            points.reverse();
+        }
+        points
+            .into_iter()
+            .map(|v| {
+                let mut p = a;
+                p[axis] = v;
+                p
+            })
+            .collect()
+    }
+}
+pub struct Prepared {
+    pub order: Vec<usize>,
+    pub factors: Vec<u32>,
+    pub regular: u32,
+    pub vertices: Vec<[u32; 2]>,
+}
+impl Prepared {
+    pub fn quads_only(surface: &Surface) -> Self {
+        Self {
+            order: (0..surface.quads.len()).collect(),
+            factors: vec![1; surface.quads.len()],
+            regular: surface.quads.len() as u32,
+            vertices: Vec::new(),
+        }
+    }
+    pub fn bytes(&self) -> usize {
+        self.vertices.len().max(1) * 8
+    }
+}
+pub fn prepare(
+    surface: &Surface,
+    step: i64,
+    extent: i64,
+    neighbors: [i64; 4],
+    junctions: &Junctions,
+) -> Prepared {
+    let mut result = Prepared {
+        order: Vec::new(),
+        factors: Vec::new(),
+        regular: 0,
+        vertices: Vec::new(),
+    };
+    let mut split = Vec::new();
+    for (index, q) in surface.quads.iter().enumerate() {
+        if q.size == [1, 1] && (!at_border(q, step, extent) || step == 1) {
+            result.order.push(index);
+            continue;
+        }
+        let c = corners(q, step);
+        let edges: [Vec<Point>; 4] =
+            std::array::from_fn(|i| junctions.edge(c[i], c[(i + 1) % 4], step, extent, neighbors));
+        if edges.iter().all(|e| e.len() == 2) {
+            result.order.push(index);
+            continue;
+        }
+        let [_, u, v] = AXES[q.face as usize];
+        let factor = if edges
+            .iter()
+            .flatten()
+            .any(|p| (p[u] - c[0][u]) % step != 0 || (p[v] - c[0][v]) % step != 0)
+        {
+            2
+        } else {
+            1
+        };
+        let mut polygon = Vec::new();
+        for edge in edges {
+            for p in &edge[..edge.len() - 1] {
+                let uv = [
+                    (p[u] - c[0][u]) * factor / step,
+                    (p[v] - c[0][v]) * factor / step,
+                ];
+                assert!(uv.iter().all(|v| (0..=65535).contains(v)));
+                polygon.push([uv[0] as u32, uv[1] as u32]);
+            }
+        }
+        split.push((index, factor as u32, triangulate(&polygon)));
+    }
+    result.regular = result.order.len() as u32;
+    result.factors.resize(result.order.len(), 1);
+    for (index, factor, triangles) in split {
+        let record = result.order.len() as u32;
+        result.order.push(index);
+        result.factors.push(factor);
+        for p in triangles {
+            result.vertices.push([record, p[0] | (p[1] << 16)]);
+        }
+    }
+    result
+}
+fn cross(a: [u32; 2], b: [u32; 2], c: [u32; 2]) -> i64 {
+    (b[0] as i64 - a[0] as i64) * (c[1] as i64 - a[1] as i64)
+        - (b[1] as i64 - a[1] as i64) * (c[0] as i64 - a[0] as i64)
+}
+/// A convex rectangle perimeter with collinear junction vertices. Ear clipping
+/// preserves those vertices without introducing off-grid center points. The
+/// diagonal check prevents leaving an untriangulated collinear boundary tail.
+fn triangulate(polygon: &[[u32; 2]]) -> Vec<[u32; 2]> {
+    let n = polygon.len();
+    let mut count = n;
+    let mut previous: Vec<_> = (0..n).map(|i| (i + n - 1) % n).collect();
+    let mut next: Vec<_> = (0..n).map(|i| (i + 1) % n).collect();
+    let mut alive = vec![true; n];
+    let mut rows = HashMap::new();
+    let mut columns = HashMap::new();
+    for p in polygon {
+        *rows.entry(p[1]).or_insert(0usize) += 1;
+        *columns.entry(p[0]).or_insert(0usize) += 1;
+    }
+    let mut ears: VecDeque<_> = (0..n)
+        .filter(|&i| cross(polygon[previous[i]], polygon[i], polygon[next[i]]) > 0)
+        .collect();
+    let mut triangles = Vec::with_capacity((n - 2) * 3);
+    while count > 3 {
+        let i = ears.pop_front().expect("convex rectangle has an ear");
+        if !alive[i] {
+            continue;
+        }
+        let left = previous[i];
+        let right = next[i];
+        let [a, b, c] = [polygon[left], polygon[i], polygon[right]];
+        if cross(a, b, c) <= 0 {
+            continue;
+        }
+        // Every vertex lies on the original rectangle perimeter. A non-axis
+        // diagonal intersects it only at its endpoints. An axis diagonal must
+        // not skip another remaining boundary point; row/column counts test
+        // that in O(1), including long one-cell-wide cliff faces.
+        if (a[0] == c[0] && columns[&a[0]] > 2) || (a[1] == c[1] && rows[&a[1]] > 2) {
+            ears.push_back(i);
+            continue;
+        }
+        triangles.extend_from_slice(&[a, b, c]);
+        alive[i] = false;
+        count -= 1;
+        *rows.get_mut(&b[1]).unwrap() -= 1;
+        *columns.get_mut(&b[0]).unwrap() -= 1;
+        next[left] = right;
+        previous[right] = left;
+        ears.push_back(left);
+        ears.push_back(right);
+    }
+    let a = alive.iter().position(|v| *v).unwrap();
+    let b = next[a];
+    let c = next[b];
+    assert!(cross(polygon[a], polygon[b], polygon[c]) > 0);
+    triangles.extend_from_slice(&[polygon[a], polygon[b], polygon[c]]);
+    triangles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn collinear_perimeters_keep_every_edge_vertex_and_exact_area() {
+        for [w, h] in [
+            [1, 1],
+            [1, 32],
+            [32, 1],
+            [2, 2],
+            [17, 23],
+            [32, 32],
+            [1, 4096],
+        ] {
+            let mut polygon = Vec::new();
+            for x in 0..w {
+                polygon.push([x, 0]);
+            }
+            for y in 0..h {
+                polygon.push([w, y]);
+            }
+            for x in (1..=w).rev() {
+                polygon.push([x, h]);
+            }
+            for y in (1..=h).rev() {
+                polygon.push([0, y]);
+            }
+            let triangles = triangulate(&polygon);
+            assert_eq!(triangles.len(), 3 * (polygon.len() - 2));
+            let area: i64 = triangles
+                .chunks_exact(3)
+                .map(|t| cross(t[0], t[1], t[2]))
+                .sum();
+            assert_eq!(area, 2 * w as i64 * h as i64);
+            let mut edges = std::collections::BTreeMap::new();
+            for t in triangles.chunks_exact(3) {
+                assert!(cross(t[0], t[1], t[2]) > 0);
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let e = if a < b { (a, b) } else { (b, a) };
+                    *edges.entry(e).or_insert(0) += 1;
+                }
+            }
+            for ((a, b), count) in edges {
+                assert!(count == 1 || count == 2);
+                if count == 1 {
+                    assert_eq!(a[0].abs_diff(b[0]) + a[1].abs_diff(b[1]), 1);
+                }
+            }
+        }
+    }
+    #[test]
+    fn interior_t_junctions_split_without_splitting_unrelated_rectangles() {
+        let surface = Surface {
+            quads: vec![
+                Quad {
+                    origin: [5, 10, 5],
+                    face: 0,
+                    size: [4, 4],
+                    color_offset: 0,
+                    water_level: 0,
+                    slope_light: false,
+                },
+                Quad {
+                    origin: [9, 10, 7],
+                    face: 0,
+                    size: [2, 2],
+                    color_offset: 16,
+                    water_level: 0,
+                    slope_light: false,
+                },
+            ],
+            ..Surface::default()
+        };
+        let junctions = Junctions::new([(&surface, 1)].into_iter());
+        let p = prepare(&surface, 1, 32, [1; 4], &junctions);
+        assert_eq!(p.regular, 1);
+        assert_eq!(p.order, [1, 0]);
+        assert_eq!(p.vertices.len(), 9);
+    }
+}

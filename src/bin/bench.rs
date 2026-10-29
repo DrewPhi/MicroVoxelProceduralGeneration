@@ -33,7 +33,12 @@ fn measure<G: Generator>(mut world: World<G>) -> microvoxel::Result<()> {
 fn main() -> microvoxel::Result<()> {
     let start = Instant::now();
     if std::env::args().any(|s| s == "--terrain") {
-        let world = World::new(ProceduralTerrain::new(42));
+        let terrain = ProceduralTerrain::new(42);
+        println!(
+            "Regional arrays/bins: {:.2} MiB",
+            terrain.regional_memory_bytes() as f64 / 1048576.
+        );
+        let world = World::new(terrain);
         println!("10 km macro-generation: {:?}", start.elapsed());
         measure(world)
     } else {

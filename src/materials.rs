@@ -1,7 +1,7 @@
 //! Compact cell values and shared definitions. Property maps start EMPTY.
 use std::collections::BTreeMap;
 
-pub const MATERIAL_SCHEMA: u32 = 1;
+pub const MATERIAL_SCHEMA: u32 = 2;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaterialId(pub u16);
 impl MaterialId {
@@ -13,6 +13,17 @@ impl MaterialId {
     pub const WATER: Self = Self(5);
     pub const SNOW: Self = Self(6);
     pub const GRASS: Self = Self(7);
+    pub const SANDSTONE: Self = Self(8);
+    pub const LIMESTONE: Self = Self(9);
+    pub const BASALT: Self = Self(10);
+    pub const MUD: Self = Self(11);
+    pub const SILT: Self = Self(12);
+    pub fn is_bedrock(self) -> bool {
+        matches!(
+            self,
+            Self::ROCK | Self::SANDSTONE | Self::LIMESTONE | Self::BASALT
+        )
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Appearance(pub u16);
@@ -75,6 +86,11 @@ impl Default for MaterialRegistry {
             ("water", MaterialKind::Fluid),
             ("snow", MaterialKind::Solid),
             ("grass", MaterialKind::Solid),
+            ("sandstone", MaterialKind::Solid),
+            ("limestone", MaterialKind::Solid),
+            ("basalt", MaterialKind::Solid),
+            ("mud", MaterialKind::Solid),
+            ("silt", MaterialKind::Solid),
         ];
         Self {
             definitions: entries

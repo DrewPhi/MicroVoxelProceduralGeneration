@@ -1,4 +1,8 @@
-use microvoxel::{generation::ProceduralTerrain, grid::CellPos, Result, World};
+use microvoxel::{
+    generation::{ProceduralTerrain, TerrainConfig},
+    grid::CellPos,
+    Result, World,
+};
 use std::{
     env,
     fs::File,
@@ -13,8 +17,10 @@ fn grid(value: f64) -> Result<i64> {
 }
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.len() > 6 {
-        return Err("noise [spacing_m] [size_m] [seed] [prefix] [origin_x_m] [origin_z_m]".into());
+    if args.len() > 7 {
+        return Err(
+            "noise [spacing_m] [size_m] [seed] [prefix] [origin_x_m] [origin_z_m] [climate]".into(),
+        );
     }
     let number = |i, default| -> Result<f64> {
         Ok(args.get(i).map_or(Ok(default), |s: &String| s.parse())?)
@@ -41,7 +47,9 @@ fn main() -> Result<()> {
     let seed = args.get(2).map_or(Ok(42u64), |s| s.parse())?;
     let prefix = args.get(3).map_or("terrain", String::as_str);
     let start = Instant::now();
-    let world = World::new(ProceduralTerrain::new(seed));
+    let config =
+        TerrainConfig::for_climate(args.get(6).map_or(Ok(Default::default()), |s| s.parse())?);
+    let world = World::new(ProceduralTerrain::with_config(seed, config)?);
     let generation = start.elapsed();
     let count = (side * side) as usize;
     let mut terrain = Vec::with_capacity(count * 2);

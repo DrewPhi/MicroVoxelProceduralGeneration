@@ -84,6 +84,22 @@ impl<G: Generator> World<G> {
     pub fn identity(&self) -> GeneratorIdentity {
         self.generator.identity()
     }
+    pub fn environment_at(&self, pos: CellPos) -> Option<crate::generation::EnvironmentSample> {
+        self.generator.environment_at(pos)
+    }
+    pub fn appearance_at(
+        &self,
+        pos: CellPos,
+        material: MaterialId,
+    ) -> crate::materials::Appearance {
+        self.edits
+            .get(pos)
+            .filter(|v| v.material == material)
+            .map_or_else(
+                || self.generator.appearance_at(pos, material),
+                |v| v.appearance,
+            )
+    }
     pub fn materials(&self) -> &MaterialRegistry {
         &self.materials
     }
@@ -92,6 +108,27 @@ impl<G: Generator> World<G> {
     }
     pub fn chunk_revision(&self, key: ChunkPos) -> u64 {
         self.chunk_revisions.get(&key).copied().unwrap_or(0)
+    }
+    /// Local display-cache invalidation; no voxel generation or dense reads.
+    pub fn region_changed_since(&self, x: i64, z: i64, edge: i64, revision: u64) -> bool {
+        if revision == self.revision {
+            return false;
+        }
+        let low = ChunkPos {
+            x: x.div_euclid(32),
+            y: i64::MIN,
+            z: i64::MIN,
+        };
+        let high = ChunkPos {
+            x: (x + edge - 1).div_euclid(32),
+            y: i64::MAX,
+            z: i64::MAX,
+        };
+        let z0 = z.div_euclid(32);
+        let z1 = (z + edge - 1).div_euclid(32);
+        self.chunk_revisions
+            .range(low..=high)
+            .any(|(key, value)| *value > revision && (z0..=z1).contains(&key.z))
     }
     pub fn storage(&self) -> &EditStore {
         &self.edits
@@ -246,6 +283,35 @@ impl<G: Generator> World<G> {
         }
         Some(result)
     }
+    /// Band-limit only an unchanged procedural column. Edited columns keep their
+    /// exact surface; sparse edits never depend on the camera's display settings.
+    pub fn display_column(&self, x: i64, z: i64, spacing: i64) -> Option<Column> {
+        if self.edits.column_edits(x, z).is_empty() {
+            self.generator.display_column(x, z, spacing)
+        } else {
+            self.surface_column(x, z)
+        }
+    }
+    /// Coarse generation never asks for a native appearance on an unedited column.
+    pub fn display_sample(
+        &self,
+        x: i64,
+        z: i64,
+        spacing: i64,
+    ) -> Option<(Column, Option<crate::generation::EnvironmentSample>)> {
+        if self.edits.column_edits(x, z).is_empty() {
+            self.generator.display_sample(x, z, spacing)
+        } else {
+            Some((self.surface_column(x, z)?, None))
+        }
+    }
+    pub fn display_surface_cover(&self, pos: CellPos) -> Option<[(MaterialId, f32); 5]> {
+        if self.edits.column_edits(pos.x, pos.z).is_empty() {
+            self.generator.surface_cover_at(pos)
+        } else {
+            None
+        }
+    }
     /// Optimized metadata for terrain LOD. Holes remain in column_runs/voxel_at.
     pub fn surface_column(&self, x: i64, z: i64) -> Option<Column> {
         let baseline = self.generator.column_hint(x, z)?;
@@ -270,7 +336,7 @@ impl<G: Generator> World<G> {
             } else if run.material != MaterialId::AIR {
                 ground = run.end;
                 surface = run.material;
-                if run.material == MaterialId::ROCK {
+                if run.material.is_bedrock() {
                     bedrock = run.end;
                 }
             }
@@ -281,6 +347,7 @@ impl<G: Generator> World<G> {
             bedrock,
             surface,
             subsoil: baseline.subsoil,
+            rock: baseline.rock,
         })
     }
     pub(crate) fn replace_edits(&mut self, store: EditStore, revision: u64) {
