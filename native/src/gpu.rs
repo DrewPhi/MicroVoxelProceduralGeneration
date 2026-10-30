@@ -3,7 +3,7 @@ use crate::camera::Camera;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec4};
 use microvoxel::render::{
-    lod::{MeshKey, EXTENT},
+    lod::{Grid, MeshKey},
     terrain::TerrainMesh,
     triangulation,
 };
@@ -25,6 +25,8 @@ struct FrameUniform {
     inverse: [f32; 16],
     eye: [f32; 4],
     effects: [f32; 4],
+    grid_eye: [i32; 4],
+    eye_fraction: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -63,6 +65,9 @@ struct ActorInstance {
     root: microvoxel::CellPos,
 }
 pub struct Gpu {
+    pub quality_mask: bool,
+    pub quality_water: bool,
+    pub grid: Grid,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub format: wgpu::TextureFormat,
@@ -364,6 +369,9 @@ impl Gpu {
             visibility: Default::default(),
             visibility_limit: 24000.,
             culled: 0,
+            quality_mask: false,
+            quality_water: false,
+            grid: Grid::default(),
             study_skip_ray: false,
             width,
             height,
@@ -419,15 +427,22 @@ impl Gpu {
         for z in 0..N {
             for x in 0..N {
                 let p = microvoxel::CellPos::new(
-                    ((x as f64 + 0.5) * 160000. / N as f64) as i64,
+                    ((x as f64 + 0.5) * self.grid.extent as f64 / N as f64) as i64,
                     0,
-                    ((z as f64 + 0.5) * 160000. / N as f64) as i64,
+                    ((z as f64 + 0.5) * self.grid.extent as f64 / N as f64) as i64,
                 );
-                heights[z * N + x] = world.environment_at(p).map_or(0., |e| e.elevation_m);
+                heights[z * N + x] = world.environment_at(p).map_or_else(
+                    || {
+                        world
+                            .surface_column(p.x, p.z)
+                            .map_or(0., |c| c.ground as f32 * self.grid.cell_m() as f32)
+                    },
+                    |e| e.elevation_m,
+                );
             }
         }
         let mut visibility = vec![1f32; N * N];
-        let cell = 10000. / N as f32;
+        let cell = self.grid.spec.extent_m as f32 / N as f32;
         for z in 0..N {
             for x in 0..N {
                 let start = heights[z * N + x];
@@ -509,6 +524,20 @@ impl Gpu {
                 self.raycaster.release(p, n);
             }
         }
+    }
+    /// Mesh keys are world-local. Never let a replacement world reuse old buffers.
+    pub fn clear_world(&mut self) {
+        self.transition = None;
+        let keys: Vec<_> = self.tiles.keys().copied().collect();
+        for key in keys {
+            self.evict(key);
+        }
+        self.actor = None;
+        self.actor_meshes.clear();
+        self.visibility = Default::default();
+        self.visibility_limit = 24000.;
+        self.culled = 0;
+        self.retiring_budget = None;
     }
     pub fn ready(&self, key: &MeshKey, ray: bool) -> bool {
         self.tiles
@@ -602,8 +631,16 @@ impl Gpu {
         protected: &BTreeSet<MeshKey>,
     ) -> Result<(), String> {
         assert_eq!(mesh.parts.len(), prepared.len());
+        let packed: Vec<_> = mesh
+            .parts
+            .iter()
+            .map(|p| microvoxel::render::colors::pack(&p.surface.colors))
+            .collect();
+        let color_bytes: usize = packed.iter().map(|p| p.len() * 4).sum();
+        let raw_colors: usize = mesh.parts.iter().map(|p| p.surface.colors.len() * 4).sum();
         let border_bytes: usize = prepared.iter().map(|p| p.bytes()).sum();
-        let size = mesh.bytes()
+        let size = mesh.bytes() - raw_colors
+            + color_bytes
             + border_bytes
             + mesh
                 .parts
@@ -629,17 +666,23 @@ impl Gpu {
         let heights = mesh.heights();
         let quads = mesh.quads();
         let faces = mesh.faces();
-        let [x, z] = key.tile.origin();
+        let [x, z] = key.tile.origin_in(self.grid);
         let parts = mesh
             .parts
             .into_iter()
             .zip(prepared)
-            .filter_map(|(part, prepared)| {
+            .zip(packed)
+            .filter_map(|((part, prepared), packed)| {
                 self.upload_part(
                     part,
                     Some(prepared),
+                    Some(packed),
                     [x, 0, z],
-                    [EXTENT - x, 32768, EXTENT - z],
+                    [
+                        self.grid.extent - x,
+                        self.grid.spec.ceiling_cells(),
+                        self.grid.extent - z,
+                    ],
                 )
             })
             .collect();
@@ -668,6 +711,7 @@ impl Gpu {
         &self,
         part: microvoxel::render::terrain::SurfacePart,
         prepared: Option<triangulation::Prepared>,
+        packed_colors: Option<Vec<u32>>,
         origin: [i64; 3],
         clip: [i64; 3],
     ) -> Option<Part> {
@@ -677,7 +721,8 @@ impl Gpu {
         let prepared =
             prepared.unwrap_or_else(|| triangulation::Prepared::quads_only(&part.surface));
         let regular_count = prepared.regular;
-        let mut references = prepared.vertices;
+        let references = prepared.vertex_words();
+        let border_vertices = prepared.vertices.len() as u32;
         let records: Vec<_> = prepared
             .order
             .into_iter()
@@ -686,21 +731,17 @@ impl Gpu {
                 let q = &part.surface.quads[index];
                 GpuQuad {
                     origin: q.origin,
-                    face: q.face,
+                    face: q.face | (q.water_level << 3),
                     size: q.size,
                     color_offset: q.color_offset,
                     // Bits 0..14: triangulation factor; 15: terrain light;
                     // 16..31: native water Y (zero means no water clip).
-                    padding: factor
+                    padding: factor.trailing_zeros()
                         | (u32::from(q.slope_light) << 15)
-                        | (u32::from(q.water_level) << 16),
+                        | (u32::from(q.constant_color) << 14),
                 }
             })
             .collect();
-        let border_vertices = references.len() as u32;
-        if references.is_empty() {
-            references.push([0; 2]);
-        }
         let vertices = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -733,11 +774,13 @@ impl Gpu {
                 contents: bytemuck::cast_slice(&records),
                 usage: wgpu::BufferUsages::STORAGE,
             });
+        let packed_colors =
+            packed_colors.unwrap_or_else(|| microvoxel::render::colors::pack(&part.surface.colors));
         let colors = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("exact cell colors"),
-                contents: bytemuck::cast_slice(&part.surface.colors),
+                contents: bytemuck::cast_slice(&packed_colors),
                 usage: wgpu::BufferUsages::STORAGE,
             });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -794,6 +837,7 @@ impl Gpu {
                 .upload_part(
                     microvoxel::render::terrain::SurfacePart { step: 1, surface },
                     None,
+                    None,
                     [0; 3],
                     [32768; 3],
                 )
@@ -833,7 +877,15 @@ impl Gpu {
         selection: Option<[i64; 3]>,
         overview: bool,
     ) -> usize {
-        self.render_at_scale(target, eye, matrix, cover, selection, overview, 0.0625)
+        self.render_at_scale(
+            target,
+            eye,
+            matrix,
+            cover,
+            selection,
+            overview,
+            self.grid.cell_m(),
+        )
     }
     /// Alternate asset resolution is for isolated previews. It never changes
     /// the canonical world's cell size or applies a rotating mesh transform.
@@ -892,6 +944,18 @@ impl Gpu {
             ]
         });
         let frame = FrameUniform {
+            grid_eye: [
+                (eye[0] / cell_size).floor() as i32,
+                (eye[1] / cell_size).floor() as i32,
+                (eye[2] / cell_size).floor() as i32,
+                0,
+            ],
+            eye_fraction: [
+                (eye[0] - (eye[0] / cell_size).floor() * cell_size) as f32,
+                (eye[1] - (eye[1] / cell_size).floor() * cell_size) as f32,
+                (eye[2] - (eye[2] / cell_size).floor() * cell_size) as f32,
+                0.,
+            ],
             vp: matrix.to_cols_array(),
             selection,
             viewport: [
@@ -905,9 +969,20 @@ impl Gpu {
                 cell_size as f32,
             ],
             inverse: matrix.inverse().to_cols_array(),
-            eye: [eye[0] as f32, eye[1] as f32, eye[2] as f32, 0.],
+            eye: [
+                eye[0] as f32,
+                eye[1] as f32,
+                eye[2] as f32,
+                self.grid.spec.extent_m as f32,
+            ],
             effects: [
-                f32::from(self.settings.ambient),
+                if self.quality_water {
+                    -2.
+                } else if self.quality_mask {
+                    -1.
+                } else {
+                    f32::from(self.settings.ambient)
+                },
                 f32::from(self.settings.shadows && !overview),
                 matrix.row(1).truncate().length() * 0.5,
                 if overview {
@@ -925,14 +1000,18 @@ impl Gpu {
                 self.tiles.get(key).map(|tile| crate::visibility::Entry {
                     key: *key,
                     low: [
-                        key.tile.origin()[0] as f64 * cell_size,
+                        key.tile.origin_in(self.grid)[0] as f64 * cell_size,
                         tile.heights[0] as f64 * cell_size,
-                        key.tile.origin()[1] as f64 * cell_size,
+                        key.tile.origin_in(self.grid)[1] as f64 * cell_size,
                     ],
                     high: [
-                        (key.tile.origin()[0] + key.tile.edge()).min(EXTENT) as f64 * cell_size,
+                        (key.tile.origin_in(self.grid)[0] + key.tile.edge_in(self.grid))
+                            .min(self.grid.extent) as f64
+                            * cell_size,
                         tile.heights[1] as f64 * cell_size,
-                        (key.tile.origin()[1] + key.tile.edge()).min(EXTENT) as f64 * cell_size,
+                        (key.tile.origin_in(self.grid)[1] + key.tile.edge_in(self.grid))
+                            .min(self.grid.extent) as f64
+                            * cell_size,
                     ],
                     solid_top: tile.solid_top as f64 * cell_size,
                 })
@@ -955,17 +1034,17 @@ impl Gpu {
             let Some(tile) = self.tiles.get_mut(key) else {
                 continue;
             };
-            let [x, z] = key.tile.origin();
-            let e = key.tile.edge();
+            let [x, z] = key.tile.origin_in(self.grid);
+            let e = key.tile.edge_in(self.grid);
             let low = [
                 x as f64 * cell_size - eye[0],
                 tile.heights[0] as f64 * cell_size - eye[1],
                 z as f64 * cell_size - eye[2],
             ];
             let high = [
-                (x + e).min(EXTENT) as f64 * cell_size - eye[0],
+                (x + e).min(self.grid.extent) as f64 * cell_size - eye[0],
                 tile.heights[1] as f64 * cell_size - eye[1],
-                (z + e).min(EXTENT) as f64 * cell_size - eye[2],
+                (z + e).min(self.grid.extent) as f64 * cell_size - eye[2],
             ];
             if !in_frustum(matrix, low, high) {
                 continue;
@@ -1010,16 +1089,16 @@ impl Gpu {
                     if tile.heights[1] <= tile.heights[0] {
                         return None;
                     }
-                    let [x, z] = key.tile.origin();
+                    let [x, z] = key.tile.origin_in(self.grid);
                     Some(crate::raycaster::Root {
                         key: *key,
                         offset,
                         bounds: [
                             [x as i32, tile.heights[0] as i32, z as i32],
                             [
-                                (x + key.tile.edge()).min(EXTENT) as i32,
+                                (x + key.tile.edge_in(self.grid)).min(self.grid.extent) as i32,
                                 tile.heights[1] as i32,
-                                (z + key.tile.edge()).min(EXTENT) as i32,
+                                (z + key.tile.edge_in(self.grid)).min(self.grid.extent) as i32,
                             ],
                         ],
                     })
@@ -1236,6 +1315,91 @@ pub(crate) fn in_frustum(matrix: Mat4, low: [f64; 3], high: [f64; 3]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "needs a Vulkan/Metal/DX12 device; run explicitly"]
+    fn centimeter_water_above_u16_height_matches_both_renderers_far_from_origin() {
+        use super::*;
+        use microvoxel::{
+            generation::{Column, FlatTerrain, Generator, Run},
+            CellPos, GridScale, Voxel, World, WorldSpec,
+        };
+        use std::{ops::Range, sync::Arc};
+        struct Scaled(FlatTerrain);
+        impl Generator for Scaled {
+            fn spec(&self) -> WorldSpec {
+                WorldSpec {
+                    grid: GridScale::new(1, 100).unwrap(),
+                    ..Default::default()
+                }
+            }
+            fn identity(&self) -> microvoxel::generation::GeneratorIdentity {
+                self.0.identity()
+            }
+            fn voxel(&self, p: CellPos) -> Option<Voxel> {
+                self.0.voxel(p)
+            }
+            fn column_hint(&self, x: i64, z: i64) -> Option<Column> {
+                self.0.column_hint(x, z)
+            }
+            fn runs(&self, x: i64, z: i64, r: Range<i64>) -> Option<Vec<Run>> {
+                self.0.runs(x, z, r)
+            }
+        }
+        let world = Arc::new(World::new(Scaled(FlatTerrain {
+            height: 80000,
+            water: 80007,
+            seed: 42,
+        })));
+        let grid = microvoxel::render::lod::Grid::new(world.spec());
+        let key = MeshKey {
+            tile: microvoxel::render::lod::TileKey {
+                level: grid.finest,
+                x: 28125,
+                z: 28125,
+            },
+            neighbors: [grid.finest; 4],
+            revision: 0,
+        };
+        let mut sampler = microvoxel::render::terrain::Sampler::new(world);
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, 128, 128)).unwrap();
+        gpu.grid = grid;
+        gpu.settings.haze = 0.;
+        gpu.settings.shadows = false;
+        gpu.settings.antialias = false;
+        gpu.hud_visible = false;
+        let cover = [key].into();
+        gpu.upload(key, sampler.mesh(key).unwrap(), &cover).unwrap();
+        let mut camera = Camera::at(CellPos::new(900016, 80030, 900016));
+        camera.grid = grid.spec.grid;
+        camera.pitch = -1.5;
+        let texture = gpu.offscreen();
+        let view = texture.create_view(&Default::default());
+        gpu.render(&view, &camera, &cover, None);
+        let mesh = gpu.read_pixels(&texture).unwrap();
+        gpu.settings.ray = true;
+        gpu.upload_ray(key, sampler.ray_brick(key, || false).unwrap(), &cover)
+            .unwrap();
+        gpu.render(&view, &camera, &cover, None);
+        let ray = gpu.read_pixels(&texture).unwrap();
+        for y in 58..70 {
+            for x in 58..70 {
+                let i = (y * 128 + x) * 4;
+                assert!(
+                    mesh[i + 2] > mesh[i + 1] && mesh[i + 1] > mesh[i],
+                    "scaled water missing"
+                );
+                for c in 0..3 {
+                    assert!(
+                        mesh[i + c].abs_diff(ray[i + c]) <= 3,
+                        "scaled renderer mismatch {:?} {:?}",
+                        &mesh[i..i + 3],
+                        &ray[i..i + 3]
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn terrain_and_hud_shaders_validate_without_a_graphics_device() {
         let ray_source = crate::raycaster::shader_source();

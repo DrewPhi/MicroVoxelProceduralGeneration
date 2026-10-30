@@ -1,7 +1,7 @@
 //! Latest-priority bounded jobs. Queued work is replaced, not left in a FIFO
 //! after a turn. Only active/completed jobs survive until acknowledged.
 use microvoxel::{
-    generation::ProceduralTerrain,
+    generation::Terrain,
     render::{
         lod::MeshKey,
         ray::Brick,
@@ -23,6 +23,10 @@ struct Job {
     key: MeshKey,
     ray: bool,
 }
+struct PageBatch {
+    page: [i64; 2],
+    jobs: VecDeque<Job>,
+}
 pub enum Payload {
     Mesh(
         TerrainMesh,
@@ -39,7 +43,7 @@ pub struct Completed {
 }
 #[derive(Default)]
 struct Queue {
-    queued: VecDeque<Job>,
+    queued: VecDeque<PageBatch>,
     busy: BTreeSet<Job>,
     wanted: BTreeSet<Job>,
     urgent: BTreeSet<Job>,
@@ -49,9 +53,11 @@ pub struct Workers {
     queue: Arc<(Mutex<Queue>, Condvar)>,
     pub results: Receiver<Completed>,
     pub count: usize,
+    spec: microvoxel::WorldSpec,
 }
 impl Workers {
-    pub fn new(world: Arc<World<ProceduralTerrain>>) -> Self {
+    pub fn new(world: Arc<World<Terrain>>) -> Self {
+        let spec = world.spec();
         let count =
             thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4));
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
@@ -76,11 +82,24 @@ impl Workers {
                                 if q.closed {
                                     break None;
                                 }
-                                let position = q.queued.iter().position(|j| {
-                                    id != 0 || q.urgent.is_empty() || q.urgent.contains(j)
+                                let position = q.queued.iter().position(|page| {
+                                    page.jobs.iter().any(|j| {
+                                        id != 0 || q.urgent.is_empty() || q.urgent.contains(j)
+                                    })
                                 });
                                 if let Some(position) = position {
-                                    break q.queued.remove(position);
+                                    let job_position = q.queued[position]
+                                        .jobs
+                                        .iter()
+                                        .position(|j| {
+                                            id != 0 || q.urgent.is_empty() || q.urgent.contains(j)
+                                        })
+                                        .unwrap();
+                                    let job = q.queued[position].jobs.remove(job_position);
+                                    if q.queued[position].jobs.is_empty() {
+                                        q.queued.remove(position);
+                                    }
+                                    break job;
                                 }
                                 q = wake.wait(q).unwrap();
                             };
@@ -97,20 +116,31 @@ impl Workers {
                                 || (id == 0 && !q.urgent.is_empty() && !q.urgent.contains(&job))
                         };
                         let start = Instant::now();
-                        let payload = if job.ray {
-                            sampler.ray_brick(job.key, cancelled).map(Payload::Ray)
-                        } else {
-                            sampler
-                                .mesh_cancellable(job.key, cancelled)
-                                .and_then(|mesh| {
-                                    if cancelled() {
-                                        return Err("mesh cancelled".into());
-                                    }
-                                    let prepared = mesh.prepare(job.key);
-                                    let solid_top = sampler.solid_top(job.key);
-                                    Ok(Payload::Mesh(mesh, prepared, solid_top))
-                                })
-                        };
+                        let payload =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if job.ray {
+                                    sampler.ray_brick(job.key, cancelled).map(Payload::Ray)
+                                } else {
+                                    sampler
+                                        .mesh_cancellable(job.key, cancelled)
+                                        .and_then(|mesh| {
+                                            if cancelled() {
+                                                return Err("mesh cancelled".into());
+                                            }
+                                            let prepared = mesh.prepare(job.key);
+                                            let solid_top = sampler.solid_top(job.key);
+                                            Ok(Payload::Mesh(mesh, prepared, solid_top))
+                                        })
+                                }
+                            }))
+                            .unwrap_or_else(|panic| {
+                                let message = panic
+                                    .downcast_ref::<String>()
+                                    .map(String::as_str)
+                                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                                    .unwrap_or("unknown panic");
+                                Err(format!("terrain build failed: {message}"))
+                            });
                         if tx
                             .send(Completed {
                                 key: job.key,
@@ -130,13 +160,17 @@ impl Workers {
             queue,
             results,
             count,
+            spec,
         }
     }
     pub fn retain(&self, keys: BTreeSet<MeshKey>) {
         let mut q = self.queue.0.lock().unwrap();
         q.wanted.retain(|j| keys.contains(&j.key));
         let wanted = q.wanted.clone();
-        q.queued.retain(|j| wanted.contains(j));
+        for page in &mut q.queued {
+            page.jobs.retain(|j| wanted.contains(j));
+        }
+        q.queued.retain(|page| !page.jobs.is_empty());
     }
     pub fn acknowledge(&self, key: MeshKey, ray: bool) {
         self.queue.0.lock().unwrap().busy.remove(&Job { key, ray });
@@ -156,10 +190,22 @@ impl Workers {
             .collect();
         q.wanted = jobs.iter().copied().collect();
         q.queued.clear();
+        let grid = microvoxel::render::lod::Grid::new(self.spec);
+        let mut admitted = 0;
         for job in jobs {
             if !q.busy.contains(&job) {
-                q.queued.push_back(job);
-                if q.queued.len() >= self.count * 2 {
+                let [x, z] = job.key.tile.origin_in(grid);
+                let page = self.spec.page(microvoxel::CellPos::new(x, 0, z));
+                if let Some(batch) = q.queued.iter_mut().find(|batch| batch.page == page) {
+                    batch.jobs.push_back(job);
+                } else {
+                    q.queued.push_back(PageBatch {
+                        page,
+                        jobs: VecDeque::from([job]),
+                    });
+                }
+                admitted += 1;
+                if admitted >= self.count * 2 {
                     break;
                 }
             }
@@ -168,7 +214,7 @@ impl Workers {
     }
     pub fn outstanding(&self) -> usize {
         let q = self.queue.0.lock().unwrap();
-        q.queued.len() + q.busy.len()
+        q.queued.iter().map(|p| p.jobs.len()).sum::<usize>() + q.busy.len()
     }
 }
 impl Drop for Workers {

@@ -1,7 +1,7 @@
 //! Sparse column bricks for direct voxel ray traversal. No triangle extraction.
 //! Vertical runs retain cavities; only potentially exposed native colors expand.
 use super::{
-    lod::{MeshKey, EXTENT, SIDE},
+    lod::{MeshKey, SIDE},
     terrain::Sampler,
 };
 use crate::{generation::Generator, grid::CellPos, materials::MaterialId};
@@ -78,8 +78,8 @@ impl<G: Generator> Sampler<G> {
         if key.revision != self.world().revision() {
             return Err("stale world mesh request".into());
         }
-        let [ox, oz] = key.tile.origin();
-        let step = key.tile.step();
+        let [ox, oz] = key.tile.origin_in(self.grid());
+        let step = key.tile.step_in(self.grid());
         let mut columns = Vec::with_capacity(1024);
         let mut runs = Vec::new();
         let mut colors = Vec::new();
@@ -91,7 +91,7 @@ impl<G: Generator> Sampler<G> {
             for ix in 0..SIDE {
                 let x = ox + ix * step;
                 let z = oz + iz * step;
-                if x >= EXTENT || z >= EXTENT {
+                if x >= self.grid().extent || z >= self.grid().extent {
                     continue;
                 }
                 let own = self.profile(x, z, step);
@@ -168,9 +168,9 @@ impl<G: Generator> Sampler<G> {
                         start_color,
                         exposed as u32,
                         count,
-                        (step as u32)
-                            | ((light as u32) << 16)
-                            | (u32::from(run.material == MaterialId::WATER) << 24),
+                        // Display spacing is implicit in column bounds. Keep
+                        // flags independent of world resolution/large LOD steps.
+                        (light as u32) | (u32::from(run.material == MaterialId::WATER) << 8),
                         0,
                     ]);
                 }
@@ -179,9 +179,9 @@ impl<G: Generator> Sampler<G> {
                     columns.push(Column {
                         low: [x as i32, low as i32, z as i32],
                         high: [
-                            (x + step).min(EXTENT) as i32,
+                            (x + step).min(self.grid().extent) as i32,
                             high as i32,
-                            (z + step).min(EXTENT) as i32,
+                            (z + step).min(self.grid().extent) as i32,
                         ],
                         first,
                         count: runs.len() as u32 - first,

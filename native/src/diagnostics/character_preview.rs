@@ -79,6 +79,7 @@ fn render(gpu: &mut Gpu, asset: &mut Asset, pose: Pose) -> microvoxel::Result<Ve
     gpu.upload(
         model,
         TerrainMesh {
+            grid: Default::default(),
             origin: [0; 3],
             parts: vec![SurfacePart { step: 1, surface }],
         },
@@ -88,6 +89,7 @@ fn render(gpu: &mut Gpu, asset: &mut Asset, pose: Pose) -> microvoxel::Result<Ve
     gpu.upload(
         ground,
         TerrainMesh {
+            grid: Default::default(),
             origin: [0; 3],
             parts: vec![SurfacePart {
                 step: 1,

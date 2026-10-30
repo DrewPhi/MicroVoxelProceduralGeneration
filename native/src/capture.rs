@@ -69,9 +69,9 @@ impl Viewpoint {
             runtime.toggle_flight();
         }
         runtime.camera.cell = microvoxel::CellPos::new(
-            (self.meters[0] * 16.).round() as i64,
-            (self.meters[1] * 16.).round() as i64,
-            (self.meters[2] * 16.).round() as i64,
+            (self.meters[0] / runtime.world.spec().grid.meters()).round() as i64,
+            (self.meters[1] / runtime.world.spec().grid.meters()).round() as i64,
+            (self.meters[2] / runtime.world.spec().grid.meters()).round() as i64,
         );
         runtime.camera.yaw = self.yaw;
         runtime.camera.pitch = self.pitch;

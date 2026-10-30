@@ -5,7 +5,7 @@ use crate::{
     generation::Generator,
     materials::MaterialRegistry,
     physics::VoxelShape,
-    CellPos, World, VOXEL_SIZE,
+    CellPos, World,
 };
 use std::{collections::VecDeque, sync::Arc};
 pub const TICK_SECONDS: f64 = 1. / 60.;
@@ -24,6 +24,7 @@ struct BodyFrame {
     shape: VoxelShape,
 }
 pub struct Player {
+    scale: crate::GridScale,
     pub root: CellPos,
     pub grounded: bool,
     pub vertical_velocity: f64,
@@ -45,10 +46,17 @@ pub struct Player {
 }
 impl Player {
     pub fn new(seed: u64, root: CellPos) -> Result<Self, String> {
+        Self::with_scale(seed, root, crate::GridScale::default())
+    }
+    pub fn with_scale(seed: u64, root: CellPos, scale: crate::GridScale) -> Result<Self, String> {
+        let resolution = (1. / scale.meters()).round() as u16;
+        if resolution > 128 || (resolution as f64 * scale.meters() - 1.).abs() > 1e-8 {
+            return Err("interactive character supports integer 4..128 cells/m; use bounded terrain diagnostics for finer grids".into());
+        }
         let recipe = CharacterRecipe { seed };
         let mut materials = MaterialRegistry::default();
         let palette = recipe.register_palette(&mut materials)?;
-        let mut bank = PoseCache::new(recipe, palette, 16, 1024 * 1024);
+        let mut bank = PoseCache::new(recipe, palette, resolution, 32 * 1024 * 1024);
         let pose = Pose::new(Clip::Idle, 0);
         let frame = bank.frame(pose)?;
         let body = Arc::new(BodyFrame {
@@ -56,12 +64,13 @@ impl Player {
             frame,
         });
         Ok(Self {
+            scale,
             root,
             grounded: false,
             vertical_velocity: 0.,
             pose,
             ticks: 0,
-            step_height_cells: 4,
+            step_height_cells: (0.25 / scale.meters()).round() as i64,
             materials,
             bank,
             bodies: VecDeque::from([(pose, Arc::clone(&body))]),
@@ -152,8 +161,19 @@ impl Player {
             shape: VoxelShape::from_frame(&frame),
             frame,
         });
-        if self.bodies.len() >= 16 {
-            self.bodies.pop_front();
+        let mut retained: usize = self
+            .bodies
+            .iter()
+            .map(|(_, b)| b.frame.memory_bytes() + b.shape.memory_bytes())
+            .sum();
+        while (self.bodies.len() >= 16
+            || retained + body.frame.memory_bytes() + body.shape.memory_bytes() > 32 * 1024 * 1024)
+            && !self.bodies.is_empty()
+        {
+            if let Some((_, old)) = self.bodies.pop_front() {
+                retained =
+                    retained.saturating_sub(old.frame.memory_bytes() + old.shape.memory_bytes());
+            }
         }
         self.bodies.push_back((pose, Arc::clone(&body)));
         Ok(body)
@@ -172,7 +192,10 @@ impl Player {
                 // Raise only as much as needed, checking every upward cell and
                 // the complete path over the obstacle, including head clearance.
                 let mut raised = self.root;
-                for height in 1..=self.step_height_cells.clamp(0, 16) {
+                for height in 1..=self
+                    .step_height_cells
+                    .clamp(0, (0.25 / self.scale.meters()).ceil() as i64)
+                {
                     let Some(up) = self.body.shape.move_one(world, raised, 1, 1) else {
                         break;
                     };
@@ -235,7 +258,7 @@ impl Player {
         ];
         let mut delta = [0; 3];
         for a in 0..3 {
-            let value = self.credit[a] + velocity[a] * TICK_SECONDS / VOXEL_SIZE;
+            let value = self.credit[a] + velocity[a] * TICK_SECONDS / self.scale.meters();
             delta[a] = (value + value.signum() * 1e-9).trunc() as i64;
             self.credit[a] = value - delta[a] as f64;
         }
@@ -250,8 +273,8 @@ impl Player {
         }
         self.grounded = self.body.shape.move_one(world, self.root, 1, -1).is_none()
             && self.vertical_velocity <= 0.;
-        let moved =
-            ((self.root.x - before.x) as f64).hypot((self.root.z - before.z) as f64) * VOXEL_SIZE;
+        let moved = ((self.root.x - before.x) as f64).hypot((self.root.z - before.z) as f64)
+            * self.scale.meters();
         self.travel += moved;
         if moved > 0. {
             self.last_movement = self.ticks;

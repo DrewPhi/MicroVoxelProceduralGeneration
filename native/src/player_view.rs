@@ -32,17 +32,24 @@ pub fn sync<G: Generator>(
     width: u32,
     height: u32,
 ) {
-    let anchor = player.root.offset([0, 24, 0]).unwrap_or(player.root);
+    let scale = world.spec().grid.meters();
+    camera.grid = world.spec().grid;
+    let anchor = player
+        .root
+        .offset([0, (1.5 / scale).round() as i64, 0])
+        .unwrap_or(player.root);
     camera.reverse = false;
     camera.cell = if view == ViewMode::First {
         anchor
     } else {
         let sign = if view == ViewMode::Rear { -1. } else { 1. };
-        let delta = camera.direction().map(|v| (v * sign * 56.).round() as i64);
+        let delta = camera
+            .direction()
+            .map(|v| (v * sign * 3.5 / scale).round() as i64);
         // Protect the near-plane corners, including wide FOV/aspect ratios.
         let extent =
             0.025 * (camera.fov * 0.5).tan() * (width as f64 / height.max(1) as f64).max(1.);
-        let radius = ((extent / 0.0625).ceil() as i32 + 1).clamp(1, 4);
+        let radius = ((extent / scale).ceil() as i32 + 1).clamp(1, 32);
         camera_boom(world, anchor, delta, radius)
     };
     camera.reverse = view == ViewMode::Front;

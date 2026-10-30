@@ -1,6 +1,6 @@
 //! Repeatable real walking/sprinting/turning test, including visible detail lag.
 use crate::{gpu::Gpu, runtime::Runtime, settings::Settings};
-use microvoxel::{generation::ProceduralTerrain, render::lod, World};
+use microvoxel::{generation::Terrain, World};
 use std::{
     fmt::Write as _,
     sync::Arc,
@@ -41,8 +41,14 @@ fn resident_kib() -> Option<u64> {
         })
 }
 
-pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
+pub fn run(world: Arc<World<Terrain>>) -> microvoxel::Result<()> {
     std::fs::create_dir_all("output/streaming")?;
+    // Optional visual evidence is a separate run: screenshot readback changes
+    // pacing, so do not compare its timings to the normal benchmark route.
+    let capture = std::env::var_os("MICROVOXEL_STREAM_CAPTURE").is_some();
+    if capture {
+        std::fs::create_dir_all("output/streaming/motion")?;
+    }
     for preset in [0, 1] {
         for ray in [false, true] {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
@@ -67,6 +73,7 @@ pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
             let mut peak_rss = resident_kib();
             let mut csv = String::from("tick,phase,update_ms,submit_ms,gpu_wait_ms,work_ms,native_ready,pending,resident_terrain_bytes,ray_arena_bytes,rss_kib\n");
             let mut gaps = [0usize; 3];
+            let mut policy_misses = [0usize; 3];
             let mut longest = 0.;
             let mut gap_time = 0.;
             let origin = rt.player.root;
@@ -102,22 +109,32 @@ pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
                     return Err("player collided during streaming test".into());
                 }
                 let p = rt.player.root;
-                traveled += ((p.x - before.x) as f64).hypot((p.z - before.z) as f64) / 16.;
+                traveled +=
+                    ((p.x - before.x) as f64).hypot((p.z - before.z) as f64) * rt.gpu.grid.cell_m();
                 before = p;
-                let ready = (0..9).all(|sample| {
+                let readiness = (0..9).fold([true; 2], |mut ready, sample| {
                     let (dx, dz) = if sample == 0 {
                         (0., 0.)
                     } else {
                         let a = (sample - 1) as f64 * std::f64::consts::TAU / 8.;
                         (a.cos() * 3., a.sin() * 3.)
                     };
-                    rt.active
-                        .at(
-                            (rt.camera.eye()[0] * 16. + dx * 16.) as i64,
-                            (rt.camera.eye()[2] * 16. + dz * 16.) as i64,
-                        )
-                        .is_some_and(|key| key.level == lod::FINEST)
+                    let x = ((rt.camera.eye()[0] + dx) / rt.gpu.grid.cell_m()) as i64;
+                    let z = ((rt.camera.eye()[2] + dz) / rt.gpu.grid.cell_m()) as i64;
+                    ready[0] &= rt
+                        .active
+                        .at(x, z)
+                        .is_some_and(|key| key.level == rt.gpu.grid.finest);
+                    ready[1] &= rt
+                        .desired
+                        .at(x, z)
+                        .is_some_and(|key| key.level == rt.gpu.grid.finest);
+                    ready
                 });
+                let ready = readiness[0];
+                if !ready && !readiness[1] {
+                    policy_misses[phase] += 1;
+                }
                 if !ready {
                     gaps[phase] += 1;
                     gap_time += 1. / 60.;
@@ -154,6 +171,15 @@ pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
                     rt.gpu.ray_allocated_bytes(),
                     rss.map_or(String::new(), |v| v.to_string())
                 )?;
+                if capture && [0, 120, 239, 360, 479, 540, 599].contains(&i) {
+                    let mode = if ray { "ray" } else { "mesh" };
+                    rt.gpu.screenshot(
+                        &texture,
+                        std::path::Path::new(&format!(
+                            "output/streaming/motion/{mode}_{preset}_{i:03}.png"
+                        )),
+                    )?;
+                }
                 if let Some(rest) = Duration::from_secs_f64(1. / 60.).checked_sub(start.elapsed()) {
                     std::thread::sleep(rest);
                 }
@@ -162,6 +188,12 @@ pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
             let mode = if ray { "ray" } else { "mesh" };
             let mut report=format!("{mode} preset {preset}: initial {initial_secs:.2}s; traveled {traveled:.2}m; native-detail misses within 3m: walk {}/240, sprint {}/240, turn {}/120; longest {:.3}s; work ms p50/p95/p99 {:?}; max pending {pending_max}; resident {:.2} MiB; ray arena allocated {:.2} MiB; culled {}\n",gaps[0],gaps[1],gaps[2],longest,frame.percentiles(),rt.gpu.bytes as f64/1048576.,rt.gpu.ray_allocated_bytes() as f64/1048576.,rt.gpu.culled);
             writeln!(report,"CPU update ms {:?}; CPU draw/submit ms {:?}; GPU wait ms {:?}; work by walk/sprint/turn {:?}; sampled peak process RSS MiB {:?}. GPU wait is synchronization time, not isolated GPU execution time. Work excludes diagnostic collision/detail checks and pacing sleep; RSS is sampled every 30 ticks and includes earlier cases in this process.",update.percentiles(),submit.percentiles(),wait.percentiles(),phases.map(|p|p.percentiles()),peak_rss.map(|v|v as f64/1024.))?;
+            writeln!(report,"Of these misses, frames with deliberately coarse desired detail (walk/sprint/turn): {policy_misses:?}")?;
+            writeln!(
+                report,
+                "Maximum accepted planner latency {:.2} ms",
+                rt.max_plan_time.as_secs_f64() * 1000.
+            )?;
             print!("{report}");
             std::fs::write(format!("output/streaming/{mode}_{preset}.txt"), report)?;
             std::fs::write(format!("output/streaming/{mode}_{preset}.csv"), csv)?;

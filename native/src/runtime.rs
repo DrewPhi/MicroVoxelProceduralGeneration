@@ -9,7 +9,7 @@ use crate::{
 use microvoxel::player::{Player, PlayerInput};
 use microvoxel::{
     generation::debug::{self, DebugLayer},
-    generation::ProceduralTerrain,
+    generation::Terrain,
     queries::{raycast, Trace},
     render::lod::{self, Layout, MeshKey},
     World,
@@ -22,13 +22,15 @@ use std::{
 use winit::keyboard::KeyCode;
 
 pub struct Runtime {
+    pub native_policy_radius: f64,
+    pub max_plan_time: Duration,
     pub gpu: Gpu,
     pub camera: Camera,
     pub player: Player,
     pub flying: bool,
     pub view: ViewMode,
     view_key: Option<(microvoxel::CellPos, u64, u64, u64, u32, u32, ViewMode)>,
-    pub world: Arc<World<ProceduralTerrain>>,
+    pub world: Arc<World<Terrain>>,
     workers: Workers,
     pub active: Layout,
     pub cover: BTreeSet<MeshKey>,
@@ -61,13 +63,23 @@ pub struct Runtime {
 }
 impl Runtime {
     pub fn new(
-        mut gpu: Gpu,
-        world: Arc<World<ProceduralTerrain>>,
+        gpu: Gpu,
+        world: Arc<World<Terrain>>,
         tile_budget: usize,
         spawn_nonce: u64,
     ) -> microvoxel::Result<Self> {
+        let spawn = Self::spawn(&world, spawn_nonce)?;
+        Self::with_spawn(gpu, world, tile_budget, spawn)
+    }
+    pub fn with_spawn(
+        mut gpu: Gpu,
+        world: Arc<World<Terrain>>,
+        tile_budget: usize,
+        spawn: (Camera, Player),
+    ) -> microvoxel::Result<Self> {
+        gpu.grid = lod::Grid::new(world.spec());
         gpu.terrain_lighting(&world);
-        let (camera, player) = Self::spawn(&world, spawn_nonce)?;
+        let (camera, player) = spawn;
         let height = gpu.height;
         let cell = camera.cell;
         let fov = camera.fov;
@@ -76,9 +88,11 @@ impl Runtime {
             "{} mesh workers; 128 MiB GPU mesh budget; tile budget {tile_budget}",
             workers.count
         );
-        let active = Layout::root();
+        let active = Layout::root_in(gpu.grid);
         let keys = active.mesh_keys(world.revision()).into_values().collect();
         let mut runtime = Self {
+            native_policy_radius: 6.,
+            max_plan_time: Duration::ZERO,
             gpu,
             camera,
             player,
@@ -90,7 +104,7 @@ impl Runtime {
             active: active.clone(),
             cover: BTreeSet::new(),
             target: Some((active.clone(), keys)),
-            last_motion_eye: cell.meters(),
+            last_motion_eye: world.spec().grid.point(cell),
             velocity: [0.; 3],
             last_plan: Instant::now() - Duration::from_secs(1),
             last_cell: cell,
@@ -119,8 +133,15 @@ impl Runtime {
         runtime.sync_view();
         Ok(runtime)
     }
-    fn spawn(world: &World<ProceduralTerrain>, nonce: u64) -> microvoxel::Result<(Camera, Player)> {
-        let mut player = Player::new(world.identity().seed, microvoxel::CellPos::default())?;
+    pub(crate) fn spawn(
+        world: &World<Terrain>,
+        nonce: u64,
+    ) -> microvoxel::Result<(Camera, Player)> {
+        let mut player = Player::with_scale(
+            world.identity().seed,
+            microvoxel::CellPos::default(),
+            world.spec().grid,
+        )?;
         for attempt in 0..128u64 {
             let camera = Camera::spawn(world, nonce.wrapping_add(attempt * 101));
             if attempt < 100
@@ -135,6 +156,10 @@ impl Runtime {
             }
         }
         Err("Could not find room for the voxel player".into())
+    }
+    /// Dropping the rest closes old worker/planner queues and their result channels.
+    pub fn into_gpu(self) -> Gpu {
+        self.gpu
     }
     pub fn respawn(&mut self, nonce: u64) -> microvoxel::Result<()> {
         let (camera, player) = Self::spawn(&self.world, nonce)?;
@@ -267,11 +292,14 @@ impl Runtime {
             let eye = self.camera.eye();
             let nearby_ready = (0..8).all(|i| {
                 let a = i as f64 * std::f64::consts::TAU / 8.;
-                let x = (eye[0] * 16. + a.cos() * self.settings.native_radius * 12.) as i64;
-                let z = (eye[2] * 16. + a.sin() * self.settings.native_radius * 12.) as i64;
-                self.active
-                    .at(x, z)
-                    .is_none_or(|key| key.level == lod::FINEST)
+                let x = (eye[0] / self.gpu.grid.cell_m()
+                    + a.cos() * self.settings.native_radius * 0.75 / self.gpu.grid.cell_m())
+                    as i64;
+                let z = (eye[2] / self.gpu.grid.cell_m()
+                    + a.sin() * self.settings.native_radius * 0.75 / self.gpu.grid.cell_m())
+                    as i64;
+                let desired = self.desired.at(x, z).map_or(0, |key| key.level);
+                self.active.at(x, z).is_none_or(|key| key.level >= desired)
             });
             let goal = if nearby_ready { 24000. } else { 1024. };
             let speed = if nearby_ready { 0.3 } else { 2. };
@@ -291,11 +319,13 @@ impl Runtime {
                 .map(|(a, b)| (a - b).abs())
                 .sum::<f64>()
                 > 0.2;
-        if moved && self.last_plan.elapsed() > Duration::from_millis(200) {
+        if moved && !self.planning && self.last_plan.elapsed() > Duration::from_millis(200) {
             self.plan_generation += 1;
             self.planner.request(crate::lod_planner::Request {
                 generation: self.plan_generation,
-                eye: std::array::from_fn(|i| self.camera.eye()[i] + self.velocity[i] * 0.5),
+                // Keep protected detail centered on the player even when its radius
+                // is capped. Speed still expands the prefetch neighborhood.
+                eye: self.camera.eye(),
                 height: self.gpu.height,
                 fov: self.camera.fov,
                 previous: self.desired.clone(),
@@ -321,13 +351,15 @@ impl Runtime {
             if result.generation != self.plan_generation {
                 continue;
             }
+            self.max_plan_time = self.max_plan_time.max(result.elapsed);
             self.achieved_pixels = result.selection.achieved_pixels;
+            self.native_policy_radius = result.selection.native_policy_radius;
             self.budget_limited = result.selection.budget_limited || self.memory_pressure;
             self.desired = result.selection.layout;
             if !self.still_capture {
                 let obsolete = self.target.as_ref().is_some_and(|(target, _)| {
                     target.tiles.difference(&self.active.tiles).any(|key| {
-                        let [x, z] = key.origin();
+                        let [x, z] = key.origin_in(self.gpu.grid);
                         let desired = self.desired.at(x, z).map_or(key.level, |k| k.level);
                         let active = self.active.at(x, z).map_or(key.level, |k| k.level);
                         if key.level > active {
@@ -359,7 +391,15 @@ impl Runtime {
         // dependent neighbor stitches wait on jobs, never the entire desired cover.
         if self.target.is_none() && !self.planning {
             let mut next = self.active.clone();
-            for _ in 0..12 {
+            // A large atomic patch can make nearby ready work wait for
+            // unrelated distant jobs. While traveling, keep each swap small
+            // enough to feed the worker pool without a long readiness barrier.
+            let patch_count = if self.velocity[0].hypot(self.velocity[2]) > 0.1 {
+                2
+            } else {
+                12
+            };
+            for _ in 0..patch_count {
                 if let Some(patch) = lod::next_patch_budget(
                     &next,
                     &self.desired,
@@ -482,17 +522,17 @@ impl Runtime {
         let mut requests: Vec<_> = requests.into_iter().collect();
         requests.sort_by(|a, b| {
             let priority = |k: &MeshKey| {
-                let [x, z] = k.tile.origin();
-                let e = k.tile.edge();
-                let dx = (x as f64 / 16. - eye[0])
+                let [x, z] = k.tile.origin_in(self.gpu.grid);
+                let e = k.tile.edge_in(self.gpu.grid);
+                let dx = (x as f64 * self.gpu.grid.cell_m() - eye[0])
                     .max(0.)
-                    .max(eye[0] - (x + e) as f64 / 16.);
-                let dz = (z as f64 / 16. - eye[2])
+                    .max(eye[0] - (x + e) as f64 * self.gpu.grid.cell_m());
+                let dz = (z as f64 * self.gpu.grid.cell_m() - eye[2])
                     .max(0.)
-                    .max(eye[2] - (z + e) as f64 / 16.);
+                    .max(eye[2] - (z + e) as f64 * self.gpu.grid.cell_m());
                 let d = dx.hypot(dz);
-                let cx = (x + e / 2) as f64 / 16. - eye[0];
-                let cz = (z + e / 2) as f64 / 16. - eye[2];
+                let cx = (x + e / 2) as f64 * self.gpu.grid.cell_m() - eye[0];
+                let cz = (z + e / 2) as f64 * self.gpu.grid.cell_m() - eye[2];
                 let ahead = cx * direction[0] + cz * direction[2];
                 d * (if ahead < 0. && d > self.settings.native_radius * 2. {
                     3.
@@ -505,14 +545,14 @@ impl Runtime {
         let radius = self.settings.native_radius * 2.;
         self.workers.schedule(
             requests.into_iter().map(|key| {
-                let [x, z] = key.tile.origin();
-                let edge = key.tile.edge();
-                let dx = (x as f64 / 16. - eye[0])
+                let [x, z] = key.tile.origin_in(self.gpu.grid);
+                let edge = key.tile.edge_in(self.gpu.grid);
+                let dx = (x as f64 * self.gpu.grid.cell_m() - eye[0])
                     .max(0.)
-                    .max(eye[0] - (x + edge) as f64 / 16.);
-                let dz = (z as f64 / 16. - eye[2])
+                    .max(eye[0] - (x + edge) as f64 * self.gpu.grid.cell_m());
+                let dz = (z as f64 * self.gpu.grid.cell_m() - eye[2])
                     .max(0.)
-                    .max(eye[2] - (z + edge) as f64 / 16.);
+                    .max(eye[2] - (z + edge) as f64 * self.gpu.grid.cell_m());
                 (key, dx.hypot(dz) < radius)
             }),
             ray,
@@ -541,7 +581,7 @@ impl Runtime {
             self.plan_generation += 1;
             self.planning = false;
             self.target = None;
-            self.desired = Layout::root(); // mark intent dirty before any wait-for-ready caller
+            self.desired = Layout::root_in(self.gpu.grid); // mark intent dirty before any wait-for-ready caller
             self.workers.retain(self.cover.clone());
             self.last_fov = -1.;
             self.last_plan = Instant::now() - Duration::from_secs(1);
@@ -583,7 +623,7 @@ impl Runtime {
                 if self
                     .active
                     .at(hit.cell.x, hit.cell.z)
-                    .is_some_and(|tile| tile.level == lod::FINEST) =>
+                    .is_some_and(|tile| tile.level == self.gpu.grid.finest) =>
             {
                 Some([hit.cell.x, hit.cell.y, hit.cell.z])
             }
@@ -592,7 +632,7 @@ impl Runtime {
         let anchor = self
             .player
             .root
-            .offset([0, 24, 0])
+            .offset([0, (1.5 / self.gpu.grid.cell_m()).round() as i64, 0])
             .unwrap_or(self.player.root);
         let boom_distance = (self.camera.cell.x - anchor.x).pow(2)
             + (self.camera.cell.y - anchor.y).pow(2)
@@ -619,14 +659,20 @@ impl Runtime {
         }
         let (ready, total) = self.loading();
         let level = self.cover.iter().map(|k| k.tile.level).max().unwrap_or(0);
-        let spacing = 100. * (1i64 << (lod::FINEST - level)) as f64 / 16.;
+        let spacing =
+            100. * (1i64 << (self.gpu.grid.finest - level)) as f64 * self.gpu.grid.cell_m();
         let mode = if self.flying {
             "Debug flight"
         } else {
             self.view.name()
         };
         let movement = if self.flying { self.camera.speed } else { 3. };
-        format!("MicroVoxel | {} | {mode} | {fps:.0} FPS | Speed {:.1} m/s | FOV {:.0}° | {spacing:.2} cm | {} / {} tiles | {:.1} MiB | Loaded {ready}/{total}{}",if self.settings.ray {"Ray"}else{"Mesh"},movement,self.camera.fov.to_degrees(),self.visible,self.cover.len(),self.gpu.bytes as f64/(1024.*1024.),if self.last_error.is_some(){" | ERROR: see terminal"}else{""})
+        let world_name = if self.world.baseline().survey().is_some() {
+            "Volcan Mountain"
+        } else {
+            "Procedural"
+        };
+        format!("MicroVoxel — {world_name} | {} | {mode} | {fps:.0} FPS | Speed {:.1} m/s | FOV {:.0}° | {spacing:.2} cm | {} / {} tiles | {:.1} MiB | Loaded {ready}/{total}{}",if self.settings.ray {"Ray"}else{"Mesh"},movement,self.camera.fov.to_degrees(),self.visible,self.cover.len(),self.gpu.bytes as f64/(1024.*1024.),if self.last_error.is_some(){" | ERROR: see terminal"}else{""})
     }
     pub fn report(&self) {
         if self.settings.ray {

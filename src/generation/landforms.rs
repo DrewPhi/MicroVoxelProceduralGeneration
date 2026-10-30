@@ -65,7 +65,22 @@ pub(super) fn landscape(x: f64, z: f64, seed: u64) -> Landscape {
     let plateau = 0.65 * raw_plateau + 0.35 * terrace;
     let basin =
         18. + 22. * noise(wx, wz, 1600., seed ^ 71).abs() + 4. * noise(wx, wz, 500., seed ^ 72);
-    let mountain = 140. + 650. * ridges(wx, wz, seed);
+    let ridge = ridges(wx, wz, seed);
+    // Geology changes structure, not only its color. Physical bedding anchors
+    // vary slowly; broad resistant benches survive to middle viewing distances.
+    let mountain = match geology {
+        Geology::Sandstone | Geology::Limestone => {
+            let raw = 140. + 650. * ridge.powf(0.88);
+            let thickness = 36. + 18. * noise(wx, wz, 900., seed ^ 93);
+            let layer = (raw + 0.025 * wx - 0.018 * wz) / thickness;
+            let bench = (layer.floor() + smoothstep(0.28, 0.68, layer.fract())) * thickness
+                - 0.025 * wx
+                + 0.018 * wz;
+            0.58 * raw + 0.42 * bench
+        }
+        Geology::Basalt => 140. + 650. * smoothstep(0.05, 0.9, ridge),
+        Geology::Granite => 140. + 650. * ridge.powf(1.12),
+    };
     let heights = [plain, hills, plateau, basin, mountain];
     let height = weights.iter().zip(heights).map(|(w, h)| w * h).sum::<f64>()
         + 12. * noise(wx, wz, 5000., seed ^ 81);

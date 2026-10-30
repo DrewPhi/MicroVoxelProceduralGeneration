@@ -1,7 +1,7 @@
 //! Compact cell values and shared definitions. Property maps start EMPTY.
 use std::collections::BTreeMap;
 
-pub const MATERIAL_SCHEMA: u32 = 2;
+pub const MATERIAL_SCHEMA: u32 = 3;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaterialId(pub u16);
 impl MaterialId {
@@ -18,6 +18,8 @@ impl MaterialId {
     pub const BASALT: Self = Self(10);
     pub const MUD: Self = Self(11);
     pub const SILT: Self = Self(12);
+    /// Appearance contains RGB565 photographed color, rather than a palette tone.
+    pub const SURVEY: Self = Self(13);
     pub fn is_bedrock(self) -> bool {
         matches!(
             self,
@@ -91,6 +93,7 @@ impl Default for MaterialRegistry {
             ("basalt", MaterialKind::Solid),
             ("mud", MaterialKind::Solid),
             ("silt", MaterialKind::Solid),
+            ("surveyed surface", MaterialKind::Solid),
         ];
         Self {
             definitions: entries

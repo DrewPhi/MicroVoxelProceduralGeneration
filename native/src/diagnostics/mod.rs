@@ -3,6 +3,7 @@
 pub mod benchmark;
 pub mod character_preview;
 pub mod lod_check;
+pub mod quality;
 pub mod ray_study;
 mod ray_study_gpu;
 pub mod streaming_check;

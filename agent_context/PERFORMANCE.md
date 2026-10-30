@@ -1,7 +1,11 @@
+> Current engine: see [overhaul acceptance results](ENGINE_REDESIGN_IMPLEMENTATION.md).
+> Measurements below describe earlier implementations and are retained as history.
+
 # Initial native renderer measurements
 
-Latest measurements and source changes are in
-[profiling and cleanup](PROFILING_AND_CLEANUP.md). The sections below preserve
+Latest terrain-version-4 measurements are in
+[terrain foundation implementation](TERRAIN_FOUNDATION_IMPLEMENTATION.md). Earlier
+paired profiles are in [profiling and cleanup](PROFILING_AND_CLEANUP.md). The sections below preserve
 earlier measurement history and use different scenes/settings where stated.
 
 Measured in a release build on this machine, using **AMD Radeon 760M integrated

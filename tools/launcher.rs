@@ -11,12 +11,16 @@ fn launch() -> Result<(), String> {
     let root = executable
         .parent()
         .ok_or("Cannot locate the project directory")?;
-    let game = root.join("native/target/release/microvoxel-game");
+    let game = root.join(
+        option_env!("MICROVOXEL_ENGINE").unwrap_or("successor/target/release/microvoxel-successor"),
+    );
     if !game.is_file() {
         return Err("The game needs building first. Run tools/build_launcher.sh from the project directory with Rust 1.85 or newer installed.".into());
     }
     fs::create_dir_all(root.join("output")).map_err(|e| e.to_string())?;
-    let log = File::create(root.join("output/launcher.log")).map_err(|e| e.to_string())?;
+    let log =
+        File::create(root.join(option_env!("MICROVOXEL_LOG").unwrap_or("output/launcher.log")))
+            .map_err(|e| e.to_string())?;
     let status = Command::new(game)
         .current_dir(root)
         .args(env::args_os().skip(1))
@@ -30,7 +34,8 @@ fn launch() -> Result<(), String> {
     } else {
         Err(format!(
             "MicroVoxel exited with {status}. See {}",
-            root.join("output/launcher.log").display()
+            root.join(option_env!("MICROVOXEL_LOG").unwrap_or("output/launcher.log"))
+                .display()
         ))
     }
 }

@@ -1,5 +1,7 @@
 //! Coordinates and indexing, shared by every subsystem.
 
+// Default-grid convenience values, retained for existing tools. Configurable
+// worlds use WorldSpec/GridScale; these are never mutable process-wide settings.
 pub const VOXELS_PER_METER: i64 = 16;
 pub const VOXEL_SIZE: f64 = 1.0 / VOXELS_PER_METER as f64;
 pub const CHUNK_EDGE: i64 = 32;

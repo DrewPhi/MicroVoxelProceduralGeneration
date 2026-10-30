@@ -1,0 +1,31 @@
+{
+  "dataset": "CA24_Volcan",
+  "doi": "10.5069/G99P2ZV5",
+  "license": "CC BY 4.0",
+  "height_url": "https://opentopography.s3.sdsc.edu/raster/CA24_Volcan/CA24_Volcan_hh/VolcanMt_20231025_DSM_05cm_elev-001_COG.tif",
+  "imagery_url": "https://opentopography.s3.sdsc.edu/raster/CA24_Volcan/CA24_Volcan_op/VolcanMt_20231025_RGB_05cm_rgb_COG.tif",
+  "crs": "EPSG:32611",
+  "vertical_datum": "WGS84 Ellipsoid",
+  "native_spacing_m": 0.05,
+  "source_bounds": [
+    536974.9500000001,
+    3664852.0,
+    537174.9500000001,
+    3665052.0
+  ],
+  "source_elevation_min_m": 1171.3109130859375,
+  "source_elevation_max_m": 1224.23876953125,
+  "vertical_offset_m": 1107.0,
+  "spawn_native": [
+    1100,
+    600
+  ],
+  "spawn_local_m": [
+    55.0,
+    80.4222412109375,
+    30.0
+  ],
+  "width": 4000,
+  "height": 4000,
+  "sha256": "a8f9e2cb3fee4fb2b55622378edbf52bfb3bee9567cd16b9b71327120fd7b4c9"
+}

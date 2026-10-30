@@ -3,13 +3,65 @@
 use crate::{character::VoxelFrame, generation::Generator, CellPos, World};
 use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
+struct ColumnMask {
+    x: i32,
+    z: i32,
+    ranges: Vec<[i32; 2]>,
+}
+fn columns(cells: &[[i32; 3]]) -> Vec<ColumnMask> {
+    let mut map = std::collections::BTreeMap::<(i32, i32), Vec<i32>>::new();
+    for &[x, y, z] in cells {
+        map.entry((x, z)).or_default().push(y);
+    }
+    map.into_iter()
+        .map(|((x, z), mut ys)| {
+            ys.sort_unstable();
+            ys.dedup();
+            let mut ranges = Vec::<[i32; 2]>::new();
+            for y in ys {
+                if let Some(r) = ranges.last_mut() {
+                    if r[1] == y {
+                        r[1] = y + 1;
+                        continue;
+                    }
+                }
+                ranges.push([y, y + 1]);
+            }
+            ColumnMask { x, z, ranges }
+        })
+        .collect()
+}
+fn columns_clear<G: Generator>(mask: &[ColumnMask], world: &World<G>, root: CellPos) -> bool {
+    mask.iter().all(|c| {
+        c.ranges.iter().all(|r| {
+            world
+                .column_runs(
+                    root.x + i64::from(c.x),
+                    root.z + i64::from(c.z),
+                    (root.y + i64::from(r[0]))..(root.y + i64::from(r[1])),
+                )
+                .is_some_and(|runs| runs.iter().all(|r| r.material == crate::MaterialId::AIR))
+        })
+    })
+}
+#[derive(Clone, Debug)]
 pub struct VoxelShape {
     cells: Vec<[i32; 3]>,
-    leading: [Vec<[i32; 3]>; 6],
+    columns: Vec<ColumnMask>,
+    leading_columns: [Vec<ColumnMask>; 6],
     pub min: [i32; 3],
     pub max: [i32; 3],
 }
 impl VoxelShape {
+    pub fn memory_bytes(&self) -> usize {
+        let bytes = |mask: &Vec<ColumnMask>| {
+            mask.capacity() * std::mem::size_of::<ColumnMask>()
+                + mask.iter().map(|c| c.ranges.capacity() * 8).sum::<usize>()
+        };
+        self.cells.capacity() * 12
+            + bytes(&self.columns)
+            + self.leading_columns.iter().map(bytes).sum::<usize>()
+    }
     pub fn cells(&self) -> &[[i32; 3]] {
         &self.cells
     }
@@ -22,7 +74,7 @@ impl VoxelShape {
         let cells: Vec<_> = set.iter().copied().collect();
         let min = std::array::from_fn(|a| cells.iter().map(|p| p[a]).min().unwrap());
         let max = std::array::from_fn(|a| cells.iter().map(|p| p[a] + 1).max().unwrap());
-        let leading = std::array::from_fn(|face| {
+        let leading: [Vec<[i32; 3]>; 6] = std::array::from_fn(|face| {
             let axis = face / 2;
             let sign = if face % 2 == 0 { -1 } else { 1 };
             cells
@@ -36,16 +88,15 @@ impl VoxelShape {
                 .collect()
         });
         Self {
+            columns: columns(&cells),
+            leading_columns: std::array::from_fn(|i| columns(&leading[i])),
             cells,
-            leading,
             min,
             max,
         }
     }
     pub fn clear<G: Generator>(&self, world: &World<G>, root: CellPos) -> bool {
-        self.cells
-            .iter()
-            .all(|p| air(world, root, p.map(i64::from)))
+        columns_clear(&self.columns, world, root)
     }
     /// One crossed boundary at a time. Since the current pose is clear, only
     /// exposed cells facing this translation can encounter a new obstruction.
@@ -60,10 +111,7 @@ impl VoxelShape {
         step[axis] = sign;
         let next = root.offset(step)?;
         let face = axis * 2 + usize::from(sign > 0);
-        self.leading[face]
-            .iter()
-            .all(|p| air(world, next, p.map(i64::from)))
-            .then_some(next)
+        columns_clear(&self.leading_columns[face], world, next).then_some(next)
     }
     pub fn sweep_axis<G: Generator>(
         &self,
@@ -146,7 +194,7 @@ pub fn camera_boom<G: Generator>(
     delta: [i64; 3],
     radius: i32,
 ) -> CellPos {
-    if delta.iter().any(|v| v.unsigned_abs() > 256) || !(1..=4).contains(&radius) {
+    if delta.iter().any(|v| v.unsigned_abs() > 256) || !(1..=32).contains(&radius) {
         return start;
     }
     let mut cells = Vec::new();

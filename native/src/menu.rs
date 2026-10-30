@@ -6,6 +6,11 @@ use std::time::{Duration, Instant};
 use winit::keyboard::KeyCode;
 const W: f32 = 760.;
 const H: f32 = 640.;
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Tab {
+    Display,
+    World,
+}
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 struct Vertex {
@@ -15,6 +20,8 @@ struct Vertex {
 pub struct Menu {
     pub open: bool,
     pub settings: Settings,
+    pub worlds: crate::worlds::Editor,
+    tab: Tab,
     cursor: [f32; 2],
     dragging: Option<usize>,
     editing: Option<usize>,
@@ -26,6 +33,8 @@ impl Menu {
         Self {
             open: false,
             settings: Settings::load(),
+            worlds: crate::worlds::Editor::new(),
+            tab: Tab::Display,
             cursor: [0.; 2],
             dragging: None,
             editing: None,
@@ -90,6 +99,18 @@ impl Menu {
         }
         self.commit_text();
         let [x, y] = self.cursor;
+        if (18. ..54.).contains(&y) {
+            if (340. ..520.).contains(&x) {
+                self.tab = Tab::Display;
+            }
+            if (536. ..732.).contains(&x) {
+                self.tab = Tab::World;
+            }
+            return false;
+        }
+        if self.tab == Tab::World {
+            return self.world_click(x, y);
+        }
         if (588.0..734.0).contains(&x) && (584.0..624.0).contains(&y) {
             return true;
         }
@@ -137,6 +158,21 @@ impl Menu {
     }
     fn commit_text(&mut self) {
         if let Some(row) = self.editing.take() {
+            if row == 4 {
+                self.worlds.seed = self.text.clone();
+                self.worlds.status.clear();
+                return;
+            }
+            if row == 5 {
+                self.worlds.centimeters = self.text.clone();
+                self.worlds.status.clear();
+                return;
+            }
+            if row == 6 {
+                self.worlds.world_scale = self.text.clone();
+                self.worlds.status.clear();
+                return;
+            }
             if let Ok(v) = self.text.parse::<f64>() {
                 if v.is_finite() {
                     let (a, b) = Self::range(row);
@@ -158,7 +194,10 @@ impl Menu {
             _ => {
                 if let Some(t) = text {
                     for c in t.chars() {
-                        if (c.is_ascii_digit() || c == '.') && self.text.len() < 10 {
+                        let row = self.editing.unwrap();
+                        let limit = if row == 4 { 20 } else { 16 };
+                        if (c.is_ascii_digit() || (c == '.' && row != 4)) && self.text.len() < limit
+                        {
                             self.text.push(c);
                         }
                     }
@@ -190,7 +229,28 @@ impl Menu {
         };
         p.rect(0., 0., W, H, [0.018, 0.028, 0.044, 0.98]);
         p.rect(0., 0., W, 4., [0.22, 0.72, 0.54, 1.]);
-        p.text(28., 25., "TERRAIN AND DISPLAY", 3., [0.88, 0.94, 0.94, 1.]);
+        p.text(28., 25., "SETTINGS", 3., [0.88, 0.94, 0.94, 1.]);
+        for (tab, x, w, label) in [
+            (Tab::Display, 340., 180., "DISPLAY"),
+            (Tab::World, 536., 196., "WORLD"),
+        ] {
+            p.rect(
+                x,
+                18.,
+                w,
+                36.,
+                if self.tab == tab {
+                    [0.12, 0.35, 0.28, 1.]
+                } else {
+                    [0.07, 0.12, 0.16, 1.]
+                },
+            );
+            p.text(x + 20., 29., label, 2., [0.8, 0.94, 0.9, 1.]);
+        }
+        if self.tab == Tab::World {
+            self.world_vertices(&mut p);
+            return p.vertices;
+        }
         p.text(
             28.,
             60.,
@@ -280,6 +340,179 @@ impl Menu {
         p.rect(588., 584., 146., 40., [0.12, 0.40, 0.30, 1.]);
         p.text(605., 598., "RESUME", 2.4, [0.88, 0.97, 0.91, 1.]);
         p.vertices
+    }
+    fn world_click(&mut self, x: f32, y: f32) -> bool {
+        if self.worlds.busy {
+            return false;
+        }
+        if (584. ..624.).contains(&y) && (588. ..734.).contains(&x) {
+            return true;
+        }
+        if (100. ..144.).contains(&y) {
+            if (28. ..370.).contains(&x) {
+                self.worlds.procedural = false;
+                self.worlds.status.clear();
+            }
+            if (388. ..732.).contains(&x) {
+                self.worlds.procedural = true;
+                self.worlds.status.clear();
+            }
+        }
+        if self.worlds.procedural {
+            if (194. ..234.).contains(&y) {
+                if (28. ..478.).contains(&x) {
+                    self.editing = Some(4);
+                    self.text = self.worlds.seed.clone();
+                }
+                if (500. ..732.).contains(&x) {
+                    self.worlds.randomize();
+                }
+            }
+            if (294. ..334.).contains(&y) && (28. ..238.).contains(&x) {
+                self.editing = Some(5);
+                self.text = self.worlds.centimeters.clone();
+            }
+            if (384. ..424.).contains(&y) && (28. ..238.).contains(&x) {
+                self.editing = Some(6);
+                self.text = self.worlds.world_scale.clone();
+            }
+        } else if (182. ..224.).contains(&y)
+            && (28. ..732.).contains(&x)
+            && !self.worlds.surveys.is_empty()
+        {
+            self.worlds.selected = (self.worlds.selected + 1) % self.worlds.surveys.len();
+            self.worlds.status.clear();
+        }
+        if (584. ..624.).contains(&y) && (28. ..550.).contains(&x) {
+            self.worlds.apply();
+        }
+        false
+    }
+    fn world_vertices(&self, p: &mut Painter) {
+        let text = [0.78, 0.86, 0.88, 1.];
+        let muted = [0.48, 0.64, 0.68, 1.];
+        p.text(
+            28.,
+            66.,
+            "CHOOSE A WORLD, THEN PRESS APPLY WORLD",
+            1.6,
+            muted,
+        );
+        for (procedural, x, label) in [
+            (false, 28., "REAL WORLDS"),
+            (true, 388., "PROCEDURAL WORLD"),
+        ] {
+            p.rect(
+                x,
+                100.,
+                344.,
+                44.,
+                if self.worlds.procedural == procedural {
+                    [0.12, 0.35, 0.28, 1.]
+                } else {
+                    [0.07, 0.12, 0.16, 1.]
+                },
+            );
+            p.text(x + 18., 116., label, 2., text);
+        }
+        if self.worlds.procedural {
+            p.text(28., 170., "WORLD SEED", 2., text);
+            p.rect(28., 194., 450., 40., [0.06, 0.1, 0.14, 1.]);
+            let seed = if self.editing == Some(4) {
+                format!("{}_", self.text)
+            } else {
+                self.worlds.seed.clone()
+            };
+            p.text(40., 207., &seed, 2., text);
+            p.rect(500., 194., 232., 40., [0.07, 0.16, 0.18, 1.]);
+            p.text(514., 208., "NEW RANDOM SEED", 1.9, [0.55, 0.95, 0.78, 1.]);
+            p.text(28., 270., "VOXEL SIZE - CENTIMETERS", 2., text);
+            p.rect(28., 294., 210., 40., [0.06, 0.1, 0.14, 1.]);
+            let cm = if self.editing == Some(5) {
+                format!("{}_", self.text)
+            } else {
+                self.worlds.centimeters.clone()
+            };
+            p.text(40., 307., &cm, 2., text);
+            p.text(258., 308., "E.G. 25, 10, 6.25, 5, 2, 1 CM", 1.7, muted);
+            p.text(28., 360., "WORLD SCALE - LANDSCAPE COMPRESSION", 2., text);
+            p.rect(28., 384., 210., 40., [0.06, 0.1, 0.14, 1.]);
+            let world_scale = if self.editing == Some(6) {
+                format!("{}_", self.text)
+            } else {
+                self.worlds.world_scale.clone()
+            };
+            p.text(40., 397., &world_scale, 2., text);
+            p.text(258., 390., "1 GAME METER = N TERRAIN METERS", 1.6, muted);
+            p.text(
+                258.,
+                411.,
+                "1 = FULL SIZE, 10 = 1:10; RANGE 1-100",
+                1.5,
+                muted,
+            );
+            p.text(
+                28.,
+                450.,
+                "SCALES DISTANCES AND HEIGHTS; PLAYER / VOXEL CM STAY FIXED",
+                1.5,
+                muted,
+            );
+        } else {
+            p.text(28., 162., "IMPORTED REAL WORLD - CLICK TO CYCLE", 1.7, text);
+            p.rect(28., 182., 704., 42., [0.07, 0.16, 0.18, 1.]);
+            if let Some(entry) = self.worlds.surveys.get(self.worlds.selected) {
+                p.text(40., 197., &entry.name, 2., text);
+                p.text(
+                    28.,
+                    270.,
+                    &format!(
+                        "VOXEL SIZE: {} CM - FIXED BY THE SURVEY",
+                        entry.grid.meters() * 100.
+                    ),
+                    1.8,
+                    text,
+                );
+            } else {
+                p.text(40., 197., "NO IMPORTED WORLDS FOUND", 2., text);
+            }
+            p.text(
+                28.,
+                326.,
+                "REAL WORLDS USE THEIR MEASURED HEIGHTS AND COLORS",
+                1.6,
+                muted,
+            );
+            p.text(
+                28.,
+                359.,
+                "SEED AND VOXEL SIZE APPLY ONLY TO PROCEDURAL WORLDS",
+                1.6,
+                muted,
+            );
+        }
+        p.text(28., 480., &self.worlds.status, 1.4, [0.9, 0.78, 0.5, 1.]);
+        p.text(
+            28.,
+            521.,
+            "APPLY REPLACES THE CURRENT SESSION AND RESPAWNS YOU",
+            1.6,
+            muted,
+        );
+        p.rect(28., 584., 522., 40., [0.12, 0.40, 0.30, 1.]);
+        p.text(
+            48.,
+            598.,
+            if self.worlds.busy {
+                "PREPARING WORLD..."
+            } else {
+                "APPLY WORLD"
+            },
+            2.4,
+            [0.88, 0.97, 0.91, 1.],
+        );
+        p.rect(588., 584., 146., 40., [0.07, 0.16, 0.18, 1.]);
+        p.text(605., 598., "RESUME", 2.4, text);
     }
 }
 struct Painter {
@@ -457,6 +690,8 @@ impl Renderer {
         .hash(&mut hash);
         menu.editing.hash(&mut hash);
         menu.text.hash(&mut hash);
+        menu.tab.hash(&mut hash);
+        menu.worlds.hash(&mut hash);
         stats.hash(&mut hash);
         width.hash(&mut hash);
         height.hash(&mut hash);
@@ -495,6 +730,43 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn world_fields_require_apply_and_preserve_full_u64_seeds() {
+        let mut menu = Menu::new();
+        menu.cursor = [600., 30.];
+        menu.click(true);
+        assert!(menu.tab == Tab::World);
+        menu.worlds.procedural = true;
+        menu.cursor = [100., 210.];
+        menu.click(true);
+        menu.key(KeyCode::Delete, None);
+        menu.key(KeyCode::Digit1, Some("18446744073709551615"));
+        menu.key(KeyCode::Enter, None);
+        menu.cursor = [100., 310.];
+        menu.click(true);
+        menu.key(KeyCode::Delete, None);
+        menu.key(KeyCode::Digit5, Some("5"));
+        menu.key(KeyCode::Enter, None);
+        menu.cursor = [100., 400.];
+        menu.click(true);
+        menu.key(KeyCode::Delete, None);
+        menu.key(KeyCode::Digit1, Some("10"));
+        menu.key(KeyCode::Enter, None);
+        assert!(menu.worlds.pending.is_none());
+        menu.cursor = [100., 600.];
+        menu.click(true);
+        assert_eq!(
+            menu.worlds.pending.take(),
+            Some(crate::worlds::Request::Procedural {
+                seed: u64::MAX,
+                grid: microvoxel::GridScale::new(1, 20).unwrap(),
+                world_scale: 10,
+            })
+        );
+        menu.click(true);
+        assert!(menu.worlds.pending.is_none());
+        assert!(!menu.vertices(1280, 720, &[]).is_empty());
+    }
     #[test]
     fn renderer_toggle_and_quality_presets_preserve_the_selected_backend() {
         let mut menu = Menu::new();

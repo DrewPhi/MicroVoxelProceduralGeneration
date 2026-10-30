@@ -1,6 +1,6 @@
 //! Equal-footprint CPU measurements. No graphics context or window is required.
 use microvoxel::{
-    generation::ProceduralTerrain,
+    generation::Terrain,
     render::{
         lod::{MeshKey, TileKey},
         terrain::Sampler,
@@ -8,7 +8,10 @@ use microvoxel::{
     World,
 };
 use std::{sync::Arc, time::Instant};
-pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
+pub fn run(world: Arc<World<Terrain>>) -> microvoxel::Result<()> {
+    if world.spec() != microvoxel::WorldSpec::default() {
+        return Err("the legacy equal-footprint benchmark uses default-grid fixtures; use --terrain-quality for scale checks".into());
+    }
     println!("Same 16 m × 16 m patch, fresh profile cache for each LOD; includes colors and greedy merging:");
     for level in (10..=13).rev() {
         let mut sampler = Sampler::new(Arc::clone(&world));

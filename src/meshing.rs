@@ -1,7 +1,7 @@
 //! Surface extraction consumes world cells. It never assigns materials by face.
 use crate::{
     generation::Generator,
-    grid::{Bounds, CellPos, VOXEL_SIZE},
+    grid::{Bounds, CellPos},
     materials::{MaterialRegistry, Voxel},
     world::{Lookup, World},
 };
@@ -20,12 +20,14 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 struct Builder<'a> {
+    cell_size: f32,
     materials: &'a MaterialRegistry,
     mesh: Mesh,
 }
 impl<'a> Builder<'a> {
-    fn new(origin: CellPos, materials: &'a MaterialRegistry) -> Self {
+    fn new(origin: CellPos, materials: &'a MaterialRegistry, cell_size: f32) -> Self {
         Self {
+            cell_size,
             materials,
             mesh: Mesh {
                 origin,
@@ -72,9 +74,7 @@ impl<'a> Builder<'a> {
         let origin = [self.mesh.origin.x, self.mesh.origin.y, self.mesh.origin.z];
         for corner in corners {
             self.mesh.vertices.push(Vertex {
-                position: std::array::from_fn(|i| {
-                    (corner[i] - origin[i]) as f32 * VOXEL_SIZE as f32
-                }),
+                position: std::array::from_fn(|i| (corner[i] - origin[i]) as f32 * self.cell_size),
                 color,
                 normal,
             });
@@ -112,7 +112,11 @@ pub fn mesh_bounds<G: Generator>(world: &World<G>, bounds: Bounds) -> Result<Mes
     if bounds.volume().ok_or("invalid mesh bounds")? > 1_000_000 {
         return Err("mesh volume budget exceeded".into());
     }
-    let mut builder = Builder::new(bounds.min, world.materials());
+    let mut builder = Builder::new(
+        bounds.min,
+        world.materials(),
+        world.spec().grid.meters() as f32,
+    );
     for z in bounds.min.z..bounds.max.z {
         for x in bounds.min.x..bounds.max.x {
             for y in bounds.min.y..bounds.max.y {

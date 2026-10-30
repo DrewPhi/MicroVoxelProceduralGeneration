@@ -1,4 +1,4 @@
-struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32> }
+struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32>, grid_eye:vec4<i32>, eye_fraction:vec4<f32> }
 @group(0) @binding(0) var<uniform> camera:Camera;
 @group(0) @binding(1) var horizon_visibility:texture_2d<f32>;
 @group(1) @binding(0) var<storage,read> data:array<u32>;
@@ -6,13 +6,13 @@ struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse
 @vertex fn vs_ray(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32>{
  let p=array<vec2<f32>,3>(vec2<f32>(-1,-1),vec2<f32>(3,-1),vec2<f32>(-1,3));return vec4<f32>(p[i],0.,1.);
 }
-fn bounds(p:u32)->mat2x3<f32>{return mat2x3<f32>(vec3<f32>(f32(data[p]),f32(data[p+1u]),f32(data[p+2u])),vec3<f32>(f32(data[p+4u]),f32(data[p+5u]),f32(data[p+6u])));}
+fn bounds(p:u32)->mat2x3<f32>{return mat2x3<f32>(vec3<f32>(f32(i32(data[p])-camera.grid_eye.x),f32(i32(data[p+1u])-camera.grid_eye.y),f32(i32(data[p+2u])-camera.grid_eye.z)),vec3<f32>(f32(i32(data[p+4u])-camera.grid_eye.x),f32(i32(data[p+5u])-camera.grid_eye.y),f32(i32(data[p+6u])-camera.grid_eye.z)));}
 fn span(low:vec3<f32>,high:vec3<f32>,origin:vec3<f32>,inv:vec3<f32>)->vec2<f32>{
  let a=(low-origin)*inv;let b=(high-origin)*inv;let near=min(a,b);let far=max(a,b);
  return vec2<f32>(max(max(near.x,near.y),near.z),min(min(far.x,far.y),far.z));
 }
 fn shadow_at(world:vec3<f32>)->f32 {
- let size=vec2<i32>(textureDimensions(horizon_visibility));let uv=clamp(world.xz/10000.*vec2<f32>(size)-0.5,vec2<f32>(0.),vec2<f32>(size)-1.);
+ let size=vec2<i32>(textureDimensions(horizon_visibility));let uv=clamp(world.xz/camera.eye.w*vec2<f32>(size)-0.5,vec2<f32>(0.),vec2<f32>(size)-1.);
  let a=vec2<i32>(floor(uv));let b=min(a+vec2<i32>(1),size-vec2<i32>(1));let t=fract(uv);
  return mix(mix(textureLoad(horizon_visibility,a,0).r,textureLoad(horizon_visibility,vec2<i32>(b.x,a.y),0).r,t.x),mix(textureLoad(horizon_visibility,vec2<i32>(a.x,b.y),0).r,textureLoad(horizon_visibility,b,0).r,t.x),t.y);
 }
@@ -21,7 +21,7 @@ struct Pixel {@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
  let ndc=(pixel.xy/camera.viewport.xy*2.-1.)*vec2<f32>(1.,-1.);
  let point=camera.inverse*vec4<f32>(ndc,0.5,1.);let direction=normalize(point.xyz/point.w);
  let inv=select(vec3<f32>(1e10),1./direction,abs(direction)>vec3<f32>(1e-10));
- let origin=camera.eye.xyz/camera.viewport.w;
+ let origin=camera.eye_fraction.xyz/camera.viewport.w;
  var closest=camera.effects.w/camera.viewport.w;var found=false;var best_run=0u;var best_normal=vec3<f32>(0,1,0);
  // A queued node already passed its bounds test. Retain the entry distance so
  // a later, nearer hit can reject it without reloading/testing its bounds.
@@ -38,7 +38,7 @@ struct Pixel {@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
    let box=bounds(node);
    let first=left&0x7fffffffu;
    for(var i=0u;i<right;i+=1u){
-    let r=first+i*8u;let low=vec3<f32>(box[0].x,f32(data[r]),box[0].z);let high=vec3<f32>(box[1].x,f32(data[r+1u]),box[1].z);
+    let r=first+i*8u;let low=vec3<f32>(box[0].x,f32(i32(data[r])-camera.grid_eye.y),box[0].z);let high=vec3<f32>(box[1].x,f32(i32(data[r+1u])-camera.grid_eye.y),box[1].z);
     let hit=span(low,high,origin,inv);let t=select(hit.x,hit.y,hit.x<0.4);
     if hit.y>=max(hit.x,0.4)&&t<closest {
      let a=(low-origin)*inv;let b=(high-origin)*inv;let face=select(min(a,b),max(a,b),hit.x<0.4);
@@ -73,10 +73,10 @@ struct Pixel {@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
  }
  var out:Pixel;if !found {discard;}
  let relative=direction*closest*camera.viewport.w;let world=relative+camera.eye.xyz;
- let r=best_run;let y=i32(floor(world.y/camera.viewport.w-best_normal.y*0.001));
+ let r=best_run;let y=camera.grid_eye.y+i32(floor((relative.y+camera.eye_fraction.y)/camera.viewport.w-best_normal.y*0.001));
  let index=u32(clamp(y-i32(data[r+4u]),0,i32(data[r+5u])-1));
  let packed=select(data[data[r+3u]+index],data[r+2u],y<i32(data[r+4u]));let rgb=vec3<f32>(f32(packed&255u),f32((packed>>8u)&255u),f32((packed>>16u)&255u))/255.;
- let flags=data[r+6u];let water=(flags&0x1000000u)!=0u;let light=(flags>>16u)&255u;
+ let flags=data[r+6u];let water=(flags&256u)!=0u;let light=flags&255u;
  var sunlight=max(0.,dot(best_normal,normalize(vec3<f32>(-0.4,0.85,-0.35))));
  var sky_light=0.34+0.10*max(best_normal.y,0.);var ambient=1.;
  if !water {

@@ -20,3 +20,13 @@
 # Machine-local executable launcher and desktop entry (rebuild from tools/).
 /MicroVoxel
 /MicroVoxel.desktop
+
+# Isolated successor build and local settings
+/successor/target/
+/successor/viewer/settings.conf
+/tools/__pycache__/
+/MicroVoxel-Successor
+
+# Diagnostics also run from crate working directories under cargo test.
+/successor/viewer/output/
+/successor/world/output/
