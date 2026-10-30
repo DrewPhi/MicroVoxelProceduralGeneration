@@ -91,6 +91,7 @@ pub(super) struct ClimateParameters {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainConfig {
+    pub refinement: Refinement,
     pub climate: ClimatePreset,
     pub wind_degrees: f64,
     pub boundary_moisture: f64,
@@ -103,6 +104,7 @@ impl Default for TerrainConfig {
 impl TerrainConfig {
     pub fn for_climate(climate: ClimatePreset) -> Self {
         Self {
+            refinement: Refinement::Geomorphic,
             climate,
             wind_degrees: 25.,
             boundary_moisture: climate.parameters().moisture,
@@ -123,9 +125,16 @@ impl TerrainConfig {
     }
     pub(super) fn fingerprint(self) -> u64 {
         mix(self.climate as u64)
+            ^ mix(self.refinement as u64 + 912)
             ^ mix(self.wind_degrees.rem_euclid(360.).to_bits()).rotate_left(19)
             ^ mix(self.boundary_moisture.to_bits()).rotate_left(41)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refinement {
+    Noise,
+    Geomorphic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,17 +1,18 @@
 //! Latest-intent planner. One queued request and one result keep CPU/memory work
 //! bounded. Terrain-error sampling and quadtree selection never block a frame.
 use microvoxel::{
-    generation::ProceduralTerrain,
+    generation::Terrain,
     render::lod::{self, Layout, Quality},
     World,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
         mpsc::{self, Receiver},
         Arc, Condvar, Mutex,
     },
     thread,
+    time::{Duration, Instant},
 };
 pub struct Request {
     pub generation: u64,
@@ -23,6 +24,7 @@ pub struct Request {
     pub quality: Quality,
 }
 pub struct Result {
+    pub elapsed: Duration,
     pub generation: u64,
     pub selection: lod::Selection,
 }
@@ -35,7 +37,7 @@ pub struct Planner {
     pub results: Receiver<Result>,
 }
 impl Planner {
-    pub fn new(world: Arc<World<ProceduralTerrain>>) -> Self {
+    pub fn new(world: Arc<World<Terrain>>) -> Self {
         let queue = Arc::new((
             Mutex::new(Queue {
                 latest: None,
@@ -49,6 +51,7 @@ impl Planner {
             .name("voxel-lod-planner".into())
             .spawn(move || {
                 let mut errors = BTreeMap::new();
+                let mut recent = VecDeque::new();
                 loop {
                     let request = {
                         let (lock, wake) = &*work;
@@ -70,40 +73,59 @@ impl Planner {
                         budget,
                         quality,
                     } = request;
-                    if errors.len() > 8192 {
-                        errors.clear();
-                    }
+                    let started = Instant::now();
                     let selection =
                         lod::select_adaptive(eye, height, fov, &previous, budget, quality, |key| {
-                            Some(*errors.entry(key).or_insert_with(|| {
-                                let [x, z] = key.origin();
-                                let edge = key.edge();
-                                let mut heights = [0.; 9];
-                                for j in 0..3 {
-                                    for i in 0..3 {
-                                        let p = microvoxel::CellPos::new(
-                                            (x + edge * i / 2).min(lod::EXTENT - 1),
-                                            0,
-                                            (z + edge * j / 2).min(lod::EXTENT - 1),
-                                        );
-                                        heights[(j * 3 + i) as usize] = world
-                                            .environment_at(p)
-                                            .map_or(0., |e| e.elevation_m as f64);
+                            let mut estimate = if let Some(&cached) = errors.get(&key) {
+                                cached
+                            } else {
+                                let computed = {
+                                    let grid = previous.grid;
+                                    let [x, z] = key.origin_in(grid);
+                                    let edge = key.edge_in(grid);
+                                    if let Some(summary) = world.terrain_summary(
+                                        [x as f64 * grid.cell_m(), z as f64 * grid.cell_m()],
+                                        edge as f64 * grid.cell_m(),
+                                    ) {
+                                        lod::TerrainError {
+                                            low: summary.min_m,
+                                            high: summary.max_m,
+                                            deviation: summary.error_m
+                                                * (1. + summary.normal_variation.min(1.))
+                                                + summary.appearance_variation
+                                                    * (edge as f64 * grid.cell_m() * 0.02).min(1.),
+                                            feature_scale: summary.feature_scale_m,
+                                        }
+                                    } else {
+                                        lod::TerrainError {
+                                            low: 0.,
+                                            high: world.spec().ceiling_m as f64,
+                                            deviation: 0.,
+                                            feature_scale: f64::INFINITY,
+                                        }
+                                    }
+                                };
+                                if errors.len() >= 16384 {
+                                    if let Some(old) = recent.pop_front() {
+                                        errors.remove(&old);
                                     }
                                 }
-                                let low =
-                                    heights.iter().copied().fold(f64::INFINITY, f64::min) - 4.;
-                                let high =
-                                    heights.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 4.;
-                                let deviation = (heights[4]
-                                    - (heights[0] + heights[2] + heights[6] + heights[8]) / 4.)
-                                    .abs();
-                                lod::TerrainError {
-                                    low,
-                                    high,
-                                    deviation,
+                                errors.insert(key, computed);
+                                recent.push_back(key);
+                                computed
+                            };
+                            // Reuse already-built child summaries without requiring their
+                            // generation. Refinement tightens the known parent envelope.
+                            for child in key.children() {
+                                if let Some(finer) = errors.get(&child) {
+                                    estimate.low = estimate.low.min(finer.low);
+                                    estimate.high = estimate.high.max(finer.high);
+                                    estimate.deviation = estimate.deviation.max(finer.deviation);
+                                    estimate.feature_scale =
+                                        estimate.feature_scale.min(finer.feature_scale);
                                 }
-                            }))
+                            }
+                            Some(estimate)
                         });
                     // A stale plan is disposable. Keep the newest queued intent.
                     if work
@@ -118,6 +140,7 @@ impl Planner {
                     }
                     if tx
                         .send(Result {
+                            elapsed: started.elapsed(),
                             generation,
                             selection,
                         })

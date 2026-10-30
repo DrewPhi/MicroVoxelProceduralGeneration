@@ -2,7 +2,7 @@
 use super::ray_study_gpu::{Bench, Hit, Ray};
 use crate::{gpu::Gpu, runtime::Runtime, settings::Settings};
 use microvoxel::{
-    generation::{FlatTerrain, Generator, GeneratorIdentity, ProceduralTerrain, Run},
+    generation::{FlatTerrain, Generator, GeneratorIdentity, Run, Terrain},
     materials::{Appearance, MaterialId, Voxel},
     render::{
         lod::{MeshKey, TileKey},
@@ -210,7 +210,7 @@ fn validate(
     }
     Ok(())
 }
-fn sharing(world: Arc<World<ProceduralTerrain>>, report: &mut String) -> microvoxel::Result<()> {
+fn sharing(world: Arc<World<Terrain>>, report: &mut String) -> microvoxel::Result<()> {
     writeln!(
         report,
         "\nSubtree sharing across 16 adjacent native terrain bricks:"
@@ -286,10 +286,7 @@ fn edit_study(report: &mut String) -> microvoxel::Result<()> {
     }
     Ok(())
 }
-fn frame_profile(
-    world: Arc<World<ProceduralTerrain>>,
-    report: &mut String,
-) -> microvoxel::Result<()> {
+fn frame_profile(world: Arc<World<Terrain>>, report: &mut String) -> microvoxel::Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
     let gpu = pollster::block_on(Gpu::new(&instance, None, 1280, 720))?;
     let mut rt = Runtime::new(gpu, world, 768, 0)?;
@@ -334,7 +331,10 @@ fn frame_profile(
     }
     Ok(())
 }
-pub fn run(world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
+pub fn run(world: Arc<World<Terrain>>) -> microvoxel::Result<()> {
+    if world.spec() != microvoxel::WorldSpec::default() {
+        return Err("ray-study currently uses default-grid fixtures; use terrain-quality for scale comparisons".into());
+    }
     let directory = Path::new("output/ray_study");
     std::fs::create_dir_all(directory)?;
     let mut report=String::from("Voxel representation study\nNative 32x32 columns, same occupancy and uncompressed existing attributes.\nSVO/DAG are opt-in immutable experiments; editable world storage and production renderer remain unchanged.\n");

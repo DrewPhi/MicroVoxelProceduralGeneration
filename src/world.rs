@@ -62,6 +62,7 @@ impl std::fmt::Display for EditError {
 impl std::error::Error for EditError {}
 
 pub struct World<G: Generator> {
+    instance_id: u64,
     generator: G,
     materials: MaterialRegistry,
     pub(crate) edits: EditStore,
@@ -69,11 +70,29 @@ pub struct World<G: Generator> {
     chunk_revisions: BTreeMap<ChunkPos, u64>,
 }
 impl<G: Generator> World<G> {
+    pub fn water_footprint(
+        &self,
+        x: i64,
+        z: i64,
+        step: i64,
+    ) -> Option<crate::generation::river::WaterFootprint> {
+        if self.region_changed_since(x, z, step, 0) {
+            return None;
+        }
+        let scale = self.spec().grid.meters();
+        self.generator
+            .water_footprint([x as f64 * scale, z as f64 * scale], step as f64 * scale)
+    }
+    pub fn baseline(&self) -> &G {
+        &self.generator
+    }
     pub fn new(generator: G) -> Self {
         Self::with_materials(generator, MaterialRegistry::default())
     }
     pub fn with_materials(generator: G, materials: MaterialRegistry) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            instance_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             generator,
             materials,
             edits: EditStore::default(),
@@ -83,6 +102,54 @@ impl<G: Generator> World<G> {
     }
     pub fn identity(&self) -> GeneratorIdentity {
         self.generator.identity()
+    }
+    pub fn cache_namespace(&self) -> u64 {
+        self.instance_id
+    }
+    pub fn spec(&self) -> crate::WorldSpec {
+        self.generator.spec()
+    }
+    pub fn has_volumetric_features(&self, origin: [f64; 2], edge: f64) -> bool {
+        self.generator.has_volumetric_features(origin, edge)
+    }
+    pub fn terrain_summary(
+        &self,
+        origin: [f64; 2],
+        edge: f64,
+    ) -> Option<crate::generation::summary::TerrainSummary> {
+        let mut summary = self.generator.terrain_summary(origin, edge)?;
+        let s = self.spec().grid.meters();
+        for key in self.edits.bricks.keys() {
+            let p = key.origin()?;
+            let x = p.x as f64 * s;
+            let z = p.z as f64 * s;
+            let e = 32. * s;
+            if x < origin[0] + edge
+                && x + e > origin[0]
+                && z < origin[1] + edge
+                && z + e > origin[1]
+            {
+                summary.min_m = summary.min_m.min(p.y as f64 * s);
+                summary.max_m = summary.max_m.max((p.y + 32) as f64 * s);
+                summary.error_m = summary.error_m.max(e);
+                summary.feature_scale_m = summary.feature_scale_m.min(s);
+            }
+        }
+        Some(summary)
+    }
+    pub fn display_voids(&self, x: i64, z: i64, step: i64) -> Vec<[i64; 2]> {
+        if self.region_changed_since(x, z, step, 0) {
+            Vec::new()
+        } else {
+            self.generator.display_voids(x, z, step)
+        }
+    }
+    pub fn display_solids(&self, x: i64, z: i64, step: i64) -> Vec<Run> {
+        if self.region_changed_since(x, z, step, 0) {
+            Vec::new()
+        } else {
+            self.generator.display_solids(x, z, step)
+        }
     }
     pub fn environment_at(&self, pos: CellPos) -> Option<crate::generation::EnvironmentSample> {
         self.generator.environment_at(pos)
@@ -102,6 +169,20 @@ impl<G: Generator> World<G> {
     }
     pub fn materials(&self) -> &MaterialRegistry {
         &self.materials
+    }
+    pub fn display_appearance_at(
+        &self,
+        pos: CellPos,
+        material: MaterialId,
+        step: i64,
+    ) -> crate::materials::Appearance {
+        self.edits
+            .get(pos)
+            .filter(|v| v.material == material)
+            .map_or_else(
+                || self.generator.display_appearance_at(pos, material, step),
+                |v| v.appearance,
+            )
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -310,6 +391,17 @@ impl<G: Generator> World<G> {
             self.generator.surface_cover_at(pos)
         } else {
             None
+        }
+    }
+    pub fn display_coverage_at(
+        &self,
+        pos: CellPos,
+        spacing: i64,
+    ) -> Option<[(MaterialId, f32); 5]> {
+        if self.region_changed_since(pos.x - spacing / 2, pos.z - spacing / 2, spacing, 0) {
+            None
+        } else {
+            self.generator.display_cover_at(pos, spacing)
         }
     }
     /// Optimized metadata for terrain LOD. Holes remain in column_runs/voxel_at.

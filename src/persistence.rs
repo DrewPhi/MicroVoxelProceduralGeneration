@@ -54,7 +54,14 @@ impl<G: Generator> World<G> {
                     .open(&temp)?,
             );
             w.write_all(MAGIC)?;
-            for value in [1u32, 16, 32, MATERIAL_SCHEMA, self.identity().version] {
+            // Format 2 stores the exact rational grid below; this old CPM slot
+            // is reserved rather than falsely describing every world as 16/m.
+            for value in [2u32, 0, 32, MATERIAL_SCHEMA, self.identity().version] {
+                w.write_all(&value.to_le_bytes())?;
+            }
+            let spec = self.spec();
+            let (n, d) = spec.grid.ratio();
+            for value in [n, d, spec.extent_m, spec.ceiling_m] {
                 w.write_all(&value.to_le_bytes())?;
             }
             for value in [
@@ -110,8 +117,24 @@ impl<G: Generator> World<G> {
             u32read(&mut r)?,
             u32read(&mut r)?,
         ];
-        if header != [1, 16, 32, MATERIAL_SCHEMA, self.identity().version] {
+        if !(1..=2).contains(&header[0])
+            || header[1] != if header[0] == 1 { 16 } else { 0 }
+            || header[2..] != [32, MATERIAL_SCHEMA, self.identity().version]
+        {
             return Err("incompatible format, grid, materials, or generator version".into());
+        }
+        let saved_spec = if header[0] == 1 {
+            crate::WorldSpec::default()
+        } else {
+            crate::WorldSpec {
+                grid: crate::GridScale::new(u32read(&mut r)?, u32read(&mut r)?)?,
+                extent_m: u32read(&mut r)?,
+                ceiling_m: u32read(&mut r)?,
+            }
+            .validate()?
+        };
+        if saved_spec != self.spec() {
+            return Err("save uses a different world grid or physical extent".into());
         }
         if u64read(&mut r)? != self.identity().seed
             || u64read(&mut r)? != self.identity().definition

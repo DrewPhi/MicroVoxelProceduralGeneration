@@ -2,12 +2,10 @@
 # Builds the Linux executable launcher and machine-local .desktop entry.
 set -eu
 cd -- "$(dirname -- "$0")/.."
-if [ ! -x native/target/release/microvoxel-game ]; then
-    cargo build --locked --release --manifest-path native/Cargo.toml
-fi
+cargo build --locked --release --manifest-path successor/Cargo.toml -p microvoxel-successor
 launcher_tmp=$(mktemp ./MicroVoxel.XXXXXX.tmp)
 trap 'rm -f "$launcher_tmp"' EXIT
-rustc --edition=2021 -O -C strip=symbols tools/launcher.rs -o "$launcher_tmp"
+MICROVOXEL_ENGINE=successor/target/release/microvoxel-successor rustc --edition=2021 -O -C strip=symbols tools/launcher.rs -o "$launcher_tmp"
 chmod 755 "$launcher_tmp"
 mv -f -- "$launcher_tmp" MicroVoxel
 python3 - <<'PY'

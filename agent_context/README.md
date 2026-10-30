@@ -4,8 +4,31 @@ Start with [the developer guide](../guide_for_devs.md) for the current layout,
 commands and implemented behavior. This folder consolidates project planning and
 handoff notes; it is not part of the runtime.
 
+- [Engine redesign implementation/results](ENGINE_REDESIGN_IMPLEMENTATION.md):
+  current engine, acceptance checks, measured results and remaining limits.
+- [Engine redesign implementation plan](ENGINE_REDESIGN_IMPLEMENTATION_PLAN.md):
+  current-code audit, retain/rewrite/retire decisions, successor architecture,
+  staged implementation and benchmark gates; consult the results record for status.
+  [Research audit](ENGINE_REDESIGN_RESEARCH.md) records inspected literature/code
+  and what the references do and do not establish.
+- [World Scale](WORLD_SCALE.md): independent landscape compression in the World
+  menu, coordinate handling, save compatibility and GPU verification.
+- [Real-terrain experiment](../assets/reference/volcan/README.md): local default
+  launch crop, native 5 cm resolution, photographed colors, import and limitations.
+- [Ten-view terrain review](TERRAIN_SCREENSHOT_REVIEW.md): procedural screenshot
+  sweep, raised river banks, water/LOD loss, strengths and prioritized follow-up.
+- [Terrain correction implementation](TERRAIN_CORRECTION_IMPLEMENTATION.md):
+  completed changes, screenshot comparison, measurements and remaining limits.
+- [Terrain correction plan](TERRAIN_CORRECTION_PLAN.md): research-backed fixes for
+  river embedding, water-aware LOD, contour bands and landform variety; proposed
+  implementation steps, regression cases and performance gates.
+
 - [Foundation plan](FOUNDATION_PLAN.md): architectural direction and future
   capability probes. Later stages describe proposed work, not completed systems.
+- [Terrain foundation implementation](TERRAIN_FOUNDATION_IMPLEMENTATION.md):
+  configurable physical scale, multiscale landforms, feature-aware LOD, coherent
+  materials, compressed appearance and sparse caves/arches; measured limits and
+  reproduction commands. [Original plan](TERRAIN_FOUNDATION_UPDATE_PLAN.md).
 - [Performance](PERFORMANCE.md): initial native measurements, reproduction command
   and the limits of those measurements.
 - [Profiling and cleanup](PROFILING_AND_CLEANUP.md): latest paired renderer and
@@ -36,7 +59,8 @@ handoff notes; it is not part of the runtime.
 
 ## Constraints to preserve
 
-- Base voxels are 1/16 meter. Authoritative occupancy and logical spatial state
+- Default base voxels are 1/16 meter; each world fixes its grid scale in its spec.
+  Authoritative occupancy and logical spatial state
   use integer cells; smooth camera rotation is allowed.
 - One canonical base color per voxel on all faces, including water. Lighting can
   shade faces. Color variation must not introduce detail below voxel size.

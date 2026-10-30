@@ -79,8 +79,8 @@ impl CharacterRecipe {
         pose: Pose,
         palette: &CharacterPalette,
     ) -> Result<VoxelFrame, String> {
-        if ![8, 16, 32, 64].contains(&cells_per_meter) {
-            return Err("character resolution must be 8, 16, 32 or 64 cells/m".into());
+        if !(4..=128).contains(&cells_per_meter) {
+            return Err("character resolution must be 4..128 cells/m".into());
         }
         let r = f64::from(cells_per_meter);
         let half = if pose.arm_forward {

@@ -5,9 +5,16 @@
 An experimental Rust foundation for an Earth-like voxel world, built without a
 game engine. Explore a procedurally generated **10 km × 10 km** landscape made of
 **6.25 cm voxels**, with diverse landforms, climate-driven erosion, drainage, sediment, biome
-suitability and grid-aligned terrain LOD.
+suitability and exact native voxels and coherent distant terrain LOD.
 
-The native **wgpu + winit** renderer merges exposed faces while preserving each
+Slope-guided ravines, coherent material patches and sparse caves/rock arches add
+structure across scales. World resolution is configurable; 6.25 cm remains the
+default, while finer interactive resolutions are experimental. **Esc → World**
+also offers independent landscape compression: World Scale `10` fits the same
+terrain into 1 km square while keeping voxel centimeters and player size fixed.
+
+The native **wgpu + winit** engine uses cached terrain patches, shared GPU buffers
+and local LOD transitions. Near the player it merges exposed faces while preserving each
 voxel's color. World generation, collision and picking share the same integer grid;
 untouched terrain stays procedural and only edits need persistent storage.
 

@@ -1,7 +1,7 @@
 //! Queries always inspect canonical cells, never display meshes or LOD samples.
 use crate::{
     generation::Generator,
-    grid::{CellPos, VOXEL_SIZE},
+    grid::CellPos,
     materials::Voxel,
     world::{Lookup, World},
 };
@@ -34,7 +34,10 @@ pub fn raycast<G: Generator>(
         return Trace::Miss;
     }
     let dir = direction.map(|n| n / length);
-    let Some(mut cell) = CellPos::containing(std::array::from_fn(|i| origin[i] + dir[i] * 1e-8))
+    let Some(mut cell) = world
+        .spec()
+        .grid
+        .position(std::array::from_fn(|i| origin[i] + dir[i] * 1e-8))
     else {
         return Trace::Miss;
     };
@@ -51,7 +54,7 @@ pub fn raycast<G: Generator>(
         if v == 0.0 {
             f64::INFINITY
         } else {
-            VOXEL_SIZE / v.abs()
+            world.spec().grid.meters() / v.abs()
         }
     });
     let c = [cell.x, cell.y, cell.z];
@@ -59,12 +62,18 @@ pub fn raycast<G: Generator>(
         if dir[i] == 0.0 {
             f64::INFINITY
         } else {
-            ((c[i] + i64::from(step[i] > 0)) as f64 * VOXEL_SIZE - origin[i]) / dir[i]
+            ((c[i] + i64::from(step[i] > 0)) as f64 * world.spec().grid.meters() - origin[i])
+                / dir[i]
         }
     });
     let mut distance = 0.0;
     let mut normal = [0i8; 3];
-    for _ in 0..200_000 {
+    // The old fixed iteration count silently shortened long rays on finer grids.
+    // This bound follows the maximum number of crossed axis planes, not meters.
+    let crossings = (reach / world.spec().grid.meters() * dir.iter().map(|v| v.abs()).sum::<f64>())
+        .ceil() as u64
+        + 4;
+    for _ in 0..crossings {
         if distance > reach {
             return Trace::Miss;
         }

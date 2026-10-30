@@ -1,4 +1,4 @@
-struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32> }
+struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32>, grid_eye:vec4<i32>, eye_fraction:vec4<f32> }
 // Origins stay on the integer voxel grid. Only the shared camera uniform moves.
 struct Tile { origin_step:vec4<f32>, clip_cells:vec4<f32> }
 struct Quad { origin:vec3<i32>, face:u32, size:vec2<u32>, color_offset:u32, padding:u32 }
@@ -7,7 +7,8 @@ struct Quad { origin:vec3<i32>, face:u32, size:vec2<u32>, color_offset:u32, padd
 @group(1) @binding(0) var<uniform> tile:Tile;
 @group(1) @binding(1) var<storage,read> quads:array<Quad>;
 @group(1) @binding(2) var<storage,read> colors:array<u32>;
-@group(1) @binding(3) var<storage,read> border_vertices:array<vec2<u32>>;
+@group(1) @binding(3) var<storage,read> border_vertices:array<u32>;
+struct BorderVertex {record:u32,u:u32,v:u32}
 struct Output {
     @builtin(position) position:vec4<f32>,
     @location(0) uv:vec2<f32>,
@@ -17,6 +18,7 @@ struct Output {
     @location(4) relative:vec3<f32>,
     @location(5) @interpolate(flat) step:f32,
     @location(6) @interpolate(flat) flags:u32,
+    @location(7) @interpolate(flat) water:f32,
 }
 fn normal(face:u32)->vec3<f32> {
     switch face {case 0u:{return vec3<f32>(0,1,0);}case 1u:{return vec3<f32>(0,-1,0);}case 2u:{return vec3<f32>(-1,0,0);}case 3u:{return vec3<f32>(1,0,0);}case 4u:{return vec3<f32>(0,0,-1);}default:{return vec3<f32>(0,0,1);}}
@@ -29,18 +31,25 @@ fn face_offset(face:u32,uv:vec2<f32>)->vec3<f32> {
     let q=quads[instance];return project_quad(q,corners[vertex]*vec2<f32>(q.size));
 }
 @vertex fn vs_conforming(@builtin(vertex_index) vertex:u32)->Output {
-    let reference=border_vertices[vertex];let q=quads[reference.x];
-    let uv=vec2<f32>(f32(reference.y&65535u),f32(reference.y>>16u))/f32(q.padding&32767u);
+    var reference:BorderVertex;
+    if border_vertices[0]==1u {
+        let a=border_vertices[1u+vertex*2u];let b=border_vertices[2u+vertex*2u];
+        reference=BorderVertex(a>>16u,(a&65535u)|((b&255u)<<16u),b>>8u);
+    } else {
+        let base=1u+vertex*3u;reference=BorderVertex(border_vertices[base],border_vertices[base+1u],border_vertices[base+2u]);
+    }
+    let q=quads[reference.record];
+    let uv=vec2<f32>(f32(reference.u),f32(reference.v))/f32(1u<<(q.padding&31u));
     return project_quad(q,uv);
 }
 fn project_quad(q:Quad,uv:vec2<f32>)->Output {
     // The finite world edge can cut through a coarse cell. Clamp that cell's
     // rectangle at the exact integer world boundary, never past known terrain.
-    var local=min(vec3<f32>(q.origin)+face_offset(q.face,uv)*tile.origin_step.w,tile.clip_cells.xyz);
-    let water=q.padding>>16u;
+    var local=min(vec3<f32>(q.origin)+face_offset(q.face&7u,uv)*tile.origin_step.w,tile.clip_cells.xyz);
+    let water=q.face>>3u;
     if water>0u {local.y=min(local.y,f32(water));}
-    let relative=(tile.origin_step.xyz*camera.viewport.w-camera.eye.xyz)+local*camera.viewport.w;
-    var out:Output;out.position=camera.vp*vec4<f32>(relative,1);out.uv=uv;out.size=q.size;out.offset=q.color_offset;out.normal=normal(q.face);out.relative=relative;out.step=tile.origin_step.w;out.flags=q.padding;return out;
+    let relative=vec3<f32>(vec3<i32>(tile.origin_step.xyz)-camera.grid_eye.xyz)*camera.viewport.w+local*camera.viewport.w-camera.eye_fraction.xyz;
+    var out:Output;out.position=camera.vp*vec4<f32>(relative,1);out.uv=uv;out.size=q.size;out.offset=q.color_offset;out.normal=normal(q.face&7u);out.relative=relative;out.step=tile.origin_step.w;out.flags=q.padding;out.water=f32(water);return out;
 }
 fn sky_color(direction:vec3<f32>)->vec3<f32> {
     let sun=normalize(vec3<f32>(-0.4,0.85,-0.35));
@@ -53,21 +62,29 @@ fn sky_color(direction:vec3<f32>)->vec3<f32> {
 }
 fn shadow_at(world:vec3<f32>)->f32 {
     let size=vec2<i32>(textureDimensions(horizon_visibility));
-    let uv=clamp(world.xz/10000.*vec2<f32>(size)-0.5,vec2<f32>(0.),vec2<f32>(size)-1.);
+    let uv=clamp(world.xz/camera.eye.w*vec2<f32>(size)-0.5,vec2<f32>(0.),vec2<f32>(size)-1.);
     let a=vec2<i32>(floor(uv));let b=min(a+vec2<i32>(1),size-vec2<i32>(1));let t=fract(uv);
     return mix(mix(textureLoad(horizon_visibility,a,0).r,textureLoad(horizon_visibility,vec2<i32>(b.x,a.y),0).r,t.x),
         mix(textureLoad(horizon_visibility,vec2<i32>(a.x,b.y),0).r,textureLoad(horizon_visibility,b,0).r,t.x),t.y);
 }
+fn color_at(index:u32)->u32 {
+    let mode=colors[0];
+    if mode==1u {return colors[4];}
+    if mode==2u {let packed=colors[4u+colors[1]+index/4u];let id=(packed>>((index%4u)*8u))&255u;return colors[4u+id];}
+    return colors[4u+index];
+}
 @fragment fn fs_main(in:Output)->@location(0) vec4<f32> {
+    if camera.effects.x < -1.5 {return vec4<f32>(vec3<f32>(select(0.,1.,in.water>0.)),1.);}
+    if camera.effects.x<0. {return vec4<f32>(1.);}
     let cell=min(vec2<u32>(max(floor(in.uv),vec2<f32>(0))),in.size-vec2<u32>(1u));
-    let packed=colors[in.offset+cell.y*in.size.x+cell.x];
+    let packed=color_at(in.offset+select(cell.y*in.size.x+cell.x,0u,(in.flags&16384u)!=0u));
     let rgb=vec3<f32>(f32(packed&255u),f32((packed>>8u)&255u),f32((packed>>16u)&255u))/255.;
     var sunlight=max(0.,dot(in.normal,normalize(vec3<f32>(-0.4,0.85,-0.35))));
     // Input palettes are sRGB. Lighting is computed in linear color; the target
     // attachment converts back to sRGB. No sub-cell color noise or grid lines.
     let world_cell=camera.viewport.w*in.step;
     var world_center=(floor((in.relative+camera.eye.xyz)/world_cell-in.normal*0.001)+vec3<f32>(0.5))*world_cell;
-    if (in.flags>>16u)>0u {world_center.y=f32(in.flags>>16u)*camera.viewport.w;}
+    if in.water>0. {world_center.y=in.water*camera.viewport.w;}
     var visibility=1.;if camera.effects.y>0.5 {visibility=shadow_at(world_center);}
     var ambient=select(1.,f32((packed>>24u)&255u)/255.,camera.effects.x>0.5);
     var sky_light=0.34+0.10*max(in.normal.y,0.);

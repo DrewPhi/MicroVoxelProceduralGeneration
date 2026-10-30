@@ -2,7 +2,7 @@
 //! Coarse terrain uses band-limited area summaries and a bounded shared hierarchy.
 //! Only display data changes; authoritative cells and queries remain exact.
 use super::{
-    lod::{MeshKey, EXTENT, FINEST, SIDE},
+    lod::{MeshKey, SIDE},
     surface::{FaceCollector, Surface, AXES, NORMALS},
 };
 use crate::{
@@ -16,7 +16,6 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
-const CEILING: i64 = 32_768;
 const CACHE_LIMIT: usize = 16_384;
 #[derive(Clone, Debug)]
 pub struct SurfacePart {
@@ -25,6 +24,7 @@ pub struct SurfacePart {
 }
 #[derive(Clone, Debug)]
 pub struct TerrainMesh {
+    pub grid: super::lod::Grid,
     pub origin: [i64; 3],
     pub parts: Vec<SurfacePart>,
 }
@@ -33,14 +33,16 @@ impl TerrainMesh {
     pub fn prepare(&self, key: MeshKey) -> Vec<super::triangulation::Prepared> {
         let junctions =
             super::triangulation::Junctions::new(self.parts.iter().map(|p| (&p.surface, p.step)));
-        let neighbors = key.neighbors.map(|level| 1i64 << (FINEST - level));
+        let neighbors = key
+            .neighbors
+            .map(|level| 1i64 << (self.grid.finest - level));
         self.parts
             .iter()
             .map(|part| {
                 super::triangulation::prepare(
                     &part.surface,
                     part.step,
-                    key.tile.edge(),
+                    key.tile.edge_in(self.grid),
                     neighbors,
                     &junctions,
                 )
@@ -81,11 +83,13 @@ struct Summary {
     water: f64,
     bedrock: f64,
     wet: f64,
+    water_id: u32,
     weight: f64,
     colors: [[f32; 3]; 3], // surface, subsoil, rock, before lighting
 }
 #[derive(Default)]
 pub struct SummaryCache {
+    namespace: Option<u64>,
     values: HashMap<(i64, i64, i64), Summary>,
     fifo: VecDeque<(i64, i64, i64)>,
     revision: u64,
@@ -113,6 +117,15 @@ impl<G: Generator> Sampler<G> {
     }
     pub fn with_summaries(world: Arc<World<G>>, summaries: SharedSummaries) -> Self {
         let revision = world.revision();
+        {
+            let mut cache = summaries.lock().unwrap();
+            if cache.namespace != Some(world.cache_namespace()) {
+                cache.values.clear();
+                cache.fifo.clear();
+                cache.revision = revision;
+                cache.namespace = Some(world.cache_namespace());
+            }
+        }
         Self {
             world,
             profiles: HashMap::new(),
@@ -121,6 +134,9 @@ impl<G: Generator> Sampler<G> {
             summaries,
             lighting: HashMap::new(),
         }
+    }
+    pub fn grid(&self) -> super::lod::Grid {
+        super::lod::Grid::new(self.world.spec())
     }
     pub fn world(&self) -> &World<G> {
         &self.world
@@ -144,43 +160,43 @@ impl<G: Generator> Sampler<G> {
         if let Some(r) = self.profiles.get(&key) {
             return Arc::clone(r);
         }
-        let runs = if !(0..EXTENT).contains(&x) || !(0..EXTENT).contains(&z) {
+        let runs = if !(0..self.grid().extent).contains(&x) || !(0..self.grid().extent).contains(&z)
+        {
             vec![Run {
                 start: 0,
-                end: CEILING,
+                end: self.world.spec().ceiling_cells(),
                 material: MaterialId::AIR,
             }]
         } else if step == 1 {
-            self.world.column_runs(x, z, 0..CEILING).unwrap_or_else(|| {
-                vec![Run {
-                    start: 0,
-                    end: CEILING,
-                    material: MaterialId::AIR,
-                }]
-            })
+            self.world
+                .column_runs(x, z, 0..self.world.spec().ceiling_cells())
+                .unwrap_or_else(|| {
+                    vec![Run {
+                        start: 0,
+                        end: self.world.spec().ceiling_cells(),
+                        material: MaterialId::AIR,
+                    }]
+                })
         } else {
             if let Some(summary) = self.summary(x, z, step) {
                 let c = summary.column;
-                let quantize = |v: i64| ((v + step / 2).div_euclid(step) * step).clamp(0, CEILING);
-                let ground = quantize(summary.ground.round() as i64);
-                let water = if summary.wet >= 0.5 {
-                    // Enclose the true plane; vertices are clipped back to its
-                    // native height, identically at every LOD.
-                    ((summary.water.round() as i64 + step - 1).div_euclid(step) * step)
-                        .clamp(0, CEILING)
-                        .max(ground)
+                // Horizontal LOD never forces coarse vertical terraces.
+                let ground =
+                    (summary.ground.floor() as i64).clamp(0, self.world.spec().ceiling_cells());
+                let water = if summary.wet >= 0.15 {
+                    (summary.water.floor() as i64).max(ground)
                 } else {
                     ground
                 };
-                let surface_start = (ground - step).max(0);
-                let bedrock = quantize(summary.bedrock.round() as i64).min(surface_start);
+                let surface_start = (ground - 1).max(0);
+                let bedrock = (summary.bedrock.floor() as i64).clamp(0, surface_start);
                 let mut runs = Vec::new();
                 for (start, end, material) in [
                     (0, bedrock, c.rock),
                     (bedrock, surface_start, c.subsoil),
                     (surface_start, ground, c.surface),
                     (ground, water, MaterialId::WATER),
-                    (water, CEILING, MaterialId::AIR),
+                    (water, self.world.spec().ceiling_cells(), MaterialId::AIR),
                 ] {
                     crate::generation::push_run(
                         &mut runs,
@@ -195,10 +211,21 @@ impl<G: Generator> Sampler<G> {
             } else {
                 vec![Run {
                     start: 0,
-                    end: CEILING,
+                    end: self.world.spec().ceiling_cells(),
                     material: MaterialId::AIR,
                 }]
             }
+        };
+        let runs = if step > 1 {
+            crate::generation::features::carve(
+                crate::generation::features::add_solids(
+                    runs,
+                    &self.world.display_solids(x, z, step),
+                ),
+                &self.world.display_voids(x, z, step),
+            )
+        } else {
+            runs
         };
         let runs = Arc::new(runs);
         if self.profiles.len() >= CACHE_LIMIT {
@@ -213,12 +240,18 @@ impl<G: Generator> Sampler<G> {
     fn summary(&self, x: i64, z: i64, step: i64) -> Option<Summary> {
         let x = x.div_euclid(step) * step;
         let z = z.div_euclid(step) * step;
-        if !(0..EXTENT).contains(&x) || !(0..EXTENT).contains(&z) {
+        if !(0..self.grid().extent).contains(&x) || !(0..self.grid().extent).contains(&z) {
             return None;
         }
         let key = (x, z, step);
         {
             let mut cache = self.summaries.lock().unwrap();
+            if cache.namespace != Some(self.world.cache_namespace()) {
+                cache.values.clear();
+                cache.fifo.clear();
+                cache.revision = self.world.revision();
+                cache.namespace = Some(self.world.cache_namespace());
+            }
             if cache.revision != self.world.revision() {
                 let revision = cache.revision;
                 cache.values.retain(|&(x, z, step), _| {
@@ -238,16 +271,18 @@ impl<G: Generator> Sampler<G> {
             for dx in 0..2 {
                 let sx = x + dx * half;
                 let sz = z + dz * half;
-                if sx >= EXTENT || sz >= EXTENT {
+                if sx >= self.grid().extent || sz >= self.grid().extent {
                     continue;
                 }
-                if step > 512 && step <= 2048 {
+                if step as f64 * self.grid().cell_m() > 32.
+                    && step as f64 * self.grid().cell_m() <= 128.
+                {
                     if let Some(child) = self.summary(sx, sz, half) {
                         children.push(child);
                     }
                 } else {
-                    let px = (sx + half / 2).min(EXTENT - 1);
-                    let pz = (sz + half / 2).min(EXTENT - 1);
+                    let px = (sx + half / 2).min(self.grid().extent - 1);
+                    let pz = (sz + half / 2).min(self.grid().extent - 1);
                     if let Some((c, environment)) = self.world.display_sample(px, pz, half) {
                         let mut colors = [[0.; 3]; 3];
                         for (index, mat) in [c.surface, c.subsoil, c.rock].into_iter().enumerate() {
@@ -256,10 +291,10 @@ impl<G: Generator> Sampler<G> {
                                 Voxel::new(
                                     mat,
                                     environment.map_or_else(
-                                        || self.world.appearance_at(p, mat),
+                                        || self.world.display_appearance_at(p, mat, half),
                                         |e| {
-                                            painting::environment_appearance(
-                                                p,
+                                            painting::environment_appearance_m(
+                                                self.world.spec().grid.point(p),
                                                 self.world.identity().seed,
                                                 mat,
                                                 e,
@@ -272,19 +307,7 @@ impl<G: Generator> Sampler<G> {
                         }
                         if half > 1 {
                             let p = CellPos::new(px, c.ground - 1, pz);
-                            if let Some(coverage) = environment
-                                .filter(|_| {
-                                    !matches!(c.surface, MaterialId::GRAVEL | MaterialId::SILT)
-                                })
-                                .map(|e| e.surface_cover(c.rock))
-                                .or_else(|| {
-                                    if environment.is_none() {
-                                        self.world.display_surface_cover(p)
-                                    } else {
-                                        None
-                                    }
-                                })
-                            {
+                            if let Some(coverage) = self.world.display_coverage_at(p, half) {
                                 colors[0] = [0.; 3];
                                 for (material, weight) in coverage {
                                     if weight <= 0. {
@@ -294,10 +317,13 @@ impl<G: Generator> Sampler<G> {
                                         Voxel::new(
                                             material,
                                             environment.map_or_else(
-                                                || self.world.appearance_at(p, material),
+                                                || {
+                                                    self.world
+                                                        .display_appearance_at(p, material, half)
+                                                },
                                                 |e| {
-                                                    painting::environment_appearance(
-                                                        p,
+                                                    painting::environment_appearance_m(
+                                                        self.world.spec().grid.point(p),
                                                         self.world.identity().seed,
                                                         material,
                                                         e,
@@ -319,7 +345,10 @@ impl<G: Generator> Sampler<G> {
                             water: c.water as f64,
                             bedrock: c.bedrock as f64,
                             wet: f64::from(c.water > c.ground),
-                            weight: ((half.min(EXTENT - sx)) * (half.min(EXTENT - sz))) as f64,
+                            water_id: 0,
+                            weight: ((half.min(self.grid().extent - sx))
+                                * (half.min(self.grid().extent - sz)))
+                                as f64,
                             colors,
                         });
                     }
@@ -334,16 +363,17 @@ impl<G: Generator> Sampler<G> {
         result.bedrock = average(|s| s.bedrock);
         result.wet = average(|s| s.wet);
         result.weight = weight;
-        let wet_weight: f64 = children.iter().map(|s| s.wet * s.weight).sum();
-        result.water = if wet_weight > 0. {
-            children
-                .iter()
-                .map(|s| s.water * s.wet * s.weight)
-                .sum::<f64>()
-                / wet_weight
+        // Never average the elevations of unrelated water bodies.
+        if let Some(wet) = children
+            .iter()
+            .filter(|s| s.wet > 0.)
+            .max_by(|a, b| (a.wet * a.weight).total_cmp(&(b.wet * b.weight)))
+        {
+            result.water = wet.water;
+            result.water_id = wet.water_id;
         } else {
-            result.ground
-        };
+            result.water = result.ground;
+        }
         // Representative material IDs are display metadata; RGB retains all
         // sampled material coverage instead of repainting the whole coarse cell.
         for layer in 0..3 {
@@ -355,7 +385,66 @@ impl<G: Generator> Sampler<G> {
                     / weight as f32;
             }
         }
+        if step > 1 {
+            if let Some(feature) = self.world.water_footprint(x, z, step) {
+                let scale = self.grid().cell_m();
+                let px = (feature.point[0] / scale).floor() as i64;
+                let pz = (feature.point[1] / scale).floor() as i64;
+                let footprint = (feature.width_m * 0.25 / scale).floor().max(1.) as i64;
+                if let Some((column, env)) = self.world.display_sample(px, pz, footprint.min(step))
+                {
+                    if column.water > column.ground {
+                        result.water = column.water as f64;
+                        result.water_id = feature.id;
+                        result.wet = result.wet.max(feature.coverage);
+                        if feature.coverage >= 0.15 {
+                            result.ground = result.ground.min(column.ground as f64);
+                            result.bedrock = result.bedrock.min(result.ground);
+                            result.column.surface = column.surface;
+                            let p = CellPos::new(px, column.ground - 1, pz);
+                            let appearance = env.map_or_else(
+                                || self.world.display_appearance_at(p, column.surface, step),
+                                |e| {
+                                    painting::environment_appearance_m(
+                                        self.world.spec().grid.point(p),
+                                        self.world.identity().seed,
+                                        column.surface,
+                                        e,
+                                    )
+                                },
+                            );
+                            result.colors[0] = linear(painting::base_color(
+                                Voxel::new(column.surface, appearance),
+                                self.world.materials(),
+                            ));
+                        } else {
+                            let blue = linear(painting::base_color(
+                                Voxel::new(
+                                    MaterialId::WATER,
+                                    self.world.appearance_at(
+                                        CellPos::new(px, column.water - 1, pz),
+                                        MaterialId::WATER,
+                                    ),
+                                ),
+                                self.world.materials(),
+                            ));
+                            for c in 0..3 {
+                                result.colors[0][c] = result.colors[0][c]
+                                    * (1. - feature.coverage as f32)
+                                    + blue[c] * feature.coverage as f32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut cache = self.summaries.lock().unwrap();
+        if cache.namespace != Some(self.world.cache_namespace()) {
+            cache.values.clear();
+            cache.fifo.clear();
+            cache.revision = self.world.revision();
+            cache.namespace = Some(self.world.cache_namespace());
+        }
         if !cache.values.contains_key(&key) {
             if cache.values.len() >= SUMMARY_LIMIT {
                 if let Some(old) = cache.fifo.pop_front() {
@@ -400,7 +489,7 @@ impl<G: Generator> Sampler<G> {
     /// A bounded worker cache of filtered slope illumination. Sampling is at
     /// least one meter wide, so native cells do not trigger fine-noise work.
     fn slope_illumination(&mut self, p: CellPos, step: i64) -> u8 {
-        let spacing = step.max(16);
+        let spacing = step.max((1. / self.grid().cell_m()).round() as i64).max(1);
         let x = p.x.div_euclid(spacing) * spacing;
         let z = p.z.div_euclid(spacing) * spacing;
         let key = (x, z, spacing);
@@ -443,7 +532,8 @@ impl<G: Generator> Sampler<G> {
             for sign in [-1, 1] {
                 let mut n = outside;
                 n[axis] += sign * step;
-                if n[0] < 0 || n[2] < 0 || n[0] >= EXTENT || n[2] >= EXTENT {
+                if n[0] < 0 || n[2] < 0 || n[0] >= self.grid().extent || n[2] >= self.grid().extent
+                {
                     continue;
                 }
                 if material_at(&self.profile(n[0], n[2], step), n[1]) != MaterialId::AIR {
@@ -461,14 +551,24 @@ impl<G: Generator> Sampler<G> {
     }
     /// Guaranteed solid base prism for conservative software occlusion.
     pub fn solid_top(&mut self, key: MeshKey) -> i64 {
-        let [ox, oz] = key.tile.origin();
-        let step = key.tile.step();
+        let [ox, oz] = key.tile.origin_in(self.grid());
+        let edge = key.tile.edge_in(self.grid());
+        let scale = self.grid().cell_m();
+        if self.world.region_changed_since(ox, oz, edge, 0)
+            || self.world.has_volumetric_features(
+                [ox as f64 * scale, oz as f64 * scale],
+                edge as f64 * scale,
+            )
+        {
+            return 0;
+        }
+        let step = key.tile.step_in(self.grid());
         let mut top = i64::MAX;
         for iz in 0..SIDE {
             for ix in 0..SIDE {
                 let x = ox + ix * step;
                 let z = oz + iz * step;
-                if x >= EXTENT || z >= EXTENT {
+                if x >= self.grid().extent || z >= self.grid().extent {
                     continue;
                 }
                 let profile = self.profile(x, z, step);
@@ -494,29 +594,208 @@ impl<G: Generator> Sampler<G> {
     pub fn mesh(&mut self, key: MeshKey) -> Result<TerrainMesh, String> {
         self.mesh_cancellable(key, || false)
     }
+    fn mesh_coarse(
+        &mut self,
+        key: MeshKey,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<TerrainMesh, String> {
+        let step = key.tile.step_in(self.grid());
+        let [ox, oz] = key.tile.origin_in(self.grid());
+        let origin = [ox, 0, oz];
+        let mut surface = Surface {
+            min_y: i64::MAX,
+            ..Default::default()
+        };
+        fn rectangle(
+            surface: &mut Surface,
+            origin: [i64; 3],
+            p: [i64; 3],
+            length: [i64; 3],
+            face: u32,
+            color: [u8; 3],
+            light: u8,
+            water: i64,
+        ) {
+            let [_, u, v] = AXES[face as usize];
+            if length[u] <= 0 || length[v] <= 0 {
+                return;
+            }
+            let offset = surface.colors.len() as u32;
+            surface
+                .colors
+                .push(u32::from_le_bytes([color[0], color[1], color[2], light]));
+            surface.quads.push(super::surface::Quad {
+                origin: std::array::from_fn(|i| (p[i] - origin[i]) as i32),
+                size: [length[u] as u32, length[v] as u32],
+                face,
+                color_offset: offset,
+                water_level: water as u32,
+                slope_light: water == 0,
+                constant_color: true,
+            });
+            surface.min_y = surface.min_y.min(p[1]);
+            surface.max_y = surface
+                .max_y
+                .max(p[1] + if face >= 2 { length[1] } else { 0 });
+            surface.unit_faces += 1;
+        }
+        for iz in 0..SIDE {
+            if cancelled() {
+                return Err("mesh cancelled".into());
+            }
+            for ix in 0..SIDE {
+                let x = ox + ix * step;
+                let z = oz + iz * step;
+                if x >= self.grid().extent || z >= self.grid().extent {
+                    continue;
+                }
+                let own = self.profile(x, z, step);
+                let width = step.min(self.grid().extent - x);
+                let depth = step.min(self.grid().extent - z);
+                for run in own.iter().filter(|r| r.material != MaterialId::AIR) {
+                    let water = if run.material == MaterialId::WATER {
+                        run.end
+                    } else {
+                        0
+                    };
+                    for (plane, face, outside) in
+                        [(run.end, 0, run.end), (run.start, 1, run.start - 1)]
+                    {
+                        if plane <= 0 || material_at(&own, outside) != MaterialId::AIR {
+                            continue;
+                        }
+                        let p = CellPos::new(x, if face == 0 { run.end - 1 } else { run.start }, z);
+                        let color = self.color(p, run.material, step);
+                        let light = if water > 0 {
+                            255
+                        } else {
+                            self.ambient(p, face, step)
+                        };
+                        rectangle(
+                            &mut surface,
+                            origin,
+                            [x, plane, z],
+                            [width, 0, depth],
+                            face,
+                            color,
+                            light,
+                            water,
+                        );
+                    }
+                    for side in 0..4 {
+                        let boundary = match side {
+                            0 => ix == 0,
+                            1 => ix == SIDE - 1,
+                            2 => iz == 0,
+                            _ => iz == SIDE - 1,
+                        };
+                        let ns = if boundary {
+                            1i64 << (self.grid().finest - key.neighbors[side])
+                        } else {
+                            step
+                        };
+                        let sub = step.min(ns);
+                        for segment in 0..step / sub {
+                            let offset = segment * sub;
+                            let (nx, nz) = match side {
+                                0 => (x - 1, z + offset),
+                                1 => (x + step, z + offset),
+                                2 => (x + offset, z - 1),
+                                _ => (x + offset, z + step),
+                            };
+                            if nx < 0
+                                || nz < 0
+                                || nx >= self.grid().extent
+                                || nz >= self.grid().extent
+                            {
+                                continue;
+                            }
+                            let neighbor = self.profile(nx, nz, ns);
+                            for air in neighbor.iter().filter(|r| r.material == MaterialId::AIR) {
+                                let low = run.start.max(air.start);
+                                let high = run.end.min(air.end);
+                                if high <= low {
+                                    continue;
+                                }
+                                let mut p = [x, low, z];
+                                if side < 2 {
+                                    p[2] += offset;
+                                } else {
+                                    p[0] += offset;
+                                }
+                                let color =
+                                    self.color(CellPos::new(p[0], low, p[2]), run.material, step);
+                                let light = if water > 0 {
+                                    255
+                                } else {
+                                    self.ambient(
+                                        CellPos::new(p[0], low, p[2]),
+                                        side as u32 + 2,
+                                        step,
+                                    )
+                                };
+                                if side == 1 {
+                                    p[0] += width;
+                                }
+                                if side == 3 {
+                                    p[2] += depth;
+                                }
+                                rectangle(
+                                    &mut surface,
+                                    origin,
+                                    p,
+                                    [sub.min(width), high - low, sub.min(depth)],
+                                    side as u32 + 2,
+                                    color,
+                                    light,
+                                    water,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        surface.merge_constant_tops();
+        if surface.quads.is_empty() {
+            surface.min_y = 0;
+        }
+        Ok(TerrainMesh {
+            grid: self.grid(),
+            origin,
+            parts: vec![SurfacePart { step: 1, surface }],
+        })
+    }
     pub fn mesh_cancellable(
         &mut self,
         key: MeshKey,
         cancelled: impl Fn() -> bool,
     ) -> Result<TerrainMesh, String> {
-        if key.tile.level > FINEST
+        if key.tile.level > self.grid().finest
             || key.tile.x >= 1u32.checked_shl(key.tile.level as u32).unwrap_or(0)
             || key.tile.z >= 1u32.checked_shl(key.tile.level as u32).unwrap_or(0)
             || key
                 .neighbors
                 .iter()
-                .any(|&n| n > FINEST || n.abs_diff(key.tile.level) > 1)
+                .any(|&n| n > self.grid().finest || n.abs_diff(key.tile.level) > 1)
         {
             return Err("unbalanced LOD mesh request".into());
         }
         if key.revision != self.world.revision() {
             return Err("stale world mesh request".into());
         }
-        let step = key.tile.step();
-        let [ox, oz] = key.tile.origin();
+        let step = key.tile.step_in(self.grid());
+        if step > 1 {
+            return self.mesh_coarse(key, cancelled);
+        }
+        let [ox, oz] = key.tile.origin_in(self.grid());
         let origin = [ox, 0, oz];
         let mut faces = FaceCollector::default();
         let mut stitches = FaceCollector::default();
+        let mut closures = Surface {
+            min_y: i64::MAX,
+            ..Default::default()
+        };
         let mut water_faces: std::collections::BTreeMap<(i64, i64), FaceCollector> =
             std::collections::BTreeMap::new();
         for iz in 0..SIDE {
@@ -526,7 +805,7 @@ impl<G: Generator> Sampler<G> {
             for ix in 0..SIDE {
                 let x = ox + ix * step;
                 let z = oz + iz * step;
-                if x >= EXTENT || z >= EXTENT {
+                if x >= self.grid().extent || z >= self.grid().extent {
                     continue;
                 }
                 let own = self.profile(x, z, step);
@@ -576,7 +855,7 @@ impl<G: Generator> Sampler<G> {
                             _ => iz == SIDE - 1,
                         };
                         let neighbor_step = if at_boundary {
-                            1i64 << (FINEST - key.neighbors[side])
+                            1i64 << (self.grid().finest - key.neighbors[side])
                         } else {
                             step
                         };
@@ -592,10 +871,82 @@ impl<G: Generator> Sampler<G> {
                             };
                             // Unknown territory is not air. Do not expose or scan
                             // the entire buried world boundary as a giant cliff.
-                            if !(0..EXTENT).contains(&nx) || !(0..EXTENT).contains(&nz) {
+                            if !(0..self.grid().extent).contains(&nx)
+                                || !(0..self.grid().extent).contains(&nz)
+                            {
                                 continue;
                             }
                             let neighbor = self.profile(nx, nz, neighbor_step);
+                            // Shader-clipped water leaves an upper interval of
+                            // its enclosing proxy empty. Close the neighboring
+                            // bank there with one native-grid rectangle/color.
+                            if neighbor_step > 1
+                                && neighbor.iter().any(|r| r.material == MaterialId::WATER)
+                            {
+                                let level = self.display_water_level(nx, nz, neighbor_step);
+                                for water in
+                                    neighbor.iter().filter(|r| r.material == MaterialId::WATER)
+                                {
+                                    let low = run.start.max(level).max(water.start);
+                                    let mut high = run.end.min(water.end);
+                                    let own_water = if run.material == MaterialId::WATER {
+                                        if step == 1 {
+                                            run.end
+                                        } else {
+                                            self.display_water_level(x, z, step)
+                                        }
+                                    } else {
+                                        0
+                                    };
+                                    if own_water > 0 {
+                                        high = high.min(own_water);
+                                    }
+                                    if low >= high {
+                                        continue;
+                                    }
+                                    let mut p = [x, low, z];
+                                    if side < 2 {
+                                        p[2] += offset;
+                                    } else {
+                                        p[0] += offset;
+                                    }
+                                    let color = self.color(
+                                        CellPos::new(p[0], low, p[2]),
+                                        run.material,
+                                        step,
+                                    );
+                                    let face = (side + 2) as u32;
+                                    let light = if own_water > 0 {
+                                        255
+                                    } else {
+                                        self.ambient(CellPos::new(p[0], low, p[2]), face, step)
+                                    };
+                                    if side == 1 {
+                                        p[0] += step;
+                                    }
+                                    if side == 3 {
+                                        p[2] += step;
+                                    }
+                                    let [_, u, v] = AXES[face as usize];
+                                    let length = [substep, high - low, substep];
+                                    let color_offset = closures.colors.len() as u32;
+                                    closures.colors.push(u32::from_le_bytes([
+                                        color[0], color[1], color[2], light,
+                                    ]));
+                                    closures.quads.push(super::surface::Quad {
+                                        origin: std::array::from_fn(|i| (p[i] - origin[i]) as i32),
+                                        face,
+                                        size: [length[u] as u32, length[v] as u32],
+                                        color_offset,
+                                        water_level: own_water as u32,
+                                        slope_light: true,
+                                        constant_color: true,
+                                    });
+                                    closures.min_y = closures.min_y.min(low);
+                                    closures.max_y = closures.max_y.max(high);
+                                    closures.unit_faces += 1;
+                                }
+                            }
                             for air in neighbor.iter().filter(|r| r.material == MaterialId::AIR) {
                                 let low = run.start.max(air.start);
                                 let high = run.end.min(air.end);
@@ -686,7 +1037,7 @@ impl<G: Generator> Sampler<G> {
         for ((spacing, level), collector) in water_faces {
             let mut surface = collector.finish(origin, spacing);
             for q in &mut surface.quads {
-                q.water_level = level as u16;
+                q.water_level = level as u32;
             }
             let index = match parts.iter().position(|p| p.step == spacing) {
                 Some(i) => i,
@@ -709,7 +1060,17 @@ impl<G: Generator> Sampler<G> {
             target.colors.extend(surface.colors);
             target.quads.extend(surface.quads);
         }
-        Ok(TerrainMesh { origin, parts })
+        if !closures.quads.is_empty() {
+            parts.push(SurfacePart {
+                step: 1,
+                surface: closures,
+            });
+        }
+        Ok(TerrainMesh {
+            grid: self.grid(),
+            origin,
+            parts,
+        })
     }
 }
 fn material_at(runs: &[Run], y: i64) -> MaterialId {
@@ -723,6 +1084,22 @@ mod tests {
     use super::super::lod::TileKey;
     use super::*;
     use crate::generation::{FlatTerrain, GeneratorIdentity};
+    #[test]
+    fn shared_summary_cache_never_mixes_world_baselines() {
+        let shared = Arc::new(Mutex::new(SummaryCache::default()));
+        let make = |height| {
+            Arc::new(World::new(FlatTerrain {
+                height,
+                water: height,
+                seed: 42,
+            }))
+        };
+        let a = Sampler::with_summaries(make(64), shared.clone());
+        let b = Sampler::with_summaries(make(128), shared);
+        assert_eq!(a.summary(64, 64, 2).unwrap().ground, 64.);
+        assert_eq!(b.summary(64, 64, 2).unwrap().ground, 128.);
+        assert_eq!(a.summary(64, 64, 2).unwrap().ground, 64.);
+    }
     #[derive(Clone, Copy)]
     struct Cliffs;
     impl Generator for Cliffs {
@@ -828,6 +1205,11 @@ mod tests {
                                 let mut cell = p;
                                 cell[u] += du;
                                 cell[v] += dv;
+                                // Compare the displayed water geometry, whose
+                                // enclosing proxy is clipped to the true plane.
+                                if quad.water_level > 0 && cell[1] >= i64::from(quad.water_level) {
+                                    continue;
+                                }
                                 let along = cell[2 - axis];
                                 if (64..128).contains(&along) {
                                     *coverage.entry((quad.face, cell[1], along)).or_insert(0) += 1;
@@ -844,7 +1226,9 @@ mod tests {
                     } else {
                         (along, 64, along, 63)
                     };
-                    let c = material_at(&s.profile(cx, cz, 2), y) != MaterialId::AIR;
+                    let cm = material_at(&s.profile(cx, cz, 2), y);
+                    let c = cm != MaterialId::AIR
+                        && (cm != MaterialId::WATER || y < s.display_water_level(cx, cz, 2));
                     let f = material_at(&s.profile(fx, fz, 1), y) != MaterialId::AIR;
                     assert_eq!(
                         coverage.get(&(negative, y, along)).copied().unwrap_or(0),

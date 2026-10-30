@@ -455,7 +455,11 @@ fn native_world_values_do_not_depend_on_lod_or_generation_order() {
         })
         .unwrap();
     assert_eq!(native.parts[0].step, 1);
-    assert!(proxy.parts[0].step > 1);
+    assert!(proxy
+        .parts
+        .iter()
+        .flat_map(|p| &p.surface.quads)
+        .any(|q| q.constant_color && q.size.iter().any(|v| *v > 32)));
     for (i, p) in points.iter().enumerate().rev() {
         assert_eq!(world.voxel_at(*p), before[i]);
     }

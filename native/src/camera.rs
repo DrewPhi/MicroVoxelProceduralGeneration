@@ -2,7 +2,7 @@
 //! accumulate speed; mouse angles and projection are continuous presentation.
 use glam::{Mat4, Vec3};
 use microvoxel::{
-    generation::{Generator, ProceduralTerrain},
+    generation::{Generator, Terrain},
     grid::CellPos,
     queries::sweep_point,
     World,
@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use winit::keyboard::KeyCode;
 
 pub struct Camera {
+    pub grid: microvoxel::GridScale,
     pub cell: CellPos,
     pub yaw: f64,
     pub pitch: f64,
@@ -21,23 +22,53 @@ pub struct Camera {
     credit: [f64; 3],
 }
 impl Camera {
-    pub fn spawn(world: &World<ProceduralTerrain>, nonce: u64) -> Self {
+    pub fn spawn(world: &World<Terrain>, nonce: u64) -> Self {
+        let grid = world.spec().grid;
+        if let Some(survey) = world.baseline().survey() {
+            let [x, z] = if nonce == 0 {
+                survey.spawn
+            } else {
+                let h = microvoxel::painting::hash(nonce);
+                let margin = grid.cells(5.).unwrap();
+                let range = world.spec().extent_cells() - 2 * margin;
+                [
+                    margin + (h % range as u64) as i64,
+                    margin + ((h >> 32) % range as u64) as i64,
+                ]
+            };
+            let column = world.surface_column(x, z).expect("validated survey spawn");
+            let mut camera = Self::at(CellPos::new(x, column.ground + grid.cells(1.7).unwrap(), z));
+            camera.grid = grid;
+            camera.yaw = 90f64.to_radians();
+            camera.speed = 4.;
+            return camera;
+        }
         let mut selected = None;
+        let world_scale = world.baseline().world_scale() as f64;
+        let extent = world.spec().extent_m as f64;
+        let margin = (64. / world_scale).min(extent * 0.1);
+        let range = (extent - 2. * margin).max(grid.meters());
         // Keep the first launch reproducible for comparisons. R chooses another
         // dry location; no player, organism, or simulation state is introduced.
         for attempt in 0..128u64 {
             let h = microvoxel::painting::hash(nonce.wrapping_add(attempt));
             let (x, z) = if nonce == 0 && attempt == 0 {
-                (149_056, 80_592)
+                (
+                    grid.cells(9316. / world_scale).unwrap(),
+                    grid.cells(5037. / world_scale).unwrap(),
+                )
             } else {
                 (
-                    1024 + (h % 157_952) as i64,
-                    1024 + ((h >> 24) % 157_952) as i64,
+                    grid.cells(margin + (h % 9872) as f64 / 9872. * range)
+                        .unwrap(),
+                    grid.cells(margin + ((h >> 24) % 9872) as f64 / 9872. * range)
+                        .unwrap(),
                 )
             };
             if let Some(c) = world.surface_column(x, z) {
                 if c.water <= c.ground {
-                    let pos = CellPos::new(x, c.ground + 27, z);
+                    let pos =
+                        CellPos::new(x, c.ground + (1.6875 / grid.meters()).round() as i64, z);
                     if camera_clear(world, pos) {
                         selected = Some(pos);
                         break;
@@ -46,14 +77,15 @@ impl Camera {
             }
         }
         let mut camera = Self::at(selected.expect("dry terrain spawn"));
+        camera.grid = grid;
         // Face an open valley instead of putting the first view against a wall.
         let mut best = f64::INFINITY;
         for i in 0..16 {
             let heading = i as f64 * std::f64::consts::TAU / 16.;
             let sample = |distance: f64| {
                 world.surface_column(
-                    camera.cell.x + (heading.cos() * distance * 16.) as i64,
-                    camera.cell.z + (heading.sin() * distance * 16.) as i64,
+                    camera.cell.x + (heading.cos() * distance / grid.meters()) as i64,
+                    camera.cell.z + (heading.sin() * distance / grid.meters()) as i64,
                 )
             };
             if let (Some(near), Some(far)) = (sample(8.), sample(128.)) {
@@ -68,6 +100,7 @@ impl Camera {
     }
     pub fn at(cell: CellPos) -> Self {
         Self {
+            grid: microvoxel::GridScale::default(),
             cell,
             yaw: -0.95,
             pitch: -0.13,
@@ -79,7 +112,7 @@ impl Camera {
         }
     }
     pub fn eye(&self) -> [f64; 3] {
-        self.cell.meters()
+        self.grid.point(self.cell)
     }
     pub fn direction(&self) -> [f64; 3] {
         let sign = if self.reverse { -1. } else { 1. };
@@ -123,7 +156,8 @@ impl Camera {
         }
         let mut delta = [0; 3];
         for i in 0..3 {
-            let value = (self.credit[i] + direction[i] * dt / 0.0625).clamp(-2048., 2048.);
+            let value = (self.credit[i] + direction[i] * dt / world.spec().grid.meters())
+                .clamp(-2048., 2048.);
             delta[i] = (value + value.signum() * 1e-9).trunc() as i64;
             self.credit[i] = value - delta[i] as f64;
         }
@@ -140,7 +174,7 @@ impl Camera {
         Mat4::perspective_rh(
             self.fov as f32,
             width as f32 / height.max(1) as f32,
-            0.025,
+            (self.grid.meters() * 0.4).min(0.025) as f32,
             24_000.,
         ) * Mat4::look_to_rh(Vec3::ZERO, Vec3::from_array(d), Vec3::Y)
     }
@@ -202,6 +236,7 @@ mod tests {
         });
         for fps in [30, 60, 120] {
             let mut camera = Camera {
+                grid: Default::default(),
                 cell: CellPos::new(10, 20, 30),
                 yaw: 0.,
                 pitch: 0.,

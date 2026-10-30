@@ -17,10 +17,12 @@ pub mod player;
 pub mod queries;
 pub mod render;
 pub mod simulation;
+pub mod spec;
 pub mod storage;
 pub mod world;
 
 pub use grid::{Bounds, CellPos, ChunkPos, VOXEL_SIZE};
 pub use materials::{MaterialId, Voxel};
+pub use spec::{GridScale, WorldSpec};
 pub use world::{Edit, Lookup, World};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

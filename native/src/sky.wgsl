@@ -1,4 +1,4 @@
-struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32> }
+struct Camera { vp:mat4x4<f32>, selection:vec4<f32>, viewport:vec4<f32>, inverse:mat4x4<f32>, eye:vec4<f32>, effects:vec4<f32>, grid_eye:vec4<i32>, eye_fraction:vec4<f32> }
 @group(0) @binding(0) var<uniform> camera:Camera;
 fn sky_color(direction:vec3<f32>)->vec3<f32> {
     let sun=normalize(vec3<f32>(-0.4,0.85,-0.35));
@@ -14,6 +14,7 @@ fn sky_color(direction:vec3<f32>)->vec3<f32> {
     return vec4<f32>(corners[i],0.999999,1.);
 }
 @fragment fn fs_sky(@builtin(position) pixel:vec4<f32>)->@location(0) vec4<f32> {
+    if camera.effects.x<0. {return vec4<f32>(0.,0.,0.,1.);}
     let ndc=(pixel.xy/camera.viewport.xy*2.-1.)*vec2<f32>(1.,-1.);
     let p=camera.inverse*vec4<f32>(ndc,0.5,1.);
     return vec4<f32>(sky_color(normalize(p.xyz/p.w)),1.);

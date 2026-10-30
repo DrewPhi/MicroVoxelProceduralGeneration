@@ -1,0 +1,28 @@
+{
+  "description": "Unretouched native renderer capture",
+  "seed": 42,
+  "world": "procedural",
+  "voxel_m": 0.0625,
+  "world_scale": 1,
+  "camera_m_degrees": [
+    4250,
+    200,
+    6250,
+    125,
+    -5.14
+  ],
+  "size": [
+    2560,
+    1440
+  ],
+  "renderer": "mesh",
+  "requested_quality": 90,
+  "native_radius_m": 6,
+  "terrain_memory_mib": 256,
+  "tile_cap": 2048,
+  "haze": 0.55,
+  "frames": 60,
+  "gpu": "AMD Radeon 760M (RADV PHOENIX), Vulkan",
+  "binary_sha256": "110653213d0caa057fe8e3be908209a0ccc121471a7ed0d2b8d35fd644aae8d2",
+  "image_sha256": "b4d51e2c94161129aa6b85b61ce09280135c7a71fbc99c20157da29897956635"
+}

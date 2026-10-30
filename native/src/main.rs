@@ -16,10 +16,13 @@ mod runtime;
 mod settings;
 mod streaming;
 mod visibility;
+#[cfg(test)]
+mod world_switch_test;
+mod worlds;
 use diagnostics::{benchmark, character_preview, lod_check, ray_study, streaming_check};
 use gpu::Gpu;
 use microvoxel::{
-    generation::{debug::DebugLayer, ClimatePreset, ProceduralTerrain, TerrainConfig},
+    generation::{debug::DebugLayer, ClimatePreset, Generator, Terrain, TerrainConfig},
     World,
 };
 use runtime::Runtime;
@@ -38,6 +41,13 @@ use winit::{
 
 #[derive(Clone)]
 struct Options {
+    earth: Option<PathBuf>,
+    procedural: bool,
+    procedural_options: bool,
+    grid: microvoxel::GridScale,
+    world_scale: u32,
+    terrain_quality: Option<PathBuf>,
+    refinement: microvoxel::generation::Refinement,
     character_preview: Option<PathBuf>,
     seed: u64,
     climate: ClimatePreset,
@@ -67,8 +77,15 @@ struct Options {
     ray_study: bool,
 }
 impl Options {
-    fn read() -> microvoxel::Result<Self> {
-        let mut options = Self {
+    fn defaults() -> Self {
+        Self {
+            earth: None,
+            procedural: false,
+            procedural_options: false,
+            grid: Default::default(),
+            world_scale: 1,
+            terrain_quality: None,
+            refinement: microvoxel::generation::Refinement::Geomorphic,
             character_preview: None,
             seed: 42,
             climate: ClimatePreset::Temperate,
@@ -96,10 +113,32 @@ impl Options {
             camera_ground: false,
             streaming_test: false,
             ray_study: false,
-        };
+        }
+    }
+    fn read() -> microvoxel::Result<Self> {
+        let mut options = Self::defaults();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--world" => match args.next().as_deref() {
+                    Some("procedural") => {
+                        options.procedural = true;
+                        options.earth = None;
+                    }
+                    Some("earth") => {
+                        options.procedural = false;
+                        options.earth = Some("output/earth/volcan.mvearth".into());
+                    }
+                    _ => return Err("--world needs earth or procedural".into()),
+                },
+                "--earth" => {
+                    options.earth = Some(
+                        args.next()
+                            .ok_or("--earth needs an imported .mvearth path")?
+                            .into(),
+                    );
+                    options.procedural = false;
+                }
                 "--character-preview" => {
                     options.character_preview = Some(
                         args.next()
@@ -174,6 +213,34 @@ impl Options {
                         _ => return Err("--view needs first, rear or front".into()),
                     }
                 }
+                "--world-scale" => {
+                    options.world_scale =
+                        args.next().ok_or("--world-scale needs 1..100")?.parse()?;
+                    microvoxel::generation::ProceduralTerrain::validate_world_scale(
+                        options.world_scale,
+                    )?;
+                }
+                "--voxel-size" => {
+                    options.grid = args
+                        .next()
+                        .ok_or("--voxel-size needs meters, e.g. 1/100")?
+                        .parse()?
+                }
+                "--terrain-quality" => {
+                    options.terrain_quality = Some(
+                        args.next()
+                            .ok_or("--terrain-quality needs an output directory")?
+                            .into(),
+                    );
+                    options.headless = true;
+                }
+                "--terrain-method" => {
+                    options.refinement = match args.next().as_deref() {
+                        Some("noise") => microvoxel::generation::Refinement::Noise,
+                        Some("geomorphic") => microvoxel::generation::Refinement::Geomorphic,
+                        _ => return Err("--terrain-method needs noise or geomorphic".into()),
+                    }
+                }
                 "--fly" => options.fly = true,
                 "--player-test" => {
                     options.player_test = true;
@@ -215,6 +282,8 @@ impl Options {
                 "--benchmark" => options.benchmark = true,
                 "--fly-test" => options.fly_test = true,
                 "--help" | "-h" => {
+                    println!("Terrain source: --world earth|procedural; --earth PATH loads another .mvearth import. A local Volcan crop is the default for ordinary launches; diagnostics and procedural generation flags retain the procedural baseline.");
+                    println!("World: --world-scale 1..100 (terrain meters per game meter; 10 = 1:10 compression)\nWorld: --voxel-size 1/16 (meters; interactive 4..128 cells/m) --terrain-method noise|geomorphic\nDiagnostics: --terrain-quality DIR (multi-seed masks, terrain and scale metrics)");
                     println!("microvoxel-game [--seed 42] [--tiles 8192] [--save edits.mvw]\n  --character-preview DIR  Export procedural character PNGs and animations, then exit\n  --view first|rear|front  Initial player camera\n  --fly             Start in debug flight (F6 returns to player)\n  --player-test     Offscreen walking/jumping/camera smoke test\n  --benchmark       Compare exact and coarse surfaces over the same 16 m patch\n  --isometric       Save a full-region isometric PNG and exit (uses --screenshot)\n  --headless        Render offscreen and exit after --frames (default 30)\n  --screenshot PATH Save a PNG (headless on completion, window on F12)\n  --fly-test        Exercise grid flight and LOD replacement in headless mode\nControls: click to capture mouse; WASD; Space jump; Shift sprint; Esc settings\nF5: first/rear/front view; F6: debug flight (Space/C vertical, Shift boost)\nMouse wheel or +/-: flight speed; 1/2/3: 4/20/100 m/s; [ / ]: FOV\nR: random location; F11: fullscreen; F12: save PNG; close window to quit");
                     println!("Diagnostics: --ray-study profiles column/SVO/DAG geometry and attributes.\nDiagnostics: --stream-test compares both backends while walking/sprinting/turning.\nRenderer: --renderer mesh|ray (also selectable in Esc menu).\nCapture: --camera-ground places --camera X/Z on the ground (Y ignored); combines with --view rear.\nDisplay: --lod-test (quality PNGs + moving-camera stress check)\n  --quality 0..100 --native-radius 2..32 --terrain-memory 64..1024 --haze 0..2 --no-effects\nEsc: settings menu with sliders and editable numbers. Window preferences persist; headless defaults stay deterministic.");
                     println!("Capture: --size 2560x1440 --camera X,Y,Z,YAW,PITCH --no-hud\n  Coordinates in meters; camera angles in degrees. Explicit camera enables flight.");
@@ -222,6 +291,18 @@ impl Options {
                     std::process::exit(0);
                 }
                 _ => return Err(format!("Unknown argument {arg}; use --help").into()),
+            }
+            if matches!(
+                arg.as_str(),
+                "--seed"
+                    | "--climate"
+                    | "--wind"
+                    | "--moisture"
+                    | "--voxel-size"
+                    | "--world-scale"
+                    | "--terrain-method"
+            ) {
+                options.procedural_options = true;
             }
         }
         if !(64..=8192).contains(&options.tiles) || !(1..=10000).contains(&options.frames) {
@@ -237,7 +318,6 @@ fn main() -> microvoxel::Result<()> {
         return character_preview::export(options.seed, directory);
     }
     let start = Instant::now();
-    println!("Preparing the 10 km world (seed {})...", options.seed);
     let mut config = TerrainConfig::for_climate(options.climate);
     if let Some(wind) = options.wind {
         config.wind_degrees = wind;
@@ -245,8 +325,56 @@ fn main() -> microvoxel::Result<()> {
     if let Some(moisture) = options.moisture {
         config.boundary_moisture = moisture;
     }
-    let generator = ProceduralTerrain::with_config(options.seed, config)?;
-    println!("Climate {}, wind towards {:.1} degrees, boundary moisture {:.2}; regional data {:.2} MiB\n{}",config.climate,config.wind_degrees,config.boundary_moisture,generator.regional_memory_bytes() as f64/1048576.,generator.environment_statistics());
+    config.refinement = options.refinement;
+    if let Some(path) = &options.terrain_quality {
+        return diagnostics::quality::run(path, options.seed);
+    }
+    let default_earth = PathBuf::from("output/earth/volcan.mvearth");
+    let diagnostic = options.streaming_test
+        || options.ray_study
+        || options.benchmark
+        || options.player_test
+        || options.lod_test
+        || options.fly_test
+        || options.isometric
+        || options.debug_maps.is_some()
+        || options.map.is_some();
+    let earth = options.earth.as_ref().or_else(|| {
+        (!options.procedural
+            && !options.procedural_options
+            && !diagnostic
+            && default_earth.is_file())
+        .then_some(&default_earth)
+    });
+    let generator = if let Some(path) = earth {
+        println!("Loading measured Volcan terrain from {}...", path.display());
+        let generator = Terrain::from_survey(path)?;
+        println!("Measured {} m square; {:.3} m voxels; {:.2} MiB raster/pyramid. Photographed surface colors; vegetation is part of the DSM.",
+            generator.spec().extent_m, generator.spec().grid.meters(), generator.regional_memory_bytes() as f64/1048576.);
+        generator
+    } else {
+        println!(
+            "Preparing the 10 km procedural world (seed {})...",
+            options.seed
+        );
+        let generator = Terrain::with_world_scale(
+            options.seed,
+            config,
+            microvoxel::WorldSpec {
+                grid: options.grid,
+                ..Default::default()
+            },
+            options.world_scale,
+        )?;
+        println!(
+            "World scale 1:{}; playable extent {} m square; voxel size {} cm",
+            options.world_scale,
+            generator.spec().extent_m,
+            generator.spec().grid.meters() * 100.
+        );
+        println!("Climate {}, wind towards {:.1} degrees, boundary moisture {:.2}; regional data {:.2} MiB\n{}",config.climate,config.wind_degrees,config.boundary_moisture,generator.regional_memory_bytes() as f64/1048576.,generator.environment_statistics());
+        generator
+    };
     if let Some(directory) = &options.debug_maps {
         environment::export(&generator, directory)?;
         if !options.headless && !options.benchmark && !options.isometric {
@@ -281,6 +409,11 @@ fn main() -> microvoxel::Result<()> {
         return headless(options, world);
     }
     let event_loop = EventLoop::new()?;
+    let mut menu = menu::Menu::new();
+    menu.worlds.select_current(&worlds::Editor::for_terrain(
+        world.baseline(),
+        earth.map(|p| p.as_path()),
+    ));
     let mut app = App {
         options,
         world,
@@ -290,7 +423,8 @@ fn main() -> microvoxel::Result<()> {
         config: None,
         runtime: None,
         grabbed: false,
-        menu: menu::Menu::new(),
+        menu,
+        world_load: None,
         frame_times: settings::FrameTimes::default(),
         menu_stats: Vec::new(),
         stats_time: Instant::now(),
@@ -309,7 +443,7 @@ fn main() -> microvoxel::Result<()> {
     }
     Ok(())
 }
-fn headless(options: Options, world: Arc<World<ProceduralTerrain>>) -> microvoxel::Result<()> {
+fn headless(options: Options, world: Arc<World<Terrain>>) -> microvoxel::Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
     let gpu = pollster::block_on(Gpu::new(&instance, None, options.size[0], options.size[1]))?;
     let mut runtime = Runtime::new(gpu, world, options.tiles, 0)?;
@@ -336,7 +470,12 @@ fn headless(options: Options, world: Arc<World<ProceduralTerrain>>) -> microvoxe
         "Stitched cover ready in {:.2}s",
         start.elapsed().as_secs_f64()
     );
-    println!("Terrain quality: requested {:.2} px, effective {:.2} px; native radius {:.1} m; cache {:.1}/{} MiB",runtime.settings.pixels(),runtime.achieved_pixels,runtime.settings.native_radius,runtime.gpu.bytes as f64/1048576.,runtime.settings.memory_mib);
+    println!("Terrain quality: requested {:.2} px, visible P95 {:.2} px; native radius {:.1} m; cache {:.1}/{} MiB",runtime.settings.pixels(),runtime.achieved_pixels,runtime.settings.native_radius,runtime.gpu.bytes as f64/1048576.,runtime.settings.memory_mib);
+    println!(
+        "Native planning radius {:.2} m; world voxel edge {:.6} m",
+        runtime.native_policy_radius,
+        runtime.world.spec().grid.meters()
+    );
     if options.lod_test {
         lod_check::run(&mut runtime, std::path::Path::new("output/lod"))?;
     }
@@ -441,7 +580,7 @@ fn player_smoke(runtime: &mut Runtime, options: &Options) -> microvoxel::Result<
     if peak <= ground {
         return Err("player did not jump".into());
     }
-    println!("Player smoke: {:?} -> {:?}; jump rose {:.2} m; grounded {}; 301 fixed ticks and collision checks in {:.2} ms",before,runtime.player.root,(peak-ground) as f64/16.,runtime.player.grounded,start.elapsed().as_secs_f64()*1000.);
+    println!("Player smoke: {:?} -> {:?}; jump rose {:.2} m; grounded {}; 301 fixed ticks and collision checks in {:.2} ms",before,runtime.player.root,(peak-ground) as f64*runtime.world.spec().grid.meters(),runtime.player.grounded,start.elapsed().as_secs_f64()*1000.);
     let parent = options
         .screenshot
         .as_deref()
@@ -512,9 +651,13 @@ fn wait_for_cover(runtime: &mut Runtime, deadline: Instant) -> microvoxel::Resul
     }
     Ok(())
 }
+struct LoadedWorld {
+    world: Arc<World<Terrain>>,
+    spawn: (camera::Camera, microvoxel::player::Player),
+}
 struct App {
     options: Options,
-    world: Arc<World<ProceduralTerrain>>,
+    world: Arc<World<Terrain>>,
     instance: wgpu::Instance,
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -522,6 +665,10 @@ struct App {
     runtime: Option<Runtime>,
     grabbed: bool,
     menu: menu::Menu,
+    world_load: Option<(
+        worlds::Request,
+        std::sync::mpsc::Receiver<Result<LoadedWorld, String>>,
+    )>,
     frame_times: settings::FrameTimes,
     menu_stats: Vec<String>,
     stats_time: Instant,
@@ -561,6 +708,9 @@ impl App {
         }
     }
     fn toggle_menu(&mut self) {
+        if self.menu.worlds.busy {
+            return;
+        }
         self.menu.open = !self.menu.open;
         if !self.menu.open {
             if let Some(settings) = self.menu.ready(true) {
@@ -579,6 +729,10 @@ impl App {
         event_loop.exit();
     }
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.world_controls() {
+            self.fail(event_loop, error);
+            return;
+        }
         let Some(runtime) = &mut self.runtime else {
             return;
         };
@@ -604,7 +758,7 @@ impl App {
                     median, p95, p99
                 ),
                 format!(
-                    "TARGET {:.2} PX / EFFECTIVE {:.2} PX {}",
+                    "TARGET {:.2} PX / VISIBLE P95 {:.2} PX {}",
                     runtime.settings.pixels(),
                     runtime.achieved_pixels,
                     if runtime.budget_limited {
@@ -614,13 +768,14 @@ impl App {
                     }
                 ),
                 format!(
-                    "TILES {} / NATIVE {} / JOBS {} / CULL {}",
+                    "TILES {} / NATIVE {} / RADIUS {:.1} M / JOBS {} / CULL {}",
                     runtime.cover.len(),
                     runtime
                         .cover
                         .iter()
-                        .filter(|k| k.tile.level == microvoxel::render::lod::FINEST)
+                        .filter(|k| k.tile.level == runtime.gpu.grid.finest)
                         .count(),
+                    runtime.native_policy_radius,
                     runtime.pending_jobs(),
                     runtime.gpu.culled
                 ),
@@ -699,6 +854,108 @@ impl App {
             self.frame_count = 0;
         }
     }
+    fn world_controls(&mut self) -> microvoxel::Result<()> {
+        if let Some(request) = self.menu.worlds.pending.take() {
+            let mut config = TerrainConfig::for_climate(self.options.climate);
+            if let Some(wind) = self.options.wind {
+                config.wind_degrees = wind;
+            }
+            if let Some(moisture) = self.options.moisture {
+                config.boundary_moisture = moisture;
+            }
+            config.refinement = self.options.refinement;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let job = request.clone();
+            match std::thread::Builder::new()
+                .name("voxel-world-loader".into())
+                .spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<LoadedWorld, String> {
+                            let terrain = match job {
+                                worlds::Request::Survey(path) => {
+                                    Terrain::from_survey(&path).map_err(|e| e.to_string())?
+                                }
+                                worlds::Request::Procedural {
+                                    seed,
+                                    grid,
+                                    world_scale,
+                                } => Terrain::with_world_scale(
+                                    seed,
+                                    config,
+                                    microvoxel::WorldSpec {
+                                        grid,
+                                        ..Default::default()
+                                    },
+                                    world_scale,
+                                )?,
+                            };
+                            let world = Arc::new(World::new(terrain));
+                            let spawn = Runtime::spawn(&world, 0).map_err(|e| e.to_string())?;
+                            Ok(LoadedWorld { world, spawn })
+                        },
+                    ))
+                    .unwrap_or_else(|_| Err("WORLD PREPARATION FAILED - SEE LAUNCHER LOG".into()));
+                    let _ = tx.send(result);
+                }) {
+                Ok(_) => self.world_load = Some((request, rx)),
+                Err(error) => {
+                    self.menu.worlds.busy = false;
+                    self.menu.worlds.status = error.to_string();
+                }
+            }
+        }
+        let result = self
+            .world_load
+            .as_ref()
+            .and_then(|(_, rx)| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("WORLD LOADER STOPPED".into()))
+                }
+            });
+        if let Some(result) = result {
+            let (request, _) = self.world_load.take().unwrap();
+            self.menu.worlds.busy = false;
+            match result {
+                Err(error) => {
+                    eprintln!("World switch: {error}");
+                    self.menu.worlds.status = error.chars().take(80).collect();
+                }
+                Ok(loaded) => {
+                    let LoadedWorld { world, spawn } = loaded;
+                    let previous = self.runtime.take().ok_or("No active renderer")?;
+                    let (view, flying, fov, speed) = (
+                        previous.view,
+                        previous.flying,
+                        previous.camera.fov,
+                        previous.camera.speed,
+                    );
+                    let mut gpu = previous.into_gpu();
+                    gpu.clear_world();
+                    let mut runtime =
+                        Runtime::with_spawn(gpu, Arc::clone(&world), self.options.tiles, spawn)?;
+                    runtime.apply_settings(self.menu.settings);
+                    runtime.set_view(view);
+                    if flying {
+                        runtime.toggle_flight();
+                    }
+                    runtime.camera.fov = fov;
+                    runtime.camera.speed = speed;
+                    runtime.gpu.hud_visible = !self.options.no_hud;
+                    self.world = world;
+                    self.runtime = Some(runtime);
+                    self.menu.worlds.select_current(&request);
+                    self.menu.worlds.status = "WORLD READY - RESUME TO EXPLORE".into();
+                    self.menu_stats.clear();
+                    self.frame_times = Default::default();
+                    self.last_frame = Instant::now();
+                    println!("Switched world: {request:?}");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -739,7 +996,11 @@ impl ApplicationHandler for App {
                 gpu,
                 Arc::clone(&self.world),
                 self.options.tiles,
-                self.nonce,
+                if self.world.baseline().survey().is_some() {
+                    0
+                } else {
+                    self.nonce
+                },
             )?);
             if self.options.display_explicit {
                 self.menu.settings = self.options.display;

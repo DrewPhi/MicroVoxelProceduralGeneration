@@ -41,7 +41,7 @@ pub fn run(runtime: &mut Runtime, directory: &Path) -> microvoxel::Result<()> {
             runtime.gpu.device.poll(wgpu::Maintain::Wait);
             times.push(t.elapsed().as_secs_f64());
         }
-        println!("LOD {name}: requested {:.2} px / effective {:.2} px; {} tiles, {} native; {:.2} MiB mesh cache; frame ms {:?}; prepare+capture {:.2}s",
+        println!("LOD {name}: requested {:.2} px / visible P95 {:.2} px; {} tiles, {} native; {:.2} MiB mesh cache; frame ms {:?}; prepare+capture {:.2}s",
             settings.pixels(),runtime.achieved_pixels,runtime.cover.len(),runtime.cover.iter().filter(|k|k.tile.level==13).count(),runtime.gpu.bytes as f64/1048576.,times.percentiles(),start.elapsed().as_secs_f64());
         runtime
             .gpu
@@ -64,7 +64,7 @@ pub fn run(runtime: &mut Runtime, directory: &Path) -> microvoxel::Result<()> {
         "shrinking must retire the old cover"
     );
     println!(
-        "Constrained cache: {:.2} MiB / 64 MiB; effective {:.2} px; limited {}",
+        "Constrained cache: {:.2} MiB / 64 MiB; visible P95 {:.2} px; limited {}",
         runtime.gpu.bytes as f64 / 1048576.,
         runtime.achieved_pixels,
         runtime.budget_limited

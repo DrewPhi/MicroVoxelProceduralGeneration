@@ -1,14 +1,14 @@
 //! Diagnostic export only. The world core owns environmental classifications.
 use microvoxel::generation::{
     debug::{DebugImage, DebugLayer},
-    ProceduralTerrain,
+    Terrain,
 };
 use std::{
     fs::{self, File},
     io::BufWriter,
     path::Path,
 };
-pub fn export(terrain: &ProceduralTerrain, directory: &Path) -> microvoxel::Result<()> {
+pub fn export(terrain: &Terrain, directory: &Path) -> microvoxel::Result<()> {
     fs::create_dir_all(directory)?;
     let mut legends=String::from("Long-term regional estimates, not live weather. Map covers 10 km square.\nX increases right, Z increases down. Diagnostic colors are not voxel palettes.\n\n");
     for layer in DebugLayer::ALL {

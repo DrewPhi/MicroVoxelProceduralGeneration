@@ -46,7 +46,15 @@ impl Junctions {
         }
         Self { lines }
     }
-    fn edge(&self, a: Point, b: Point, step: i64, extent: i64, neighbors: [i64; 4]) -> Vec<Point> {
+    fn edge(
+        &self,
+        a: Point,
+        b: Point,
+        step: i64,
+        extent: i64,
+        neighbors: [i64; 4],
+        constant: bool,
+    ) -> Vec<Point> {
         let axis = (0..3)
             .find(|&i| a[i] != b[i])
             .expect("nonempty rectangle edge");
@@ -60,7 +68,7 @@ impl Junctions {
         }
         // Every independently meshed border uses the same finer grid spacing.
         // Only that edge refines; other edges retain their own junction list.
-        let mut spacing = step;
+        let mut spacing = if constant { i64::MAX / 2 } else { step };
         let mut border = false;
         for (fixed, plane, n) in [
             (0, 0, neighbors[0]),
@@ -95,7 +103,7 @@ pub struct Prepared {
     pub order: Vec<usize>,
     pub factors: Vec<u32>,
     pub regular: u32,
-    pub vertices: Vec<[u32; 2]>,
+    pub vertices: Vec<[u32; 3]>,
 }
 impl Prepared {
     pub fn quads_only(surface: &Surface) -> Self {
@@ -107,7 +115,57 @@ impl Prepared {
         }
     }
     pub fn bytes(&self) -> usize {
-        self.vertices.len().max(1) * 8
+        4 + self.vertices.len().max(1) * if self.compact_vertices() { 8 } else { 12 }
+    }
+    fn compact_vertices(&self) -> bool {
+        self.vertices
+            .iter()
+            .all(|v| v[0] < 65536 && v[1] < 1 << 24 && v[2] < 1 << 24)
+    }
+    /// Exact 16-bit record + two 24-bit coordinates. Wide/adversarial parts
+    /// retain a lossless 3-word fallback; never truncate fine-grid junctions.
+    pub fn vertex_words(&self) -> Vec<u32> {
+        let compact = self.compact_vertices();
+        let mut words = Vec::with_capacity(self.bytes() / 4);
+        words.push(u32::from(compact));
+        for v in &self.vertices {
+            if compact {
+                words.extend([(v[0] << 16) | (v[1] & 65535), (v[2] << 8) | (v[1] >> 16)]);
+            } else {
+                words.extend(v);
+            }
+        }
+        if self.vertices.is_empty() {
+            words.extend([0, 0]);
+        }
+        words
+    }
+}
+
+#[cfg(test)]
+mod packing_tests {
+    use super::*;
+    #[test]
+    fn compact_junctions_are_exact_and_wide_references_fall_back() {
+        let mut p = Prepared {
+            order: vec![],
+            factors: vec![],
+            regular: 0,
+            vertices: vec![[65535, 1 << 23, (1 << 24) - 1], [7, 129000, 1]],
+        };
+        let words = p.vertex_words();
+        assert_eq!(words[0], 1);
+        assert_eq!(words.len() * 4, p.bytes());
+        let decoded: Vec<_> = words[1..]
+            .chunks_exact(2)
+            .map(|v| [v[0] >> 16, (v[0] & 65535) | ((v[1] & 255) << 16), v[1] >> 8])
+            .collect();
+        assert_eq!(decoded, p.vertices);
+        p.vertices.push([65536, 1, 1]);
+        let words = p.vertex_words();
+        assert_eq!(words[0], 0);
+        assert_eq!(words.len() * 4, p.bytes());
+        assert_eq!(&words[1..], p.vertices.concat());
     }
 }
 pub fn prepare(
@@ -130,22 +188,31 @@ pub fn prepare(
             continue;
         }
         let c = corners(q, step);
-        let edges: [Vec<Point>; 4] =
-            std::array::from_fn(|i| junctions.edge(c[i], c[(i + 1) % 4], step, extent, neighbors));
+        let edges: [Vec<Point>; 4] = std::array::from_fn(|i| {
+            junctions.edge(
+                c[i],
+                c[(i + 1) % 4],
+                step,
+                extent,
+                neighbors,
+                q.constant_color,
+            )
+        });
         if edges.iter().all(|e| e.len() == 2) {
             result.order.push(index);
             continue;
         }
         let [_, u, v] = AXES[q.face as usize];
-        let factor = if edges
+        // A clipped water plane can introduce a native-grid junction, not
+        // merely a half-step one. Preserve it exactly instead of rounding two
+        // perimeter vertices onto the same UV and degenerating the polygon.
+        let factor = edges
             .iter()
             .flatten()
-            .any(|p| (p[u] - c[0][u]) % step != 0 || (p[v] - c[0][v]) % step != 0)
-        {
-            2
-        } else {
-            1
-        };
+            .flat_map(|p| [p[u] - c[0][u], p[v] - c[0][v]])
+            .map(|d| step / (1i64 << d.unsigned_abs().trailing_zeros().min(step.trailing_zeros())))
+            .max()
+            .unwrap_or(1);
         let mut polygon = Vec::new();
         for edge in edges {
             for p in &edge[..edge.len() - 1] {
@@ -153,7 +220,7 @@ pub fn prepare(
                     (p[u] - c[0][u]) * factor / step,
                     (p[v] - c[0][v]) * factor / step,
                 ];
-                assert!(uv.iter().all(|v| (0..=65535).contains(v)));
+                assert!(uv.iter().all(|v| (0..=u32::MAX as i64).contains(v)));
                 polygon.push([uv[0] as u32, uv[1] as u32]);
             }
         }
@@ -166,7 +233,7 @@ pub fn prepare(
         result.order.push(index);
         result.factors.push(factor);
         for p in triangles {
-            result.vertices.push([record, p[0] | (p[1] << 16)]);
+            result.vertices.push([record, p[0], p[1]]);
         }
     }
     result
@@ -235,6 +302,44 @@ fn triangulate(polygon: &[[u32; 2]]) -> Vec<[u32; 2]> {
 mod tests {
     use super::*;
     #[test]
+    fn native_water_junctions_do_not_round_to_half_step_uvs() {
+        let coarse = Surface {
+            quads: vec![Quad {
+                origin: [0, 64, 0],
+                face: 2,
+                size: [2, 2],
+                color_offset: 0,
+                water_level: 0,
+                slope_light: false,
+                constant_color: false,
+            }],
+            ..Default::default()
+        };
+        let thin = Surface {
+            quads: vec![Quad {
+                origin: [0, 67, 0],
+                face: 3,
+                size: [1, 16],
+                color_offset: 0,
+                water_level: 0,
+                slope_light: false,
+                constant_color: true,
+            }],
+            ..Default::default()
+        };
+        let junctions = Junctions::new([(&coarse, 16), (&thin, 1)].into_iter());
+        let prepared = prepare(&coarse, 16, 512, [16; 4], &junctions);
+        assert!(prepared.factors.contains(&16));
+        let mut area = 0;
+        for triangle in prepared.vertices.chunks_exact(3) {
+            let points: Vec<_> = triangle.iter().map(|p| [p[1], p[2]]).collect();
+            let a = cross(points[0], points[1], points[2]);
+            assert!(a > 0);
+            area += a;
+        }
+        assert_eq!(area, 32 * 32 * 2);
+    }
+    #[test]
     fn collinear_perimeters_keep_every_edge_vertex_and_exact_area() {
         for [w, h] in [
             [1, 1],
@@ -286,6 +391,7 @@ mod tests {
         let surface = Surface {
             quads: vec![
                 Quad {
+                    constant_color: false,
                     origin: [5, 10, 5],
                     face: 0,
                     size: [4, 4],
@@ -294,6 +400,7 @@ mod tests {
                     slope_light: false,
                 },
                 Quad {
+                    constant_color: false,
                     origin: [9, 10, 7],
                     face: 0,
                     size: [2, 2],

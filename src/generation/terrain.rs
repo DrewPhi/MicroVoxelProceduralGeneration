@@ -1,4 +1,5 @@
 //! Regional geology, climate-conditioned erosion and native surface refinement.
+use super::river::{Channel, RiverDiagnostics, WaterFootprint};
 use super::{
     climate::{self, ClimateCell},
     environment::{EnvironmentSample, Geology, TerrainConfig},
@@ -26,16 +27,20 @@ const NEIGHBORS: [(isize, isize); 8] = [
 ];
 
 // Regional fields are dense, but contain only 626 × 626 samples for 100 km².
+#[derive(Clone)]
 pub(crate) struct Region {
     side: usize,
     heights: Vec<f64>,
+    gradients: Vec<[f32; 2]>,
     bedrock: Vec<f64>,
     soil: Vec<f64>,
     resistance: Vec<f64>,
     rainfall: Vec<f64>,
     lakes: Vec<f64>,
+    lake_ids: Vec<u32>,
     flow: Vec<f64>,
     channels: Vec<Channel>,
+    river_diagnostics: RiverDiagnostics,
     bins: Vec<Vec<usize>>,
     budget: SedimentBudget,
     config: TerrainConfig,
@@ -43,7 +48,7 @@ pub(crate) struct Region {
     landscapes: Vec<LandscapeCell>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SedimentBudget {
     eroded: f64,
     deposited: f64,
@@ -56,15 +61,6 @@ struct Drainage {
     distance: Vec<f64>,
     spill: Vec<f64>, // Virtual fill surface: terrain itself is never filled.
     area: Vec<f64>,
-}
-
-struct Channel {
-    start: [f64; 2],
-    end: [f64; 2],
-    level: [f64; 2],
-    half_width: f64,
-    depth: f64,
-    bend: f64,
 }
 
 pub(crate) struct Surface {
@@ -80,26 +76,138 @@ pub(crate) struct Surface {
 // ---- Regional geology and hydrology. No fluid simulation per microvoxel. ----
 
 impl Region {
+    pub(super) fn water_footprint(&self, origin: [f64; 2], edge: f64) -> Option<WaterFootprint> {
+        if !edge.is_finite()
+            || edge <= 0.
+            || edge > 128.
+            || origin
+                .iter()
+                .any(|v| !v.is_finite() || *v < 0. || *v >= REGION_SIZE)
+        {
+            return None;
+        }
+        let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+        if self.bins.is_empty() {
+            return None;
+        }
+        let lo = origin.map(|v| (v / BIN_SIZE).floor() as usize);
+        let hi = origin.map(|v| ((v + edge) / BIN_SIZE).floor().min((side - 1) as f64) as usize);
+        let mut bodies = std::collections::BTreeMap::<u32, WaterFootprint>::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for z in lo[1]..=hi[1] {
+            for x in lo[0]..=hi[0] {
+                for &i in &self.bins[z * side + x] {
+                    if !seen.insert(i) {
+                        continue;
+                    }
+                    if let Some(hit) = self.channels[i].footprint(origin, edge) {
+                        bodies
+                            .entry(hit.id)
+                            .and_modify(|body| {
+                                body.coverage = (body.coverage + hit.coverage).min(1.);
+                                body.width_m = body.width_m.max(hit.width_m);
+                            })
+                            .or_insert(hit);
+                    }
+                }
+            }
+        }
+        bodies
+            .into_values()
+            .max_by(|a, b| a.coverage.total_cmp(&b.coverage))
+    }
+    pub(super) fn river_diagnostics(&self) -> RiverDiagnostics {
+        self.river_diagnostics
+    }
+    pub(super) fn set_refinement(&mut self, mode: super::Refinement) {
+        self.config.refinement = mode;
+    }
+    pub(super) fn channel_footprint(&self, origin: [f64; 2], edge: f64) -> Option<f64> {
+        let mut width = f64::INFINITY;
+        let mut visit = |c: &Channel| {
+            let pad = c.half_width + c.bend.abs();
+            if c.start[0].min(c.end[0]) - pad < origin[0] + edge
+                && c.start[0].max(c.end[0]) + pad > origin[0]
+                && c.start[1].min(c.end[1]) - pad < origin[1] + edge
+                && c.start[1].max(c.end[1]) + pad > origin[1]
+            {
+                width = width.min(c.half_width * 2.);
+            }
+        };
+        if edge <= 128. && !self.bins.is_empty() {
+            let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+            let lo = origin.map(|v| (v / BIN_SIZE).floor().max(0.) as usize);
+            let hi =
+                origin.map(|v| ((v + edge) / BIN_SIZE).floor().min((side - 1) as f64) as usize);
+            for z in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    for &i in &self.bins[z * side + x] {
+                        visit(&self.channels[i]);
+                    }
+                }
+            }
+        } else {
+            for c in &self.channels {
+                visit(c);
+            }
+        }
+        width.is_finite().then_some(width)
+    }
+    pub(super) fn gradient_at(&self, x: f64, z: f64) -> [f64; 2] {
+        // Interpolated precomputed secants are continuous across regional
+        // cells. Computing them once avoids repeated field differentiation in
+        // every scale of every procedural surface query.
+        let (indices, weights) = self.interpolation(x, z);
+        std::array::from_fn(|axis| {
+            indices
+                .iter()
+                .zip(weights)
+                .map(|(&i, w)| self.gradients[i][axis] as f64 * w)
+                .sum()
+        })
+    }
+    fn update_gradients(&mut self) {
+        self.gradients = (0..self.heights.len())
+            .map(|i| {
+                let x = i % self.side;
+                let z = i / self.side;
+                let (lo_x, hi_x) = (x.saturating_sub(1), (x + 1).min(self.side - 1));
+                let (lo_z, hi_z) = (z.saturating_sub(1), (z + 1).min(self.side - 1));
+                [
+                    ((self.heights[z * self.side + hi_x] - self.heights[z * self.side + lo_x])
+                        / ((hi_x - lo_x) as f64 * REGIONAL_SPACING)) as f32,
+                    ((self.heights[hi_z * self.side + x] - self.heights[lo_z * self.side + x])
+                        / ((hi_z - lo_z) as f64 * REGIONAL_SPACING)) as f32,
+                ]
+            })
+            .collect();
+    }
+
     fn from_heights(side: usize, heights: Vec<f64>) -> Self {
         let count = heights.len();
         let soil: Vec<f64> = heights.iter().map(|h| h.min(3.0)).collect();
         let bedrock = heights.iter().zip(&soil).map(|(h, s)| h - s).collect();
-        Self {
+        let mut region = Self {
             side,
             heights,
+            gradients: Vec::new(),
             bedrock,
             soil,
             resistance: vec![0.15; count],
             rainfall: vec![1.0; count],
             lakes: vec![0.0; count],
+            lake_ids: vec![0; count],
             flow: vec![0.0; count],
             channels: Vec::new(),
+            river_diagnostics: RiverDiagnostics::default(),
             bins: Vec::new(),
             budget: SedimentBudget::default(),
             config: TerrainConfig::default(),
             climate: vec![ClimateCell::default(); count],
             landscapes: vec![LandscapeCell::default(); count],
-        }
+        };
+        region.update_gradients();
+        region
     }
 
     pub(crate) fn generate(seed: u64, config: TerrainConfig) -> Self {
@@ -145,7 +253,9 @@ impl Region {
         let drainage = region.drainage_tree(seed);
         region.preserve_lakes(&drainage);
         region.build_channels(&drainage, seed);
-        region.flow = drainage.area;
+        region.update_gradients();
+        // Virtual spill routes require a bounded physical breach; large
+        // unresolved divides are not presented as uphill rivers.
         climate::finish(
             &mut region.climate,
             &region.heights,
@@ -219,6 +329,8 @@ impl Region {
             + self.climate.capacity() * std::mem::size_of::<ClimateCell>()
             + self.landscapes.capacity() * std::mem::size_of::<LandscapeCell>()
             + self.channels.capacity() * std::mem::size_of::<Channel>()
+            + self.lake_ids.capacity() * 4
+            + self.gradients.capacity() * std::mem::size_of::<[f32; 2]>()
             + self.bins.capacity() * std::mem::size_of::<Vec<usize>>()
             + self
                 .bins
@@ -435,45 +547,195 @@ impl Region {
             if cells.len() >= 4 && supply > 0. && supply >= evaporation {
                 for i in cells {
                     self.lakes[i] = level;
+                    self.lake_ids[i] = basin as u32;
                 }
             }
         }
     }
 
     fn build_channels(&mut self, drainage: &Drainage, seed: u64) {
-        let mut level = vec![0.0; self.heights.len()];
-        for &i in &drainage.order {
-            let next = drainage.receiver[i];
-            level[i] = if self.lakes[i] > 0.0 {
-                self.lakes[i]
-            } else {
-                (self.heights[i] - 0.15).max(if next == i { 0.0 } else { level[next] })
-            };
+        let count = self.heights.len();
+        let surface: Vec<_> = self
+            .heights
+            .iter()
+            .zip(&self.lakes)
+            .map(|(&h, &w)| h.max(w))
+            .collect();
+        let active: Vec<_> = (0..count)
+            .map(|i| {
+                let next = drainage.receiver[i];
+                // Small dry saddles may be breached by the bounded carving
+                // below; large virtual spill routes remain explicitly blocked.
+                next != i && surface[next] <= surface[i] + 4.
+            })
+            .collect();
+        let mut discharge: Vec<_> = self.rainfall.iter().map(|r| r * CELL_AREA).collect();
+        for &i in drainage.order.iter().rev() {
+            if active[i] {
+                discharge[drainage.receiver[i]] += discharge[i];
+            }
         }
+        self.flow = discharge;
+        let mut parent = vec![usize::MAX; count];
+        let mut degree = vec![0u8; count];
         for &i in &drainage.order {
             let next = drainage.receiver[i];
-            if next == i || drainage.area[i] < RIVER_THRESHOLD {
+            if active[i] && self.flow[i] >= RIVER_THRESHOLD {
+                degree[next] = degree[next].saturating_add(1);
+                if parent[next] == usize::MAX || self.flow[i] > self.flow[parent[next]] {
+                    parent[next] = i;
+                }
+            }
+        }
+        let mut ids = vec![0u32; count];
+        let mut level = self.heights.clone();
+        for &i in drainage.order.iter().rev() {
+            ids[i] = if degree[i] == 1 && parent[i] != usize::MAX {
+                ids[parent[i]]
+            } else {
+                i as u32 + 1
+            };
+            if self.lakes[i] > 0. {
+                level[i] = self.lakes[i];
                 continue;
             }
+            let width = (1.5 + 2.3 * (self.flow[i] / RIVER_THRESHOLD).max(1.).powf(0.35)).min(40.);
             let (x, z) = self.position(i);
-            let (nx, nz) = self.position(next);
-            let width = (1.5 + 2.3 * (drainage.area[i] / RIVER_THRESHOLD).powf(0.35)).min(40.0);
-            let bend = ((mix(seed ^ i as u64) >> 11) as f64 / (1u64 << 53) as f64 - 0.5)
-                * drainage.distance[i]
-                * 0.12;
+            // Bound a channel against its *surrounding sampled field*, not just
+            // the routing vertex. This prevents raised aqueduct-shaped beds.
+            let radius = width * 0.5 + 8.;
+            let mut bank = self.heights[i];
+            for dz in [-1., 0., 1.] {
+                for dx in [-1., 0., 1.] {
+                    let px = x + dx * radius;
+                    let pz = z + dz * radius;
+                    bank = bank.min(
+                        self.field_at(&self.heights, px, pz)
+                            .max(self.lake_at(px, pz)),
+                    );
+                }
+            }
+            level[i] = (bank - 0.6).max(0.25);
+        }
+        // One upstream-to-downstream pass enforces shared junction profiles.
+        for &i in drainage.order.iter().rev() {
+            let next = drainage.receiver[i];
+            if active[i] && self.flow[i] >= RIVER_THRESHOLD {
+                level[next] = level[next].min(level[i]);
+            }
+        }
+        // A channel correction can lower a spillway. Reconcile a whole lake,
+        // rather than leaving a stale high plane beside the corrected outlet.
+        let mut lake_level = std::collections::HashMap::<u32, f64>::new();
+        for i in 0..count {
+            if self.lake_ids[i] != 0 {
+                lake_level
+                    .entry(self.lake_ids[i])
+                    .and_modify(|v| *v = v.min(level[i]))
+                    .or_insert(level[i]);
+            }
+        }
+        for i in 0..count {
+            if let Some(&h) = lake_level.get(&self.lake_ids[i]) {
+                self.lakes[i] = h;
+                level[i] = h;
+            }
+        }
+        for &i in drainage.order.iter().rev() {
+            let next = drainage.receiver[i];
+            if active[i] && self.flow[i] >= RIVER_THRESHOLD {
+                level[next] = level[next].min(level[i]);
+            }
+        }
+        self.channels.clear();
+        self.river_diagnostics = RiverDiagnostics {
+            blocked_spill_links: (0..count)
+                .filter(|&i| drainage.receiver[i] != i && !active[i])
+                .count(),
+            ..RiverDiagnostics::default()
+        };
+        for &i in &drainage.order {
+            let next = drainage.receiver[i];
+            if !active[i] || self.flow[i] < RIVER_THRESHOLD {
+                continue;
+            }
+            let start = self.position(i);
+            let end = self.position(next);
+            let a = [start.0, start.1];
+            let b = [end.0, end.1];
+            let before = if parent[i] != usize::MAX {
+                self.position(parent[i])
+            } else {
+                start
+            };
+            let after = self.position(drainage.receiver[next]);
+            let tangent = |v: [f64; 2]| {
+                let length = v[0].hypot(v[1]).max(0.001);
+                [v[0] / length, v[1] / length]
+            };
+            let u = tangent([b[0] - before.0, b[1] - before.1]);
+            let v = tangent([after.0 - a[0], after.1 - a[1]]);
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let mut points = std::array::from_fn(|k| {
+                let t = k as f64 / 4.;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                std::array::from_fn(|axis| {
+                    (2. * t3 - 3. * t2 + 1.) * a[axis]
+                        + (t3 - 2. * t2 + t) * u[axis] * length
+                        + (-2. * t3 + 3. * t2) * b[axis]
+                        + (t3 - t2) * v[axis] * length
+                })
+            });
+            let width = (1.5 + 2.3 * (self.flow[i] / RIVER_THRESHOLD).powf(0.35)).min(40.);
+            // Do not turn a virtual route over a high divide into an
+            // arbitrarily deep trench. Reject it with a diagnostic instead.
+            let cut_limit = 12. + width * 0.25;
+            let valid = |path: &[[f64; 2]; 5]| {
+                path.iter().enumerate().all(|(k, p)| {
+                    let t = k as f64 / 4.;
+                    let h = level[i] * (1. - t) + level[next] * t;
+                    self.field_at(&self.heights, p[0], p[1]) - h <= cut_limit
+                })
+            };
+            let straightened = !valid(&points);
+            if straightened {
+                // Curves must stay in the drainage corridor. A straight
+                // routing edge is the safe fallback when smoothing crosses rock.
+                points = std::array::from_fn(|k| {
+                    let t = k as f64 / 4.;
+                    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+                });
+            }
+            let resolved = valid(&points);
+            self.river_diagnostics.straightened_segments += usize::from(straightened);
+            if !resolved {
+                self.river_diagnostics.unresolved_segments += 1;
+                continue;
+            }
             self.channels.push(Channel {
-                start: [x, z],
-                end: [nx, nz],
+                start: a,
+                end: b,
+                points,
+                id: ids[i],
                 level: [level[i], level[next]],
                 half_width: width * 0.5,
-                depth: (0.3 + width * 0.12).min(5.0),
-                bend,
+                depth: (0.3 + width * 0.12).min(5.),
+                bend: length * 0.3,
             });
         }
+        self.river_diagnostics.segments = self.channels.len();
+        self.river_diagnostics.reaches = self
+            .channels
+            .iter()
+            .map(|c| c.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let _ = seed; // Topology already includes deterministic seeded routing.
         let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
         self.bins = vec![Vec::new(); side * side];
         for (index, channel) in self.channels.iter().enumerate() {
-            let radius = channel.half_width + 12.0 + channel.bend.abs();
+            let radius = channel.half_width + 16.0 + channel.bend.abs();
             let bounds = |axis: usize| {
                 let low = ((channel.start[axis].min(channel.end[axis]) - radius) / BIN_SIZE)
                     .floor()
@@ -524,43 +786,31 @@ impl Region {
 
     fn lake_at(&self, x: f64, z: f64) -> f64 {
         let (indices, weights) = self.interpolation(x, z);
-        let mut weight = 0.0;
-        let mut level = 0.0;
+        // Distinct basins are separate flat water bodies. Blending their
+        // elevations invents a sloping water plane between unrelated lakes.
+        let mut bodies = [(u32::MAX, 0f64, 0f64); 4];
         for (&i, w) in indices.iter().zip(weights) {
-            if self.lakes[i] > 0.0 {
-                weight += w;
-                level += self.lakes[i] * w;
+            if self.lakes[i] > 0. {
+                let id = self.lake_ids[i];
+                let slot = bodies
+                    .iter()
+                    .position(|b| b.0 == id)
+                    .or_else(|| bodies.iter().position(|b| b.0 == u32::MAX))
+                    .unwrap();
+                bodies[slot].0 = id;
+                bodies[slot].1 += w;
+                bodies[slot].2 += self.lakes[i] * w;
             }
         }
-        if weight > 0.25 {
-            level / weight
+        let body = bodies
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        if body.1 > 0.25 {
+            body.2 / body.1
         } else {
-            0.0
+            0.
         }
-    }
-}
-
-impl Channel {
-    // Local curved segment, anchored at both drainage nodes. Bins avoid testing
-    // the entire network for every output pixel or microvoxel column.
-    fn sample(&self, x: f64, z: f64) -> Option<(f64, f64, f64)> {
-        let vx = self.end[0] - self.start[0];
-        let vz = self.end[1] - self.start[1];
-        let length_squared = vx * vx + vz * vz;
-        let t = (((x - self.start[0]) * vx + (z - self.start[1]) * vz) / length_squared)
-            .clamp(0.0, 1.0);
-        let bend = self.bend * (std::f64::consts::PI * t).sin() / length_squared.sqrt();
-        let px = self.start[0] + t * vx - vz * bend;
-        let pz = self.start[1] + t * vz + vx * bend;
-        let squared_distance = (x - px).powi(2) + (z - pz).powi(2);
-        if squared_distance > (self.half_width + 12.0).powi(2) {
-            return None;
-        }
-        Some((
-            squared_distance.sqrt(),
-            lerp(self.level[0], self.level[1], t),
-            self.half_width,
-        ))
     }
 }
 
@@ -595,7 +845,12 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
     let mountain = environment.landform_weights[4] as f64;
     let roughness =
         lerp(0.12, 3.0, rockiness) * (0.3 + 0.7 * mountain) * lerp(1.0, 0.2, wet_valley);
-    let detail = surface_detail(x, z, spacing, seed, roughness);
+    let detail = if region.config.refinement == super::Refinement::Noise {
+        surface_detail(x, z, spacing, seed, roughness)
+    } else {
+        super::geomorph::relief(region, x, z, spacing, seed, environment)
+            + surface_detail(x, z, spacing, seed, roughness * 0.35)
+    };
     let mut height = base + detail;
     let mut water: f64 = 0.0;
     let mut bank = 0.0_f64;
@@ -617,7 +872,7 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
         }
         if let Some((distance, level, half_width, depth)) = closest {
             let edge = distance / half_width;
-            let influence = 1.0 - smoothstep(half_width, half_width + 12.0, distance);
+            let influence = 1.0 - smoothstep(half_width, half_width + 16.0, distance);
             bank = influence;
             // Use one nearest channel profile; combining the highest water
             // with a different segment's lowest bed would overfill confluences.
@@ -625,16 +880,16 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
             let target = if edge <= 1.0 {
                 bed
             } else {
-                level + (distance - half_width) * 0.35
+                level + (distance - half_width) * 0.22
             };
             height = lerp(base + detail, base.min(target), influence);
             if edge <= 1.0 {
                 // Gravel-scale bed variation stays well below channel depth.
                 let grain = surface_detail(x + 37.0, z - 19.0, spacing, seed ^ 701, 0.025);
-                height = bed + grain.clamp(-0.04, 0.04);
+                height = (base + detail).min(bed + grain.clamp(-0.04, 0.04));
             }
             if edge < 1.0 {
-                water = level;
+                water = level.min(base + detail - 0.08);
             }
         }
     }
@@ -684,26 +939,23 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
     let surface = if bank > 0.25 && water > 0. {
         MaterialId::GRAVEL
     } else if bank > 0.25 {
-        MaterialId::SILT
+        super::geomorph::coverage(
+            x,
+            z,
+            seed,
+            [
+                (MaterialId::SILT, (bank * 0.38) as f32),
+                (MaterialId::GRAVEL, (bank * 0.18) as f32),
+                (subsoil, (1. - bank * 0.56) as f32),
+                (rock, 0.),
+                (rock, 0.),
+            ],
+        )
     } else {
         let coverage = environment.surface_cover(rock);
         // Stable per-voxel coverage sampling. No translucent materials or
         // fractional world cells; filtering belongs exclusively to display LOD.
-        let sample = (mix(seed
-            ^ mix((x * 16.).floor() as i64 as u64)
-            ^ mix((z * 16.).floor() as i64 as u64).rotate_left(29))
-            >> 11) as f64
-            / (1u64 << 53) as f64;
-        let mut cumulative = 0.;
-        let mut material = MaterialId::GRASS;
-        for (candidate, weight) in coverage {
-            cumulative += weight as f64;
-            if sample < cumulative {
-                material = candidate;
-                break;
-            }
-        }
-        material
+        super::geomorph::coverage(x, z, seed, coverage)
     };
     Surface {
         height,
@@ -719,6 +971,43 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjacent_lake_basins_never_blend_their_water_planes() {
+        let mut region = Region::from_heights(3, vec![1.; 9]);
+        for z in 0..3 {
+            region.lakes[z * 3] = 50.;
+            region.lake_ids[z * 3] = 1;
+            region.lakes[z * 3 + 1] = 100.;
+            region.lake_ids[z * 3 + 1] = 2;
+        }
+        for x in [2., 7., 8., 9., 14.] {
+            let h = region.lake_at(x, 8.);
+            assert!(h == 50. || h == 100., "invented water plane {h}");
+        }
+    }
+
+    #[test]
+    fn physical_detail_and_gradient_are_continuous_across_sampling_anchors() {
+        let heights = (0..81)
+            .map(|i| 100. + (i % 9) as f64 * 7. + (i / 9) as f64 * 2.)
+            .collect();
+        let mut region = Region::from_heights(9, heights);
+        region.soil.fill(0.);
+        for x in (1..96).map(|i| i as f64 * 1.317) {
+            let a = terrain_surface(&region, x - 1e-6, 53.2, 0.001, 42);
+            let b = terrain_surface(&region, x + 1e-6, 53.2, 0.001, 42);
+            assert!(
+                (a.height - b.height).abs() < 0.001,
+                "discontinuous relief at {x}: {} / {}",
+                a.height,
+                b.height
+            );
+        }
+        let a = region.gradient_at(64. - 1e-6, 53.2);
+        let b = region.gradient_at(64. + 1e-6, 53.2);
+        assert!((a[0] - b[0]).abs() < 1e-6);
+    }
 
     #[test]
     fn drainage_reaches_outlets_and_preserves_lake_bed() {
@@ -786,6 +1075,8 @@ mod tests {
             half_width: 2.0,
             depth: 1.0,
             bend: 0.0,
+            id: 1,
+            points: [[0., 0.], [4., 0.], [8., 0.], [12., 0.], [16., 0.]],
         };
         let (distance, level, width) = channel.sample(8.0, 0.0).unwrap();
         assert_eq!(distance, 0.0);
@@ -802,6 +1093,32 @@ mod tests {
         assert_eq!(sample.water, 11.0);
         assert_eq!(sample.surface, MaterialId::GRAVEL);
         assert!(sample.bedrock <= sample.height);
+    }
+
+    #[test]
+    fn invalid_high_river_profile_cannot_raise_surrounding_ground() {
+        let mut region = Region::from_heights(3, vec![5.; 9]);
+        region.channels.push(Channel {
+            start: [0., 0.],
+            end: [16., 0.],
+            points: [[0., 0.], [4., 0.], [8., 0.], [12., 0.], [16., 0.]],
+            id: 1,
+            level: [20., 19.],
+            half_width: 3.,
+            depth: 1.,
+            bend: 0.,
+        });
+        let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+        region.bins = vec![Vec::new(); side * side];
+        region.bins[0].push(0);
+        for z in 0..20 {
+            let s = terrain_surface(&region, 8., z as f64 * 0.5, 0.0625, 42);
+            assert!(s.height < 5.5, "carving raised a wall: {}", s.height);
+            assert!(
+                s.water == 0. || s.water < 5.5,
+                "water perched above the field"
+            );
+        }
     }
 
     #[test]

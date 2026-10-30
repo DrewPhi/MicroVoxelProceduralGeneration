@@ -30,7 +30,8 @@ fn differently_colored_faces_merge_without_losing_any_color() {
             faces.add(0, [x, 5, z], [x as u8, z as u8, 130]).unwrap();
         }
     }
-    let surface = faces.finish([0, 0, 0], 1);
+    let mut surface = faces.finish([0, 0, 0], 1);
+    surface.merge_constant_tops();
     assert_eq!(surface.unit_faces, 1024);
     assert_eq!(surface.quads.len(), 1);
     assert_eq!(surface.bytes(), 32 + 4096);
@@ -89,7 +90,12 @@ fn native_surface_is_exact_including_cavities_and_edited_appearance() {
                     assert!(!voxel.is_air());
                     let expected = painting::base_color(voxel, world.materials());
                     assert_eq!(
-                        &part.surface.colors[(q.color_offset + v * q.size[0] + u) as usize]
+                        &part.surface.colors[(q.color_offset
+                            + if q.constant_color {
+                                0
+                            } else {
+                                v * q.size[0] + u
+                            }) as usize]
                             .to_le_bytes()[..3],
                         &expected
                     );
@@ -162,11 +168,11 @@ fn coarse_fine_boundary_is_closed_at_fine_heights_in_both_directions() {
         let coarse_faces = boundary_faces(&coarse, 2);
         let fine_faces = boundary_faces(&fine, 3);
         if height == 31 {
-            assert_eq!(coarse_faces, vec![[31, 32, 640, 704]]);
+            assert!(coarse_faces.is_empty());
             assert!(fine_faces.is_empty());
         } else {
             assert!(coarse_faces.is_empty());
-            assert_eq!(fine_faces, vec![[32, 33, 640, 672]]);
+            assert_eq!(fine_faces, vec![[31, 33, 640, 672]]);
         }
         for part in coarse.parts.iter().chain(&fine.parts) {
             for q in &part.surface.quads {
@@ -176,6 +182,39 @@ fn coarse_fine_boundary_is_closed_at_fine_heights_in_both_directions() {
             }
         }
     }
+}
+
+#[test]
+fn coarse_columns_keep_native_heights_without_expanding_native_color_faces() {
+    let world = Arc::new(World::new(FlatTerrain {
+        height: 10001,
+        water: 10001,
+        seed: 42,
+    }));
+    let m = mesh(world, key(7, 2, 2, [7; 4], 0));
+    let tops: Vec<_> = m
+        .parts
+        .iter()
+        .flat_map(|p| {
+            p.surface
+                .quads
+                .iter()
+                .filter(|q| q.face == 0)
+                .map(move |q| (p, q))
+        })
+        .collect();
+    assert!(!tops.is_empty());
+    for (p, q) in tops {
+        assert_eq!(q.origin[1] as i64 * p.step, 10001);
+        assert!(q.constant_color);
+    }
+    assert!(
+        m.parts
+            .iter()
+            .map(|p| p.surface.colors.len())
+            .sum::<usize>()
+            <= 4096
+    );
 }
 #[test]
 fn all_lod_geometry_stays_axis_aligned_and_coarse_grid_aligned() {
