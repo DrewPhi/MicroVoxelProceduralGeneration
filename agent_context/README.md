@@ -57,6 +57,9 @@ handoff notes; it is not part of the runtime.
 - [Player research](PLAYER_RESEARCH.md): literature, Rust source review and
   grid-aligned animation tradeoffs.
 
+- [LOD budget issue 3](LOD_BUDGET_ISSUE_3.md): per-binding ceiling diagnosis,
+  range bindings, memory ledger and matched capture validation.
+
 ## Constraints to preserve
 
 - Default base voxels are 1/16 meter; each world fixes its grid scale in its spec.

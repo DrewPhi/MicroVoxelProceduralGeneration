@@ -19,6 +19,18 @@ mod arena;
 use arena::{Arena, Handle};
 
 pub const GPU_BUDGET: usize = 128 * 1024 * 1024;
+/// Negotiate buffer capacity explicitly: using_resolution only copies texture
+/// dimensions. Raising a limit permits growth; it does not allocate memory.
+fn terrain_device_limits(adapter: wgpu::Limits) -> wgpu::Limits {
+    let mut limits = wgpu::Limits::downlevel_defaults().using_resolution(adapter.clone());
+    let ceiling = 1024u64 * 1024 * 1024;
+    limits.max_buffer_size = adapter.max_buffer_size.min(ceiling);
+    limits.max_storage_buffer_binding_size = (adapter.max_storage_buffer_binding_size as u64)
+        .min(limits.max_buffer_size)
+        .min(ceiling) as u32;
+    limits
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameUniform {
@@ -41,6 +53,7 @@ struct GpuQuad {
     padding: u32,
 }
 struct Part {
+    bind: Option<wgpu::BindGroup>,
     metadata: Handle,
     geometry: Handle,
     colors: Handle,
@@ -136,7 +149,6 @@ pub struct Gpu {
     shadow_texture: wgpu::Texture,
     frame_buffer: wgpu::Buffer,
     frame_bind: wgpu::BindGroup,
-    tile_bind: wgpu::BindGroup,
     tile_layout: wgpu::BindGroupLayout,
     pool_migrations: Vec<(u64, wgpu::Buffer)>,
     ray_migrations: Vec<(u64, usize)>,
@@ -199,13 +211,15 @@ impl Gpu {
                 &wgpu::DeviceDescriptor {
                     label: Some("MicroVoxel GPU"),
                     required_features: crate::gpu_timing::required_features(adapter.features()),
-                    required_limits: wgpu::Limits::downlevel_defaults()
-                        .using_resolution(adapter.limits()),
+                    required_limits: terrain_device_limits(adapter.limits()),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
             )
             .await?;
+        println!("Terrain buffer limits: adapter storage {} MiB / buffer {} MiB; negotiated storage {} MiB / buffer {} MiB",
+            adapter.limits().max_storage_buffer_binding_size / 1048576, adapter.limits().max_buffer_size / 1048576,
+            device.limits().max_storage_buffer_binding_size / 1048576, device.limits().max_buffer_size / 1048576);
         let format = surface
             .map(|s| {
                 let caps = s.get_capabilities(&adapter);
@@ -295,32 +309,6 @@ impl Gpu {
             1u64 << 20,
             wgpu::BufferUsages::UNIFORM,
         );
-        let tile_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pooled terrain"),
-            layout: &tile_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &metadata_pool.buffer,
-                        offset: 0,
-                        size: std::num::NonZeroU64::new(48),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: geometry_pool.buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: color_pool.buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: vertex_pool.buffer.as_entire_binding(),
-                },
-            ],
-        });
         let (completion_tx, completion_rx) = mpsc::channel();
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain layout"),
@@ -485,7 +473,6 @@ impl Gpu {
             shadow_texture,
             frame_buffer,
             frame_bind,
-            tile_bind,
             tile_layout,
             pool_migrations: Vec::new(),
             ray_migrations: Vec::new(),
@@ -971,6 +958,19 @@ impl Gpu {
                 }
             }
         }
+        for part in &mut parts {
+            part.bind = Some(Self::part_bind(
+                &self.device,
+                &self.tile_layout,
+                [
+                    &self.geometry_pool,
+                    &self.color_pool,
+                    &self.vertex_pool,
+                    &self.metadata_pool,
+                ],
+                part,
+            ));
+        }
         let previous_ray = self.tiles.get(&key).and_then(|t| t.ray);
         let ray_bytes = previous_ray.map_or(0, |(_, n)| n as usize * 4);
         if let Some(old) = self.tiles.insert(
@@ -1083,11 +1083,7 @@ impl Gpu {
         let old_capacity = pool.arena.capacity();
         // Keep the old buffer charged until its copy and all preceding draws finish.
         let minimum = (old_capacity + data.len().max(4) as u64 + alignment - 1).next_multiple_of(4);
-        let binding_limit = if index == 3 {
-            self.device.limits().max_buffer_size.min(u32::MAX as u64)
-        } else {
-            self.device.limits().max_storage_buffer_binding_size as u64
-        };
+        let binding_limit = self.device.limits().max_buffer_size.min(u32::MAX as u64);
         // Leave one quarter of the ceiling available for future migrations
         // and actor poses. Steady capacity and temporary migration capacity
         // are different limits; filling both makes compaction impossible.
@@ -1112,8 +1108,8 @@ impl Gpu {
         let capacity = capacity / wgpu::COPY_BUFFER_ALIGNMENT * wgpu::COPY_BUFFER_ALIGNMENT;
         if capacity < minimum {
             return Err(format!(
-                "GPU mesh budget reached ({} growth); reduce LOD tile budget",
-                pool.label
+                "GPU mesh budget reached ({} growth): request {} B, live {} B, pending {} B, pool {} B, minimum {} B, pool limit {} B, committed {} B, ceiling {} B, migration headroom {} B, steady allowance {} B",
+                pool.label, data.len(), pool.arena.live_bytes(), pool.arena.pending_bytes(), old_capacity, minimum, binding_limit, committed, limit, available, steady_available
             ));
         }
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1155,33 +1151,70 @@ impl Gpu {
         }
         result
     }
-    fn refresh_tile_bind(&mut self) {
-        self.tile_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pooled terrain"),
-            layout: &self.tile_layout,
+    fn part_bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        pools: [&Pool; 4],
+        part: &Part,
+    ) -> wgpu::BindGroup {
+        fn range(pool: &Pool, h: Handle) -> wgpu::BindingResource<'_> {
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &pool.buffer,
+                offset: h.offset,
+                size: std::num::NonZeroU64::new(h.size),
+            })
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain draw ranges"),
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.metadata_pool.buffer,
+                        buffer: &pools[3].buffer,
                         offset: 0,
                         size: std::num::NonZeroU64::new(48),
                     }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.geometry_pool.buffer.as_entire_binding(),
+                    resource: range(pools[0], part.geometry),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.color_pool.buffer.as_entire_binding(),
+                    resource: range(pools[1], part.colors),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.vertex_pool.buffer.as_entire_binding(),
+                    resource: range(pools[2], part.vertices),
                 },
             ],
-        });
+        })
+    }
+    fn refresh_tile_bind(&mut self) {
+        let pools = [
+            &self.geometry_pool,
+            &self.color_pool,
+            &self.vertex_pool,
+            &self.metadata_pool,
+        ];
+        for part in self
+            .tiles
+            .values_mut()
+            .flat_map(|t| t.parts.iter_mut())
+            .chain(
+                self.actor_meshes
+                    .iter_mut()
+                    .flat_map(|a| a.parts.iter_mut()),
+            )
+        {
+            part.bind = Some(Self::part_bind(
+                &self.device,
+                &self.tile_layout,
+                pools,
+                part,
+            ));
+        }
     }
     /// Migrate one pool per trim, using only headroom under the retiring ceiling.
     fn shrink_pools(&mut self, force: bool) {
@@ -1191,7 +1224,11 @@ impl Gpu {
         let limit = self.retiring_budget.unwrap_or(self.budget).max(self.budget) as u64;
         let available = limit.saturating_sub(self.managed_committed_bytes());
         for index in 0..4 {
-            let alignment = [32, 4, 4, 256][index];
+            let alignment = if index == 3 {
+                256
+            } else {
+                self.device.limits().min_storage_buffer_offset_alignment as u64
+            };
             let pools = [
                 &self.geometry_pool,
                 &self.color_pool,
@@ -1294,11 +1331,7 @@ impl Gpu {
                 .flat_map(|t| t.parts.iter())
                 .chain(self.actor_meshes.iter().flat_map(|a| a.parts.iter()))
             {
-                let indices = [
-                    (part.geometry.offset / 32) as u32,
-                    (part.colors.offset / 4) as u32,
-                    (part.vertices.offset / 4) as u32,
-                ];
+                let indices = [0, 0, 0];
                 self.queue.write_buffer(
                     &self.metadata_pool.buffer,
                     part.metadata.offset + 32,
@@ -1319,6 +1352,35 @@ impl Gpu {
                 let _ = completed.send(serial);
             });
         }
+    }
+    pub fn report_memory(&self) {
+        let mib = |n: u64| n as f64 / 1048576.;
+        println!("Terrain memory ledger: configured {:.2} MiB; retiring {:?}; committed {:.2} MiB; available {:.2} MiB; storage binding limit {:.2} MiB",
+            mib(self.budget as u64), self.retiring_budget.map(|b| mib(b as u64)),
+            mib(self.managed_committed_bytes()),
+            mib((self.budget as u64).saturating_sub(self.managed_committed_bytes())),
+            mib(self.device.limits().max_storage_buffer_binding_size as u64));
+        for pool in [
+            &self.geometry_pool,
+            &self.color_pool,
+            &self.vertex_pool,
+            &self.metadata_pool,
+        ] {
+            println!(
+                "  {}: live {:.2} MiB; pending {:.2} MiB; free {:.2} MiB; capacity {:.2} MiB",
+                pool.label,
+                mib(pool.arena.live_bytes()),
+                mib(pool.arena.pending_bytes()),
+                mib(pool.arena.capacity() - pool.arena.live_bytes() - pool.arena.pending_bytes()),
+                mib(pool.arena.capacity())
+            );
+        }
+        println!(
+            "  migrations: mesh {:.2} MiB; ray {:.2} MiB; ray arena {:.2} MiB",
+            mib(self.pool_migrations.iter().map(|(_, b)| b.size()).sum()),
+            mib(self.ray_migrations.iter().map(|(_, n)| *n as u64).sum()),
+            mib(self.raycaster.allocated_bytes as u64)
+        );
     }
     pub fn terrain_arena_stats(&self) -> [(u64, u64, u64); 4] {
         [
@@ -1371,21 +1433,42 @@ impl Gpu {
         let packed_colors =
             packed_colors.unwrap_or_else(|| microvoxel::render::colors::pack(&part.surface.colors));
         self.reap_pools();
-        // Every draw uses one shared bind group. These offsets are element indices,
-        // leaving shader storage bindings fixed across the entire visible cover.
+        // Draws bind aligned slices of pooled buffers. Shader indices are local
+        // to each slice, so pool capacity can exceed the per-binding limit.
+        let storage_limit = self.device.limits().max_storage_buffer_binding_size as usize;
+        if [
+            records.len() * 32,
+            packed_colors.len() * 4,
+            references.len() * 4,
+        ]
+        .into_iter()
+        .any(|n| n > storage_limit)
+        {
+            return Err(
+                "GPU mesh budget reached (single draw exceeds storage binding limit)".into(),
+            );
+        }
         let geometry = self.write_pool(
             0,
             bytemuck::cast_slice(&records),
-            std::mem::size_of::<GpuQuad>() as u64,
+            self.device.limits().min_storage_buffer_offset_alignment as u64,
         )?;
-        let colors = match self.write_pool(1, bytemuck::cast_slice(&packed_colors), 4) {
+        let colors = match self.write_pool(
+            1,
+            bytemuck::cast_slice(&packed_colors),
+            self.device.limits().min_storage_buffer_offset_alignment as u64,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 self.geometry_pool.arena.retire(geometry, self.submitted);
                 return Err(e);
             }
         };
-        let vertices = match self.write_pool(2, bytemuck::cast_slice(&references), 4) {
+        let vertices = match self.write_pool(
+            2,
+            bytemuck::cast_slice(&references),
+            self.device.limits().min_storage_buffer_offset_alignment as u64,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 self.geometry_pool.arena.retire(geometry, self.submitted);
@@ -1407,9 +1490,9 @@ impl Gpu {
         for (out, v) in meta[..8].iter_mut().zip(floats) {
             *out = v.to_bits();
         }
-        meta[8] = (geometry.offset / std::mem::size_of::<GpuQuad>() as u64) as u32;
-        meta[9] = (colors.offset / 4) as u32;
-        meta[10] = (vertices.offset / 4) as u32;
+        meta[8] = 0;
+        meta[9] = 0;
+        meta[10] = 0;
         let metadata = match self.write_pool(3, bytemuck::cast_slice(&meta), 256) {
             Ok(h) => h,
             Err(e) => {
@@ -1419,14 +1502,27 @@ impl Gpu {
                 return Err(e);
             }
         };
-        Ok(Some(Part {
+        let mut part = Part {
+            bind: None,
             metadata,
             geometry,
             colors,
             vertices,
             count: regular_count,
             border_vertices,
-        }))
+        };
+        part.bind = Some(Self::part_bind(
+            &self.device,
+            &self.tile_layout,
+            [
+                &self.geometry_pool,
+                &self.color_pool,
+                &self.vertex_pool,
+                &self.metadata_pool,
+            ],
+            &part,
+        ));
+        Ok(Some(part))
     }
     pub fn move_cached_actor(&mut self, root: microvoxel::CellPos) {
         if let Some(actor) = &mut self.actor {
@@ -1735,9 +1831,9 @@ impl Gpu {
                 for (out, v) in meta[..8].iter_mut().zip(floats) {
                     *out = v.to_bits();
                 }
-                meta[8] = (part.geometry.offset / std::mem::size_of::<GpuQuad>() as u64) as u32;
-                meta[9] = (part.colors.offset / 4) as u32;
-                meta[10] = (part.vertices.offset / 4) as u32;
+                meta[8] = 0;
+                meta[9] = 0;
+                meta[10] = 0;
                 self.queue.write_buffer(
                     &self.metadata_pool.buffer,
                     part.metadata.offset,
@@ -1824,13 +1920,21 @@ impl Gpu {
                     continue;
                 }
                 for part in &self.tiles[key].parts {
-                    pass.set_bind_group(1, &self.tile_bind, &[part.metadata.offset as u32]);
+                    pass.set_bind_group(
+                        1,
+                        part.bind.as_ref().expect("resident draw binding"),
+                        &[part.metadata.offset as u32],
+                    );
                     pass.draw(0..6, 0..part.count);
                 }
             }
             if let Some((_, mesh)) = actor {
                 for part in &mesh.parts {
-                    pass.set_bind_group(1, &self.tile_bind, &[part.metadata.offset as u32]);
+                    pass.set_bind_group(
+                        1,
+                        part.bind.as_ref().expect("resident draw binding"),
+                        &[part.metadata.offset as u32],
+                    );
                     pass.draw(0..6, 0..part.count);
                 }
             }
@@ -1841,7 +1945,11 @@ impl Gpu {
                 }
                 for part in &self.tiles[key].parts {
                     if part.border_vertices > 0 {
-                        pass.set_bind_group(1, &self.tile_bind, &[part.metadata.offset as u32]);
+                        pass.set_bind_group(
+                            1,
+                            part.bind.as_ref().expect("resident draw binding"),
+                            &[part.metadata.offset as u32],
+                        );
                         pass.draw(0..part.border_vertices, 0..1);
                     }
                 }
@@ -1991,6 +2099,91 @@ pub(crate) fn in_frustum(matrix: Mat4, low: [f64; 3], high: [f64; 3]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terrain_limits_use_adapter_buffer_headroom_without_overrequesting() {
+        use super::*;
+        for (storage, buffer) in [
+            (64u32 << 20, 128u64 << 20),
+            (512 << 20, 2 << 30),
+            (2 << 30, 4 << 30),
+        ] {
+            let mut adapter = wgpu::Limits::downlevel_defaults();
+            adapter.max_storage_buffer_binding_size = storage;
+            adapter.max_buffer_size = buffer;
+            let limits = terrain_device_limits(adapter.clone());
+            assert!(limits.max_buffer_size <= adapter.max_buffer_size);
+            assert!(limits.max_storage_buffer_binding_size <= storage);
+            assert!(limits.max_storage_buffer_binding_size as u64 <= limits.max_buffer_size);
+            assert_eq!(limits.max_storage_buffer_binding_size, storage.min(1 << 30));
+            assert_eq!(
+                limits.max_storage_buffers_per_shader_stage,
+                wgpu::Limits::downlevel_defaults().max_storage_buffers_per_shader_stage
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires graphics adapter; validates rendering past a storage binding boundary"]
+    fn pooled_color_ranges_above_binding_limit_preserve_pixels() {
+        use super::*;
+        use microvoxel::{
+            generation::FlatTerrain,
+            render::{lod::TileKey, terrain::Sampler},
+            World,
+        };
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, 64, 64)).unwrap();
+        gpu.budget = 768 * 1048576;
+        let mut sampler = Sampler::new(std::sync::Arc::new(World::new(FlatTerrain {
+            height: 16,
+            water: 0,
+            seed: 42,
+        })));
+        let key = MeshKey {
+            tile: TileKey {
+                level: 13,
+                x: 1,
+                z: 1,
+            },
+            neighbors: [13; 4],
+            corner_levels: None,
+            revision: 0,
+        };
+        let cover = [key].into();
+        let mut camera = Camera::at(microvoxel::CellPos::new(48, 64, 48));
+        camera.pitch = -1.4;
+        let texture = gpu.offscreen();
+        let view = texture.create_view(&Default::default());
+        gpu.upload(key, sampler.display_mesh(key, || false).unwrap(), &cover)
+            .unwrap();
+        gpu.render(&view, &camera, &cover, None);
+        let expected = gpu.read_pixels(&texture).unwrap();
+        assert!(
+            expected.chunks_exact(4).any(|p| p[1] > p[2]),
+            "test must see terrain"
+        );
+        gpu.evict(key);
+        gpu.device.poll(wgpu::Maintain::Wait);
+        gpu.reap_pools();
+        // Reserve address space, not a giant per-draw binding or CPU color array.
+        let boundary = gpu.device.limits().max_storage_buffer_binding_size as u64;
+        if boundary + 65536 > gpu.device.limits().max_buffer_size {
+            return;
+        }
+        gpu.color_pool = Pool::new(
+            &gpu.device,
+            "color boundary regression",
+            boundary + 65536,
+            wgpu::BufferUsages::STORAGE,
+        );
+        gpu.color_pool.arena.allocate(boundary + 256, 256).unwrap();
+        gpu.upload(key, sampler.display_mesh(key, || false).unwrap(), &cover)
+            .unwrap();
+        assert!(gpu.tiles[&key].parts[0].colors.offset > boundary);
+        gpu.render(&view, &camera, &cover, None);
+        assert_eq!(gpu.read_pixels(&texture).unwrap(), expected);
+        assert!(gpu.managed_committed_bytes() <= gpu.budget as u64);
+    }
     #[test]
     #[ignore = "requires graphics adapter"]
     fn recent_native_cache_survives_newer_distant_cache_pressure() {
@@ -2188,6 +2381,7 @@ mod tests {
                 ray: None,
                 mesh_ready: true,
                 parts: vec![Part {
+                    bind: None,
                     geometry,
                     colors,
                     vertices,

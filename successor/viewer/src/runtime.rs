@@ -576,6 +576,8 @@ impl Runtime {
                     continue;
                 }
                 Err(message) if message.contains("GPU mesh budget") => {
+                    eprintln!("Required upload pressure: {message}");
+                    self.gpu.report_memory();
                     self.prefetch.clear();
                     self.prefetch_pause_until = Instant::now() + Duration::from_millis(500);
                     if !self.gpu.recover_cache_pressure(&protected) {
@@ -906,6 +908,7 @@ impl Runtime {
         println!("Streaming state: eye {:?} m; active {} / desired {} tiles; target {:?}; jobs {}; effective tile budget {}; pressure {}; error {:?}",
             self.camera.eye(),self.active.tiles.len(),self.desired.tiles.len(),
             self.target.as_ref().map(|(_,keys)|keys.len()),self.pending_jobs(),self.effective_budget,self.memory_pressure,self.last_error);
+        self.gpu.report_memory();
         let pools = self.gpu.terrain_arena_stats();
         println!(
             "Terrain arenas: {:.2} MiB live, {:.2} MiB pending GPU completion, {:.2} MiB reserved",

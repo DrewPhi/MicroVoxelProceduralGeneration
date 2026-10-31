@@ -72,7 +72,11 @@ GPU tiles after edits; worker/planner epochs reject stale results. GPU allocatio
 retire after submission completion. Growth/compaction counts migration buffers
 against the permitted memory ceiling. Lowering a budget can retain the previous
 ceiling while the visible cover coarsens; high-offset ray allocations may delay
-shrinking until replaced or evicted.
+shrinking until replaced or evicted. Terrain draws bind aligned subranges of the
+shared buffers, so total pool capacity can exceed an adapter's per-storage-binding
+limit. Bindings are cached and refreshed on growth/compaction. The console memory
+ledger distinguishes live/pending/free pool capacity and in-flight migrations;
+see [the LOD budget investigation](agent_context/LOD_BUDGET_ISSUE_3.md).
 
 The new atlas is **1000 km square** in source coordinates, not a whole planet.
 World Scale 10 makes it 100 km square in game; scale 1 retains its original size.
