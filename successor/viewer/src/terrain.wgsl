@@ -88,7 +88,7 @@ fn project_quad(q:Quad,uv:vec2<f32>)->Output {
     }
     let water=q.face>>3u;
     if water>0u && !is_smooth {local.y=min(local.y,f32(water));}
-    let relative=vec3<f32>(vec3<i32>(tile.origin_step.xyz)-camera.grid_eye.xyz)*camera.viewport.w+local*camera.viewport.w-camera.eye_fraction.xyz;
+    let relative=(vec3<f32>(vec3<i32>(tile.origin_step.xyz)-camera.grid_eye.xyz)+local)*camera.viewport.w-camera.eye_fraction.xyz;
     var out:Output;out.position=camera.vp*vec4<f32>(relative,1);out.uv=uv;out.size=q.size;out.offset=q.color_offset;out.normal=surface_normal;out.relative=relative;out.step=tile.origin_step.w;out.flags=q.padding;out.water=f32(water);out.phase=tile.clip_cells.w;out.smooth_rgb=smooth_rgb;return out;
 }
 fn linear_rgb(packed:u32)->vec3<f32> {

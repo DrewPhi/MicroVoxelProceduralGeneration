@@ -85,9 +85,10 @@ impl<G: Generator> Sampler<G> {
         let scale = self.grid().cell_m();
         self.world
             .region_changed_since(x - halo, z - halo, edge + halo * 2, 0)
-            || self.world.has_volumetric_features(
+            || self.world.has_display_volumetric_features(
                 [(x - halo) as f64 * scale, (z - halo) as f64 * scale],
                 (edge + halo * 2) as f64 * scale,
+                step as f64 * scale,
             )
     }
 
@@ -109,47 +110,62 @@ impl<G: Generator> Sampler<G> {
             .display_sample(px, pz, step)
             .ok_or("unknown coarse terrain sample")?;
         let wet = c.water > c.ground;
-        let material = if wet { MaterialId::WATER } else { c.surface };
-        let p = CellPos::new(px, if wet { c.water - 1 } else { c.ground - 1 }, pz);
-        let appearance = env.map_or_else(
-            || self.world.display_appearance_at(p, material, step),
-            |e| {
-                painting::environment_appearance_m(
-                    self.world.spec().grid.point(p),
-                    self.world.identity().seed,
-                    material,
-                    e,
-                )
-            },
-        );
-        let rgb = painting::base_color(Voxel::new(material, appearance), self.world.materials());
-        let mut linear = rgb.map(|v| (v as f32 / 255.).powf(2.2));
-        if !wet {
-            if let Some(cover) = self.world.display_coverage_at(p, step) {
+        // A node represents a centered support region, independent of which tile
+        // requests it. Keep the entire query inside the world at boundary nodes.
+        let edge = step.min(extent);
+        let ox = (px - edge / 2).clamp(0, extent - edge);
+        let oz = (pz - edge / 2).clamp(0, extent - edge);
+        let river_coverage = if step > 1 {
+            self.world
+                .water_footprint(ox, oz, edge)
+                .map_or(if wet { 1. } else { 0. }, |f| {
+                    f.coverage.clamp(0., 1.) as f32
+                })
+        } else if wet {
+            1.
+        } else {
+            0.
+        };
+        let land = CellPos::new(px, c.ground - 1, pz);
+        let color = |p, material| {
+            let appearance = env.map_or_else(
+                || self.world.display_appearance_at(p, material, step),
+                |e| {
+                    painting::environment_appearance_m(
+                        self.world.spec().grid.point(p),
+                        self.world.identity().seed,
+                        material,
+                        e,
+                    )
+                },
+            );
+            painting::base_color(Voxel::new(material, appearance), self.world.materials())
+                .map(|v| (v as f32 / 255.).powf(2.2))
+        };
+        // Start with terrestrial albedo even at wet nodes: generators need not
+        // provide material coverage. Fractional water never falls back to blue.
+        let mut linear = color(land, c.surface);
+        if river_coverage < 1. {
+            if let Some(cover) = self.world.display_coverage_at(land, step) {
                 linear = [0.; 3];
                 for (mat, weight) in cover {
-                    if weight <= 0. {
-                        continue;
-                    }
-                    let appearance = env.map_or_else(
-                        || self.world.display_appearance_at(p, mat, step),
-                        |e| {
-                            painting::environment_appearance_m(
-                                self.world.spec().grid.point(p),
-                                self.world.identity().seed,
-                                mat,
-                                e,
-                            )
-                        },
-                    );
-                    let rgb =
-                        painting::base_color(Voxel::new(mat, appearance), self.world.materials());
-                    for i in 0..3 {
-                        linear[i] += (rgb[i] as f32 / 255.).powf(2.2) * weight;
+                    if weight > 0. {
+                        let rgb = color(land, mat);
+                        for i in 0..3 {
+                            linear[i] += rgb[i] * weight;
+                        }
                     }
                 }
             }
         }
+        if river_coverage > 0. {
+            let water = color(CellPos::new(px, c.water - 1, pz), MaterialId::WATER);
+            for i in 0..3 {
+                linear[i] = linear[i] * (1. - river_coverage) + water[i] * river_coverage;
+            }
+        }
+        // Coverage changes appearance only. Heights and water classification
+        // remain tied to this node's occupied column, never a remote river level.
         let rgb = linear.map(|v| (v.max(0.).powf(1. / 2.2) * 255.).round().clamp(0., 255.) as u8);
         let value = Sample {
             height: c.ground.max(c.water) as f32,
@@ -267,6 +283,22 @@ impl<G: Generator> Sampler<G> {
             }
             if z == oz + edge {
                 spacing = spacing.max(neighbors[3]);
+            }
+            if let Some(levels) = key.corner_levels {
+                let corner = if x == ox && z == oz {
+                    Some(0)
+                } else if x == ox && z == oz + edge {
+                    Some(1)
+                } else if x == ox + edge && z == oz + edge {
+                    Some(2)
+                } else if x == ox + edge && z == oz {
+                    Some(3)
+                } else {
+                    None
+                };
+                if let Some(i) = corner {
+                    spacing = spacing.max(1i64 << (grid.finest - levels[i]));
+                }
             }
             spacing
         };
@@ -471,6 +503,7 @@ mod tests {
         let grid = Grid::new(world.spec());
         let mut sampler = Sampler::new(world);
         let coarse = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: grid.finest - 3,
                 x: 1,
@@ -484,6 +517,7 @@ mod tests {
         assert!(mesh.parts[0].surface.quads.iter().all(|q| q.face == 6));
         assert_eq!(mesh.prepare(coarse)[0].regular, 1024);
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: grid.finest,
                 x: 1,
@@ -619,6 +653,65 @@ mod boundary_tests {
         u32::from_le_bytes([rgb[0], rgb[1], rgb[2], 255])
     }
     #[test]
+    fn diagonal_coarse_tile_sets_one_shared_corner_height_and_color() {
+        use crate::render::lod::Layout;
+        let world = Arc::new(World::new(Curved { complex: false }));
+        let grid = Grid::new(world.spec());
+        let level = grid.finest - 2;
+        let base: Vec<_> = (0..4)
+            .map(|i| TileKey {
+                level,
+                x: i % 2,
+                z: i / 2,
+            })
+            .collect();
+        let mut layout = Layout {
+            grid,
+            tiles: base.iter().copied().collect(),
+        };
+        for &tile in &base[1..] {
+            layout.split(tile);
+        }
+        layout.balance();
+        let point = (base[0].edge_in(grid), base[0].edge_in(grid));
+        let keys = layout.mesh_keys(0);
+        let mut sampler = Sampler::new(world);
+        let mut expected = None;
+        let mut incident = 0;
+        for key in keys.values() {
+            let [x, z] = key.tile.origin_in(grid);
+            let edge = key.tile.edge_in(grid);
+            if (x == point.0 || x + edge == point.0) && (z == point.1 || z + edge == point.1) {
+                let mesh = sampler.display_mesh(*key, || false).unwrap();
+                let value = (nodes(&mesh)[&point], node_colors(&mesh)[&point]);
+                if let Some(first) = expected {
+                    assert_eq!(value, first, "corner mismatch at {:?}", key.tile);
+                } else {
+                    expected = Some(value);
+                }
+                incident += 1;
+            }
+        }
+        assert_eq!(incident, 4);
+        let northeast = *keys
+            .values()
+            .find(|k| k.tile.origin_in(grid) == [point.0, point.1])
+            .unwrap();
+        // The former side-only rule used the fine filter here and disagreed
+        // with the other three incident patches, despite valid edge balance.
+        let legacy = sampler
+            .display_mesh(
+                MeshKey {
+                    corner_levels: None,
+                    ..northeast
+                },
+                || false,
+            )
+            .unwrap();
+        assert_ne!(nodes(&legacy)[&point], expected.unwrap().0);
+    }
+
+    #[test]
     fn two_to_one_edges_share_exact_height_and_filtered_colors_in_all_four_directions() {
         let world = Arc::new(World::new(Curved { complex: false }));
         let grid = Grid::new(world.spec());
@@ -680,12 +773,14 @@ mod boundary_tests {
             ),
         ] {
             let mut fine = MeshKey {
+                corner_levels: None,
                 tile: fine_tile,
                 neighbors: [fine_level; 4],
                 revision: 0,
             };
             fine.neighbors[side] = coarse_level;
             let mut coarse = MeshKey {
+                corner_levels: None,
                 tile: coarse_tile,
                 neighbors: [coarse_level; 4],
                 revision: 0,
@@ -757,6 +852,7 @@ mod boundary_tests {
         for step in 1..=4 {
             let level = grid.finest - step;
             let key = MeshKey {
+                corner_levels: None,
                 tile: TileKey { level, x: 0, z: 0 },
                 neighbors: [level; 4],
                 revision,
@@ -785,6 +881,7 @@ mod boundary_tests {
         let grid = Grid::new(world.spec());
         let level = grid.finest - 2;
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x: 0, z: 0 },
             neighbors: [level; 4],
             revision: 0,
@@ -805,6 +902,7 @@ mod boundary_tests {
         let grid = Grid::new(world.spec());
         let level = grid.finest - 2;
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x: 2, z: 1 },
             neighbors: [level; 4],
             revision: world.revision(),
@@ -849,6 +947,7 @@ mod boundary_tests {
         let grid = Grid::new(edited.spec());
         let level = grid.finest - 2;
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x: 0, z: 0 },
             neighbors: [level; 4],
             revision: edited.revision(),
@@ -928,6 +1027,7 @@ mod closure_tests {
         let grid = Grid::new(world.spec());
         let level = grid.finest - 1;
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x: 2, z: 2 },
             neighbors: [grid.finest; 4],
             revision: 0,
@@ -1007,6 +1107,7 @@ mod closure_tests {
         let grid = Grid::new(world.spec());
         let level = grid.finest - 1;
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x: 2, z: 2 },
             neighbors: [grid.finest; 4],
             revision: 0,
@@ -1073,6 +1174,7 @@ mod cache_tests {
     fn key(grid: Grid, x: u32) -> MeshKey {
         let level = grid.finest - 3;
         MeshKey {
+            corner_levels: None,
             tile: TileKey { level, x, z: 1 },
             neighbors: [level; 4],
             revision: 0,
@@ -1171,5 +1273,106 @@ mod cache_tests {
         let warm_calls = calls.load(Ordering::Relaxed) - before;
         eprintln!("40 builds cold={cold:?} persistent={warm:?} speedup={:.2} sourcecalls={cold_calls}/{warm_calls} retainednodes={}",cold.as_secs_f64()/warm.as_secs_f64(),sampler.visual_nodes.values.len());
         assert!(warm_calls < cold_calls);
+    }
+}
+
+#[cfg(test)]
+mod river_coverage_tests {
+    use super::*;
+    use crate::{
+        generation::{river::WaterFootprint, Column, FlatTerrain, GeneratorIdentity},
+        World,
+    };
+    use std::sync::Arc;
+
+    struct NarrowChannel(bool);
+    impl Generator for NarrowChannel {
+        fn identity(&self) -> GeneratorIdentity {
+            FlatTerrain {
+                height: 32,
+                water: 0,
+                seed: 7,
+            }
+            .identity()
+        }
+        fn voxel(&self, p: CellPos) -> Option<Voxel> {
+            let c = self.column_hint(p.x, p.z)?;
+            Some(Voxel::new(
+                c.material_at(p.y),
+                self.appearance_at(p, c.material_at(p.y)),
+            ))
+        }
+        fn column_hint(&self, _x: i64, z: i64) -> Option<Column> {
+            let mut c = FlatTerrain {
+                height: 32,
+                water: 0,
+                seed: 7,
+            }
+            .column_hint(0, z)?;
+            // One occupied native row, between the coarse sample rows.
+            if self.0 && z == 65 {
+                c.ground = 28;
+                c.water = 30;
+            }
+            Some(c)
+        }
+        fn water_footprint(&self, origin: [f64; 2], edge: f64) -> Option<WaterFootprint> {
+            let extent = self.spec().extent_cells() as f64 * self.spec().grid.meters();
+            assert!(origin.iter().all(|v| *v >= 0. && *v + edge <= extent));
+            let z = 65. * self.spec().grid.meters();
+            (self.0 && origin[1] <= z && origin[1] + edge > z).then_some(WaterFootprint {
+                id: 7,
+                point: [origin[0] + edge / 2., z],
+                width_m: self.spec().grid.meters(),
+                coverage: self.spec().grid.meters() / edge,
+            })
+        }
+    }
+    #[test]
+    fn narrow_channel_between_dry_nodes_survives_without_raising_geometry() {
+        let river = Sampler::new(Arc::new(World::new(NarrowChannel(true))));
+        let dry = Sampler::new(Arc::new(World::new(NarrowChannel(false))));
+        for step in [4, 16, 64] {
+            let a = river
+                .visual_node(64, 64, step, &mut VisualNodes::default())
+                .unwrap();
+            let b = dry
+                .visual_node(64, 64, step, &mut VisualNodes::default())
+                .unwrap();
+            assert_eq!(a.height, b.height);
+            assert!(!a.water);
+            assert_ne!(a.color, b.color, "channel disappeared at spacing {step}");
+            let water = painting::base_color(
+                Voxel::new(
+                    MaterialId::WATER,
+                    river
+                        .world
+                        .baseline()
+                        .appearance_at(CellPos::new(64, 31, 64), MaterialId::WATER),
+                ),
+                river.world.materials(),
+            );
+            assert_ne!(a.color.to_le_bytes()[..3], water);
+        }
+        for z in [64, 65, 66] {
+            let a = river
+                .visual_node(64, z, 1, &mut VisualNodes::default())
+                .unwrap();
+            assert_eq!(a.water, z == 65);
+            assert_eq!(a.height, if z == 65 { 30. } else { 32. });
+        }
+        let untouched = river
+            .visual_node(64, 96, 4, &mut VisualNodes::default())
+            .unwrap();
+        let baseline = dry
+            .visual_node(64, 96, 4, &mut VisualNodes::default())
+            .unwrap();
+        assert_eq!(untouched.color, baseline.color);
+        // Boundary support must remain within the source's domain.
+        for n in [0, river.grid().extent] {
+            river
+                .visual_node(n, n, 64, &mut VisualNodes::default())
+                .unwrap();
+        }
     }
 }

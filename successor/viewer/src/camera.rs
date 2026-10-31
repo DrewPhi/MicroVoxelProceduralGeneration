@@ -45,6 +45,7 @@ impl Camera {
         }
         let mut selected = None;
         let world_scale = world.baseline().world_scale() as f64;
+        let atlas = world.baseline().is_atlas();
         let extent = world.spec().extent_m as f64;
         let margin = (64. / world_scale).min(extent * 0.1);
         let range = (extent - 2. * margin).max(grid.meters());
@@ -54,8 +55,10 @@ impl Camera {
             let h = microvoxel::painting::hash(nonce.wrapping_add(attempt));
             let (x, z) = if nonce == 0 && attempt == 0 {
                 (
-                    grid.cells(9316. / world_scale).unwrap(),
-                    grid.cells(5037. / world_scale).unwrap(),
+                    grid.cells((if atlas { 975_761.75 } else { 9316. }) / world_scale)
+                        .unwrap(),
+                    grid.cells((if atlas { 475_600.52 } else { 5037. }) / world_scale)
+                        .unwrap(),
                 )
             } else {
                 (
@@ -95,6 +98,11 @@ impl Camera {
                     camera.yaw = heading;
                 }
             }
+        }
+        if atlas && nonce == 0 {
+            // Reproducible player-scale valley route, facing the river and ridge.
+            camera.yaw = 137f64.to_radians();
+            camera.pitch = 3f64.to_radians();
         }
         camera
     }

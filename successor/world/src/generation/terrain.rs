@@ -10,8 +10,8 @@ use crate::materials::MaterialId;
 use std::{cmp::Reverse, collections::BinaryHeap};
 pub(super) const REGION_SIZE: f64 = 10000.0;
 pub(super) const REGIONAL_SPACING: f64 = 16.0;
-const HEIGHT_SCALE: f64 = 1024.0;
 const EROSION_STEPS: usize = 24;
+#[cfg(test)]
 const CELL_AREA: f64 = REGIONAL_SPACING * REGIONAL_SPACING;
 const RIVER_THRESHOLD: f64 = 100_000.0; // Rainfall-weighted catchment area, m².
 const BIN_SIZE: f64 = 64.0;
@@ -26,10 +26,13 @@ const NEIGHBORS: [(isize, isize); 8] = [
     (1, 1),
 ];
 
-// Regional fields are dense, but contain only 626 × 626 samples for 100 km².
+// Regional fields are dense but bounded; native voxels are queried lazily.
 #[derive(Clone)]
 pub(crate) struct Region {
     side: usize,
+    spacing: f64,
+    extent: f64,
+    ceiling: f64,
     heights: Vec<f64>,
     gradients: Vec<[f32; 2]>,
     bedrock: Vec<f64>,
@@ -76,17 +79,23 @@ pub(crate) struct Surface {
 // ---- Regional geology and hydrology. No fluid simulation per microvoxel. ----
 
 impl Region {
+    fn cell_area(&self) -> f64 {
+        self.spacing * self.spacing
+    }
+    pub(super) fn extent_m(&self) -> f64 {
+        self.extent
+    }
     pub(super) fn water_footprint(&self, origin: [f64; 2], edge: f64) -> Option<WaterFootprint> {
         if !edge.is_finite()
             || edge <= 0.
             || edge > 128.
             || origin
                 .iter()
-                .any(|v| !v.is_finite() || *v < 0. || *v >= REGION_SIZE)
+                .any(|v| !v.is_finite() || *v < 0. || *v >= self.extent)
         {
             return None;
         }
-        let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+        let side = (self.extent / BIN_SIZE).ceil() as usize + 1;
         if self.bins.is_empty() {
             return None;
         }
@@ -135,7 +144,7 @@ impl Region {
             }
         };
         if edge <= 128. && !self.bins.is_empty() {
-            let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+            let side = (self.extent / BIN_SIZE).ceil() as usize + 1;
             let lo = origin.map(|v| (v / BIN_SIZE).floor().max(0.) as usize);
             let hi =
                 origin.map(|v| ((v + edge) / BIN_SIZE).floor().min((side - 1) as f64) as usize);
@@ -175,9 +184,9 @@ impl Region {
                 let (lo_z, hi_z) = (z.saturating_sub(1), (z + 1).min(self.side - 1));
                 [
                     ((self.heights[z * self.side + hi_x] - self.heights[z * self.side + lo_x])
-                        / ((hi_x - lo_x) as f64 * REGIONAL_SPACING)) as f32,
+                        / ((hi_x - lo_x) as f64 * self.spacing)) as f32,
                     ((self.heights[hi_z * self.side + x] - self.heights[lo_z * self.side + x])
-                        / ((hi_z - lo_z) as f64 * REGIONAL_SPACING)) as f32,
+                        / ((hi_z - lo_z) as f64 * self.spacing)) as f32,
                 ]
             })
             .collect();
@@ -189,6 +198,9 @@ impl Region {
         let bedrock = heights.iter().zip(&soil).map(|(h, s)| h - s).collect();
         let mut region = Self {
             side,
+            spacing: REGIONAL_SPACING,
+            extent: REGION_SIZE,
+            ceiling: 2048.,
             heights,
             gradients: Vec::new(),
             bedrock,
@@ -210,21 +222,37 @@ impl Region {
         region
     }
 
-    pub(crate) fn generate(seed: u64, config: TerrainConfig) -> Self {
-        let side = (REGION_SIZE / REGIONAL_SPACING) as usize + 1;
+    pub(crate) fn generate(
+        seed: u64,
+        config: TerrainConfig,
+        extent_m: u32,
+        ceiling_m: u32,
+    ) -> Self {
+        let extent = extent_m as f64;
+        // Keep dense climate/drainage arrays bounded to at most 783² samples.
+        // Large exports use coarse regional fields, not full native voxels.
+        let spacing = 16. * 2f64.powf((extent / (16. * 782.)).max(1.).log2().ceil());
+        let side = (extent / spacing).ceil() as usize + 1;
         let land: Vec<_> = (0..side * side)
             .map(|i| {
                 landforms::landscape(
-                    (i % side) as f64 * REGIONAL_SPACING,
-                    (i / side) as f64 * REGIONAL_SPACING,
+                    (i % side) as f64 * spacing,
+                    (i / side) as f64 * spacing,
                     seed,
                 )
             })
             .collect();
-        let heights: Vec<_> = land.iter().map(|p| p.height).collect();
+        let heights: Vec<_> = land
+            .iter()
+            .map(|p| p.height.min(ceiling_m as f64 - 32.))
+            .collect();
         let mut region = Self::from_heights(side, heights);
+        region.spacing = spacing;
+        region.extent = extent;
+        region.ceiling = ceiling_m as f64;
+        region.update_gradients();
         region.config = config;
-        region.climate = climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+        region.climate = climate::compute(&region.heights, side, spacing, config, seed);
         for (i, land) in land.into_iter().enumerate() {
             let (x, z) = region.position(i);
             let c = region.climate[i];
@@ -239,8 +267,7 @@ impl Region {
         for step in 0..EROSION_STEPS {
             if step % 8 == 0 {
                 if step > 0 {
-                    region.climate =
-                        climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+                    region.climate = climate::compute(&region.heights, side, spacing, config, seed);
                 }
                 region.assign_runoff();
             }
@@ -248,7 +275,9 @@ impl Region {
             region.transport_sediment(&drainage);
             region.relax_slopes();
         }
-        region.climate = climate::compute(&region.heights, side, REGIONAL_SPACING, config, seed);
+        let drainage = region.drainage_tree(seed);
+        region.carve_valleys(&drainage);
+        region.climate = climate::compute(&region.heights, side, spacing, config, seed);
         region.assign_runoff();
         let drainage = region.drainage_tree(seed);
         region.preserve_lakes(&drainage);
@@ -263,7 +292,7 @@ impl Region {
             &region.flow,
             &region.lakes,
             side,
-            REGIONAL_SPACING,
+            spacing,
         );
         region
     }
@@ -341,8 +370,8 @@ impl Region {
 
     fn position(&self, i: usize) -> (f64, f64) {
         (
-            (i % self.side) as f64 * REGIONAL_SPACING,
-            (i / self.side) as f64 * REGIONAL_SPACING,
+            (i % self.side) as f64 * self.spacing,
+            (i / self.side) as f64 * self.spacing,
         )
     }
 
@@ -360,10 +389,7 @@ impl Region {
             } else {
                 1.0
             };
-            Some((
-                nz as usize * self.side + nx as usize,
-                length * REGIONAL_SPACING,
-            ))
+            Some((nz as usize * self.side + nx as usize, length * self.spacing))
         })
     }
 
@@ -376,7 +402,7 @@ impl Region {
     fn drainage_tree(&self, seed: u64) -> Drainage {
         let count = self.heights.len();
         let mut receiver: Vec<usize> = (0..count).collect();
-        let mut distance = vec![REGIONAL_SPACING; count];
+        let mut distance = vec![self.spacing; count];
         let mut visited = vec![false; count];
         let mut spill = self.heights.clone();
         let mut rank = vec![0; count];
@@ -426,7 +452,11 @@ impl Region {
                 }
             }
         }
-        let mut area: Vec<f64> = self.rainfall.iter().map(|rain| CELL_AREA * rain).collect();
+        let mut area: Vec<f64> = self
+            .rainfall
+            .iter()
+            .map(|rain| self.cell_area() * rain)
+            .collect();
         for &i in order.iter().rev() {
             if receiver[i] != i {
                 area[receiver[i]] += area[i];
@@ -456,27 +486,54 @@ impl Region {
             let capacity = if submerged {
                 0.0
             } else {
-                CELL_AREA * 0.70 * (drainage.area[i] / CELL_AREA).sqrt() * slope.sqrt()
+                self.cell_area()
+                    * 0.70
+                    * (drainage.area[i] / self.cell_area()).sqrt()
+                    * slope.sqrt()
             };
             if load[i] > capacity {
                 let fraction = if submerged { 0.95 } else { 0.45 };
-                let deposit = ((load[i] - capacity) * fraction).min(4.0 * CELL_AREA);
-                self.soil[i] += deposit / CELL_AREA;
-                self.heights[i] += deposit / CELL_AREA;
+                let deposit = ((load[i] - capacity) * fraction).min(4.0 * self.cell_area());
+                self.soil[i] += deposit / self.cell_area();
+                self.heights[i] += deposit / self.cell_area();
                 load[i] -= deposit;
                 self.budget.deposited += deposit;
             } else {
-                let demand = ((capacity - load[i]) * 0.45 / CELL_AREA).min(4.0);
+                let demand = ((capacity - load[i]) * 0.45 / self.cell_area()).min(4.0);
                 let loose = demand.min(self.soil[i]);
                 let rock = ((demand - loose) * self.resistance[i]).min(self.bedrock[i].max(0.0));
                 self.soil[i] -= loose;
                 self.bedrock[i] -= rock;
                 let removed = loose + rock;
                 self.heights[i] -= removed;
-                load[i] += removed * CELL_AREA;
-                self.budget.eroded += removed * CELL_AREA;
+                load[i] += removed * self.cell_area();
+                self.budget.eroded += removed * self.cell_area();
             }
             load[next] += load[i];
+        }
+    }
+
+    /// Implicit stream-power-inspired incision. Downstream-first integration
+    /// connects tributary valleys without unstable explicit erosion time steps.
+    /// Removed material is accounted as exported sediment, not vanished soil.
+    fn carve_valleys(&mut self, drainage: &Drainage) {
+        let area = self.spacing * self.spacing;
+        for &i in &drainage.order {
+            let next = drainage.receiver[i];
+            if next == i || drainage.area[i] < 250_000. {
+                continue;
+            }
+            let relief = (self.heights[i] - self.heights[next]).max(0.);
+            let strength = (drainage.area[i] / 1_000_000.).powf(0.35) * 240. / drainage.distance[i];
+            let cut = (relief * strength / (1. + strength))
+                .min(100.)
+                .min(self.heights[i] * 0.18);
+            let loose = cut.min(self.soil[i]);
+            self.soil[i] -= loose;
+            self.bedrock[i] -= cut - loose;
+            self.heights[i] -= cut;
+            self.budget.eroded += cut * area;
+            self.budget.exported += cut * area;
         }
     }
 
@@ -535,8 +592,8 @@ impl Region {
             let mut supply = 0.;
             let mut evaporation = 0.;
             for &i in &cells {
-                supply += self.climate[i].rain as f64 * 0.001 * CELL_AREA;
-                evaporation += self.climate[i].pet as f64 * 0.001 * CELL_AREA;
+                supply += self.climate[i].rain as f64 * 0.001 * self.cell_area();
+                evaporation += self.climate[i].pet as f64 * 0.001 * self.cell_area();
                 for (j, _) in self.neighbors(i) {
                     if visited[j] != basin && drainage.receiver[j] == i {
                         supply += drainage.area[j];
@@ -569,7 +626,7 @@ impl Region {
                 next != i && surface[next] <= surface[i] + 4.
             })
             .collect();
-        let mut discharge: Vec<_> = self.rainfall.iter().map(|r| r * CELL_AREA).collect();
+        let mut discharge: Vec<_> = self.rainfall.iter().map(|r| r * self.cell_area()).collect();
         for &i in drainage.order.iter().rev() {
             if active[i] {
                 discharge[drainage.receiver[i]] += discharge[i];
@@ -732,7 +789,7 @@ impl Region {
             .collect::<std::collections::BTreeSet<_>>()
             .len();
         let _ = seed; // Topology already includes deterministic seeded routing.
-        let side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+        let side = (self.extent / BIN_SIZE).ceil() as usize + 1;
         self.bins = vec![Vec::new(); side * side];
         for (index, channel) in self.channels.iter().enumerate() {
             let radius = channel.half_width + 16.0 + channel.bend.abs();
@@ -766,8 +823,8 @@ impl Region {
     }
 
     fn interpolation(&self, x: f64, z: f64) -> ([usize; 4], [f64; 4]) {
-        let gx = (x / REGIONAL_SPACING).clamp(0.0, (self.side - 1) as f64);
-        let gz = (z / REGIONAL_SPACING).clamp(0.0, (self.side - 1) as f64);
+        let gx = (x / self.spacing).clamp(0.0, (self.side - 1) as f64);
+        let gz = (z / self.spacing).clamp(0.0, (self.side - 1) as f64);
         let ix = (gx.floor() as usize).min(self.side - 2);
         let iz = (gz.floor() as usize).min(self.side - 2);
         let tx = gx - ix as f64;
@@ -854,10 +911,10 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
     let mut height = base + detail;
     let mut water: f64 = 0.0;
     let mut bank = 0.0_f64;
-    let bins_side = (REGION_SIZE / BIN_SIZE).ceil() as usize + 1;
+    let bins_side = (region.extent / BIN_SIZE).ceil() as usize + 1;
     if !region.bins.is_empty() {
-        let bx = (x / BIN_SIZE) as usize;
-        let bz = (z / BIN_SIZE) as usize;
+        let bx = ((x / BIN_SIZE).max(0.) as usize).min(bins_side - 1);
+        let bz = ((z / BIN_SIZE).max(0.) as usize).min(bins_side - 1);
         let mut closest = None;
         let mut best = f64::INFINITY;
         for &index in &region.bins[bz * bins_side + bx] {
@@ -902,7 +959,7 @@ pub(crate) fn terrain_surface(region: &Region, x: f64, z: f64, spacing: f64, see
             water = water.max(lake);
         }
     }
-    height = height.clamp(0.0, HEIGHT_SCALE);
+    height = height.clamp(0.0, region.ceiling - 24.);
     if water <= height + 0.02 {
         water = 0.0;
     }
@@ -1027,6 +1084,23 @@ mod tests {
         region.preserve_lakes(&drainage);
         for i in [6, 7, 11, 12] {
             assert!((region.lakes[i] - 10.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn valley_incision_connects_downhill_and_accounts_for_exported_mass() {
+        let heights = (0..81).map(|i| 20. + (i / 9) as f64 * 15.).collect();
+        let mut region = Region::from_heights(9, heights);
+        let mut drainage = region.drainage_tree(42);
+        drainage.area.fill(10_000_000.);
+        let before: f64 = region.heights.iter().sum::<f64>() * region.cell_area();
+        region.carve_valleys(&drainage);
+        let after: f64 = region.heights.iter().sum::<f64>() * region.cell_area();
+        assert!(region.budget.exported > 0.);
+        assert!((before - after - region.budget.exported).abs() < 1e-6);
+        for (i, &next) in drainage.receiver.iter().enumerate() {
+            assert!(region.heights[i] >= region.heights[next]);
+            assert!(region.soil[i] >= 0. && region.bedrock[i] >= 0.);
         }
     }
 

@@ -221,6 +221,7 @@ mod tests {
     fn solid_prism_hides_a_distant_box_but_preserves_its_silhouette() {
         use microvoxel::render::lod::TileKey;
         let key = |x| MeshKey {
+            corner_levels: None,
             tile: TileKey { level: 1, x, z: 0 },
             neighbors: [1; 4],
             revision: 0,

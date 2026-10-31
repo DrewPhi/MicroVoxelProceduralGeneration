@@ -35,7 +35,7 @@ impl ClimatePreset {
                 sea_temperature: 14.,
                 season_amplitude: 7.,
                 moisture: 0.8,
-                storm_transport: 300_000.,
+                storm_transport: 600_000.,
             },
             Self::Continental => ClimateParameters {
                 sea_temperature: 12.,
@@ -277,7 +277,14 @@ impl EnvironmentSample {
             let t = ((v - a) / (b - a)).clamp(0., 1.);
             t * t * (3. - 2. * t)
         };
-        let snow = 1. - ramp(-1., 6., self.warm_season_c);
+        let permanent_snow = 1. - ramp(-1., 6., self.warm_season_c);
+        // Climatological snow persistence on cold, moist uplands. This is a
+        // static seasonal-cover estimate, not live snowfall or a snowpack solver.
+        let seasonal_snow = (1. - ramp(0., 5., self.temperature_c))
+            * (1. - ramp(-2., 2., self.cold_season_c))
+            * ramp(0.12, 0.38, self.moisture)
+            * 0.8;
+        let snow = permanent_snow.max(seasonal_snow);
         let exposed = (1. - ramp(0.08, 0.8, self.soil_depth_m)).max(ramp(0.65, 1.6, self.slope));
         let dry = 1. - ramp(0.10, 0.26, self.moisture);
         let wet = ramp(0.72, 0.90, self.ground_wetness) * (1. - ramp(0.04, 0.14, self.slope));

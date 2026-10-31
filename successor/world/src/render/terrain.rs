@@ -1173,6 +1173,7 @@ mod tests {
         let world = Arc::new(World::new(Cliffs));
         let mut s = Sampler::new(world);
         let coarse = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 12,
                 x: 1,
@@ -1184,6 +1185,7 @@ mod tests {
         let keys = [
             coarse,
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 1,
@@ -1193,6 +1195,7 @@ mod tests {
                 revision: 0,
             },
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 1,
@@ -1202,6 +1205,7 @@ mod tests {
                 revision: 0,
             },
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 2,
@@ -1211,6 +1215,7 @@ mod tests {
                 revision: 0,
             },
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 3,
@@ -1290,6 +1295,7 @@ mod tests {
         let mut sampler = Sampler::new(world);
         for level in [13, 12, 10, 8, 6] {
             let key = MeshKey {
+                corner_levels: None,
                 tile: TileKey { level, x: 1, z: 1 },
                 neighbors: [level; 4],
                 revision: 0,
@@ -1395,6 +1401,7 @@ mod tests {
         for water in [64, 81] {
             let mut s = Sampler::new(Arc::new(World::new(CoarseOnly { water })));
             let key = MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 8,
                     x: 1,
@@ -1469,6 +1476,7 @@ mod tests {
         let before = world.voxel_at(CellPos::new(71, 51, 77));
         let mut s = Sampler::new(Arc::clone(&world));
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 12,
                 x: 1,

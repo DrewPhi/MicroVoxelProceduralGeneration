@@ -107,6 +107,7 @@ fn render_patch(
     for z in (z0..z0 + 512).step_by(edge as usize) {
         for x in (x0..x0 + 512).step_by(edge as usize) {
             let key = MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level,
                     x: (x / edge) as u32,

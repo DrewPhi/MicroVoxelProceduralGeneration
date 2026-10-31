@@ -1,0 +1,181 @@
+{
+  "seed": 42,
+  "world": "atlas",
+  "world_scale": 10,
+  "generator_version": 4,
+  "valley_cache_version": 8,
+  "valley_cache_file": "output/atlas-refinement/valley-v8-c74bcf538efbc321.bin",
+  "voxel_m": 0.0625,
+  "size": [
+    1280,
+    720
+  ],
+  "frames": 3,
+  "camera_ground": true,
+  "adapter": "llvmpipe Vulkan CPU software rendering",
+  "atlas_data_mib": 194.11,
+  "capture_readiness": "settled stitched cover;10 actual native resident samples; no continuous native disk guarantee",
+  "scenes": [
+    {
+      "name": "first",
+      "game_xz": [
+        97576.175,
+        47560.052
+      ],
+      "source_xz": [
+        975761.75,
+        475600.52
+      ],
+      "yaw_deg": 137,
+      "pitch_deg": 3,
+      "view": "first",
+      "quality": 95,
+      "requested_tiles": 4096,
+      "memory_mib": 384,
+      "requested_native_radius_m": 32,
+      "native_samples_ready": 10,
+      "native_samples_total": 10,
+      "jobs_at_capture": 0,
+      "visible_p95_px": 4.15,
+      "requested_error_px": 1.04,
+      "resident_cache_mib": 179.9,
+      "planning_radius_m": 31.27,
+      "software_gpu_ms_per_frame": 451.8,
+      "cover_ready_seconds": 46.3,
+      "active_tiles": 3066,
+      "effective_tile_budget": 3072,
+      "memory_pressure": false,
+      "ground_eye_m": [
+        97576.1875,
+        255.0625,
+        47560.0625
+      ]
+    },
+    {
+      "name": "rear",
+      "game_xz": [
+        97576.175,
+        47560.052
+      ],
+      "source_xz": [
+        975761.75,
+        475600.52
+      ],
+      "yaw_deg": 137,
+      "pitch_deg": 3,
+      "view": "rear",
+      "quality": 95,
+      "requested_tiles": 4096,
+      "memory_mib": 384,
+      "requested_native_radius_m": 32,
+      "native_samples_ready": 10,
+      "native_samples_total": 10,
+      "jobs_at_capture": 0,
+      "visible_p95_px": 4.29,
+      "requested_error_px": 1.04,
+      "resident_cache_mib": 173.3,
+      "planning_radius_m": 31.27,
+      "software_gpu_ms_per_frame": 421.57,
+      "cover_ready_seconds": 42.92,
+      "active_tiles": 2994,
+      "effective_tile_budget": 3072,
+      "memory_pressure": false,
+      "ground_eye_m": [
+        97578.75,
+        254.875,
+        47557.6875
+      ]
+    },
+    {
+      "name": "downstream",
+      "game_xz": [
+        97679.577,
+        47428.146
+      ],
+      "source_xz": [
+        976795.77,
+        474281.46
+      ],
+      "yaw_deg": 128,
+      "pitch_deg": 3,
+      "view": "first",
+      "quality": 95,
+      "requested_tiles": 4096,
+      "memory_mib": 384,
+      "requested_native_radius_m": 32,
+      "native_samples_ready": 10,
+      "native_samples_total": 10,
+      "jobs_at_capture": 0,
+      "visible_p95_px": 4.06,
+      "requested_error_px": 1.04,
+      "resident_cache_mib": 186.5,
+      "planning_radius_m": 31.27,
+      "software_gpu_ms_per_frame": 424.12,
+      "cover_ready_seconds": 47.65,
+      "active_tiles": 3046,
+      "effective_tile_budget": 3072,
+      "memory_pressure": false,
+      "ground_eye_m": [
+        97679.5625,
+        242.1875,
+        47428.125
+      ]
+    },
+    {
+      "name": "first-highbudget",
+      "game_xz": [
+        97576.175,
+        47560.052
+      ],
+      "source_xz": [
+        975761.75,
+        475600.52
+      ],
+      "yaw_deg": 137,
+      "pitch_deg": 3,
+      "view": "first",
+      "quality": 100,
+      "requested_tiles": 8192,
+      "memory_mib": 768,
+      "requested_native_radius_m": 32,
+      "native_samples_ready": 10,
+      "native_samples_total": 10,
+      "jobs_at_capture": 0,
+      "visible_p95_px": 3.92,
+      "requested_error_px": 1.0,
+      "resident_cache_mib": 203.0,
+      "planning_radius_m": 32.0,
+      "software_gpu_ms_per_frame": 370.54,
+      "cover_ready_seconds": 153.51,
+      "active_tiles": 3431,
+      "effective_tile_budget": 3456,
+      "memory_pressure": true,
+      "ground_eye_m": [
+        97576.1875,
+        255.0625,
+        47560.0625
+      ]
+    }
+  ],
+  "overview": {
+    "file": "overview-2km.png",
+    "game_origin_xz_m": [
+      96000,
+      46500
+    ],
+    "game_center_xz_m": [
+      97000,
+      47500
+    ],
+    "edge_m": 2000,
+    "area_km2": 4,
+    "pixels": [
+      4096,
+      3072
+    ],
+    "source_display_cell_m": 32,
+    "mesh_tiles": 256,
+    "mesh_data_mib": 20.09
+  },
+  "validation": "all five renders inspected; all four ground captures10/10 actual resident native samples and jobs0; release+launcher builds passed; full visual acceptance incomplete"
+}

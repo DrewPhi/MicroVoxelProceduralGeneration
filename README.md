@@ -3,15 +3,20 @@
 ![A voxel mountain valley, grasslands and lake, captured at 1440p in the native mesh renderer](assets/cover.png)
 
 An experimental Rust foundation for an Earth-like voxel world, built without a
-game engine. Explore a procedurally generated **10 km × 10 km** landscape made of
-**6.25 cm voxels**, with diverse landforms, climate-driven erosion, drainage, sediment, biome
-suitability and exact native voxels and coherent distant terrain LOD.
+game engine. The current default explores a geographic terrain atlas with
+**6.25 cm native voxels**, connected drainage, climate-informed materials and
+coherent distant terrain LOD. The launcher starts in a **2 km × 2 km valley**
+with a cached local erosion and deposition prototype.
 
-Slope-guided ravines, coherent material patches and sparse caves/rock arches add
-structure across scales. World resolution is configurable; 6.25 cm remains the
-default, while finer interactive resolutions are experimental. **Esc → World**
-also offers independent landscape compression: World Scale `10` fits the same
-terrain into 1 km square while keeping voxel centimeters and player size fixed.
+Voxel size and landscape compression are independent settings in **Esc → World**.
+World Scale `10` compresses source terrain distances tenfold while keeping voxel
+centimeters and player size fixed. The full atlas surrounds the inspection valley;
+the new erosion refinement is currently bounded to that valley. The earlier
+procedural terrain generator and real-data import remain available.
+
+[Latest valley screenshots and capture settings](assets/valley/README.md) show
+current terrain honestly: curved rivers and local detail have improved, while
+river terraces, distant facets and broad material regions still need work.
 
 The native **wgpu + winit** engine uses cached terrain patches, shared GPU buffers
 and local LOD transitions. Near the player it merges exposed faces while preserving each

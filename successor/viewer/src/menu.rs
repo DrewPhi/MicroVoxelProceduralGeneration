@@ -400,7 +400,15 @@ impl Menu {
         );
         for (procedural, x, label) in [
             (false, 28., "REAL WORLDS"),
-            (true, 388., "PROCEDURAL WORLD"),
+            (
+                true,
+                388.,
+                if self.worlds.atlas {
+                    "ATLAS WORLD"
+                } else {
+                    "PROCEDURAL WORLD"
+                },
+            ),
         ] {
             p.rect(
                 x,

@@ -150,7 +150,37 @@ impl Layout {
                 point[axis] = next;
             }
         }
-        false
+        self.diagonal_points(parent)
+            .into_iter()
+            .any(|[x, z]| self.at(x, z).is_some_and(|n| n.level > parent.level + 1))
+    }
+    fn diagonal_points(&self, key: TileKey) -> [[i64; 2]; 4] {
+        let [x, z] = key.origin_in(self.grid);
+        let edge = key.edge_in(self.grid);
+        [
+            [x - 1, z - 1],
+            [x - 1, z + edge],
+            [x + edge, z + edge],
+            [x + edge, z - 1],
+        ]
+    }
+    fn corners(&self, key: TileKey) -> [[i64; 2]; 4] {
+        let [x, z] = key.origin_in(self.grid);
+        let e = key.edge_in(self.grid);
+        [[x, z], [x, z + e], [x + e, z + e], [x + e, z]]
+    }
+    fn corner_level_at(&self, [cx, cz]: [i64; 2], fallback: u8) -> u8 {
+        let (cx, cz) = (cx.min(self.grid.extent), cz.min(self.grid.extent));
+        [[cx - 1, cz - 1], [cx - 1, cz], [cx, cz - 1], [cx, cz]]
+            .into_iter()
+            .filter_map(|[x, z]| self.at(x, z))
+            .map(|k| k.level)
+            .min()
+            .unwrap_or(fallback)
+    }
+    pub fn corner_levels(&self, key: TileKey) -> [u8; 4] {
+        self.corners(key)
+            .map(|p| self.corner_level_at(p, key.level))
     }
     pub fn split(&mut self, key: TileKey) {
         self.tiles.remove(&key);
@@ -165,7 +195,11 @@ impl Layout {
         loop {
             let mut split = BTreeSet::new();
             for &key in &self.tiles {
-                for p in self.side_midpoints(key) {
+                for p in self
+                    .side_midpoints(key)
+                    .into_iter()
+                    .chain(self.diagonal_points(key))
+                {
                     if let Some(n) = self.at(p[0], p[1]) {
                         if n.level + 1 < key.level {
                             split.insert(n);
@@ -394,6 +428,13 @@ pub fn select_adaptive(
                     }
                 }
             }
+            for [nx, nz] in layout.diagonal_points(k) {
+                if let Some(neighbor) = layout.at(nx, nz) {
+                    if neighbor.level < k.level && !closure.contains(&neighbor) {
+                        pending.push(neighbor);
+                    }
+                }
+            }
         }
         let cost: usize = closure
             .iter()
@@ -556,16 +597,29 @@ pub fn next_patch_budget(
 pub struct MeshKey {
     pub tile: TileKey,
     pub neighbors: [u8; 4],
+    /// Coarsest incident leaf at (-X,-Z), (-X,+Z), (+X,+Z), (+X,-Z).
+    /// Coarse layout keys include these. Native cells do not use corner filtering.
+    pub corner_levels: Option<[u8; 4]>,
     pub revision: u64,
 }
 impl Layout {
     pub fn mesh_keys(&self, revision: u64) -> BTreeMap<TileKey, MeshKey> {
+        let mut corners = BTreeMap::new();
         self.tiles
             .iter()
             .map(|&tile| {
                 (
                     tile,
                     MeshKey {
+                        corner_levels: if tile.level == self.grid.finest {
+                            None
+                        } else {
+                            Some(self.corners(tile).map(|point| {
+                                *corners
+                                    .entry(point)
+                                    .or_insert_with(|| self.corner_level_at(point, tile.level))
+                            }))
+                        },
                         tile,
                         neighbors: self.neighbors(tile),
                         revision,
@@ -579,6 +633,63 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_mesh_identity_omits_unused_corner_filters() {
+        let grid = Grid::default();
+        let mut layout = Layout::root_in(grid);
+        let root = *layout.tiles.iter().next().unwrap();
+        let mut tile = root;
+        while tile.level < grid.finest {
+            layout.split(tile);
+            tile = tile.children().next().unwrap();
+        }
+        let keys = layout.mesh_keys(7);
+        assert_eq!(keys[&tile].corner_levels, None);
+        assert!(keys
+            .values()
+            .filter(|k| k.tile.level < grid.finest)
+            .all(|k| k.corner_levels.is_some()));
+    }
+    #[test]
+    fn balance_and_merges_include_diagonal_neighbors() {
+        let grid = Grid::default();
+        let level = grid.finest - 3;
+        let base: Vec<_> = (0..4)
+            .map(|i| TileKey {
+                level,
+                x: i % 2,
+                z: i / 2,
+            })
+            .collect();
+        let desired = Layout {
+            grid,
+            tiles: base.iter().copied().collect(),
+        };
+        let mut active = desired.clone();
+        for &tile in &base[1..] {
+            active.split(tile);
+        }
+        active.split(base[3].children().next().unwrap());
+        assert!(active
+            .tiles
+            .iter()
+            .any(|&k| active.corner_levels(k).into_iter().any(|l| k.level > l + 1)));
+        active.balance();
+        for _ in 0..30 {
+            for &tile in &active.tiles {
+                assert!(active
+                    .corner_levels(tile)
+                    .into_iter()
+                    .all(|l| tile.level <= l + 1));
+            }
+            if active == desired {
+                return;
+            }
+            active = next_patch_budget(&active, &desired, [0., 10., 0.], 128).unwrap();
+        }
+        panic!("corner-balanced coarsening did not converge");
+    }
+
     fn grid(extent: i64) -> Grid {
         let root = (extent.max(SIDE) as u64).next_power_of_two() as i64;
         Grid {

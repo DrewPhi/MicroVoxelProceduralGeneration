@@ -18,6 +18,7 @@ mod raycaster;
 mod runtime;
 mod settings;
 mod streaming;
+mod streaming_policy;
 mod visibility;
 #[cfg(test)]
 mod world_switch_test;
@@ -46,9 +47,11 @@ use winit::{
 struct Options {
     earth: Option<PathBuf>,
     procedural: bool,
+    atlas: bool,
     procedural_options: bool,
     grid: microvoxel::GridScale,
     world_scale: u32,
+    extent_m: u32,
     terrain_quality: Option<PathBuf>,
     refinement: microvoxel::generation::Refinement,
     character_preview: Option<PathBuf>,
@@ -59,6 +62,7 @@ struct Options {
     debug_maps: Option<PathBuf>,
     map: Option<DebugLayer>,
     isometric: bool,
+    overview_area_km2: Option<f64>,
     view: player_view::ViewMode,
     fly: bool,
     player_test: bool,
@@ -86,9 +90,11 @@ impl Options {
         Self {
             earth: None,
             procedural: false,
+            atlas: false,
             procedural_options: false,
             grid: Default::default(),
             world_scale: 1,
+            extent_m: 10_000,
             terrain_quality: None,
             refinement: microvoxel::generation::Refinement::Geomorphic,
             character_preview: None,
@@ -99,6 +105,7 @@ impl Options {
             debug_maps: None,
             map: None,
             isometric: false,
+            overview_area_km2: None,
             view: player_view::ViewMode::First,
             fly: false,
             player_test: false,
@@ -129,17 +136,25 @@ impl Options {
             match arg.as_str() {
                 "--brick-study" => options.brick_study = true,
                 "--world" => match args.next().as_deref() {
+                    Some("atlas") => {
+                        options.atlas = true;
+                        options.procedural = false;
+                        options.earth = None;
+                    }
                     Some("procedural") => {
+                        options.atlas = false;
                         options.procedural = true;
                         options.earth = None;
                     }
                     Some("earth") => {
+                        options.atlas = false;
                         options.procedural = false;
                         options.earth = Some("output/earth/volcan.mvearth".into());
                     }
-                    _ => return Err("--world needs earth or procedural".into()),
+                    _ => return Err("--world needs atlas, earth or procedural".into()),
                 },
                 "--earth" => {
+                    options.atlas = false;
                     options.earth = Some(
                         args.next()
                             .ok_or("--earth needs an imported .mvearth path")?
@@ -191,6 +206,13 @@ impl Options {
                     options.display.transitions = false;
                     options.display_explicit = true;
                 }
+                "--extent-km" => {
+                    let km: u32 = args.next().ok_or("--extent-km needs 1..100")?.parse()?;
+                    if !(1..=100).contains(&km) {
+                        return Err("--extent-km must be 1..100".into());
+                    }
+                    options.extent_m = km * 1000;
+                }
                 "--seed" => options.seed = args.next().ok_or("--seed needs an integer")?.parse()?,
                 "--climate" => {
                     options.climate = args.next().ok_or("--climate needs a preset")?.parse()?
@@ -209,6 +231,16 @@ impl Options {
                     options.map = Some(args.next().ok_or("--map needs a layer name")?.parse()?)
                 }
                 "--isometric" => options.isometric = true,
+                "--overview-area-km2" => {
+                    let area: f64 = args
+                        .next()
+                        .ok_or("--overview-area-km2 needs a positive area")?
+                        .parse()?;
+                    if !area.is_finite() || area <= 0. {
+                        return Err("overview area must be finite and positive".into());
+                    }
+                    options.overview_area_km2 = Some(area);
+                }
                 "--view" => {
                     options.view = match args
                         .next()
@@ -295,9 +327,9 @@ impl Options {
                 "--benchmark" => options.benchmark = true,
                 "--fly-test" => options.fly_test = true,
                 "--help" | "-h" => {
-                    println!("Terrain source: --world earth|procedural; --earth PATH loads another .mvearth import. A local Volcan crop is the default for ordinary launches; diagnostics and procedural generation flags retain the procedural baseline.");
-                    println!("World: --world-scale 1..100 (terrain meters per game meter; 10 = 1:10 compression)\nWorld: --voxel-size 1/16 (meters; interactive 4..128 cells/m) --terrain-method noise|geomorphic\nDiagnostics: --terrain-quality DIR (multi-seed masks, terrain and scale metrics)\nDiagnostics: --brick-study, --edit-test, --stream-test");
-                    println!("microvoxel-game [--seed 42] [--tiles 8192] [--save edits.mvw]\n  --character-preview DIR  Export procedural character PNGs and animations, then exit\n  --view first|rear|front  Initial player camera\n  --fly             Start in debug flight (F6 returns to player)\n  --player-test     Offscreen walking/jumping/camera smoke test\n  --benchmark       Compare exact and coarse surfaces over the same 16 m patch\n  --isometric       Save a full-region isometric PNG and exit (uses --screenshot)\n  --headless        Render offscreen and exit after --frames (default 30)\n  --screenshot PATH Save a PNG (headless on completion, window on F12)\n  --fly-test        Exercise grid flight and LOD replacement in headless mode\nControls: click to capture mouse; WASD; Space jump; Shift sprint; Esc settings\nF5: first/rear/front view; F6: debug flight (Space/C vertical, Shift boost)\nMouse wheel or +/-: flight speed; 1/2/3: 4/20/100 m/s; [ / ]: FOV\nR: random location; F11: fullscreen; F12: save PNG; close window to quit");
+                    println!("Terrain source: --world atlas|earth|procedural; --earth PATH loads another .mvearth import. Atlas seeds compile immutable 1000 km landscapes; the launcher defaults to atlas at 1:10 scale.");
+                    println!("World: --extent-km 1..100 (source region edge)\nWorld: --world-scale 1..100 (terrain meters per game meter; 10 = 1:10 compression)\nWorld: --voxel-size 1/16 (meters; interactive 4..128 cells/m) --terrain-method noise|geomorphic\nDiagnostics: --terrain-quality DIR (multi-seed masks, terrain and scale metrics)\nDiagnostics: --brick-study, --edit-test, --stream-test");
+                    println!("microvoxel-game [--seed 42] [--tiles 8192] [--save edits.mvw]\n  --character-preview DIR  Export procedural character PNGs and animations, then exit\n  --view first|rear|front  Initial player camera\n  --fly             Start in debug flight (F6 returns to player)\n  --player-test     Offscreen walking/jumping/camera smoke test\n  --benchmark       Compare exact and coarse surfaces over the same 16 m patch\n  --isometric       Save an isometric PNG and exit (uses --screenshot)\n  --overview-area-km2 N  Crop the existing world around its highest sampled peak\n  --headless        Render offscreen and exit after --frames (default 30)\n  --screenshot PATH Save a PNG (headless on completion, window on F12)\n  --fly-test        Exercise grid flight and LOD replacement in headless mode\nControls: click to capture mouse; WASD; Space jump; Shift sprint; Esc settings\nF5: first/rear/front view; F6: debug flight (Space/C vertical, Shift boost)\nMouse wheel or +/-: flight speed; 1/2/3: 4/20/100 m/s; [ / ]: FOV\nR: random location; F11: fullscreen; F12: save PNG; close window to quit");
                     println!("Diagnostics: --ray-study profiles column/SVO/DAG geometry and attributes.\nDiagnostics: --stream-test compares both backends while walking/sprinting/turning.\nRenderer: --renderer mesh|ray (also selectable in Esc menu).\nCapture: --camera-ground places --camera X/Z on the ground (Y ignored); combines with --view rear.\nDisplay: --lod-test (quality PNGs + moving-camera stress check)\n  --quality 0..100 --native-radius 2..32 --terrain-memory 64..1024 --haze 0..2 --no-effects\nEsc: settings menu with sliders and editable numbers. Window preferences persist; headless defaults stay deterministic.");
                     println!("Capture: --size 2560x1440 --camera X,Y,Z,YAW,PITCH --no-hud\n  Coordinates in meters; camera angles in degrees. Explicit camera enables flight.");
                     println!("Environment: --climate temperate|continental|arid|subpolar|tropical\n  --wind DEGREES    Prevailing wind direction (towards +X = 0, +Z = 90)\n  --moisture 0..1   Override incoming climatic moisture\n  --debug-maps DIR  Export 12 PNG diagnostic maps and exit (unless --headless/--benchmark)\n  --map LAYER       Start in a diagnostic view (e.g. biomes, rainfall, landforms)\n  M                Cycle diagnostic maps and back to 3D terrain");
@@ -313,6 +345,7 @@ impl Options {
                     | "--moisture"
                     | "--voxel-size"
                     | "--world-scale"
+                    | "--extent-km"
                     | "--terrain-method"
             ) {
                 options.procedural_options = true;
@@ -348,7 +381,17 @@ fn main() -> microvoxel::Result<()> {
     // Imported worlds remain explicitly selectable in the menu/CLI. A local
     // experiment left in output/ must not silently replace the procedural world.
     let earth = options.earth.as_ref();
-    let generator = if let Some(path) = earth {
+    let generator = if options.atlas {
+        println!(
+            "Preparing 1000 km atlas (seed {}); first build may take 3 minutes...",
+            options.seed
+        );
+        let generator = Terrain::prepare_atlas(options.seed, options.grid, options.world_scale)?;
+        println!("Atlas source loaded in {:.2}s; regional data {:.2} MiB; scale 1:{}; playable extent {} m; voxel {} cm",
+            start.elapsed().as_secs_f64(), generator.regional_memory_bytes() as f64 / 1048576.,
+            options.world_scale, generator.spec().extent_m, generator.spec().grid.meters() * 100.);
+        generator
+    } else if let Some(path) = earth {
         println!("Loading measured Volcan terrain from {}...", path.display());
         let generator = Terrain::from_survey(path)?;
         println!("Measured {} m square; {:.3} m voxels; {:.2} MiB raster/pyramid. Photographed surface colors; vegetation is part of the DSM.",
@@ -356,7 +399,8 @@ fn main() -> microvoxel::Result<()> {
         generator
     } else {
         println!(
-            "Preparing the 10 km procedural world (seed {})...",
+            "Preparing the {} km procedural world (seed {})...",
+            options.extent_m / 1000,
             options.seed
         );
         let generator = Terrain::with_world_scale(
@@ -364,6 +408,7 @@ fn main() -> microvoxel::Result<()> {
             config,
             microvoxel::WorldSpec {
                 grid: options.grid,
+                extent_m: options.extent_m,
                 ..Default::default()
             },
             options.world_scale,
@@ -378,6 +423,9 @@ fn main() -> microvoxel::Result<()> {
         generator
     };
     if let Some(directory) = &options.debug_maps {
+        if generator.is_atlas() {
+            return Err("Atlas diagnostic map export is not supported; use landscape_lab for atlas diagnostics".into());
+        }
         environment::export(&generator, directory)?;
         if !options.headless && !options.benchmark && !options.isometric {
             return Ok(());
@@ -405,6 +453,9 @@ fn main() -> microvoxel::Result<()> {
                 .screenshot
                 .as_deref()
                 .unwrap_or(std::path::Path::new("isometric_10km.png")),
+            options.overview_area_km2,
+            options.display.memory_mib,
+            options.camera.map(|v| [v.meters[0], v.meters[2]]),
         );
     }
     if options.benchmark {
@@ -462,7 +513,7 @@ fn headless(options: Options, world: Arc<World<Terrain>>) -> microvoxel::Result<
         runtime.prepare_still_capture();
     }
     if let Some(camera) = options.camera {
-        camera.apply(&mut runtime);
+        camera.apply(&mut runtime)?;
         if options.camera_ground {
             camera.ground(&mut runtime)?;
         }
@@ -481,6 +532,9 @@ fn headless(options: Options, world: Arc<World<Terrain>>) -> microvoxel::Result<
         runtime.native_policy_radius,
         runtime.world.spec().grid.meters()
     );
+    if options.camera.is_some() {
+        runtime.report_capture_detail();
+    }
     if options.lod_test {
         lod_check::run(&mut runtime, std::path::Path::new("output/lod"))?;
     }
@@ -849,6 +903,18 @@ impl App {
                 .unwrap_or(std::path::Path::new("output/native_preview.png"));
             if let Err(error) = runtime.gpu.screenshot(&texture, path) {
                 eprintln!("Screenshot: {error}");
+            } else {
+                // Keep the exact view alongside F12 captures for seam regressions.
+                let eye = runtime.camera.eye();
+                let direction = runtime.camera.direction();
+                let (n, d) = runtime.world.spec().grid.ratio();
+                let info=format!("seed={}\nvoxel_m={n}/{d}\nworld_scale={}\ncamera={},{},{},{},{}\nsize={}x{}\nquality={}\nmemory_mib={}\nfov_degrees={}\nrenderer={}\n",
+                    runtime.world.identity().seed,runtime.world.baseline().world_scale(),eye[0],eye[1],eye[2],
+                    direction[2].atan2(direction[0]).to_degrees(),direction[1].asin().to_degrees(),
+                    runtime.gpu.width,runtime.gpu.height,runtime.settings.quality,runtime.settings.memory_mib,runtime.camera.fov.to_degrees(),if runtime.settings.ray {"ray"}else{"mesh"});
+                if let Err(error) = std::fs::write(path.with_extension("txt"), info) {
+                    eprintln!("Screenshot camera metadata: {error}");
+                }
             }
         }
         self.frame_count += 1;
@@ -877,6 +943,11 @@ impl App {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> Result<LoadedWorld, String> {
                             let terrain = match job {
+                                worlds::Request::Atlas {
+                                    seed,
+                                    grid,
+                                    world_scale,
+                                } => Terrain::prepare_atlas(seed, grid, world_scale)?,
                                 worlds::Request::Survey(path) => {
                                     Terrain::from_survey(&path).map_err(|e| e.to_string())?
                                 }
@@ -1020,7 +1091,7 @@ impl ApplicationHandler for App {
             }
             self.runtime.as_mut().unwrap().gpu.hud_visible = !self.options.no_hud;
             if let Some(camera) = self.options.camera {
-                camera.apply(self.runtime.as_mut().unwrap());
+                camera.apply(self.runtime.as_mut().unwrap())?;
                 if self.options.camera_ground {
                     camera.ground(self.runtime.as_mut().unwrap())?;
                 }

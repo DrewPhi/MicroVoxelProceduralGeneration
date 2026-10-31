@@ -178,6 +178,16 @@ fn physical_terrain_features_survive_grid_changes_and_sparse_edits() {
             b.height_m
         );
     }
+    // Geographic provinces need not fit inside the initial 10 km crop.
+    let terrain = ProceduralTerrain::with_spec(
+        42,
+        Default::default(),
+        WorldSpec {
+            extent_m: 100_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(
         !terrain.geological_features().is_empty(),
         "seed 42 needs a geological capability fixture"
@@ -208,6 +218,12 @@ fn physical_terrain_features_survive_grid_changes_and_sparse_edits() {
                 .unwrap()
                 .height_m
     );
+    let [low, high] = feature.bounds();
+    let origin = [low[0], low[2]];
+    let edge = (high[0] - low[0]).max(high[2] - low[2]);
+    assert!(terrain.has_display_volumetric_features(origin, edge, 0.25));
+    assert!(!terrain.has_display_volumetric_features(origin, edge, 128.));
+    assert!(terrain.has_volumetric_features(origin, edge));
     let center = feature.center_m;
     let summary = terrain
         .summarize_m([center[0] - 16., center[2] - 16.], 32.)

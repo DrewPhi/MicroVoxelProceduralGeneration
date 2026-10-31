@@ -22,6 +22,7 @@ fn key(world: &World<Terrain>, x: i64, z: i64, coarse: bool) -> MeshKey {
     let level = grid.finest - u8::from(coarse);
     let edge = 32i64 << u8::from(coarse);
     MeshKey {
+        corner_levels: None,
         tile: TileKey {
             level,
             x: (x.div_euclid(edge)) as u32,

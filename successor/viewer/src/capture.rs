@@ -19,9 +19,9 @@ impl std::str::FromStr for Viewpoint {
         if values.len() != 5 || values.iter().any(|v| !v.is_finite()) {
             return Err("--camera needs five finite numbers".into());
         }
-        if !(0.0..10000.).contains(&values[0])
-            || !(0.0..2048.).contains(&values[1])
-            || !(0.0..10000.).contains(&values[2])
+        if !(0.0..1_000_000.).contains(&values[0])
+            || !(0.0..32_768.).contains(&values[1])
+            || !(0.0..1_000_000.).contains(&values[2])
             || values[4].abs() > 89.
         {
             return Err("Camera must be inside the world; pitch must be -89..89 degrees".into());
@@ -34,8 +34,21 @@ impl std::str::FromStr for Viewpoint {
     }
 }
 impl Viewpoint {
+    fn validate(self, spec: microvoxel::WorldSpec) -> microvoxel::Result<()> {
+        if !self.meters.iter().all(|v| v.is_finite())
+            || !(0.0..spec.extent_m as f64).contains(&self.meters[0])
+            || !(0.0..spec.ceiling_m as f64).contains(&self.meters[1])
+            || !(0.0..spec.extent_m as f64).contains(&self.meters[2])
+        {
+            return Err(
+                "Capture camera must be inside the selected world's extent and ceiling".into(),
+            );
+        }
+        Ok(())
+    }
     /// Use the same reproducible X/Z/yaw/pitch at actual player height.
     pub fn ground(self, runtime: &mut Runtime) -> microvoxel::Result<()> {
+        self.validate(runtime.world.spec())?;
         if !runtime
             .player
             .place_above(&runtime.world, runtime.camera.cell.x, runtime.camera.cell.z)
@@ -64,7 +77,8 @@ impl Viewpoint {
         );
         Ok(())
     }
-    pub fn apply(self, runtime: &mut Runtime) {
+    pub fn apply(self, runtime: &mut Runtime) -> microvoxel::Result<()> {
+        self.validate(runtime.world.spec())?;
         if !runtime.flying {
             runtime.toggle_flight();
         }
@@ -84,6 +98,7 @@ impl Viewpoint {
             self.yaw.to_degrees(),
             self.pitch.to_degrees()
         );
+        Ok(())
     }
 }
 pub fn size(text: &str) -> Result<[u32; 2], String> {
@@ -101,9 +116,18 @@ mod tests {
     #[test]
     fn camera_and_image_size_reject_invalid_exports() {
         assert!("1,2,3,90,-10".parse::<Viewpoint>().is_ok());
-        for s in ["1,2,3", "NaN,2,3,0,0", "10001,2,3,0,0", "1,2,3,0,90"] {
+        for s in ["1,2,3", "NaN,2,3,0,0", "1000000,2,3,0,0", "1,2,3,0,90"] {
             assert!(s.parse::<Viewpoint>().is_err());
         }
+        let atlas: Viewpoint = "89000,600,46000,-47.67,0".parse().unwrap();
+        assert!(atlas.validate(microvoxel::WorldSpec::default()).is_err());
+        assert!(atlas
+            .validate(microvoxel::WorldSpec {
+                extent_m: 100_000,
+                ..Default::default()
+            })
+            .is_ok());
+        assert!("1,32768,3,0,0".parse::<Viewpoint>().is_err());
         assert_eq!(size("2560x1440").unwrap(), [2560, 1440]);
         assert!(size("99999x99999").is_err());
     }

@@ -76,14 +76,18 @@ pub(super) struct FeatureIndex {
 impl FeatureIndex {
     pub fn generate(region: &Region, seed: u64) -> Self {
         let mut index = Self::default();
-        for z in 0..39 {
-            for x in 0..39 {
+        let side = (region.extent_m() / 256.).ceil() as u32;
+        for z in 0..side {
+            for x in 0..side {
                 let h = mix(seed ^ mix(x as u64) ^ mix(z as u64).rotate_left(29) ^ 1719);
                 if h % 7 != 0 {
                     continue;
                 }
                 let px = 128. + x as f64 * 256. + (h % 81) as f64;
                 let pz = 128. + z as f64 * 256. + ((h >> 16) % 81) as f64;
+                if px >= region.extent_m() || pz >= region.extent_m() {
+                    continue;
+                }
                 let s = terrain::terrain_surface(region, px, pz, 0.001, seed);
                 let g = region.gradient_at(px, pz);
                 let length = g[0].hypot(g[1]);
@@ -152,7 +156,15 @@ impl FeatureIndex {
             .collect()
     }
     pub fn overlaps(&self, origin: [f64; 2], edge: f64) -> bool {
+        self.overlaps_resolved(origin, edge, 0.)
+    }
+    pub fn overlaps_resolved(&self, origin: [f64; 2], edge: f64, cell_m: f64) -> bool {
         self.descriptors.iter().any(|f| {
+            // Sub-cell features cannot be represented by this display grid.
+            // Their canonical occupancy and close-up render path remain exact.
+            if f.radius_m * 2. < cell_m {
+                return false;
+            }
             let [a, b] = f.bounds();
             a[0] < origin[0] + edge
                 && b[0] > origin[0]

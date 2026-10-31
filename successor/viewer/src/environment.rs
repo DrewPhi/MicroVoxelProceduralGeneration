@@ -10,7 +10,7 @@ use std::{
 };
 pub fn export(terrain: &Terrain, directory: &Path) -> microvoxel::Result<()> {
     fs::create_dir_all(directory)?;
-    let mut legends=String::from("Long-term regional estimates, not live weather. Map covers 10 km square.\nX increases right, Z increases down. Diagnostic colors are not voxel palettes.\n\n");
+    let mut legends=format!("Long-term regional estimates, not live weather. Map covers {} km square.\nX increases right, Z increases down. Diagnostic colors are not voxel palettes.\n\n", microvoxel::generation::Generator::spec(terrain).extent_m as f64 * terrain.world_scale() as f64 / 1000.);
     for layer in DebugLayer::ALL {
         let image = terrain.debug_image(layer, 512)?;
         write_png(&image, &directory.join(format!("{layer}.png")))?;

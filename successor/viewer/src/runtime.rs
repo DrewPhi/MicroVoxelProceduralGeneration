@@ -35,6 +35,13 @@ pub struct Runtime {
     pub active: Layout,
     pub cover: BTreeSet<MeshKey>,
     target: Option<(Layout, BTreeSet<MeshKey>)>,
+    prefetch: BTreeSet<MeshKey>,
+    warmed: BTreeSet<MeshKey>,
+    pub prefetch_builds: usize,
+    pub prefetch_hits: usize,
+    pub cache_hits: usize,
+    prefetch_enabled: bool,
+    prefetch_pause_until: Instant,
     last_motion_eye: [f64; 3],
     velocity: [f64; 3],
     last_plan: Instant,
@@ -101,6 +108,13 @@ impl Runtime {
             active: active.clone(),
             cover: BTreeSet::new(),
             target: Some((active.clone(), keys)),
+            prefetch: BTreeSet::new(),
+            warmed: BTreeSet::new(),
+            prefetch_builds: 0,
+            prefetch_hits: 0,
+            cache_hits: 0,
+            prefetch_enabled: std::env::var_os("MICROVOXEL_DISABLE_PREFETCH").is_none(),
+            prefetch_pause_until: Instant::now(),
             last_motion_eye: world.spec().grid.point(cell),
             velocity: [0.; 3],
             last_plan: Instant::now() - Duration::from_secs(1),
@@ -234,6 +248,8 @@ impl Runtime {
         if changes.changed_cells.is_empty() {
             return Ok(changes);
         }
+        self.prefetch.clear();
+        self.warmed.clear();
         self.world = Arc::new(world);
         self.workers.replace_world(Arc::clone(&self.world));
         self.planner.replace_world(Arc::clone(&self.world));
@@ -298,6 +314,7 @@ impl Runtime {
         if self.last_error.is_some() {
             return;
         }
+        let was_moving = self.velocity[0].hypot(self.velocity[2]) > 0.1;
         if dt > 0. {
             let eye = self.camera.eye();
             for axis in [0, 2] {
@@ -307,8 +324,37 @@ impl Runtime {
             }
             self.last_motion_eye = eye;
         }
+        if !was_moving
+            && self.velocity[0].hypot(self.velocity[2]) > 0.1
+            && !self.still_capture
+            && !self.cover.is_empty()
+        {
+            // An idle refinement batch must not hold near detail behind far jobs.
+            // Keep the published cover; cached completed meshes remain reusable.
+            self.target = None;
+            self.plan_generation += 1;
+            self.planning = false;
+            self.last_plan = Instant::now() - Duration::from_secs(1);
+            self.last_fov = -1.;
+        }
         // Camera changes update intent even while a small ready patch is loading.
         let direction = self.camera.direction();
+        // Speculation is useful only while the immediate walking neighborhood
+        // is already detailed. Pause it when travel outruns required refinement.
+        let native_guard = self.native_policy_radius.min(3.);
+        let eye = self.camera.eye();
+        let near_detail_ready = (0..9).all(|i| {
+            let angle = i as f64 * std::f64::consts::TAU / 8.;
+            let radius = if i == 8 { 0. } else { native_guard };
+            let x = ((eye[0] + angle.cos() * radius) / self.gpu.grid.cell_m()).floor() as i64;
+            let z = ((eye[2] + angle.sin() * radius) / self.gpu.grid.cell_m()).floor() as i64;
+            self.active
+                .at(x, z)
+                .is_some_and(|k| k.level == self.gpu.grid.finest)
+        });
+        if !near_detail_ready {
+            self.prefetch.clear();
+        }
         // Distant coverage is retained independently of native refinement.
         self.gpu.visibility_limit = 24000.;
 
@@ -335,6 +381,23 @@ impl Runtime {
                 fov: self.camera.fov,
                 previous: self.desired.clone(),
                 budget: self.effective_budget,
+                prefetch_eye: (self.prefetch_enabled
+                    && near_detail_ready
+                    && !self.still_capture
+                    && !self.memory_pressure
+                    && self
+                        .active
+                        .at(self.camera.cell.x, self.camera.cell.z)
+                        .is_some_and(|k| k.level + 1 >= self.gpu.grid.finest))
+                .then(|| {
+                    crate::streaming_policy::prediction(
+                        self.camera.eye(),
+                        self.velocity,
+                        direction,
+                        32. * self.gpu.grid.cell_m(),
+                        self.native_policy_radius,
+                    )
+                }),
                 quality: lod::Quality {
                     pixels: self.settings.pixels(),
                     native_radius: (self.settings.native_radius
@@ -356,6 +419,21 @@ impl Runtime {
             if !self.planner.accepts(&result) || result.generation != self.plan_generation {
                 continue;
             }
+            self.prefetch = result
+                .prefetch
+                .into_iter()
+                .filter(|_| near_detail_ready)
+                .map(|mut key| {
+                    let [x, z] = key.tile.origin_in(self.gpu.grid);
+                    let halo = key.tile.step_in(self.gpu.grid) * 2;
+                    key.revision = self.world.region_revision(
+                        x - halo,
+                        z - halo,
+                        key.tile.edge_in(self.gpu.grid) + halo * 2,
+                    );
+                    key
+                })
+                .collect();
             self.max_plan_time = self.max_plan_time.max(result.elapsed);
             self.achieved_pixels = result.selection.achieved_pixels;
             self.native_policy_radius = result.selection.native_policy_radius;
@@ -393,29 +471,23 @@ impl Runtime {
         // Retain the last complete cover. Only local balanced patches and their
         // dependent neighbor stitches wait on jobs, never the entire desired cover.
         if self.target.is_none() && !self.planning {
-            let mut next = self.active.clone();
-            // A large atomic patch can make nearby ready work wait for
-            // unrelated distant jobs. While traveling, keep each swap small
-            // enough to feed the worker pool without a long readiness barrier.
-            let patch_count = if self.velocity[0].hypot(self.velocity[2]) > 0.1 {
-                2
-            } else {
-                12
-            };
-            for _ in 0..patch_count {
-                if let Some(patch) = lod::next_patch_budget(
-                    &next,
-                    &self.desired,
-                    self.camera.eye(),
-                    self.effective_budget + 64,
-                ) {
-                    next = patch;
+            let next = streaming_patch(
+                &self.active,
+                &self.desired,
+                self.camera.eye(),
+                self.effective_budget + 64,
+                if self.velocity[0].hypot(self.velocity[2]) > 0.1 {
+                    2
                 } else {
-                    break;
-                }
-            }
+                    12
+                },
+            );
             if next != self.active {
-                let keys = local_keys(&next, &self.world).into_values().collect();
+                let keys: BTreeSet<_> = local_keys(&next, &self.world).into_values().collect();
+                self.cache_hits += keys
+                    .difference(&self.cover)
+                    .filter(|k| self.gpu.ready(k, self.settings.ray))
+                    .count();
                 self.target = Some((next, keys));
             }
         }
@@ -424,8 +496,16 @@ impl Runtime {
             protected.extend(keys);
         }
         protected.extend(self.gpu.transition_keys());
+        let speed = self.velocity[0].hypot(self.velocity[2]);
+        self.gpu.configure_streaming_cache(
+            self.camera.eye(),
+            self.native_policy_radius * 1.5 + speed * 0.5 + 32. * self.gpu.grid.cell_m(),
+        );
         self.gpu.trim(&protected);
-        self.workers.retain(protected.clone());
+        self.warmed.retain(|k| self.gpu.tiles.contains_key(k));
+        let mut wanted = protected.clone();
+        wanted.extend(&self.prefetch);
+        self.workers.retain(wanted);
         let upload_start = Instant::now();
         for _ in 0..4 {
             let Ok(result) = self.workers.results.try_recv() else {
@@ -437,8 +517,34 @@ impl Runtime {
             if result.ray != self.settings.ray {
                 continue;
             }
-            if !protected.contains(&result.key) {
+            let speculative = !protected.contains(&result.key);
+            if speculative && !self.prefetch.contains(&result.key) {
                 continue;
+            }
+            if speculative {
+                let Ok(payload) = &result.payload else {
+                    continue;
+                };
+                let bytes = match payload {
+                    Payload::Mesh(mesh, prepared, _) => {
+                        mesh.bytes() + prepared.iter().map(|p| p.bytes()).sum::<usize>()
+                    }
+                    Payload::Ray(brick) => brick.bytes(),
+                };
+                let warm_bytes: usize = self
+                    .warmed
+                    .iter()
+                    .filter(|k| !protected.contains(k))
+                    .filter_map(|k| self.gpu.tiles.get(k))
+                    .map(|t| t.bytes)
+                    .sum();
+                if warm_bytes + bytes
+                    > crate::streaming_policy::warm_budget(self.settings.memory_mib)
+                    || !self.gpu.prefetch_room(bytes, &protected)
+                {
+                    self.prefetch_pause_until = Instant::now() + Duration::from_millis(500);
+                    continue;
+                }
             }
             if result
                 .payload
@@ -459,9 +565,22 @@ impl Runtime {
                 }
                 Payload::Ray(brick) => self.gpu.upload_ray(result.key, brick, &protected),
             }) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if speculative {
+                        self.prefetch_builds += 1;
+                        self.warmed.insert(result.key);
+                    }
+                }
+                Err(message) if message.contains("GPU mesh budget") && speculative => {
+                    self.prefetch_pause_until = Instant::now() + Duration::from_millis(500);
+                    continue;
+                }
                 Err(message) if message.contains("GPU mesh budget") => {
-                    self.relax_detail();
+                    self.prefetch.clear();
+                    self.prefetch_pause_until = Instant::now() + Duration::from_millis(500);
+                    if !self.gpu.recover_cache_pressure(&protected) {
+                        self.relax_detail();
+                    }
                     break;
                 }
                 Err(message) => {
@@ -478,14 +597,18 @@ impl Runtime {
                 && keys.iter().all(|k| self.gpu.ready(k, self.settings.ray))
             {
                 let (layout, keys) = self.target.take().unwrap();
+                self.prefetch_hits += keys
+                    .difference(&self.cover)
+                    .filter(|k| self.warmed.remove(k))
+                    .count();
                 self.gpu.begin_transition(
                     &self.cover,
                     &keys,
-                    // Fast travel must not wait 160 ms per refinement patch.
-                    // Keep walking fades, but publish ready sprint detail at once.
-                    self.settings.transitions
-                        && self.initial_ready
-                        && self.velocity[0].hypot(self.velocity[2]) < 4.,
+                    self.settings.transitions && self.initial_ready,
+                    crate::streaming_policy::transition_seconds(
+                        32. * self.gpu.grid.cell_m(),
+                        self.velocity[0].hypot(self.velocity[2]),
+                    ),
                 );
                 self.active = layout;
                 self.cover = keys;
@@ -497,7 +620,20 @@ impl Runtime {
                 self.gpu.trim(&retained);
             }
         }
-        if self.settled() {
+        if !self.initial_ready
+            && (self.settled()
+                || (self
+                    .active
+                    .at(self.camera.cell.x, self.camera.cell.z)
+                    .is_some_and(|k| k.level + 1 >= self.gpu.grid.finest)
+                    && !self.cover.is_empty()
+                    && self
+                        .cover
+                        .iter()
+                        .all(|k| self.gpu.ready(k, self.settings.ray))))
+        {
+            // Nearby continuity is sufficient; distant polishing must not keep
+            // ready near patches popping until the entire world has settled.
             self.initial_ready = true;
         }
         let ray = self.settings.ray;
@@ -535,7 +671,28 @@ impl Runtime {
             priority(a).total_cmp(&priority(b))
         });
         let radius = self.settings.native_radius * 2.;
-        self.workers.schedule(
+        let warm_bytes: usize = self
+            .warmed
+            .iter()
+            .filter(|k| !protected.contains(k))
+            .filter_map(|k| self.gpu.tiles.get(k))
+            .map(|t| t.bytes)
+            .sum();
+        let allow_prefetch = near_detail_ready
+            && Instant::now() >= self.prefetch_pause_until
+            && warm_bytes.saturating_add(65536)
+                < crate::streaming_policy::warm_budget(self.settings.memory_mib)
+            && self.gpu.prefetch_room(65536, &protected);
+        let warm_requests: Vec<_> = if allow_prefetch {
+            self.prefetch
+                .iter()
+                .filter(|k| !self.gpu.ready(k, ray))
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.workers.schedule_with_prefetch(
             requests.into_iter().map(|key| {
                 let [x, z] = key.tile.origin_in(self.gpu.grid);
                 let edge = key.tile.edge_in(self.gpu.grid);
@@ -548,12 +705,14 @@ impl Runtime {
                 (key, dx.hypot(dz) < radius)
             }),
             ray,
+            warm_requests,
         );
     }
 
     fn relax_detail(&mut self) {
         // Preserve playable coverage on exhaustion; quality can be
         // raised again through settings after increasing residency.
+        self.prefetch.clear();
         self.memory_pressure = true;
         self.plan_generation += 1;
         self.planning = false;
@@ -572,6 +731,7 @@ impl Runtime {
     }
 
     pub fn prepare_still_capture(&mut self) {
+        self.prefetch.clear();
         self.still_capture = true;
         self.target = None;
         self.workers.retain(self.cover.clone());
@@ -583,6 +743,10 @@ impl Runtime {
             || self.settings.native_radius != settings.native_radius
             || self.settings.memory_mib != settings.memory_mib;
         self.settings = settings;
+        if terrain_changed {
+            self.prefetch.clear();
+            self.warmed.clear();
+        }
         if renderer_changed {
             self.initial_ready = false;
         }
@@ -658,7 +822,15 @@ impl Runtime {
             &self.player.materials,
         ) {
             if error.contains("GPU mesh budget") {
-                self.relax_detail();
+                let mut required = self.cover.clone();
+                required.extend(self.gpu.transition_keys());
+                if let Some((_, keys)) = &self.target {
+                    required.extend(keys);
+                }
+                self.prefetch.clear();
+                if !self.gpu.recover_cache_pressure(&required) {
+                    self.relax_detail();
+                }
                 self.gpu.move_cached_actor(self.player.root);
             } else {
                 self.last_error = Some(error);
@@ -691,7 +863,49 @@ impl Runtime {
         };
         format!("MicroVoxel — {world_name} | {} | {mode} | {fps:.0} FPS | Speed {:.1} m/s | FOV {:.0}° | {spacing:.2} cm | {} / {} tiles | {:.1} MiB | Loaded {ready}/{total}{}",if self.settings.ray {"Ray"}else{"Mesh"},movement,self.camera.fov.to_degrees(),self.visible,self.cover.len(),self.gpu.bytes as f64/(1024.*1024.),if self.last_error.is_some(){" | ERROR: see terminal"}else{""})
     }
+    /// Actual resident support at player-eye X/Z; policy radius alone is not proof.
+    pub fn report_capture_detail(&self) {
+        let grid = self.gpu.grid;
+        let mut native = 0;
+        for i in 0..10 {
+            let (dx, dz) = if i == 0 {
+                (0., 0.)
+            } else if i == 9 {
+                (self.camera.yaw.cos() * 5., self.camera.yaw.sin() * 5.)
+            } else {
+                let a = (i - 1) as f64 * std::f64::consts::TAU / 8.;
+                (a.cos() * 6., a.sin() * 6.)
+            };
+            let x = self.camera.cell.x + (dx / grid.cell_m()).round() as i64;
+            let z = self.camera.cell.z + (dz / grid.cell_m()).round() as i64;
+            let tile = self.active.at(x, z);
+            let step = tile.map(|t| t.step_in(grid));
+            let loaded = tile.is_some_and(|t| {
+                self.cover
+                    .iter()
+                    .any(|k| k.tile == t && self.gpu.ready(k, self.settings.ray))
+            });
+            if step == Some(1) && loaded {
+                native += 1;
+            }
+            println!("Capture detail sample {i}: offset ({dx:.2},{dz:.2}) m; display step {step:?} voxels; resident {loaded}");
+        }
+        println!("Capture native support: {native}/10 samples (center, 8 around 6 m, forward 5 m); voxel {:.6} m; requested radius {:.1} m; planning radius {:.2} m",
+            grid.cell_m(), self.settings.native_radius, self.native_policy_radius);
+        if native < 10 {
+            println!("Capture detail limitation: nearby samples include coarse or missing support; settled cover does not establish native coverage.");
+        }
+    }
+
     pub fn report(&self) {
+        println!(
+            "Resident detail reused before generation: {} tiles",
+            self.cache_hits
+        );
+        println!("Predictive detail: {} speculative meshes built; {} reused at publication; {} ready tracked",self.prefetch_builds,self.prefetch_hits,self.warmed.len());
+        println!("Streaming state: eye {:?} m; active {} / desired {} tiles; target {:?}; jobs {}; effective tile budget {}; pressure {}; error {:?}",
+            self.camera.eye(),self.active.tiles.len(),self.desired.tiles.len(),
+            self.target.as_ref().map(|(_,keys)|keys.len()),self.pending_jobs(),self.effective_budget,self.memory_pressure,self.last_error);
         let pools = self.gpu.terrain_arena_stats();
         println!(
             "Terrain arenas: {:.2} MiB live, {:.2} MiB pending GPU completion, {:.2} MiB reserved",
@@ -728,6 +942,46 @@ impl Runtime {
     }
 }
 
+/// Bound an atomic update by actual rebuilt neighbor identities, not only splits.
+/// One indivisible balanced closure may exceed the cap; never split that closure.
+fn streaming_patch(
+    active: &Layout,
+    desired: &Layout,
+    eye: [f64; 3],
+    budget: usize,
+    steps: usize,
+) -> Layout {
+    if active == desired {
+        return active.clone();
+    }
+    let original: BTreeSet<_> = if steps > 2 {
+        active.mesh_keys(0).into_values().collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut next = active.clone();
+    for _ in 0..steps {
+        let Some(candidate) = lod::next_patch_budget(&next, desired, eye, budget) else {
+            break;
+        };
+        let changed = if steps > 2 {
+            candidate
+                .mesh_keys(0)
+                .into_values()
+                .filter(|k| !original.contains(k))
+                .take(33)
+                .count()
+        } else {
+            0
+        };
+        if next != *active && changed > 32 {
+            break;
+        }
+        next = candidate;
+    }
+    next
+}
+
 fn local_keys(
     layout: &Layout,
     world: &World<Terrain>,
@@ -743,12 +997,56 @@ fn local_keys(
 }
 
 #[cfg(test)]
+#[path = "runtime/travel_cache_test.rs"]
+mod travel_cache_test;
+
+#[cfg(test)]
+#[path = "runtime/stop_resume_test.rs"]
+mod stop_resume_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use microvoxel::{
         materials::{Appearance, MaterialId, Voxel},
         CellPos, Edit, EditAction,
     };
+
+    #[test]
+    fn idle_batches_bound_real_rebuilds_and_keep_balanced_cover() {
+        let mut active = Layout::root();
+        let desired = lod::select([5000., 100., 5000.], 720, 1.1, &active, 2048);
+        let mut bounded = 0;
+        for _ in 0..30 {
+            let first = lod::next_patch_budget(&active, &desired, [5000., 100., 5000.], 2112);
+            let next = streaming_patch(&active, &desired, [5000., 100., 5000.], 2112, 12);
+            if next == active {
+                break;
+            }
+            let original: BTreeSet<_> = active.mesh_keys(0).into_values().collect();
+            let jobs = next
+                .mesh_keys(0)
+                .into_values()
+                .filter(|k| !original.contains(k))
+                .count();
+            assert!(
+                jobs <= 32 || first.as_ref() == Some(&next),
+                "oversized multi-step idle batch: {jobs}"
+            );
+            if jobs <= 32 {
+                bounded += 1;
+            }
+            for &tile in &next.tiles {
+                assert!(next
+                    .neighbors(tile)
+                    .iter()
+                    .all(|level| level.abs_diff(tile.level) <= 1));
+            }
+            assert!(next.at(80000, 80000).is_some());
+            active = next;
+        }
+        assert!(bounded > 5);
+    }
 
     #[test]
     fn local_edit_refreshes_neighbor_halo_and_preserves_distant_keys() {

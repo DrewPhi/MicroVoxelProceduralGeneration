@@ -331,6 +331,7 @@ fn column_profiles_and_native_tiles_preserve_internal_holes() {
     let mut sampler = Sampler::new(Arc::new(world));
     let mesh = sampler
         .mesh(MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: FINEST,
                 x: 0,
@@ -434,6 +435,7 @@ fn native_world_values_do_not_depend_on_lod_or_generation_order() {
     let mut sampler = Sampler::new(Arc::clone(&world));
     let native = sampler
         .mesh(MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: FINEST,
                 x: 149057 / SIDE as u32,
@@ -445,6 +447,7 @@ fn native_world_values_do_not_depend_on_lod_or_generation_order() {
         .unwrap();
     let proxy = sampler
         .mesh(MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 3,
                 x: 4,

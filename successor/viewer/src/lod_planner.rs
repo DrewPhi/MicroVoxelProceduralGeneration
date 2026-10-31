@@ -22,12 +22,14 @@ pub struct Request {
     pub previous: Layout,
     pub budget: usize,
     pub quality: Quality,
+    pub prefetch_eye: Option<[f64; 3]>,
 }
 pub struct Result {
     epoch: u64,
     pub elapsed: Duration,
     pub generation: u64,
     pub selection: lod::Selection,
+    pub prefetch: Vec<lod::MeshKey>,
 }
 struct Queue {
     epoch: u64,
@@ -89,8 +91,61 @@ impl Planner {
                         previous,
                         budget,
                         quality,
+                        prefetch_eye,
                     } = request;
                     let started = Instant::now();
+                    let mut estimate_terrain = |key: lod::TileKey| {
+                        let mut estimate = if let Some(&cached) = errors.get(&key) {
+                            cached
+                        } else {
+                            let computed = {
+                                let grid = previous.grid;
+                                let [x, z] = key.origin_in(grid);
+                                let edge = key.edge_in(grid);
+                                if let Some(summary) = world.terrain_summary(
+                                    [x as f64 * grid.cell_m(), z as f64 * grid.cell_m()],
+                                    edge as f64 * grid.cell_m(),
+                                ) {
+                                    lod::TerrainError {
+                                        low: summary.min_m,
+                                        high: summary.max_m,
+                                        deviation: summary.error_m
+                                            * (1. + summary.normal_variation.min(1.))
+                                            + summary.appearance_variation
+                                                * (edge as f64 * grid.cell_m() * 0.02).min(1.),
+                                        feature_scale: summary.feature_scale_m,
+                                    }
+                                } else {
+                                    lod::TerrainError {
+                                        low: 0.,
+                                        high: world.spec().ceiling_m as f64,
+                                        deviation: 0.,
+                                        feature_scale: f64::INFINITY,
+                                    }
+                                }
+                            };
+                            if errors.len() >= 16384 {
+                                if let Some(old) = recent.pop_front() {
+                                    errors.remove(&old);
+                                }
+                            }
+                            errors.insert(key, computed);
+                            recent.push_back(key);
+                            computed
+                        };
+                        // Reuse already-built child summaries without requiring their
+                        // generation. Refinement tightens the known parent envelope.
+                        for child in key.children() {
+                            if let Some(finer) = errors.get(&child) {
+                                estimate.low = estimate.low.min(finer.low);
+                                estimate.high = estimate.high.max(finer.high);
+                                estimate.deviation = estimate.deviation.max(finer.deviation);
+                                estimate.feature_scale =
+                                    estimate.feature_scale.min(finer.feature_scale);
+                            }
+                        }
+                        Some(estimate)
+                    };
                     let selection = microvoxel::render::clipmap::select(
                         eye,
                         height,
@@ -98,59 +153,51 @@ impl Planner {
                         &previous,
                         budget,
                         quality,
-                        |key| {
-                            let mut estimate = if let Some(&cached) = errors.get(&key) {
-                                cached
-                            } else {
-                                let computed = {
-                                    let grid = previous.grid;
-                                    let [x, z] = key.origin_in(grid);
-                                    let edge = key.edge_in(grid);
-                                    if let Some(summary) = world.terrain_summary(
-                                        [x as f64 * grid.cell_m(), z as f64 * grid.cell_m()],
-                                        edge as f64 * grid.cell_m(),
-                                    ) {
-                                        lod::TerrainError {
-                                            low: summary.min_m,
-                                            high: summary.max_m,
-                                            deviation: summary.error_m
-                                                * (1. + summary.normal_variation.min(1.))
-                                                + summary.appearance_variation
-                                                    * (edge as f64 * grid.cell_m() * 0.02).min(1.),
-                                            feature_scale: summary.feature_scale_m,
-                                        }
-                                    } else {
-                                        lod::TerrainError {
-                                            low: 0.,
-                                            high: world.spec().ceiling_m as f64,
-                                            deviation: 0.,
-                                            feature_scale: f64::INFINITY,
-                                        }
-                                    }
-                                };
-                                if errors.len() >= 16384 {
-                                    if let Some(old) = recent.pop_front() {
-                                        errors.remove(&old);
-                                    }
-                                }
-                                errors.insert(key, computed);
-                                recent.push_back(key);
-                                computed
-                            };
-                            // Reuse already-built child summaries without requiring their
-                            // generation. Refinement tightens the known parent envelope.
-                            for child in key.children() {
-                                if let Some(finer) = errors.get(&child) {
-                                    estimate.low = estimate.low.min(finer.low);
-                                    estimate.high = estimate.high.max(finer.high);
-                                    estimate.deviation = estimate.deviation.max(finer.deviation);
-                                    estimate.feature_scale =
-                                        estimate.feature_scale.min(finer.feature_scale);
-                                }
-                            }
-                            Some(estimate)
-                        },
+                        &mut estimate_terrain,
                     );
+                    let mut prefetch = Vec::new();
+                    if let Some(future) = prefetch_eye {
+                        let forecast = microvoxel::render::clipmap::select(
+                            future,
+                            height,
+                            fov,
+                            &selection.layout,
+                            budget,
+                            quality,
+                            &mut estimate_terrain,
+                        );
+                        let visible: std::collections::BTreeSet<_> = selection
+                            .layout
+                            .mesh_keys(world.revision())
+                            .into_values()
+                            .collect();
+                        let grid = previous.grid;
+                        prefetch = forecast
+                            .layout
+                            .mesh_keys(world.revision())
+                            .into_values()
+                            .map(|mut key| {
+                                // Native interiors are camera-independent. Preload one
+                                // reusable interior rather than many moving border variants.
+                                if key.tile.level == grid.finest {
+                                    key.neighbors = [grid.finest; 4];
+                                    key.corner_levels = None;
+                                }
+                                key
+                            })
+                            .filter(|k| k.tile.level + 2 >= grid.finest && !visible.contains(k))
+                            .collect();
+                        prefetch.sort_by(|a, b| {
+                            let distance = |k: &lod::MeshKey| {
+                                let [x, z] = k.tile.origin_in(grid);
+                                let half = k.tile.edge_in(grid) as f64 * grid.cell_m() * 0.5;
+                                (x as f64 * grid.cell_m() + half - future[0])
+                                    .hypot(z as f64 * grid.cell_m() + half - future[2])
+                            };
+                            distance(a).total_cmp(&distance(b))
+                        });
+                        prefetch.truncate(48);
+                    }
                     // Numeric world revisions may repeat across independent sources.
                     // Epoch validation also rejects plans already buffered at replacement.
                     {
@@ -171,6 +218,7 @@ impl Planner {
                             elapsed: started.elapsed(),
                             generation,
                             selection,
+                            prefetch,
                         })
                         .is_err()
                     {
@@ -226,6 +274,7 @@ mod tests {
             results,
         };
         let old = Result {
+            prefetch: Vec::new(),
             epoch: 0,
             generation: 7,
             elapsed: Duration::ZERO,

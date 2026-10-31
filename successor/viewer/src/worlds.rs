@@ -7,6 +7,11 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Request {
+    Atlas {
+        seed: u64,
+        grid: GridScale,
+        world_scale: u32,
+    },
     Procedural {
         seed: u64,
         grid: GridScale,
@@ -46,6 +51,7 @@ impl SurveyEntry {
 }
 #[derive(Hash)]
 pub struct Editor {
+    pub atlas: bool,
     pub procedural: bool,
     pub seed: String,
     pub centimeters: String,
@@ -71,6 +77,7 @@ impl Editor {
             .take(16)
             .collect();
         Self {
+            atlas: false,
             procedural: true,
             seed: "42".into(),
             centimeters: "6.25".into(),
@@ -83,9 +90,17 @@ impl Editor {
         }
     }
     pub fn select_current(&mut self, request: &Request) {
-        self.procedural = matches!(request, Request::Procedural { .. });
+        self.procedural = !matches!(request, Request::Survey(_));
+        if self.procedural {
+            self.atlas = matches!(request, Request::Atlas { .. });
+        }
         match request {
-            Request::Procedural {
+            Request::Atlas {
+                seed,
+                grid,
+                world_scale,
+            }
+            | Request::Procedural {
                 seed,
                 grid,
                 world_scale,
@@ -143,10 +158,19 @@ impl Editor {
             .map_err(|_| "WORLD SCALE MUST BE A WHOLE NUMBER FROM 1 TO 100")?;
         microvoxel::generation::ProceduralTerrain::validate_world_scale(world_scale)
             .map_err(|_| "WORLD SCALE MUST BE A WHOLE NUMBER FROM 1 TO 100")?;
-        Ok(Request::Procedural {
-            seed,
-            world_scale,
-            grid: GridScale::new(1, cells.round() as u32)?,
+        let grid = GridScale::new(1, cells.round() as u32)?;
+        Ok(if self.atlas {
+            Request::Atlas {
+                seed,
+                grid,
+                world_scale,
+            }
+        } else {
+            Request::Procedural {
+                seed,
+                grid,
+                world_scale,
+            }
         })
     }
     pub fn apply(&mut self) {
@@ -157,7 +181,12 @@ impl Editor {
             Ok(request) => {
                 self.pending = Some(request);
                 self.busy = true;
-                self.status = "PREPARING WORLD - PLEASE WAIT".into();
+                self.status = if self.atlas && self.procedural {
+                    "PREPARING ATLAS - FIRST BUILD MAY TAKE 3 MINUTES"
+                } else {
+                    "PREPARING WORLD - PLEASE WAIT"
+                }
+                .into();
             }
             Err(error) => self.status = error,
         }
@@ -170,6 +199,12 @@ impl Editor {
                     .unwrap_or(Path::new("output/earth/volcan.mvearth"))
                     .into(),
             )
+        } else if terrain.is_atlas() {
+            Request::Atlas {
+                seed: terrain.identity().seed,
+                grid: terrain.spec().grid,
+                world_scale: terrain.world_scale(),
+            }
         } else {
             Request::Procedural {
                 seed: terrain.identity().seed,
@@ -183,6 +218,35 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn atlas_selection_survives_field_updates_and_survey_round_trip() {
+        let mut editor = Editor::new();
+        editor.select_current(&Request::Atlas {
+            seed: 42,
+            grid: GridScale::default(),
+            world_scale: 10,
+        });
+        editor.seed = "73".into();
+        editor.centimeters = "5".into();
+        editor.world_scale = "20".into();
+        assert_eq!(
+            editor.request().unwrap(),
+            Request::Atlas {
+                seed: 73,
+                grid: GridScale::new(1, 20).unwrap(),
+                world_scale: 20,
+            }
+        );
+        editor.select_current(&Request::Survey("missing.mvearth".into()));
+        assert!(editor.atlas);
+        editor.procedural = true;
+        editor.apply();
+        assert!(matches!(
+            editor.pending,
+            Some(Request::Atlas { seed: 73, .. })
+        ));
+        assert!(editor.status.contains("3 MINUTES"));
+    }
     #[test]
     fn scale_validation_and_source_selection_are_independent_of_voxel_size() {
         let mut e = Editor::new();

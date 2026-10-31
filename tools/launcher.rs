@@ -23,6 +23,7 @@ fn launch() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     let status = Command::new(game)
         .current_dir(root)
+        .args(["--world", "atlas", "--world-scale", "10"])
         .args(env::args_os().skip(1))
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)

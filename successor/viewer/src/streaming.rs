@@ -52,7 +52,34 @@ struct Queue {
     busy: BTreeSet<Job>,
     wanted: BTreeSet<Job>,
     urgent: BTreeSet<Job>,
+    prefetch: BTreeSet<Job>,
     closed: bool,
+}
+impl Queue {
+    fn next_job(&mut self, id: usize) -> Option<Job> {
+        let allowed = |j: &Job| {
+            (id != 0 || self.urgent.is_empty() || self.urgent.contains(j))
+                && (!self.prefetch.contains(j) || self.urgent.is_empty())
+        };
+        // Page grouping must never let speculative jobs jump ahead of real
+        // requests on a later page.
+        let real = self
+            .queued
+            .iter()
+            .flat_map(|p| &p.jobs)
+            .any(|j| allowed(j) && !self.prefetch.contains(j));
+        let eligible = |j: &Job| allowed(j) && (!real || !self.prefetch.contains(j));
+        let page = self
+            .queued
+            .iter()
+            .position(|p| p.jobs.iter().any(eligible))?;
+        let job = self.queued[page].jobs.iter().position(eligible).unwrap();
+        let result = self.queued[page].jobs.remove(job);
+        if self.queued[page].jobs.is_empty() {
+            self.queued.remove(page);
+        }
+        result
+    }
 }
 pub struct Workers {
     queue: Arc<(Mutex<Queue>, Condvar)>,
@@ -88,24 +115,8 @@ impl Workers {
                                 if q.closed {
                                     break None;
                                 }
-                                let position = q.queued.iter().position(|page| {
-                                    page.jobs.iter().any(|j| {
-                                        id != 0 || q.urgent.is_empty() || q.urgent.contains(j)
-                                    })
-                                });
-                                if let Some(position) = position {
-                                    let job_position = q.queued[position]
-                                        .jobs
-                                        .iter()
-                                        .position(|j| {
-                                            id != 0 || q.urgent.is_empty() || q.urgent.contains(j)
-                                        })
-                                        .unwrap();
-                                    let job = q.queued[position].jobs.remove(job_position);
-                                    if q.queued[position].jobs.is_empty() {
-                                        q.queued.remove(position);
-                                    }
-                                    break job;
+                                if let Some(job) = q.next_job(id) {
+                                    break Some(job);
                                 }
                                 q = wake.wait(q).unwrap();
                             };
@@ -132,7 +143,9 @@ impl Workers {
                             q.closed
                                 || q.epoch != job.epoch
                                 || !q.wanted.contains(&job)
-                                || (id == 0 && !q.urgent.is_empty() && !q.urgent.contains(&job))
+                                || ((id == 0 || q.prefetch.contains(&job))
+                                    && !q.urgent.is_empty()
+                                    && !q.urgent.contains(&job))
                         };
                         let start = Instant::now();
                         let payload =
@@ -191,6 +204,7 @@ impl Workers {
         q.queued.clear();
         q.wanted.clear();
         q.urgent.clear();
+        q.prefetch.clear();
         self.queue.1.notify_all();
     }
     pub fn retain(&self, keys: BTreeSet<MeshKey>) {
@@ -198,6 +212,7 @@ impl Workers {
         q.wanted.retain(|j| keys.contains(&j.key));
         let wanted = q.wanted.clone();
         q.urgent.retain(|job| wanted.contains(job));
+        q.prefetch.retain(|job| wanted.contains(job));
         for page in &mut q.queued {
             page.jobs.retain(|j| wanted.contains(j));
         }
@@ -215,11 +230,35 @@ impl Workers {
         });
         !q.closed && q.epoch == result.epoch
     }
+    #[cfg(test)]
     pub fn schedule(&self, keys: impl IntoIterator<Item = (MeshKey, bool)>, ray: bool) {
+        self.schedule_with_prefetch(keys, ray, std::iter::empty());
+    }
+    pub fn schedule_with_prefetch(
+        &self,
+        keys: impl IntoIterator<Item = (MeshKey, bool)>,
+        ray: bool,
+        prefetch: impl IntoIterator<Item = MeshKey>,
+    ) {
         let (lock, wake) = &*self.queue;
         let mut q = lock.lock().unwrap();
         let epoch = q.epoch;
-        let entries: Vec<_> = keys.into_iter().collect();
+        let mut entries: Vec<_> = keys.into_iter().collect();
+        let required: BTreeSet<_> = entries.iter().map(|(k, _)| *k).collect();
+        let warm: Vec<_> = prefetch
+            .into_iter()
+            .filter(|k| !required.contains(k))
+            .take(48)
+            .collect();
+        q.prefetch = warm
+            .iter()
+            .map(|key| Job {
+                epoch,
+                key: *key,
+                ray,
+            })
+            .collect();
+        entries.extend(warm.into_iter().map(|key| (key, false)));
         q.urgent = entries
             .iter()
             .filter(|(_, urgent)| *urgent)
@@ -292,6 +331,7 @@ mod tests {
     }
     fn key() -> MeshKey {
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 0,
                 x: 0,
@@ -301,6 +341,37 @@ mod tests {
             revision: 0,
         }
     }
+    #[test]
+    fn real_jobs_precede_speculation_across_pages_and_urgent_work_blocks_it() {
+        let warm = Job {
+            epoch: 0,
+            key: key(),
+            ray: false,
+        };
+        let real = Job {
+            key: MeshKey {
+                tile: TileKey { x: 1, ..key().tile },
+                ..key()
+            },
+            ..warm
+        };
+        let mut q = Queue::default();
+        q.prefetch.insert(warm);
+        q.queued.push_back(PageBatch {
+            page: [0, 0],
+            jobs: [warm].into(),
+        });
+        q.queued.push_back(PageBatch {
+            page: [1, 0],
+            jobs: [real].into(),
+        });
+        assert_eq!(q.next_job(1), Some(real));
+        q.urgent.insert(real);
+        assert_eq!(q.next_job(1), None);
+        q.urgent.clear();
+        assert_eq!(q.next_job(1), Some(warm));
+    }
+
     #[test]
     fn old_world_completion_cannot_acknowledge_identical_new_job() {
         let workers = workers();

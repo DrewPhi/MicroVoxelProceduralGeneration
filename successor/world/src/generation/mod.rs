@@ -1,11 +1,19 @@
 //! Generation is a baseline provider, never a camera-dependent world model.
 mod climate;
+pub mod atlas;
+pub mod atlas_climate;
+pub mod atlas_hydrology;
+pub mod geographic_atlas;
+pub mod landscape_experiment;
+pub mod landscape_paint;
+mod landscape_mesh;
 pub mod debug;
 mod environment;
 pub mod features;
 mod geomorph;
 mod landforms;
 mod noise;
+mod provinces;
 pub mod river;
 mod source;
 pub mod summary;
@@ -26,7 +34,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const GENERATOR_VERSION: u32 = 5;
+pub const GENERATOR_VERSION: u32 = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GeneratorIdentity {
     pub seed: u64,
@@ -115,6 +123,11 @@ pub trait Generator: Send + Sync {
     }
     fn has_volumetric_features(&self, _origin: [f64; 2], _edge: f64) -> bool {
         false
+    }
+    /// Render-only feature significance. Custom generators conservatively keep
+    /// their full volumetric path unless they provide a size-aware override.
+    fn has_display_volumetric_features(&self, origin: [f64; 2], edge: f64, _cell_m: f64) -> bool {
+        self.has_volumetric_features(origin, edge)
     }
     fn spec(&self) -> crate::WorldSpec {
         crate::WorldSpec::default()
@@ -219,12 +232,22 @@ impl ProceduralTerrain {
         spec: crate::WorldSpec,
     ) -> Result<Self, String> {
         let spec = spec.validate()?;
+        // Legacy regional indexes were sized for this domain. The larger world
+        // envelope is supported by the saved atlas, not those dense indexes.
+        if spec.extent_m > 100_000 || spec.ceiling_m > 2048 {
+            return Err("legacy procedural terrain supports at most 100 km and a 2048 m ceiling; use the atlas source for larger worlds".into());
+        }
         config.validate()?;
         config.wind_degrees = config.wind_degrees.rem_euclid(360.);
         if config.wind_degrees == 0. {
             config.wind_degrees = 0.;
         }
-        let region = Arc::new(terrain::Region::generate(seed, config));
+        let region = Arc::new(terrain::Region::generate(
+            seed,
+            config,
+            spec.extent_m,
+            spec.ceiling_m,
+        ));
         let features = Arc::new(features::FeatureIndex::generate(&region, seed));
         Ok(Self {
             spec,
@@ -362,10 +385,14 @@ impl ProceduralTerrain {
         layer: debug::DebugLayer,
         size: usize,
     ) -> Result<debug::DebugImage, String> {
-        debug::image(size, layer, |x, z| self.region.environment_at(x, z))
+        debug::image(size, self.source_extent_m as f64, layer, |x, z| {
+            self.region.environment_at(x, z)
+        })
     }
     pub fn environment_statistics(&self) -> debug::EnvironmentStats {
-        debug::statistics(128, |x, z| self.region.environment_at(x, z))
+        debug::statistics(128, self.source_extent_m as f64, |x, z| {
+            self.region.environment_at(x, z)
+        })
     }
     pub fn extent_cells(&self) -> i64 {
         self.spec.extent_cells()
@@ -437,6 +464,9 @@ impl Generator for ProceduralTerrain {
     fn has_volumetric_features(&self, origin: [f64; 2], edge: f64) -> bool {
         self.features.overlaps(origin, edge)
     }
+    fn has_display_volumetric_features(&self, origin: [f64; 2], edge: f64, cell_m: f64) -> bool {
+        self.features.overlaps_resolved(origin, edge, cell_m)
+    }
     fn display_cover_at(&self, pos: CellPos, spacing: i64) -> Option<[(MaterialId, f32); 5]> {
         let size = spacing as f64 * self.spec.grid.meters();
         if size * (self.world_scale as f64) < 4. {
@@ -473,6 +503,7 @@ impl Generator for ProceduralTerrain {
             seed: self.seed,
             version: GENERATOR_VERSION,
             definition: 0x5445525241494e32
+                ^ painting::hash(self.source_extent_m as u64 ^ 0x534f55524345)
                 ^ self.config.fingerprint()
                 ^ if self.world_scale == 1 {
                     0

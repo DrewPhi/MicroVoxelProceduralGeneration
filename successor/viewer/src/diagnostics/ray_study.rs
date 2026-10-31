@@ -44,6 +44,7 @@ fn local(mut brick: Brick) -> Brick {
 }
 fn key(x: u32, z: u32, revision: u64) -> MeshKey {
     MeshKey {
+        corner_levels: None,
         tile: TileKey { level: 13, x, z },
         neighbors: [13; 4],
         revision,
@@ -302,7 +303,7 @@ fn frame_profile(world: Arc<World<Terrain>>, report: &mut String) -> microvoxel:
     rt.prepare_still_capture();
     "4250,200,6250,125,-5.14"
         .parse::<crate::capture::Viewpoint>()?
-        .apply(&mut rt);
+        .apply(&mut rt)?;
     rt.gpu.hud_visible = false;
     crate::wait_for_cover(&mut rt, Instant::now() + Duration::from_secs(120))?;
     let texture = rt.gpu.offscreen();

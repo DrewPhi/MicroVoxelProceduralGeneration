@@ -12,9 +12,10 @@ use microvoxel::{
 fn regional_environment_drives_diversity_and_preserves_world_contracts() {
     let generator = ProceduralTerrain::new(42);
     let stats = generator.environment_statistics();
-    // Check useful diversity, not an exact snapshot of tuning coefficients.
-    assert!(stats.landforms.iter().all(|n| *n > stats.samples / 50));
-    assert!(stats.geology.iter().all(|n| *n > 0));
+    // A 10 km crop may occupy one geographic province; diversity belongs at
+    // regional scale, not an artificial requirement to pack every type nearby.
+    assert!(stats.landforms.iter().sum::<usize>() == stats.samples);
+    assert!(stats.geology.iter().sum::<usize>() == stats.samples);
     assert!(stats.gentle_fraction > 0.20);
     assert!(generator.regional_memory_bytes() < 64 * 1024 * 1024);
     let p = CellPos::new(85000, 0, 80000);
@@ -84,4 +85,36 @@ fn regional_environment_drives_diversity_and_preserves_world_contracts() {
     ] {
         assert!(world.materials().get(id).unwrap().properties.is_empty());
     }
+}
+
+#[test]
+fn large_region_has_diverse_connected_geography_with_bounded_memory() {
+    let generator = ProceduralTerrain::with_spec(
+        42,
+        TerrainConfig::default(),
+        microvoxel::WorldSpec {
+            extent_m: 100_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let stats = generator.environment_statistics();
+    assert!(stats.landforms.iter().all(|n| *n > stats.samples / 100));
+    assert!(stats.geology.iter().all(|n| *n > 0));
+    assert!(stats.max_elevation > 1400.);
+    assert!(stats.min_elevation < 150.);
+    assert!(stats.gentle_fraction > 0.4);
+    assert!(generator.regional_memory_bytes() < 256 * 1024 * 1024);
+    // Distant coordinates are populated, not a clamped copy of the old 10 km edge.
+    let a = generator.sample_m(11_000., 15_000.).unwrap();
+    let b = generator.sample_m(91_000., 85_000.).unwrap();
+    assert!((a.height_m - b.height_m).abs() > 1.);
+    let coarse = generator.at_grid(microvoxel::GridScale::new(1, 4).unwrap());
+    let fine = generator.at_grid(microvoxel::GridScale::new(1, 100).unwrap());
+    assert_eq!(
+        coarse.sample_m(81_234., 78_456.).unwrap().height_m,
+        fine.sample_m(81_234., 78_456.).unwrap().height_m
+    );
+    let world = World::new(generator);
+    assert!(image_from_world(&world, DebugLayer::Biomes, 16).is_ok());
 }

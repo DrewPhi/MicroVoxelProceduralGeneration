@@ -1,13 +1,27 @@
 //! Runtime-selectable baselines. Renderers, collision and edits share one source.
 use super::*;
 use std::{path::Path, sync::Arc};
+#[path = "atlas/cache.rs"]
+mod atlas_cache;
 
 #[derive(Clone)]
 pub enum Terrain {
     Procedural(Arc<ProceduralTerrain>),
     Survey(Arc<survey::Survey>),
+    Atlas(Arc<atlas::AtlasTerrain>),
 }
 impl Terrain {
+    pub fn from_atlas(path: &Path, grid: crate::GridScale, scale: u32) -> Result<Self, String> {
+        Ok(Self::Atlas(Arc::new(atlas::AtlasTerrain::load(
+            path, grid, scale,
+        )?)))
+    }
+    pub fn prepare_atlas(seed: u64, grid: crate::GridScale, scale: u32) -> Result<Self, String> {
+        atlas_cache::prepare_atlas(seed, grid, scale)
+    }
+    pub fn is_atlas(&self) -> bool {
+        matches!(self, Self::Atlas(_))
+    }
     pub fn new(seed: u64) -> Self {
         Self::Procedural(Arc::new(ProceduralTerrain::new(seed)))
     }
@@ -39,6 +53,7 @@ impl Terrain {
         match self {
             Self::Procedural(p) => p.world_scale(),
             Self::Survey(_) => 1,
+            Self::Atlas(a) => a.world_scale(),
         }
     }
     pub fn from_survey(path: &Path) -> crate::Result<Self> {
@@ -54,6 +69,7 @@ impl Terrain {
         match self {
             Self::Procedural(p) => p.as_ref(),
             Self::Survey(s) => s.as_ref(),
+            Self::Atlas(a) => a.as_ref(),
         }
     }
     pub fn config(&self) -> Option<TerrainConfig> {
@@ -66,11 +82,15 @@ impl Terrain {
         match self {
             Self::Procedural(p) => p.regional_memory_bytes(),
             Self::Survey(s) => s.memory_bytes(),
+            Self::Atlas(a) => a.memory_bytes(),
         }
     }
     pub fn environment_statistics(&self) -> String {
         match self {
             Self::Procedural(p) => p.environment_statistics().to_string(),
+            Self::Atlas(_) => {
+                "Compiled ocean-transport climate, hydrology and geographic materials.".into()
+            }
             _ => "Measured surface and aerial colors; climate/material classes are not surveyed."
                 .into(),
         }
@@ -94,6 +114,7 @@ impl Terrain {
     pub fn at_grid(&self, grid: crate::GridScale) -> Self {
         match self {
             Self::Procedural(p) => Self::Procedural(Arc::new(p.at_grid(grid))),
+            Self::Atlas(a) => Self::Atlas(Arc::new(a.at_grid(grid))),
             Self::Survey(s) => {
                 assert_eq!(
                     grid,
@@ -166,6 +187,10 @@ impl Generator for Terrain {
     }
     fn has_volumetric_features(&self, o: [f64; 2], e: f64) -> bool {
         self.generator().has_volumetric_features(o, e)
+    }
+    fn has_display_volumetric_features(&self, o: [f64; 2], e: f64, cell_m: f64) -> bool {
+        self.generator()
+            .has_display_volumetric_features(o, e, cell_m)
     }
     fn display_solids(&self, x: i64, z: i64, s: i64) -> Vec<Run> {
         self.generator().display_solids(x, z, s)

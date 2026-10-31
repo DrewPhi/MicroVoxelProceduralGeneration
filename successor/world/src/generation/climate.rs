@@ -46,7 +46,29 @@ fn growing_temperature(mean: f64, amplitude: f64) -> f64 {
         .sum::<f64>()
         / 12.
 }
+/// Dominant and weaker reverse-season moisture transport. Both solve the same
+/// O(cells) dependency sweep; no per-voxel weather or iterative atmosphere.
 pub(super) fn compute(
+    heights: &[f64],
+    side: usize,
+    spacing: f64,
+    config: TerrainConfig,
+    seed: u64,
+) -> Vec<ClimateCell> {
+    let mut primary = compute_wind(heights, side, spacing, config, seed);
+    let mut reverse = config;
+    reverse.wind_degrees += 180.;
+    let secondary = compute_wind(heights, side, spacing, reverse, seed);
+    for (a, b) in primary.iter_mut().zip(secondary) {
+        a.rain = 0.8 * a.rain + 0.2 * b.rain;
+        a.humidity = 0.8 * a.humidity + 0.2 * b.humidity;
+        a.exposure = 0.8 * a.exposure + 0.2 * b.exposure;
+        a.moisture = a.rain / (a.rain + a.pet);
+    }
+    primary
+}
+
+fn compute_wind(
     heights: &[f64],
     side: usize,
     spacing: f64,
@@ -81,7 +103,11 @@ pub(super) fn compute(
         for xi in 0..side {
             let x = if sx > 0 { xi } else { side - 1 - xi };
             let i = z * side + x;
-            let boundary = config.boundary_moisture * 0.88 * capacity(result[i].mean as f64);
+            let regional_source = (1.
+                + 0.25 * noise(x as f64 * spacing, z as f64 * spacing, 55_000., seed ^ 3401))
+            .clamp(0.65, 1.35);
+            let boundary =
+                config.boundary_moisture * regional_source * 0.88 * capacity(result[i].mean as f64);
             let upstream = |nx: isize, nz: isize| {
                 if nx < 0 || nz < 0 || nx >= side as isize || nz >= side as isize {
                     (boundary, heights[i])

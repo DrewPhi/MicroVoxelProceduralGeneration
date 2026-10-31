@@ -15,7 +15,10 @@ release executable is `successor/target/release/microvoxel-successor`; launcher
 logs go to `output/launcher.log`. `tools/build_successor.sh` also builds a separate
 MicroVoxel-Successor shortcut. Generated binaries/settings/captures are ignored.
 
-Ordinary launch opens the procedural world. Imported surveys remain available
+The **MicroVoxel launcher** opens the new saved geographic atlas, seed 42, at
+World Scale 10. Direct CLI execution retains the legacy procedural default; use
+`--world atlas --world-scale 10` for the new source or `--world procedural` for
+comparison. Imported surveys remain available
 through **Esc → World** or `--earth PATH`; a downloaded experiment in `output/`
 never silently changes the starting world. See [survey attribution](assets/reference/volcan/README.md).
 
@@ -71,11 +74,51 @@ against the permitted memory ceiling. Lowering a budget can retain the previous
 ceiling while the visible cover coarsens; high-offset ray allocations may delay
 shrinking until replaced or evicted.
 
-The finite source is **10 km square**, not a whole planet. World Scale N compresses
-source coordinates in X/Y/Z while voxel centimeters, player size and movement stay
-fixed: 1 is 10 km square, 10 is 1 km square, 100 is 100 m square. It enters save
-identity; incompatible source/scale saves are rejected. Procedural generation and
-long-term climate are deterministic; live weather and water physics remain future work.
+The new atlas is **1000 km square** in source coordinates, not a whole planet.
+World Scale 10 makes it 100 km square in game; scale 1 retains its original size.
+Changing scale compresses X/Y/Z together; it does not change voxel/player sizes.
+The default spawn now enters the player-scale valley near game X=97576, Z=47560
+at scale10. Its2×2km refinement region is source X960000..980000, Z465000..485000.
+Rivers use shared compiled profiles; the local erosion field caches under
+`output/atlas-refinement/`. Details: [valley implementation](agent_context/PLAYER_VALLEY_IMPLEMENTATION.md).
+
+Seed 42 reuses the validated local atlas. Other seeds compile once (several
+minutes), then load from `output/atlas-cache/`. The launcher builds the compiler
+helper. The menu keeps generation work off the interactive thread.
+
+`generation/atlas/` loads immutable physical terrain/climate/drainage arrays,
+reconstructs smooth shared triangle edges and river profiles, and supplies the
+existing rendering, collision and edit interfaces. A bounded in-memory patch
+cache is disposable; canonical atlas files persist. Analytic refinement does
+not run an erosion solve per voxel or renderer request.
+
+The **legacy** source defaults to **10 km square**. Its CLI accepts
+`--extent-km 1..100`. World Scale N compresses source coordinates in X/Y/Z while
+voxel centimeters, player size and movement stay fixed: with the default source,
+1 is 10 km square, 10 is 1 km square, 100 is 100 m square. Source extent, grid,
+generator version and scale enter save compatibility; incompatible saves are rejected.
+
+The legacy generator 6 starts with tectonic-inspired 72 km province sites and connected
+convergent mountain belts. Broad lowland/hill/plateau fields receive local ridge
+and geological detail; catchment routing, bounded valley incision and sediment
+transport shape drainage. Two seasonal wind sweeps supply static climate and
+continuous material/snow suitability. Native cells retain solid colors. These
+are approximate geographic/climate models; live weather and water physics remain
+future work. Regional arrays stay bounded (16 m samples at 10 km, 128 m at 100 km),
+so independently solved extents have different sampling and boundary conditions.
+
+Reproduce the full-scale overview (true heights, no vertical exaggeration):
+
+```sh
+./MicroVoxel --world procedural --seed 42 --extent-km 100 --isometric \
+  --screenshot output/overview-100km-v6/isometric-100km-seed42.png \
+  --debug-maps output/overview-100km-v6/maps
+```
+
+To inspect about 1000 km² around the highest sampled peak of that same world,
+add `--overview-area-km2 1000 --terrain-memory 512`. Crop edges snap to display
+cells (about 31.616 km square); terrain scale, climate and drainage stay unchanged.
+The `.txt` beside the PNG records crop bounds and sampled peak elevation.
 
 ## Checks and captures
 

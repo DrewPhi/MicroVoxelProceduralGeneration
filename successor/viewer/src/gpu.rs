@@ -130,6 +130,9 @@ pub struct Gpu {
     retiring_budget: Option<usize>,
     transition: Option<(BTreeSet<MeshKey>, std::time::Instant)>,
     transition_in: BTreeSet<MeshKey>,
+    transition_duration: f32,
+    cache_focus: Option<([f64; 3], f64)>,
+    allocation_need: Option<(usize, u64)>,
     shadow_texture: wgpu::Texture,
     frame_buffer: wgpu::Buffer,
     frame_bind: wgpu::BindGroup,
@@ -476,6 +479,9 @@ impl Gpu {
             retiring_budget: None,
             transition: None,
             transition_in: BTreeSet::new(),
+            transition_duration: 0.16,
+            cache_focus: None,
+            allocation_need: None,
             shadow_texture,
             frame_buffer,
             frame_bind,
@@ -522,7 +528,7 @@ impl Gpu {
     pub fn transitioning(&self) -> bool {
         self.transition
             .as_ref()
-            .is_some_and(|(_, t)| t.elapsed().as_secs_f32() < 0.16)
+            .is_some_and(|(_, t)| t.elapsed().as_secs_f32() < self.transition_duration)
     }
     fn clear_transition(&mut self) {
         let mut keys = self.transition_in.clone();
@@ -556,6 +562,7 @@ impl Gpu {
         old: &BTreeSet<MeshKey>,
         new: &BTreeSet<MeshKey>,
         enabled: bool,
+        seconds: f32,
     ) {
         if !self.transitioning() {
             self.clear_transition();
@@ -563,6 +570,7 @@ impl Gpu {
         if enabled && !self.settings.ray && !self.transitioning() && !old.is_empty() && old != new {
             // Only changed ownership regions render twice. Unchanged mountains
             // and the player are submitted once, never as two full-frame images.
+            self.transition_duration = seconds.clamp(0.025, 0.25);
             self.transition_in = new.difference(old).copied().collect();
             // Only an actual one-level split has this parent reconstruction.
             // Neighbor stitch/revision changes must not collapse to a parent.
@@ -672,15 +680,57 @@ impl Gpu {
             self.height,
         );
     }
+    pub fn configure_streaming_cache(&mut self, eye: [f64; 3], radius: f64) {
+        self.cache_focus = Some((eye, radius.min(64.)));
+    }
+    fn recent_detail(&self, key: &MeshKey) -> bool {
+        let Some((eye, radius)) = self.cache_focus else {
+            return false;
+        };
+        if key.tile.level + 2 < self.grid.finest {
+            return false;
+        }
+        let [x, z] = key.tile.origin_in(self.grid);
+        let e = key.tile.edge_in(self.grid) as f64 * self.grid.cell_m();
+        let x = x as f64 * self.grid.cell_m();
+        let z = z as f64 * self.grid.cell_m();
+        (x - eye[0])
+            .max(eye[0] - x - e)
+            .max(0.)
+            .hypot((z - eye[2]).max(eye[2] - z - e).max(0.))
+            <= radius
+    }
+    fn cache_limit(&self, protected: &BTreeSet<MeshKey>) -> usize {
+        let visible: usize = protected
+            .iter()
+            .filter_map(|k| self.tiles.get(k))
+            .map(|t| t.bytes)
+            .sum();
+        (self.budget / 2)
+            .max(visible + self.budget / 16)
+            .min(self.budget * 3 / 4)
+    }
+    pub fn prefetch_room(&self, bytes: usize, protected: &BTreeSet<MeshKey>) -> bool {
+        let required: usize = protected
+            .iter()
+            .filter_map(|k| self.tiles.get(k))
+            .map(|t| t.bytes)
+            .sum();
+        required.saturating_add(bytes) <= self.cache_limit(protected)
+            && self
+                .managed_committed_bytes()
+                .saturating_add((self.budget / 8) as u64)
+                <= self.budget as u64
+    }
     pub fn trim(&mut self, protected: &BTreeSet<MeshKey>) {
         // Cached, unprotected tiles must not consume the replacement working
         // set. Protected cover/transition tiles may exceed this cache target.
-        while self.bytes > self.budget / 2 {
+        while self.bytes > self.cache_limit(protected) {
             let candidate = self
                 .tiles
                 .iter()
                 .filter(|(key, _)| !protected.contains(key))
-                .min_by_key(|(_, tile)| tile.used)
+                .min_by_key(|(key, tile)| (self.recent_detail(key), tile.used))
                 .map(|(key, _)| *key);
             let Some(key) = candidate else {
                 break;
@@ -691,11 +741,31 @@ impl Gpu {
         if self.retiring_budget.is_some()
             || self.managed_committed_bytes() > self.budget as u64 * 3 / 4
         {
-            self.shrink_pools();
+            self.shrink_pools(false);
             if self.bytes <= self.budget && self.managed_committed_bytes() <= self.budget as u64 {
                 self.retiring_budget = None;
             }
         }
+    }
+    /// Reclaim optional cache before degrading required terrain. Never waits on
+    /// the GPU; the caller retries after normal queue completion polling.
+    pub fn recover_cache_pressure(&mut self, protected: &BTreeSet<MeshKey>) -> bool {
+        let unused: Vec<_> = self
+            .tiles
+            .keys()
+            .filter(|k| !protected.contains(k))
+            .copied()
+            .collect();
+        let evicted = !unused.is_empty();
+        for key in unused {
+            self.evict(key);
+        }
+        self.reap_pools();
+        self.shrink_pools(true);
+        evicted
+            || !self.pool_migrations.is_empty()
+            || !self.ray_migrations.is_empty()
+            || self.terrain_arena_stats().iter().any(|s| s.1 > 0)
     }
     fn evict(&mut self, key: MeshKey) {
         if let Some(tile) = self.tiles.remove(&key) {
@@ -721,6 +791,7 @@ impl Gpu {
                 self.retire_part(part);
             }
         }
+        self.cache_focus = None;
         self.visibility = Default::default();
         self.visibility_limit = 24000.;
         self.culled = 0;
@@ -739,6 +810,7 @@ impl Gpu {
         brick: microvoxel::render::ray::Brick,
         protected: &BTreeSet<MeshKey>,
     ) -> Result<(), String> {
+        self.allocation_need = None;
         self.reap_pools();
         let bytes = brick.bytes().max(32);
         let limit = self.retiring_budget.unwrap_or(self.budget).max(self.budget);
@@ -800,7 +872,7 @@ impl Gpu {
                 .tiles
                 .iter()
                 .filter(|(k, _)| !protected.contains(k))
-                .min_by_key(|(_, t)| t.used)
+                .min_by_key(|(key, t)| (self.recent_detail(key), t.used))
                 .map(|(k, _)| *k);
             if let Some(victim) = victim {
                 self.evict(victim);
@@ -857,12 +929,12 @@ impl Gpu {
         // Lowering a budget retains its previous ceiling only while coarsening
         // the protected cover. Otherwise a smaller parent could never be loaded.
         let limit = self.retiring_budget.unwrap_or(self.budget).max(self.budget);
-        while self.bytes + size > limit / 2 {
+        while self.bytes + size > self.cache_limit(protected) {
             let candidate = self
                 .tiles
                 .iter()
                 .filter(|(key, _)| !protected.contains(key))
-                .min_by_key(|(_, tile)| tile.used)
+                .min_by_key(|(key, tile)| (self.recent_detail(key), tile.used))
                 .map(|(key, _)| *key);
             let Some(candidate) = candidate else {
                 if self.bytes + size > limit {
@@ -979,8 +1051,10 @@ impl Gpu {
             &mut self.metadata_pool,
         ];
         if let Some(h) = pools[index].write(&self.queue, data, alignment) {
+            self.allocation_need = None;
             return Ok(h);
         }
+        self.allocation_need = Some((index, data.len().max(4) as u64 + alignment - 1));
         let committed = pools.iter().map(|p| p.arena.capacity()).sum::<u64>()
             + self
                 .pool_migrations
@@ -997,6 +1071,14 @@ impl Gpu {
         let available = limit.saturating_sub(committed);
         let active_capacity = pools.iter().map(|p| p.arena.capacity()).sum::<u64>()
             + self.raycaster.allocated_bytes as u64;
+        let largest_other = pools
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, p)| p.arena.capacity())
+            .chain([self.raycaster.allocated_bytes as u64])
+            .max()
+            .unwrap_or(0);
         let pool = &mut pools[index];
         let old_capacity = pool.arena.capacity();
         // Keep the old buffer charged until its copy and all preceding draws finish.
@@ -1009,7 +1091,16 @@ impl Gpu {
         // Leave one quarter of the ceiling available for future migrations
         // and actor poses. Steady capacity and temporary migration capacity
         // are different limits; filling both makes compaction impossible.
-        let steady_available = (limit * 3 / 4).saturating_sub(active_capacity - old_capacity);
+        let other = active_capacity - old_capacity;
+        let room = limit.saturating_sub(other);
+        // Preserve enough headroom to copy the largest active pool, rather
+        // than assuming every pool is smaller than one quarter of the budget.
+        let migration_safe = if room / 2 >= largest_other {
+            room / 2
+        } else {
+            room.saturating_sub(largest_other)
+        };
+        let steady_available = (limit * 3 / 4).saturating_sub(other).min(migration_safe);
         let capacity = (old_capacity + old_capacity / 2)
             .max(minimum)
             .min(available)
@@ -1056,9 +1147,13 @@ impl Gpu {
             &mut self.vertex_pool,
             &mut self.metadata_pool,
         ];
-        pools[index]
+        let result = pools[index]
             .write(&self.queue, data, alignment)
-            .ok_or_else(|| "GPU mesh budget reached (fragmented terrain arena)".into())
+            .ok_or_else(|| "GPU mesh budget reached (fragmented terrain arena)".into());
+        if result.is_ok() {
+            self.allocation_need = None;
+        }
+        result
     }
     fn refresh_tile_bind(&mut self) {
         self.tile_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1089,7 +1184,7 @@ impl Gpu {
         });
     }
     /// Migrate one pool per trim, using only headroom under the retiring ceiling.
-    fn shrink_pools(&mut self) {
+    fn shrink_pools(&mut self, force: bool) {
         if !self.pool_migrations.is_empty() || !self.ray_migrations.is_empty() {
             return;
         }
@@ -1108,8 +1203,23 @@ impl Gpu {
                 continue;
             }
             let packed = pool.arena.packed_size(alignment);
-            let capacity = (packed + packed / 8).max(65536).next_multiple_of(256);
-            if capacity >= pool.arena.capacity() * 3 / 4 || capacity > available {
+            let required = if force {
+                self.allocation_need
+                    .filter(|(i, _)| *i == index)
+                    .map_or(0, |(_, n)| n)
+            } else {
+                0
+            };
+            let mut capacity = (packed + packed / 8).max(65536).next_multiple_of(256);
+            if force {
+                capacity = capacity
+                    .max((packed + required).next_multiple_of(256))
+                    .min(pool.arena.capacity());
+            }
+            if ((required == 0) && capacity >= pool.arena.capacity() * 3 / 4)
+                || capacity > available
+                || packed + required > capacity
+            {
                 continue;
             }
             let pools = [
@@ -1119,6 +1229,9 @@ impl Gpu {
                 &mut self.metadata_pool,
             ];
             let pool = &mut *pools[index];
+            if force && packed >= pool.arena.capacity() {
+                continue;
+            }
             let mapping = pool.arena.compact(capacity, alignment);
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(pool.label),
@@ -1511,7 +1624,7 @@ impl Gpu {
                 f32::from(self.settings.shadows && !overview),
                 matrix.row(1).truncate().length() * 0.5,
                 if overview {
-                    40000.
+                    self.grid.spec.extent_m as f32 * 4.
                 } else {
                     self.visibility_limit
                 },
@@ -1579,7 +1692,8 @@ impl Gpu {
         }
         if !overview {
             if let Some((old, start)) = &self.transition {
-                let progress = (start.elapsed().as_secs_f32() / 0.16).clamp(0., 1.);
+                let progress =
+                    (start.elapsed().as_secs_f32() / self.transition_duration).clamp(0., 1.);
                 for key in &visible {
                     let phase = if old.contains(key) {
                         2. + progress
@@ -1878,6 +1992,118 @@ pub(crate) fn in_frustum(matrix: Mat4, low: [f64; 3], high: [f64; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "requires graphics adapter"]
+    fn recent_native_cache_survives_newer_distant_cache_pressure() {
+        use super::*;
+        use microvoxel::{
+            generation::FlatTerrain,
+            render::{lod::TileKey, terrain::Sampler},
+            World,
+        };
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, 64, 64)).unwrap();
+        let mut sampler = Sampler::new(std::sync::Arc::new(World::new(FlatTerrain {
+            height: 16,
+            water: 0,
+            seed: 42,
+        })));
+        let key = |x| MeshKey {
+            tile: TileKey { level: 13, x, z: 1 },
+            neighbors: [13; 4],
+            corner_levels: None,
+            revision: 0,
+        };
+        let (visible, recent, far) = (key(1), key(2), key(1000));
+        for k in [visible, recent, far] {
+            gpu.upload(
+                k,
+                sampler.display_mesh(k, || false).unwrap(),
+                &[visible, recent, far].into(),
+            )
+            .unwrap();
+        }
+        gpu.tiles.get_mut(&recent).unwrap().used = 1;
+        gpu.tiles.get_mut(&far).unwrap().used = 100;
+        gpu.configure_streaming_cache([3., 2., 3.], 8.);
+        // A small logical payload ceiling isolates eviction order. This is not
+        // a claim that device buffers fit below their normal minimum capacity.
+        gpu.budget = 2 * (gpu.tiles[&visible].bytes + gpu.tiles[&recent].bytes);
+        gpu.trim(&[visible].into());
+        assert!(gpu.ready(&visible, false));
+        assert!(gpu.ready(&recent, false));
+        assert!(!gpu.ready(&far, false));
+    }
+    #[test]
+    #[ignore = "requires graphics adapter"]
+    fn ready_patch_fades_keep_coverage_at_walking_and_sprinting_durations() {
+        use super::*;
+        use microvoxel::{
+            generation::FlatTerrain,
+            render::{lod::TileKey, terrain::Sampler},
+            World,
+        };
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, 128, 128)).unwrap();
+        gpu.detail_settings(&crate::settings::Settings {
+            haze: 0.,
+            shadows: false,
+            antialias: false,
+            ..Default::default()
+        });
+        gpu.hud_visible = false;
+        let mut sampler = Sampler::new(std::sync::Arc::new(World::new(FlatTerrain {
+            height: 16,
+            water: 0,
+            seed: 42,
+        })));
+        let parent = TileKey {
+            level: 12,
+            x: 1,
+            z: 1,
+        };
+        let old_key = MeshKey {
+            tile: parent,
+            neighbors: [12; 4],
+            corner_levels: None,
+            revision: 0,
+        };
+        let old: BTreeSet<_> = [old_key].into();
+        let new: BTreeSet<_> = parent
+            .children()
+            .map(|tile| MeshKey {
+                tile,
+                neighbors: [13; 4],
+                corner_levels: None,
+                revision: 0,
+            })
+            .collect();
+        let all: BTreeSet<_> = old.union(&new).copied().collect();
+        for key in &all {
+            gpu.upload(*key, sampler.display_mesh(*key, || false).unwrap(), &all)
+                .unwrap();
+        }
+        let mut camera = Camera::at(microvoxel::CellPos::new(96, 48, 96));
+        camera.pitch = -1.5;
+        let texture = gpu.offscreen();
+        let view = texture.create_view(&Default::default());
+        for seconds in [0.025, 0.16] {
+            gpu.clear_transition();
+            gpu.begin_transition(&old, &new, true, seconds);
+            for progress in [0., 0.5, 0.95] {
+                gpu.transition.as_mut().unwrap().1 = std::time::Instant::now()
+                    - std::time::Duration::from_secs_f32(seconds * progress);
+                gpu.render(&view, &camera, &new, None);
+                let pixels = gpu.read_pixels(&texture).unwrap();
+                for y in 40..88 {
+                    for x in 40..88 {
+                        let p = &pixels[(y * 128 + x) * 4..][..3];
+                        assert!(p[1] > p[2], "fade hole {seconds}/{progress}: {p:?}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     #[ignore = "needs a Vulkan/Metal/DX12 device; run explicitly"]
     fn repeated_growth_aligns_fractional_ratios_and_odd_budget_ceilings() {
         use super::*;
@@ -1894,7 +2120,16 @@ mod tests {
         gpu.refresh_tile_bind();
         assert_eq!(gpu.geometry_pool.buffer.size(), 260);
         let other = gpu.managed_committed_bytes() as usize - 260;
-        gpu.budget = ((other + 389) * 4).div_ceil(3);
+        let largest = [
+            gpu.color_pool.arena.capacity(),
+            gpu.vertex_pool.arena.capacity(),
+            gpu.metadata_pool.arena.capacity(),
+            gpu.raycaster.allocated_bytes as u64,
+        ]
+        .into_iter()
+        .max()
+        .unwrap() as usize;
+        gpu.budget = other + largest + 389;
         let first = gpu.write_pool(0, &vec![0xabu8; 260], 4).unwrap();
         gpu.write_pool(0, &[0; 4], 4).unwrap();
         assert_eq!(gpu.geometry_pool.buffer.size(), 388);
@@ -1937,6 +2172,7 @@ mod tests {
         let vertices = gpu.write_pool(2, &[0; 4], 4).unwrap();
         let metadata = gpu.write_pool(3, &[0; 48], 256).unwrap();
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 0,
                 x: 0,
@@ -2023,6 +2259,7 @@ mod tests {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let mut gpu = pollster::block_on(Gpu::new(&instance, None, 16, 16)).unwrap();
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 0,
                 x: 0,
@@ -2165,6 +2402,7 @@ mod tests {
         })));
         let grid = microvoxel::render::lod::Grid::new(world.spec());
         let key = MeshKey {
+            corner_levels: None,
             tile: microvoxel::render::lod::TileKey {
                 level: grid.finest,
                 x: 28125,
@@ -2264,6 +2502,7 @@ mod tests {
         world.apply(&edits).unwrap();
         let mut sampler = Sampler::new(Arc::new(world));
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 1,
@@ -2335,6 +2574,7 @@ mod tests {
         let mut sampler = Sampler::new(world);
         let keys = [
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 12,
                     x: 1,
@@ -2344,6 +2584,7 @@ mod tests {
                 revision: 0,
             },
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 1,
@@ -2353,6 +2594,7 @@ mod tests {
                 revision: 0,
             },
             MeshKey {
+                corner_levels: None,
                 tile: TileKey {
                     level: 13,
                     x: 1,
@@ -2408,6 +2650,7 @@ mod tests {
         }));
         let mut sampler = Sampler::new(world);
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 10,
                 x: 582,

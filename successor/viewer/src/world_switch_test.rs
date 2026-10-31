@@ -36,6 +36,7 @@ fn menu_switches_survey_procedural_and_back_without_stale_gpu_tiles() {
     gpu.grid = Grid::new(world.spec());
     let level = gpu.grid.finest;
     let key = MeshKey {
+        corner_levels: None,
         tile: TileKey { level, x: 0, z: 0 },
         neighbors: [level; 4],
         revision: 0,

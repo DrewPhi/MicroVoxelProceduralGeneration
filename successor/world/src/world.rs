@@ -121,6 +121,15 @@ impl<G: Generator> World<G> {
     pub fn has_volumetric_features(&self, origin: [f64; 2], edge: f64) -> bool {
         self.generator.has_volumetric_features(origin, edge)
     }
+    pub fn has_display_volumetric_features(
+        &self,
+        origin: [f64; 2],
+        edge: f64,
+        cell_m: f64,
+    ) -> bool {
+        self.generator
+            .has_display_volumetric_features(origin, edge, cell_m)
+    }
     pub fn terrain_summary(
         &self,
         origin: [f64; 2],

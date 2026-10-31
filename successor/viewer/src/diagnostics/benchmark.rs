@@ -25,6 +25,7 @@ pub fn run(world: Arc<World<Terrain>>) -> microvoxel::Result<()> {
         for z in (z0..z0 + 256).step_by(edge as usize) {
             for x in (x0..x0 + 256).step_by(edge as usize) {
                 let mesh = sampler.mesh(MeshKey {
+                    corner_levels: None,
                     tile: TileKey {
                         level,
                         x: (x / edge) as u32,

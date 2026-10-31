@@ -331,6 +331,7 @@ mod tests {
         let mut roots: Vec<_> = (0..8256)
             .map(|i| Root {
                 key: MeshKey {
+                    corner_levels: None,
                     tile: TileKey {
                         level: 13,
                         x: i % 128,

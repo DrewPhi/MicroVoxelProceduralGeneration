@@ -154,6 +154,7 @@ pub struct DebugImage {
 }
 pub(super) fn image(
     size: usize,
+    extent_m: f64,
     layer: DebugLayer,
     sample: impl Fn(f64, f64) -> EnvironmentSample,
 ) -> Result<DebugImage, String> {
@@ -164,8 +165,8 @@ pub(super) fn image(
     for z in 0..size {
         for x in 0..size {
             let p = sample(
-                (x as f64 + 0.5) * 10000. / size as f64,
-                (z as f64 + 0.5) * 10000. / size as f64,
+                (x as f64 + 0.5) * extent_m / size as f64,
+                (z as f64 + 0.5) * extent_m / size as f64,
             );
             rgb.extend_from_slice(&layer.color(p));
         }
@@ -217,6 +218,7 @@ impl fmt::Display for EnvironmentStats {
 }
 pub(super) fn statistics(
     side: usize,
+    extent_m: f64,
     sample: impl Fn(f64, f64) -> EnvironmentSample,
 ) -> EnvironmentStats {
     let mut s = EnvironmentStats {
@@ -235,8 +237,8 @@ pub(super) fn statistics(
     for z in 0..side {
         for x in 0..side {
             let e = sample(
-                (x as f64 + 0.5) * 10000. / side as f64,
-                (z as f64 + 0.5) * 10000. / side as f64,
+                (x as f64 + 0.5) * extent_m / side as f64,
+                (z as f64 + 0.5) * extent_m / side as f64,
             );
             s.landforms[e.landform() as usize] += 1;
             s.geology[e.geology as usize] += 1;
@@ -269,8 +271,10 @@ pub fn image_from_world<G: crate::generation::Generator>(
     let mut rgb = Vec::with_capacity(size * size * 3);
     for z in 0..size {
         for x in 0..size {
-            let px = ((x as f64 + 0.5) * 160000. / size as f64).floor() as i64;
-            let pz = ((z as f64 + 0.5) * 160000. / size as f64).floor() as i64;
+            let px = ((x as f64 + 0.5) * world.spec().extent_cells() as f64 / size as f64).floor()
+                as i64;
+            let pz = ((z as f64 + 0.5) * world.spec().extent_cells() as f64 / size as f64).floor()
+                as i64;
             let e = world
                 .environment_at(crate::CellPos::new(px, 0, pz))
                 .ok_or("generator does not provide environment data")?;

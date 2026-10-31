@@ -280,6 +280,7 @@ mod tests {
             .unwrap();
         let mut s = Sampler::new(Arc::new(world));
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 1,
@@ -317,6 +318,7 @@ mod tests {
             seed: 42,
         });
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 1,

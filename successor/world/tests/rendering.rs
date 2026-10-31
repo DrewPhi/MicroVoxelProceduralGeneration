@@ -13,6 +13,7 @@ use microvoxel::{
 use std::sync::Arc;
 fn key(level: u8, x: u32, z: u32, neighbors: [u8; 4], revision: u64) -> MeshKey {
     MeshKey {
+        corner_levels: None,
         tile: TileKey { level, x, z },
         neighbors,
         revision,

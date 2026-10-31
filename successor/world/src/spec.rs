@@ -94,11 +94,11 @@ impl Default for WorldSpec {
 impl WorldSpec {
     pub fn validate(self) -> Result<Self, String> {
         if self.extent_m == 0
-            || self.extent_m > 10_000
+            || self.extent_m > 1_000_000
             || self.ceiling_m < 1024
-            || self.ceiling_m > 2048
+            || self.ceiling_m > 32_768
         {
-            return Err("world extent must be 1..10000 m and vertical limit 1024..2048 m".into());
+            return Err("world extent must be 1..1000000 m and vertical limit 1024..32768 m".into());
         }
         Ok(self)
     }

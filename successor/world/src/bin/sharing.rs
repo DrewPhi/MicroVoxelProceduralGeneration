@@ -39,6 +39,7 @@ fn inspect<G: Generator>(name: &str, generator: G) {
     let start = Instant::now();
     for i in 0..16 {
         let key = MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 2125 + i % 4,

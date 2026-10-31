@@ -58,6 +58,7 @@ fn connected_ridge_and_native_boundary_have_no_sky_pixels() {
     // Left: two exact native tiles. Right: one connected step-two patch.
     let keys = [
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 12,
                 x: 1,
@@ -67,6 +68,7 @@ fn connected_ridge_and_native_boundary_have_no_sky_pixels() {
             revision: 0,
         },
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 1,
@@ -76,6 +78,7 @@ fn connected_ridge_and_native_boundary_have_no_sky_pixels() {
             revision: 0,
         },
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 13,
                 x: 1,
@@ -120,6 +123,7 @@ fn connected_two_to_one_boundary_at_large_world_coordinates_has_no_sky_pixels() 
     let mut sampler = Sampler::new(Arc::new(World::new(Ridge { base })));
     let keys = [
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 11,
                 x: (base[0] / 128 + 1) as u32,
@@ -129,6 +133,7 @@ fn connected_two_to_one_boundary_at_large_world_coordinates_has_no_sky_pixels() 
             revision: 0,
         },
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 12,
                 x: (base[0] / 64 + 1) as u32,
@@ -138,6 +143,7 @@ fn connected_two_to_one_boundary_at_large_world_coordinates_has_no_sky_pixels() 
             revision: 0,
         },
         MeshKey {
+            corner_levels: None,
             tile: TileKey {
                 level: 12,
                 x: (base[0] / 64 + 1) as u32,
@@ -164,6 +170,103 @@ fn connected_two_to_one_boundary_at_large_world_coordinates_has_no_sky_pixels() 
             for x in 180..332 {
                 let p = &pixels[(y * 512 + x) * 4..][..3];
                 assert!(p[1] > p[2], "sky/crack pixel at {x},{y} yaw {yaw}: {p:?}");
+            }
+        }
+    }
+}
+
+struct CentimeterCorner;
+impl Generator for CentimeterCorner {
+    fn identity(&self) -> GeneratorIdentity {
+        GeneratorIdentity {
+            seed: 1,
+            version: 1,
+            definition: 2,
+        }
+    }
+    fn spec(&self) -> microvoxel::WorldSpec {
+        microvoxel::WorldSpec {
+            grid: microvoxel::GridScale::new(1, 50).unwrap(),
+            ..Default::default()
+        }
+    }
+    fn column_hint(&self, x: i64, z: i64) -> Option<Column> {
+        self.display_column(x, z, 1)
+    }
+    fn display_column(&self, x: i64, z: i64, step: i64) -> Option<Column> {
+        let h = 64 + (x * x).rem_euclid(13) + (z * z).rem_euclid(19) + step * 2;
+        Some(Column {
+            ground: h,
+            water: 0,
+            bedrock: 0,
+            surface: MaterialId::GRASS,
+            subsoil: MaterialId::SOIL,
+            rock: MaterialId::ROCK,
+        })
+    }
+    fn voxel(&self, p: CellPos) -> Option<Voxel> {
+        Some(Voxel::new(
+            self.column_hint(p.x, p.z)?.material_at(p.y),
+            self.appearance_at(p, MaterialId::GRASS),
+        ))
+    }
+    fn runs(&self, x: i64, z: i64, r: Range<i64>) -> Option<Vec<Run>> {
+        Some(self.column_hint(x, z)?.runs(r))
+    }
+}
+#[test]
+#[ignore = "requires graphics adapter"]
+fn centimeter_diagonal_corner_at_eight_kilometers_has_no_sky_cracks() {
+    use microvoxel::render::lod::{Grid, Layout};
+    let world = Arc::new(World::new(CentimeterCorner));
+    let grid = Grid::new(world.spec());
+    let base = [399872i64, 249984i64];
+    let level = grid.finest - 2;
+    let tiles: Vec<_> = (0..4)
+        .map(|i| TileKey {
+            level,
+            x: (base[0] / 128) as u32 + i % 2,
+            z: (base[1] / 128) as u32 + i / 2,
+        })
+        .collect();
+    let mut layout = Layout {
+        grid,
+        tiles: tiles.iter().copied().collect(),
+    };
+    for &tile in &tiles[1..] {
+        layout.split(tile);
+    }
+    layout.balance();
+    let keys = layout.mesh_keys(0);
+    let cover: BTreeSet<_> = keys.into_values().collect();
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    let mut gpu = pollster::block_on(Gpu::new(&instance, None, 256, 256)).unwrap();
+    gpu.grid = grid;
+    gpu.detail_settings(&crate::settings::Settings {
+        haze: 0.,
+        shadows: false,
+        antialias: false,
+        ..Default::default()
+    });
+    gpu.hud_visible = false;
+    let mut sampler = Sampler::new(world);
+    for key in &cover {
+        gpu.upload(*key, sampler.display_mesh(*key, || false).unwrap(), &cover)
+            .unwrap();
+    }
+    let texture = gpu.offscreen();
+    let view = texture.create_view(&Default::default());
+    for yaw in [0., 0.37, 1.1] {
+        let mut camera = Camera::at(CellPos::new(base[0] + 128, 150, base[1] + 128));
+        camera.grid = grid.spec.grid;
+        camera.pitch = -1.45;
+        camera.yaw = yaw;
+        gpu.render(&view, &camera, &cover, None);
+        let pixels = gpu.read_pixels(&texture).unwrap();
+        for y in 72..184 {
+            for x in 72..184 {
+                let p = &pixels[(y * 256 + x) * 4..][..3];
+                assert!(p[1] > p[2], "corner crack {x},{y}, yaw {yaw}: {p:?}");
             }
         }
     }

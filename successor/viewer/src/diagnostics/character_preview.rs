@@ -41,6 +41,7 @@ impl Asset {
 }
 fn key(revision: u64) -> MeshKey {
     MeshKey {
+        corner_levels: None,
         tile: TileKey {
             level: 13,
             x: 0,
