@@ -1,0 +1,168 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,frame=single,breaklines=true}
+\setlist{nosep}
+
+\title{Analytic Micro-Voxel Terrain\\\large Plan for Demo 1: FBM $\rightarrow$ quadratic patches $\rightarrow$ exact voxel ray cast}
+\date{November 1, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Context}
+The \texttt{continuous-terrain} branch starts from scratch. The old engine has been deleted from the working tree but is still in git history at \texttt{HEAD}.
+
+The goal is to render terrain without stepping through it voxel by voxel. Terrain is stored as cheap continuous pieces whose ray intersection has a \emph{closed form}. Each piece is then \emph{floored into micro-voxels}, and the voxel size $s$ is a hyperparameter.
+
+Later, edits will be kept in RAM and the pieces refit to the edited voxels, so the whole world stays compressed as analytic functions. Demo~1 is FBM terrain with no vegetation and no edits: just voxels, plus lighting that shows depth. It is written in Rust with wgpu and puts as much work as possible on the GPU from day one, so it won't need rewriting later.
+
+\section{Which functions have a cheap closed-form ray intersection?}
+A ray $\mathbf p(t)=\mathbf o+t\mathbf d$ is linear in $t$. A heightfield $y=h(x,z)$ is hit where
+\[
+f(t)=h(o_x+t d_x,\; o_z+t d_z)-(o_y+t d_y)=0 .
+\]
+\textbf{If $h$ is a polynomial of total degree $n$ in $(x,z)$, then $f(t)$ is a polynomial of degree $n$ in $t$.}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Patch function $h(x,z)$ & Degree in $t$ & Closed form & Verdict\\
+\midrule
+plane $a+bx+cz$ & 1 & division & trivial, but faceted\\
+bilinear $a+bx+cz+dxz$ & 2 & quadratic formula & OK\\
+\textbf{total-degree-2 quadratic} (6 coeffs) & \textbf{2} & \textbf{quadratic formula} & \textbf{recommended}\\
+total-degree-3 cubic (10 coeffs) & 3 & Cardano / bracketed Newton & 3--5$\times$ cost, fragile\\
+biquadratic ($x^2z^2$ terms) & 4 & Ferrari & avoid\\
+bicubic / B\'ezier tensor patches & 6 & none & needs iteration\\
+FBM / Perlin (quintic fade, many octaves) & high & none & not analytic\\
+\bottomrule
+\end{tabular}
+\end{center}
+The recommended patch is $h(x,z)=a+bx+cz+dx^2+exz+fz^2$.
+
+Key consequences:
+\begin{itemize}
+\item ``Piecewise quadratic'' has to mean \emph{total degree 2}, not tensor-product biquadratic, because tensor-product terms raise the degree in $t$. This matches the literature: closed-form ray--surface intersection is only known for a few piecewise-polynomial surfaces, and in practice that means second-order interpolation~\cite{rbf}.
+\item 3D implicit quadrics $F(x,y,z)=0$ of total degree 2 \emph{also} give a quadratic in $t$. That is the future route to overhangs and caves, using the same solver.
+\item \textbf{FBM is the authoring source, never the render representation.} It is sampled and then fit (Section~\ref{sec:fit}).
+\item The root solve is a Blinn-style stable quadratic: $q=-\tfrac12\bigl(b+\operatorname{sign}(b)\sqrt{b^2-4ac}\bigr)$, with roots $q/a$ and $c/q$, and a linear fallback when $|a|\approx 0$. If cubics are ever needed, use Yuksel's bracketed-Newton solver~\cite{yuksel}.
+\end{itemize}
+
+\section{Why some traversal is unavoidable, and how it stays tiny}
+Even with closed-form patches, a ray still has to find \emph{which} patch it hits first, because closer patches occlude farther ones. What we avoid is stepping voxel by voxel:
+\begin{enumerate}
+\item \textbf{Patch level:} traverse a hierarchical \emph{maximum mipmap}, a quadtree of per-patch max heights~\cite{tevs,ebert}. This takes about $O(\log N)$ steps, and building the pyramid is negligible.
+\item \textbf{Inside a patch:} solve one closed-form quadratic.
+\item \textbf{Voxel level:} a short, provably bounded column DDA, typically 1--3 columns.
+\end{enumerate}
+
+\subsection{Exact voxelization with a bracketed analytic hit}
+\begin{itemize}
+\item Patches cover $P\times P$ voxel columns and are aligned to column boundaries. Every column belongs to exactly one patch, so the voxel world is well defined even when neighbouring patches don't match at their edges.
+\item Column height: $H(i,j)=\lfloor h(\mathbf c_{ij})/s\rfloor$, where $\mathbf c_{ij}$ is the column centre. Voxel rows $k<H$ are solid.
+\item \textbf{Upper envelope.} Let $L$ be the patch's maximum gradient, which has a closed form for a quadratic. For any point $\mathbf p$ in a column,
+\[
+H s\le h(\mathbf c)\le h(\mathbf p)+L\,s/\sqrt2 .
+\]
+So intersecting the ray analytically with $h+m_{\text{up}}$, where $m_{\text{up}}=L s/\sqrt2$, gives a $t$ that is guaranteed not to pass any voxel.
+\item \textbf{Lower envelope.} The ray must have hit a voxel before it crosses $h-s-L s/\sqrt2$.
+\item Between the two analytic hits, a 2D column DDA does one quadratic evaluation and one floor per step. It is exact, and its step count is bounded by the number of columns between the envelopes. Grazing rays take more steps, and a diagnostics heatmap shows where.
+\item The face the ray enters through (top or $\pm x$/$\pm z$ side) gives a flat voxel normal for free.
+\end{itemize}
+
+\section{FBM $\rightarrow$ quadratic fitting on the GPU}\label{sec:fit}
+\begin{itemize}
+\item Sample FBM at the column centres and fit one least-squares quadratic per patch to its $P^2$ samples.
+\item \textbf{Key fact:} every patch uses the same local sample layout, so $A^\top A$ is identical everywhere. Precompute $W=(A^\top A)^{-1}A^\top$ (a $6\times P^2$ matrix) once on the CPU and upload it. Fitting a patch is then just six dot products, $\mathbf c=W\mathbf y$: one workgroup per patch with a reduction.
+\item Store coefficients in patch-local coordinates for f32 precision. Column indices are \texttt{i32}.
+\item \textbf{Error metric:} the fraction of columns where $\lfloor h_{\text{fit}}/s\rfloor\ne\lfloor h_{\text{fbm}}/s\rfloor$, plus the maximum error in voxels. Overfitting is fine, because only column centres matter.
+\item \textbf{Fidelity rule:} a quadratic captures at most about half a wavelength. So the patch width $P s$ should be at most about half the smallest FBM wavelength we keep; finer octaves are lost.
+\item \textbf{Continuity:} independent patches are not $C^0$. Because they are column-aligned and floored, a seam can only appear as an extra voxel step. If seams turn out to be visible, upgrade to $C^1$ Powell--Sabin piecewise quadratics~\cite{ps}. Those are still total degree 2, so still closed form.
+\item \textbf{Memory:} 24\,B per patch. With $s=0.25$\,m, $P=8$ and a 2\,km$\times$2\,km world, that is $1000^2$ patches, or about 24\,MB, all resident on the GPU.
+\end{itemize}
+
+\section{GPU pipeline (wgpu compute)}
+On startup and whenever a hyperparameter changes:
+\begin{enumerate}
+\item \texttt{fbm\_fit.wgsl}: each workgroup evaluates FBM for one patch, reduces $W\mathbf y$, and writes the coefficients and mismatch stats.
+\item \texttt{bounds.wgsl}: computes the analytic min/max of each patch (corners, edge extrema, interior critical point) expanded by the envelope margins, then builds the min/max pyramid.
+\end{enumerate}
+Every frame:
+\begin{enumerate}[resume]
+\item \texttt{raycast.wgsl}: one thread per pixel (8$\times$8 workgroups) runs mipmap traversal $\to$ patch quadratic $\to$ column DDA and writes the hit, normal and column. The same function is reused for shadow rays.
+\item \texttt{shade.wgsl}: applies the lighting and presents to the swapchain.
+\end{enumerate}
+The CPU handles the window, input and camera, uploads $W$, triggers refits, and will later hold edits in RAM. It also contains a reference implementation of every kernel, used for tests.
+
+\section{Demo 1 lighting}
+\begin{itemize}
+\item A directional sun with Lambert shading on the voxel face normal, plus hemisphere ambient light.
+\item Hard shadows from a second analytic ray, which is the strongest depth cue.
+\item Cheap voxel ambient occlusion, computed from the analytic neighbouring column heights $H(i\pm1,j\pm1)$.
+\item A height/slope colour tint and exponential distance fog.
+\item An optional far-field mode: when a voxel is smaller than about one pixel on screen, shade the continuous patch instead. It is off by default.
+\end{itemize}
+
+\section{Code layout}
+\begin{lstlisting}
+Cargo.toml                      (workspace)
+crates/terrain-core/            pure Rust, no GPU deps
+  src/fbm.rs  patch.rs  fit.rs  ray.rs  reference.rs  params.rs
+crates/viewer/                  wgpu + winit + glam + bytemuck + png
+  src/main.rs gpu.rs camera.rs capture.rs
+  shaders/common.wgsl fbm_fit.wgsl bounds.wgsl raycast.wgsl shade.wgsl
+\end{lstlisting}
+\begin{itemize}
+\item GPU structs use \texttt{\#[repr(C)]} and \texttt{bytemuck}, and are shared from \texttt{terrain-core}.
+\item Pin the current wgpu release at implementation time (the v29.x line). Validate WGSL with \texttt{naga} in tests.
+\item Ideas from the old \texttt{src/generation/noise.rs} and \texttt{native/src/capture.rs} can be reused from git history.
+\end{itemize}
+
+\section{Milestones}
+\begin{description}
+\item[M0] Math core on the CPU and a reference renderer that writes PNGs.
+\item[M1] GPU fit and bounds passes, checked for parity against the CPU.
+\item[M2] GPU ray cast, a free-fly camera, and headless capture.
+\item[M3] Lighting, and live tweaking of voxel size, $P$ and the FBM parameters.
+\item[M4] Diagnostics: mismatch, traversal-step and DDA-step heatmaps, plus GPU timings.
+\end{description}
+
+\section{Beyond Demo 1}
+\begin{itemize}
+\item \textbf{Adaptive patches:} split a patch in a quadtree whenever its mismatch exceeds a tolerance.
+\item \textbf{Edits:} store column/voxel overrides in a sparse RAM map mirrored to a GPU hash, then refit in the background with the same $W\mathbf y$ kernel. If a patch still can't match its voxels, subdivide it or keep a residual grid for it.
+\item \textbf{Overhangs and caves:} 3D cells holding implicit quadrics, which still give a quadratic in $t$.
+\item \textbf{LOD:} store fitted quadratics at the coarser pyramid levels too.
+\end{itemize}
+
+\section*{Verification}
+\begin{itemize}
+\item Core unit tests:
+  \begin{itemize}
+  \item quadratic-solver edge cases;
+  \item envelope soundness against brute-force marching;
+  \item DDA hits equal brute-force hits on random rays;
+  \item analytic min/max equals dense sampling;
+  \item exact quadratics are reproduced by the fit.
+  \end{itemize}
+\item Viewer tests: \texttt{naga} validates every shader, and the GPU output matches the CPU for coefficients, the pyramid and a 64$\times$64 image.
+\item Headless capture via \texttt{--capture} and \texttt{--camera}, compared with the CPU reference PNG.
+\end{itemize}
+
+\begin{thebibliography}{9}
+\bibitem{tevs} A.~Tevs, I.~Ihrke, H.-P.~Seidel. Maximum Mipmaps for Fast, Accurate, and Scalable Dynamic Height Field Rendering. I3D 2008. \url{https://pure.mpg.de/pubman/item/item_1325622_5/component/file_3590464/i3d08.pdf}
+\bibitem{ebert} D.~Ebert, J.~Kr\"uger. GPU Ray-Casting of Terrain. Eurographics 2009. \url{https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2009/GPU_Ray-Casting/EG09AreasTerrain.pdf}
+\bibitem{rbf} Heightfield ray intersection with higher-order reconstruction. \url{https://www.arxiv.org/pdf/2201.10887}
+\bibitem{park} GPU-only Terrain Rendering for Walk-through. \url{https://dspace.zcu.cz/bitstream/11025/10902/1/Park.pdf}
+\bibitem{yuksel} C.~Yuksel. High-Performance Polynomial Root Finding for Graphics. HPG 2022. \url{https://diglib.eg.org/handle/10.1145/3543865}
+\bibitem{ps} O.~Davydov, L.~Schumaker. Scattered data fitting with Powell--Sabin splines. \url{https://math.vanderbilt.edu/schumake/pps.pdf}
+\end{thebibliography}
+
+\end{document}

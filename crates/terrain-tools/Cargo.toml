@@ -1,0 +1,10 @@
+[package]
+name = "terrain-tools"
+description = "Developer tools for inspecting and tuning terrain"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+terrain-core = { path = "../terrain-core" }
+png = "0.17"

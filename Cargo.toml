@@ -1,14 +1,18 @@
-[package]
-name = "microvoxel"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-rust-version = "1.75"
-description = "A dependency-free discrete voxel world core with procedural terrain"
+[workspace]
+resolver = "3"
+members = ["crates/terrain-core", "crates/terrain-tools"]
 
-[lib]
-path = "src/lib.rs"
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Noise-heavy tests stay fast without a release build.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2

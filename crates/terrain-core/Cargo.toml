@@ -1,0 +1,8 @@
+[package]
+name = "terrain-core"
+description = "Analytic terrain math: FBM source terrain, patch fitting, closed-form ray intersection"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
