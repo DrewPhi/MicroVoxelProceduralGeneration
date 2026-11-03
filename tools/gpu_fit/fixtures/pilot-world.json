@@ -1,0 +1,77 @@
+{
+  "above_region": "air",
+  "below_region": "solid for future rendering; not materialized",
+  "bounds_m": {
+    "min": [
+      5672.0,
+      529.8125,
+      4760.0
+    ],
+    "max": [
+      5688.0,
+      545.8125,
+      4776.0
+    ]
+  },
+  "dimensions": [
+    256,
+    256,
+    256
+  ],
+  "elapsed_seconds": 2.491333885,
+  "extent_m": [
+    16.0,
+    16.0,
+    16.0
+  ],
+  "note": "Global FBM recipe + finite bounds define the full 3D solid/air target, including caves and overhangs. No native dense volume, quadratic fit or GPU/cluster job generated.",
+  "origin_cells": [
+    90752,
+    8477,
+    76160
+  ],
+  "preview": {
+    "color": "Hypsometric elevation tint, 8m-smoothed broad hillshade and subtle native-column hillshade. Diagnostic only; terrain unchanged.",
+    "height": 1024,
+    "height_file": "surface-heights.f32",
+    "height_format": "little-endian f32; rows +Z, columns +X; native top face height",
+    "meters_per_pixel": 0.9765625,
+    "sampling": "Highest solid native voxel in each sampled XZ column; unsampled columns are not exhaustive bounds",
+    "vertical_slice_z_m": 4772.0,
+    "width": 1024
+  },
+  "proposed_patch_edge_m": 8.0,
+  "proposed_quadratics_per_patch": 5,
+  "stage": "unfitted_authoring_region",
+  "surface_height_range_m": [
+    270.5625,
+    563.6875
+  ],
+  "terrain": {
+    "base_m": 350.0,
+    "cave_roof_m": 5.0,
+    "cave_scale_m": 55.0,
+    "cave_width": 0.23,
+    "ceiling_m": 1024.0,
+    "gain": 0.5,
+    "lacunarity": 2.0,
+    "octaves": 7,
+    "overhang_m": 12.0,
+    "relief_m": 280.0,
+    "rock_scale_m": 40.0,
+    "seed": 42,
+    "voxel_cm": 6.25,
+    "wavelength_m": 1800.0,
+    "world_m": 10000.0
+  },
+  "version": 1,
+  "vertical_margin_m": {
+    "above_sampled_max": 28.3125,
+    "below_sampled_min": 102.5625
+  },
+  "voxel_m": 0.0625,
+  "authoring_sources_sha256": {
+    "src/terrain.rs": "7a547e222cf984b183c2be49b0a760ecea82a987c31e3567675508d39e3eaa7e",
+    "src/bin/fbm_world.rs": "c650155c8f65ddc266280e8d60842a5e6aeae0cb207e13943d116af7001b5bbb"
+  }
+}

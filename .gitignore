@@ -1,0 +1,8 @@
+/target/
+/output/
+/fbm
+/analytic
+
+/tools/gpu_fit/sampler/target/
+
+__pycache__/

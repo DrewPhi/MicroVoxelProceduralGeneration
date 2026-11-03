@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+exec ./analytic --scene output/world-1km-initialized/terrain.json --camera 750,270,750,-145,5 --speed 30 "$@"

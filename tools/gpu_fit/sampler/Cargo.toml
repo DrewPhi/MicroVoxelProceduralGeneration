@@ -1,0 +1,9 @@
+[package]
+name = "terrain-sampler"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+fastnoise-lite = { path = "vendor/fastnoise-lite-1.1.1", features = ["f64"] }
+[patch.crates-io]
+num-traits = { path = "vendor/num-traits-0.2.19" }
+autocfg = { path = "vendor/autocfg-1.5.1" }
