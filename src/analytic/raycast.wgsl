@@ -45,20 +45,46 @@ fn accumulate(color:vec3f,p:vec3f,depth:f32)->vec3f {
 }
 @group(0) @binding(8) var<storage,read> air_nodes:array<u32>;
 struct AirJump { t:f32, cell:vec3i, normal:vec3f }
-fn air_jump(o:vec3f,d:vec3f,pc:vec3u,cell_size:f32)->AirJump {
+@group(0) @binding(9) var<storage,read> envelope_nodes:array<Quad>;
+var<private> envelope_work:u32;
+fn interval_max(q:Quad,u:vec3f,v:vec3f,duration:f32)->f32 {
+ let a=dot(q.b.xyz,v*v)+q.b.w*v.x*v.y+q.c.x*v.x*v.z+q.c.y*v.y*v.z;
+ let b=dot(gradient(q,u),v);let c=value(q,u);
+ var high=max(c,value(q,u+duration*v));
+ if a<0. {let vertex=-b/(2.*a);if vertex>0.&&vertex<duration {high=max(high,value(q,u+vertex*v));}}
+ return high;
+}
+fn air_jump(o:vec3f,d:vec3f,pc:vec3u,cell_size:f32,enter:f32)->AirJump {
  var result:AirJump;result.t=-1.;result.cell=vec3i(0);result.normal=vec3f(0.);
  if temporal.tuning.w<.5 {return result;}
+ let use_envelopes=temporal.tuning.w>1.5;
  let base=air_nodes[0]+(pc.y*air_nodes[3]+pc.z)*air_nodes[1]+pc.x;
- if air_nodes[base]==0u{return result;}
+ let base_air=air_nodes[base]!=0u;
+ if !use_envelopes&&air_nodes[base]==0u{return result;}
  for(var l=i32(air_nodes[36])-1;l>=0;l--){
   let level=u32(l);let desc=level*4u;let width=1u<<level;let node=pc/width;
   let index=air_nodes[desc]+(node.y*air_nodes[desc+3u]+node.z)*air_nodes[desc+1u]+node.x;
-  if air_nodes[index]==0u {continue;}
+  let all_air=air_nodes[index]!=0u;
+  if !all_air&&(!use_envelopes||level<2u||level>4u){continue;}
   let low=vec3f(node*width)*frame.scene.w;
   let high=min(vec3f((node+vec3u(1))*width)*frame.scene.w,frame.scene.xyz);
   var ends=vec3f(1e30);
   for(var a=0u;a<3u;a++){if abs(d[a])>1e-12 {ends[a]=(select(low[a],high[a],d[a]>0.)-o[a])/d[a];}}
-  let t=min(ends.x,min(ends.y,ends.z));
+  let box_end=min(ends.x,min(ends.y,ends.z));var t=box_end;
+  if !all_air {
+   envelope_work++;
+   let q=envelope_nodes[index-air_nodes[37]];
+   let scale=2./(f32(width)*frame.scene.w);
+   let u=(o+enter*d-low)*scale-vec3f(1.);let v=d*scale;
+   if value(q,u)+q.c.z>=0. {continue;}
+   let duration=max(0.,box_end-enter);
+   let skip=first_possible(q,u,v,duration);
+   // Check the entire interval, not only its endpoints. Uncertain signs
+   // or near-tangent roots fall through to the smaller region / exact path.
+   if skip<=max(0.0001,cell_size*2.)||interval_max(q,u,v,skip)+q.c.z*.5>=0. {continue;}
+   t=min(box_end,enter+skip);
+  }
+  if t<=enter {continue;}
   var cell=clamp(vec3i(floor((o+t*d)/cell_size)),vec3i(round(low/cell_size)),vec3i(round(high/cell_size))-vec3i(1));
   var normal=vec3f(0.);
   for(var a=0u;a<3u;a++){if ends[a]<=t+0.000001 {
@@ -69,6 +95,7 @@ fn air_jump(o:vec3f,d:vec3f,pc:vec3u,cell_size:f32)->AirJump {
  }
  return result;
 }
+
 fn value(q:Quad,p:vec3f)->f32 {
  return q.a.x+dot(q.a.yzw,p)+dot(q.b.xyz,p*p)+q.b.w*p.x*p.y+q.c.x*p.x*p.z+q.c.y*p.y*p.z;
 }
@@ -94,16 +121,20 @@ fn trace(o:vec3f,d:vec3f)->Hit {
   step[a]=select(-1,1,d[a]>0.);delta[a]=edge/abs(d[a]);
   next[a]=((f32(cell[a])+select(0.,1.,d[a]>0.))*edge-o[a])/d[a];
  }}
+ var last_bounds_patch=0xffffffffu;
  for(var visit=0u;visit<1024u;visit++) {
   if any(cell<vec3i(0))||any(cell>=vec3i(frame.grid.xyz))||enter>=exit{break;}
   h.visits++;
-  let jump=air_jump(o,d,vec3u(cell),edge);
-  if jump.t>enter {
-   enter=jump.t;cell=jump.cell;
-   for(var a=0u;a<3u;a++){if step[a]!=0 {next[a]=((f32(cell[a])+select(0.,1.,d[a]>0.))*edge-o[a])/d[a];}}
-   continue;
-  }
   let patch_id=(u32(cell.y)*frame.grid.z+u32(cell.z))*frame.grid.x+u32(cell.x);
+  if temporal.tuning.w<1.5||patch_id!=last_bounds_patch {
+   last_bounds_patch=patch_id;
+   let jump=air_jump(o,d,vec3u(cell),edge,enter);
+   if jump.t>enter {
+    enter=jump.t;cell=jump.cell;
+    for(var a=0u;a<3u;a++){if step[a]!=0 {next[a]=((f32(cell[a])+select(0.,1.,d[a]>0.))*edge-o[a])/d[a];}}
+    continue;
+   }
+  }
   let end=min(exit,min(next.x,min(next.y,next.z)));
   let u=(o+enter*d-vec3f(cell)*edge)*scale-vec3f(1.);let v=d*scale;
   var best=1e30;var best_normal=vec3f(0.,1.,0.);
@@ -188,14 +219,16 @@ fn trace_voxels(o:vec3f,d:vec3f,accelerate:bool)->Hit {
  for(var a=0u;a<3u;a++){if abs(d[a])>1e-12{step[a]=select(-1,1,d[a]>0.);delta[a]=size/abs(d[a]);next[a]=((f32(cell[a])+select(0.,1.,d[a]>0.))*size-o[a])/d[a];}}
  // A finite grid crosses at most nx+ny+nz voxel boundaries.
  let limit=u32(dims.x+dims.y+dims.z)+3u;
+ var last_bounds_patch=0xffffffffu;
  for(var iteration=0u;iteration<limit;iteration++) {
   if any(cell<vec3i(0))||any(cell>=dims)||enter>=exit{break;}
   h.visits++;
   let center=(vec3f(cell)+vec3f(.5))*size;
   let pc=min(vec3u(floor(center/frame.scene.w)),frame.grid.xyz-vec3u(1));
   let pid=(pc.y*frame.grid.z+pc.z)*frame.grid.x+pc.x;
-  if accelerate && abs(frame.scene.w/size-round(frame.scene.w/size))<0.00001 {
-   let jump=air_jump(o,d,pc,size);
+  if accelerate && abs(frame.scene.w/size-round(frame.scene.w/size))<0.00001 && (temporal.tuning.w<1.5||pid!=last_bounds_patch) {
+   last_bounds_patch=pid;
+   let jump=air_jump(o,d,pc,size,enter);
    if jump.t>enter {
     enter=jump.t;cell=jump.cell;normal=jump.normal;
     for(var a=0u;a<3u;a++){if step[a]!=0 {next[a]=((f32(cell[a])+select(0.,1.,d[a]>0.))*size-o[a])/d[a];}}
@@ -236,8 +269,9 @@ fn trace_voxels(o:vec3f,d:vec3f,accelerate:bool)->Hit {
  }
  return h;
 }
-struct Sample { color:vec3f, hit:Hit, direction:vec3f }
+struct Sample { color:vec3f, hit:Hit, direction:vec3f, envelope_tests:f32 }
 fn sample_pixel(pixel:vec2f)->Sample {
+ envelope_work=0u;
  let uv=(pixel+vec2f(.5)+temporal.jitter.xy)/vec2f(frame.options.xy)*2.-vec2f(1.);
  let d=normalize(frame.forward.xyz+frame.right.xyz*uv.x*frame.forward.w*frame.eye.w-frame.up.xyz*uv.y*frame.eye.w);
  var h:Hit;
@@ -274,7 +308,7 @@ fn sample_pixel(pixel:vec2f)->Sample {
  }
  if frame.options.z==1u {color=vec3f(f32(h.visits)/12.,.05,1.-min(1.,f32(h.visits)/12.));}
  if frame.options.z==2u {color=vec3f(min(1.,f32(h.tests)/60.),f32(h.tests)/120.,.05);}
- return Sample(color,h,d);
+ return Sample(color,h,d,f32(envelope_work));
 }
 fn spatial_offset(i:u32,n:u32)->vec2f {
  if n==1u{return vec2f(0.);}
@@ -286,15 +320,15 @@ fn spatial_offset(i:u32,n:u32)->vec2f {
 fn main(@builtin(global_invocation_id) id:vec3u) {
  if id.x>=frame.options.x||id.y>=frame.options.y{return;}
  let n=select(1u,u32(clamp(round(temporal.tuning.z),1.,4.)),temporal.state.z>0.5);
- var first:Sample;var color=vec3f(0.);var visits=0.;var tests=0.;
+ var first:Sample;var color=vec3f(0.);var visits=0.;var tests=0.;var envelopes=0.;
  for(var i=0u;i<n;i++){
   let sample=sample_pixel(vec2f(id.xy)+spatial_offset(i,n));
   if i==0u {first=sample;}
-  color+=sample.color;visits+=f32(sample.hit.visits);tests+=f32(sample.hit.tests);
+  color+=sample.color;visits+=f32(sample.hit.visits);tests+=f32(sample.hit.tests);envelopes+=sample.envelope_tests;
  }
  color/=f32(n);let h=first.hit;let d=first.direction;
  if frame.options.w!=0u && id.x%32u==0u && id.y%32u==0u {
-  let stride=(frame.options.x+31u)/32u;probes[(id.y/32u)*stride+id.x/32u]=vec4f(h.t,visits/f32(n),tests/f32(n),f32(h.patch_id));
+  let stride=(frame.options.x+31u)/32u;probes[(id.y/32u)*stride+id.x/32u]=vec4f(h.t,visits/f32(n),tests/f32(n),envelopes/f32(n));
  }
  color=accumulate(color,select(frame.eye.xyz+d*max(h.t,0.),d,h.t<0.),h.t);
  textureStore(next_history,vec2i(id.xy),vec4f(color,h.t));
@@ -342,14 +376,14 @@ case 55u: {let rows=array<u32,7>(31u,1u,2u,4u,8u,8u,8u);return rows[row];}
 case 56u: {let rows=array<u32,7>(14u,17u,17u,14u,17u,17u,14u);return rows[row];}
 case 57u: {let rows=array<u32,7>(14u,17u,17u,15u,1u,1u,14u);return rows[row];}
 default:{return 0u;} }}
-const traversal_labels=array<u32,100>(84u,82u,65u,86u,69u,82u,83u,65u,76u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,71u,82u,73u,68u,32u,66u,65u,83u,69u,76u,73u,78u,69u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,65u,73u,82u,32u,72u,73u,69u,82u,65u,82u,67u,72u,89u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,72u,65u,82u,68u,87u,65u,82u,69u,32u,85u,78u,65u,86u,65u,73u,76u,65u,66u,76u,69u,32u,32u,32u,32u,32u);
+const traversal_labels=array<u32,125>(84u,82u,65u,86u,69u,82u,83u,65u,76u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,71u,82u,73u,68u,32u,66u,65u,83u,69u,76u,73u,78u,69u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,65u,73u,82u,32u,72u,73u,69u,82u,65u,82u,67u,72u,89u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,32u,81u,85u,65u,68u,82u,65u,84u,73u,67u,32u,69u,78u,86u,69u,76u,79u,80u,69u,83u,32u,32u,32u,32u,32u,32u,72u,65u,82u,68u,87u,65u,82u,69u,32u,85u,78u,65u,86u,65u,73u,76u,65u,66u,76u,69u,32u,32u,32u,32u,32u);
 fn traversal_panel(id:vec2u,base:vec3f)->vec3f {
- if id.x<436u||id.x>=806u||id.y<20u||id.y>=196u {return base;}
+ if id.x<436u||id.x>=806u||id.y<20u||id.y>=240u {return base;}
  let p=id-vec2u(436u,20u);let row=p.y/44u;let cy=p.y%44u;
  var color=select(vec3f(.07,.09,.13),vec3f(.16,.2,.27),row>0u);
- if row>0u&&row<3u&&u32(round(temporal.tuning.w))==row-1u {color=vec3f(.16,.38,.3);}
+ if row>0u&&row<4u&&u32(round(temporal.tuning.w))==row-1u {color=vec3f(.16,.38,.3);}
  if p.x>=12u&&cy>=8u&&cy<22u {let x=(p.x-12u)/2u;if x/6u<25u&&x%6u<5u {
- let c=traversal_labels[row*25u+x/6u];if (glyph(c,(cy-8u)/2u)&(1u<<(4u-x%6u)))!=0u {return select(vec3f(.92,.95,1.),vec3f(.46),row==3u);}
+ let c=traversal_labels[row*25u+x/6u];if (glyph(c,(cy-8u)/2u)&(1u<<(4u-x%6u)))!=0u {return select(vec3f(.92,.95,1.),vec3f(.46),row==4u);}
  }}return color;
 }
 fn menu_pixel(id:vec2u,base:vec3f)->vec3f {

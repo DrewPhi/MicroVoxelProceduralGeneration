@@ -78,3 +78,12 @@ Closeview continuous1.39->1.42ms, voxels1.90->2.05ms. Four imagepairs: exactvoxe
 RGBidentical; continuouslongviewmax1leveloutof255. CPUreference80rays each across
 multiplecamera/pitch cases passed0mismatches. Tests cover conservative upper
 bounds and odd-sized hierarchy parents. GUI selection inspected viaXWarpPointer.
+
+Issue20 prototype implemented in envelopes.rs + optional mode2. See
+QUADRATIC_ENVELOPES.md for derivation, conservative residual bounds and empirical
+float32 safety qualifications. GUI/CLI selection works; default unchanged.
+~5.9MB extraGPU/~0.2s startup. Tested14unit tests +2880CPU/GPUrays +full-image
+comparisons. Bound queries per-patch cached; limited32/64/128m parent scales.
+Fewer source tests, but slower than air hierarchy: longview6.84vs5.41ms at1sample;
+27.29vs21.68ms at4samples. Keep as experimental menu option, not a speedup claim.
+Raw output/envelopes/benchmark/summary.json. GUI screenshot envelope-menu.png.

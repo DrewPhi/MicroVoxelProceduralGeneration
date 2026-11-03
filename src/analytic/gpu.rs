@@ -1,5 +1,5 @@
 //! Persistent GPU resources; asynchronous timing readback, no per-frame mesh work.
-use super::{scene::Scene, traversal};
+use super::{envelopes, scene::Scene, traversal};
 use bytemuck::{Pod, Zeroable};
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
@@ -37,6 +37,7 @@ pub struct Gpu {
     coeff: wgpu::Buffer,
     coeff_tail: wgpu::Buffer,
     air: wgpu::Buffer,
+    envelopes: wgpu::Buffer,
     pub traversal_mode: u32,
     pub output: wgpu::Texture,
     bind: [wgpu::BindGroup; 2],
@@ -55,6 +56,8 @@ pub struct Gpu {
     pub width: u32,
     pub height: u32,
     pub coefficient_bytes: u64,
+    pub envelope_bytes: u64,
+    pub bounds_build_ms: f64,
     queries: Option<wgpu::QuerySet>,
     resolve: wgpu::Buffer,
     slots: Vec<Slot>,
@@ -65,6 +68,7 @@ pub struct Gpu {
     pub present_ms: Option<f64>,
     pub average_patches: f64,
     pub average_quads: f64,
+    pub average_envelopes: f64,
     pub frames: u64,
     pub cpu_encode_ms: f64,
 }
@@ -209,7 +213,25 @@ impl Gpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let hierarchy = traversal::build(scene);
+        let bounds_start = std::time::Instant::now();
+        let mut hierarchy = traversal::build(scene);
+        hierarchy[37] = if hierarchy[36] > 1 {
+            hierarchy[4]
+        } else {
+            hierarchy.len() as u32
+        };
+        let envelope_data = envelopes::build(scene);
+        let envelopes = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quadratic envelopes"),
+            contents: bytemuck::cast_slice(&envelope_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let bounds_build_ms = bounds_start.elapsed().as_secs_f64() * 1000.;
+        println!(
+            "Quadratic envelope parents: {} bytes; bounds construction {:.3}s",
+            envelope_data.len() * 48,
+            bounds_build_ms / 1000.
+        );
         let air = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("conservative air hierarchy"),
             contents: bytemuck::cast_slice(&hierarchy),
@@ -242,6 +264,7 @@ impl Gpu {
                 &history[1 - i],
                 &history[i],
                 &air,
+                &envelopes,
             )
         });
         let screen = Self::screen(&device, &present, &output);
@@ -280,6 +303,7 @@ impl Gpu {
             coeff,
             coeff_tail,
             air,
+            envelopes,
             traversal_mode: 0,
             output,
             bind,
@@ -298,6 +322,8 @@ impl Gpu {
             width: w,
             height: h,
             coefficient_bytes: bytes.len() as u64,
+            envelope_bytes: envelope_data.len() as u64 * 48,
+            bounds_build_ms,
             queries,
             resolve,
             slots,
@@ -308,6 +334,7 @@ impl Gpu {
             present_ms: None,
             average_patches: 0.,
             average_quads: 0.,
+            average_envelopes: 0.,
             frames: 0,
             cpu_encode_ms: 0.,
         })
@@ -377,11 +404,16 @@ impl Gpu {
         history: &wgpu::Texture,
         next: &wgpu::Texture,
         air: &wgpu::Buffer,
+        envelopes: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("analytic resources"),
             layout: &p.get_bind_group_layout(0),
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: envelopes.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: air.as_entire_binding(),
@@ -466,6 +498,7 @@ impl Gpu {
                 &self.history[1 - i],
                 &self.history[i],
                 &self.air,
+                &self.envelopes,
             )
         });
         self.screen = Self::screen(&self.device, &self.present, &self.output);
@@ -499,6 +532,8 @@ impl Gpu {
                 values.chunks_exact(4).map(|p| p[1] as f64).sum::<f64>() / count as f64;
             self.average_quads =
                 values.chunks_exact(4).map(|p| p[2] as f64).sum::<f64>() / count as f64;
+            self.average_envelopes =
+                values.chunks_exact(4).map(|p| p[3] as f64).sum::<f64>() / count as f64;
             drop(data);
             slot.buffer.unmap();
         }

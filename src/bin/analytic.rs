@@ -1,4 +1,6 @@
 //! Native viewer for the fitted continuous min-of-quadrics scene.
+#[path = "../analytic/envelopes.rs"]
+mod envelopes;
 #[path = "../analytic/gpu.rs"]
 mod gpu;
 #[path = "../analytic/scene.rs"]
@@ -148,6 +150,7 @@ struct App {
     menu: bool,
     cursor: [f64; 2],
     slider_drag: Option<usize>,
+    initial_traversal: u32,
     last: Instant,
     title: Instant,
     mode: u32,
@@ -198,7 +201,7 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(w.clone()).unwrap();
         let size = w.inner_size();
-        let g = match pollster::block_on(gpu::Gpu::new(
+        let mut g = match pollster::block_on(gpu::Gpu::new(
             &instance,
             Some(&surface),
             &self.scene,
@@ -212,6 +215,7 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        g.traversal_mode = self.initial_traversal;
         let c = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: g.format,
@@ -256,7 +260,7 @@ impl ApplicationHandler for App {
             } => {
                 if self.menu {
                     let [x, y] = self.cursor;
-                    if (436.0..806.0).contains(&x) && (64.0..152.0).contains(&y) {
+                    if (436.0..806.0).contains(&x) && (64.0..196.0).contains(&y) {
                         if let Some(g) = &mut self.gpu {
                             g.traversal_mode = ((y - 20.) / 44.) as u32 - 1;
                         }
@@ -387,7 +391,7 @@ impl ApplicationHandler for App {
                     self.frames += 1;
                     if self.title.elapsed().as_secs_f32() > 0.5 {
                         let fps = self.frames as f32 / self.title.elapsed().as_secs_f32();
-                        self.window.as_ref().unwrap().set_title(&format!("Analytic | {fps:.0} FPS | GPU {:.2} ms | CPU {:.2} ms | visits {:.1}, Q {:.1} | speed {:.1} m/s | T AA | G walk/fly | Esc options | mode {} | F12 capture",g.compute_ms.unwrap_or(0.),g.cpu_encode_ms,g.average_patches,g.average_quads,self.camera.speed,["continuous","patch heatmap","quadratic heatmap","snapped approximate","analytic voxels","voxel reference"][self.mode as usize]));
+                        self.window.as_ref().unwrap().set_title(&format!("Analytic | {fps:.0} FPS | GPU {:.2} ms | CPU {:.2} ms | visits {:.1}, Q {:.1}, bounds {:.1} | speed {:.1} m/s | T AA | G walk/fly | Esc options | mode {} | F12 capture",g.compute_ms.unwrap_or(0.),g.cpu_encode_ms,g.average_patches,g.average_quads,g.average_envelopes,self.camera.speed,["continuous","patch heatmap","quadratic heatmap","snapped approximate","analytic voxels","voxel reference"][self.mode as usize]));
                         self.frames = 0;
                         self.title = Instant::now();
                     }
@@ -411,7 +415,7 @@ fn run() -> Result<(), String> {
             .cloned()
     };
     if args.iter().any(|a| a == "--help") {
-        println!("analytic [--scene terrain.json] [--headless --size 640x360 --frames 60 --capture output/analytic/preview.png --verify] [--camera x,y,z,yaw,pitch] [--mode shaded|snapped|voxels|patches|quadratics]\n--walk: start on ground with 1.7 m eye height; --speed m/s; G: walk/fly; T: toggle anti-aliasing; --no-aa: disable in headless captures; Click: capture mouse; WASD fly; Space/Ctrl up/down; Shift boost; wheel speed; Esc menu; Home reset; F12 screenshot; 1/2/3 diagnostic views.");
+        println!("analytic [--scene terrain.json] [--headless --size 640x360 --frames 60 --capture output/analytic/preview.png --verify] [--camera x,y,z,yaw,pitch] [--mode shaded|snapped|voxels|patches|quadratics]\n--walk: start on ground with 1.7 m eye height; --speed m/s; G: walk/fly; --traversal grid|hierarchy|envelopes; T: toggle anti-aliasing; --no-aa: disable in headless captures; Click: capture mouse; WASD fly; Space/Ctrl up/down; Shift boost; wheel speed; Esc menu; Home reset; F12 screenshot; 1/2/3 diagnostic views.");
         return Ok(());
     }
     let path = val("--scene").unwrap_or_else(|| "output/fit-occupancy/terrain.json".into());
@@ -451,6 +455,15 @@ fn run() -> Result<(), String> {
     if args.iter().any(|a| a == "--walk") {
         camera.toggle_walk(&scene, mode);
     }
+    let initial_traversal = match val("--traversal").as_deref() {
+        None | Some("grid") => 0,
+        Some("hierarchy") => 1,
+        Some("envelopes") => 2,
+        Some("hardware") => {
+            return Err("Hardware procedural traversal unavailable in wgpu 24".into())
+        }
+        _ => return Err("Traversal must be grid, hierarchy or envelopes".into()),
+    };
     if args.iter().any(|a| a == "--headless") {
         let size = val("--size").unwrap_or_else(|| "640x360".into());
         let (w, h) = size.split_once('x').ok_or("Size must be WIDTHxHEIGHT")?;
@@ -477,14 +490,7 @@ fn run() -> Result<(), String> {
         if args.iter().any(|a| a == "--verify") {
             g.spatial_samples = 1;
         }
-        g.traversal_mode = match val("--traversal").as_deref() {
-            None | Some("grid") => 0,
-            Some("hierarchy") => 1,
-            Some("hardware") => {
-                return Err("Hardware procedural traversal unavailable in wgpu 24".into())
-            }
-            _ => return Err("Traversal must be grid or hierarchy".into()),
-        };
+        g.traversal_mode = initial_traversal;
         let setup = start.elapsed().as_secs_f64();
         let motion: Vec<f32> = val("--camera-step")
             .unwrap_or_else(|| "0,0,0".into())
@@ -548,7 +554,7 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        let report = serde_json::json!({"traversal":g.traversal_mode,"spatial_samples":g.spatial_samples,"anti_aliasing":g.aa_enabled,"camera_end":camera.eye.to_array(),"adapter":g.adapter_name,"scene":path,"render_mode":mode,"voxel_cm":scene.voxel_m*100.,"size":[w,h],"frames":frames,"setup_seconds":setup,"synchronized_frame_ms":sync_ms,"gpu_compute_ms":g.compute_ms,"cpu_encode_ms":g.cpu_encode_ms,"coefficient_bytes":g.coefficient_bytes,"average_traversal_visits":g.average_patches,"average_quadratic_tests":g.average_quads,"verification":{"rays":checked,"hits":hits,"mismatches":mismatches,"max_hit_error_m":max_error},"capture":capture});
+        let report = serde_json::json!({"traversal":g.traversal_mode,"spatial_samples":g.spatial_samples,"anti_aliasing":g.aa_enabled,"camera_end":camera.eye.to_array(),"adapter":g.adapter_name,"scene":path,"render_mode":mode,"voxel_cm":scene.voxel_m*100.,"size":[w,h],"frames":frames,"setup_seconds":setup,"synchronized_frame_ms":sync_ms,"gpu_compute_ms":g.compute_ms,"cpu_encode_ms":g.cpu_encode_ms,"envelope_bytes":g.envelope_bytes,"bounds_build_ms":g.bounds_build_ms,"coefficient_bytes":g.coefficient_bytes,"average_traversal_visits":g.average_patches,"average_envelope_tests":g.average_envelopes,"average_quadratic_tests":g.average_quads,"verification":{"rays":checked,"hits":hits,"mismatches":mismatches,"max_hit_error_m":max_error},"capture":capture});
         let out = capture.with_extension("json");
         std::fs::write(out, serde_json::to_vec_pretty(&report).unwrap())
             .map_err(|e| e.to_string())?;
@@ -571,6 +577,7 @@ fn run() -> Result<(), String> {
         menu: false,
         cursor: [0.; 2],
         slider_drag: None,
+        initial_traversal,
         last: Instant::now(),
         title: Instant::now(),
         mode,

@@ -258,3 +258,30 @@ views were slightly slower (1.90 vs 2.05 ms), so both options remain available.
 Raw results: `output/world-1km-initialized/traversal-benchmark.json`. Settings
 are session-only. CPU/GPU checks and full-image comparisons passed for sampled
 views; performance improvements are scene-dependent.
+
+### Experimental quadratic envelope traversal (#20)
+
+Choose **Esc → Traversal → Quadratic Envelopes**, or launch with:
+
+```sh
+./explore-1km --walk --mode voxels --traversal envelopes
+```
+
+Parent quadratics conservatively bound the solid/air field (including native
+voxel-center margins). Closed-form ray inequalities skip certified-negative
+prefixes even inside some mixed terrain regions. Source surfaces, voxel size and
+appearance remain the same. Grid and Air Hierarchy stay selectable.
+
+This is a research comparison, currently **slower than Air Hierarchy** in tested
+views: about 6.84 vs 5.41 ms for a long 960x540 voxel view at 1 sample, and 27.29
+vs 21.68 ms at 4 samples. It reduces source-quadratic tests but adds parent-bound
+work. GPU envelope memory is ~5.9 MB; construction adds ~0.2 s at scene load.
+The window title and JSON captures now distinguish source tests from envelope
+bound tests. Reference-voxel mode remains unaccelerated; continuous experimental
+spline scenes retain their previous traversal.
+
+The mathematical construction, float32 limitations, testing and results are in
+[agent_context/QUADRATIC_ENVELOPES.md](agent_context/QUADRATIC_ENVELOPES.md).
+Reproduce with `tools/check_quadratic_envelopes.py` and
+`tools/benchmark_envelopes.py` after building `--bin analytic`. Raw generated
+reports stay in ignored `output/envelopes/`.
