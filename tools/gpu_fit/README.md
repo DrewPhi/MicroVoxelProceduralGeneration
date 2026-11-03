@@ -67,3 +67,13 @@ fitting parameterization, not the terrain definition or rendering geometry.
 Global fixed-label constraints may still limit accuracy: inspect metrics and
 previews before replacing the old demo. No claim of fixed five-quad capacity
 being sufficient everywhere, or preserved local-test error on the 1km region.
+
+## Full-world fitting diagnosis
+
+The completed world job retained initialization; it was not an improved fit.
+See [the fitting audit](../../agent_context/FITTING_AUDIT.md) for measured local
+probes: global continuity coupling, a field-scale/hinge-loss mismatch, and the
+pilot's different warm start. `audit_initialization.py` inspects an exported
+shared-parameter model on a prepared dataset without training or modifying it.
+These are evidence and hypotheses to separate with small controlled ablations,
+not a claim that the existing result is an optimum.
