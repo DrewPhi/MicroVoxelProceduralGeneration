@@ -1,32 +1,11 @@
-# Build outputs
-/target/
-/native/target/
-/build/
+# Rust build outputs, wherever the new workspace places its crates.
+target/
 
-# Generated artifacts; PNG assets in source/asset directories remain trackable.
-/output/
-/screenshots/
+# Generated data and captures.
+output/
 /worlds/
-/*.pgm
-/*.obj
-/*.png
-/native/*.png
-*.mvw
+/screenshots/
+
+# Temporary files and Python caches.
 *.tmp
-
-# Local renderer preferences
-/native/settings.conf
-
-# Machine-local executable launcher and desktop entry (rebuild from tools/).
-/MicroVoxel
-/MicroVoxel.desktop
-
-# Isolated successor build and local settings
-/successor/target/
-/successor/viewer/settings.conf
-/tools/__pycache__/
-/MicroVoxel-Successor
-
-# Diagnostics also run from crate working directories under cargo test.
-/successor/viewer/output/
-/successor/world/output/
+__pycache__/

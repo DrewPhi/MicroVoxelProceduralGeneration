@@ -7,7 +7,7 @@ Start with [ARCHITECTURE.md](ARCHITECTURE.md) and [master issue #24](https://git
 
 ## 1. Branches and when to reference them
 
-- **Working branch:** `frontier-voxel-engine`, with new implementation under `frontier/`. The branch initially inherits source from `main` only so legacy comparisons remain available. **Do not edit or replace `successor/`, `src/`, `native/`, or old workspace launchers** until a separate promotion issue.
+- **Working branch:** `frontier-voxel-engine`, with new implementation under `frontier/`. At the user's request on 2026-11-04, inherited engines, assets, tests, tools, Cargo files and obsolete CI were removed from this branch for a fresh start. Legacy source remains on its original remote branches and in Git history. Inspect it with `git show` or a separate temporary benchmark checkout; do not restore whole legacy source trees here. This cleanup is not promotion of a new runtime and does not change the legacy branches.
 - **`main` / `successor/`: current old voxel/game engine.** Safe to *inspect* any old source to understand a test, data model, or a known failure; never automatically reuse its scheduler, CPU coarse terrain meshing, publication transitions, or LOD-quality approximation.
 - **`engine-overhaul`: historical prior overhaul snapshot.** Safe for provenance, contrast and regression investigation only. Do not switch the new implementation to that source tree or blend its old runtime into `frontier/`.
 - **`DrewsAnalyticRendering`: independent analytic quadratic/FBM experiments.** Safe to inspect FBM visual direction, scene fixtures, performance profiling, and negative fitting evidence. Do not make quadratic optimizer, shader, patch traversal, or globally matched coefficients a prerequisite for frontier work.

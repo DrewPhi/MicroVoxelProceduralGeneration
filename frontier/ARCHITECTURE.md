@@ -2,6 +2,13 @@
 
 This document governs the **new, isolated** `frontier-voxel-engine` branch and the `frontier/` workspace. It is a research-backed plan, **not a claim of globally optimal performance**. Revisit architectural choices only against matched measurements, the visual requirements below, and documented alternatives.
 
+**Fresh-start checkout (2026-11-04):** inherited engine source, tools, tests, assets,
+build manifests and obsolete CI have been removed from this branch at the user's
+request. Legacy paths below identify files on the named reference branches, not
+files that must remain in this checkout. No Frontier runtime has been implemented
+yet. Generated legacy artifacts are preserved in the
+[archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
+
 ## Product contract / invariants
 
 - A deterministic, **editable, 0.0625 m** (6.25 cm) integer-lattice world, including air/material, digging/placing, caves, rock arches, player structures and vegetation.
@@ -108,4 +115,4 @@ Every Frontier issue MUST include **Legacy reference policy** specifying named f
 
 ## Migration strategy
 
-Create `frontier/world`, `frontier/renderer`, `frontier/runtime`, `frontier/tools` as isolated crates/workspace. Current `main` continues running unchanged; existing engine files are available for inspection, comparative benchmarks and *selective* vetted ports. Never overwrite world saves or mutate the stable player experience before an explicit promotion decision. Progress in vertical slices: canonical world → one coherent beautiful mountain visible at distance → motion-aware streaming → exact local voxels + far cave → editing + flight → appearance/performance.
+Create `frontier/world`, `frontier/renderer`, `frontier/runtime`, `frontier/tools` as isolated crates/workspace. Current `main` continues running unchanged; its engine files remain available on that remote branch for inspection, comparative benchmarks in a separate checkout, and *selective* vetted ports. Keep legacy source trees out of this fresh working copy. Never overwrite world saves or mutate the stable player experience before an explicit promotion decision. Progress in vertical slices: canonical world → one coherent beautiful mountain visible at distance → motion-aware streaming → exact local voxels + far cave → editing + flight → appearance/performance.

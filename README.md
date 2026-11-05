@@ -1,47 +1,29 @@
-# MicroVoxel Procedural Generation
+# Frontier Voxel Engine
 
-**Frontier development branch:** the new engine starts under
-[`frontier/`](frontier/ARCHITECTURE.md). Read its
-[architecture](frontier/ARCHITECTURE.md) and [agent instructions](frontier/AGENTS.md)
-before implementation. This branch currently contains the plans and inherited
-reference engine; the new runtime has not been built yet.
+A fresh Rust voxel-world engine, starting with its architecture and implementation
+plan. The target is an editable 6.25 cm voxel world with stable distant terrain,
+caves, and bounded streaming work. Performance targets remain to be demonstrated.
 
-The older engine described below is retained for comparison, as required by the
-Frontier plan. Analytic experiments remain on `DrewsAnalyticRendering`; generated
-legacy datasets, fitted models and screenshots are preserved in the
-[research archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
+Start with the [architecture](frontier/ARCHITECTURE.md),
+[agent instructions](frontier/AGENTS.md), and
+[implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
+The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 
-![A voxel mountain valley, grasslands and lake, captured at 1440p in the native mesh renderer](assets/cover.png)
+This branch currently contains planning documents only. There is no runnable
+engine, Cargo workspace, or build workflow yet. Those belong to the staged
+Frontier implementation, starting with
+[FV01: isolated workspace](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/25).
 
-An experimental Rust foundation for an Earth-like voxel world, built without a
-game engine. The current default explores a geographic terrain atlas with
-**6.25 cm native voxels**, connected drainage, climate-informed materials and
-coherent distant terrain LOD. The launcher starts in a **2 km × 2 km valley**
-with a cached local erosion and deposition prototype.
+## Legacy references
 
-Voxel size and landscape compression are independent settings in **Esc → World**.
-World Scale `10` compresses source terrain distances tenfold while keeping voxel
-centimeters and player size fixed. The full atlas surrounds the inspection valley;
-the new erosion refinement is currently bounded to that valley. The earlier
-procedural terrain generator and real-data import remain available.
+The old engines, assets, tools, and research notes have been removed from this
+branch's working tree. They remain available on GitHub:
 
-[Latest valley screenshots and capture settings](assets/valley/README.md) show
-current terrain honestly: curved rivers and local detail have improved, while
-river terraces, distant facets and broad material regions still need work.
+- [Previous game engine (`main`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/main)
+- [Analytic experiments (`DrewsAnalyticRendering`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/DrewsAnalyticRendering)
+- [Generated datasets, fitted models, and screenshots](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04)
 
-The native **wgpu + winit** engine uses cached terrain patches, shared GPU buffers
-and local LOD transitions. Near the player it merges exposed faces while preserving each
-voxel's color. World generation, collision and picking share the same integer grid;
-untouched terrain stays procedural and only edits need persistent storage.
+Consult those as references under the Frontier reuse policy; do not restore an old
+runtime into this branch by default.
 
-Walk and jump through the world as a procedural voxel character, with first-person
-and third-person views. Press **Esc** to tune terrain detail, native render radius,
-cache size and haze while watching frame times. A starting point for exploring terrain, biomes, lighting,
-sky and future simulation.
-
-[Developer guide](guide_for_devs.md) · [Project notes](agent_context/README.md) · [MIT license](LICENSE)
-
-The native preview includes selectable mesh and experimental voxel ray-casting
-terrain backends (`--renderer mesh|ray`, or the Esc menu), with shared procedural
-world data and player collision. See [the developer guide](guide_for_devs.md) for
-build instructions and reproducible renderer comparisons.
+[MIT license](LICENSE)
