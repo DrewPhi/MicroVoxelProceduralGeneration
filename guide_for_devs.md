@@ -199,4 +199,7 @@ checkout. Do not restore old source trees here. Generated historical artifacts
 remain in the [archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
 
 Latest transition work: [four-pass LOD experiment](frontier/LOD_POLISH_CHECKPOINT.md).
-4×MSAA is now the default; `--voxel-filter on` remains experimental.
+4×MSAA and `--voxel-filter on` are now defaults (filter enabled by user preference).
+The CLI defaults to the regional recipe; `--terrain-recipe legacy` preserves the
+original world. See [regional terrain results](frontier/REGIONAL_TERRAIN_CHECKPOINT.md)
+and use `--start-xz X,Z` to inspect another physical region.

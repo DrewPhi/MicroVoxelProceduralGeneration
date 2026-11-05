@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 frontier-renderer = { path = "../renderer" }
 
-[dev-dependencies]
 frontier-world = { path = "../world" }
+
+[dev-dependencies]
 glam = "=0.29.3"

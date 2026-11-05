@@ -4,22 +4,39 @@ use crate::{Cell, Material, VOXEL_SIZE};
 
 /// Noise/composition and material definition version, independent of the fixture.
 pub const FBM_SOURCE_VERSION: u32 = 1;
+/// Regional composition version; recipe must also be included in source/cache keys.
+pub const REGIONAL_FBM_SOURCE_VERSION: u32 = 2;
+
+/// Explicit source identity: the legacy recipe retains existing worlds exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FbmRecipe {
+    #[default]
+    Legacy,
+    /// Regional mountains with a gentle continuous domain warp.
+    Regional,
+    /// Same regional bands without warp, for matched source comparisons.
+    RegionalUnwarped,
+}
 
 /// Physical source settings, not display/LOD settings. Changing them changes the world.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FbmParams {
+    pub recipe: FbmRecipe,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
     pub amplitude: f64,
-    /// Number of octaves, in [1, 16]; frequency doubles each octave.
+    /// Octaves in [1, 16]: legacy ridge bands or regional fine-detail bands.
+    /// Frequency doubles each octave; regional macro/ridge bands each have three.
     pub octaves: u32,
-    /// Relative amplitude of successive octaves, in [0, 1].
+    /// Relative octave amplitude in [0, 1]. Regional gain is 0.8 * roughness,
+    /// so default fine-band slope energy decays instead of accumulating.
     pub roughness: f64,
 }
 impl Default for FbmParams {
     fn default() -> Self {
         Self {
+            recipe: FbmRecipe::Legacy,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -77,6 +94,14 @@ impl FbmTerrain {
     pub fn params(&self) -> FbmParams {
         self.params
     }
+    /// Version of the selected canonical composition. Include params (including
+    /// recipe), seed and this version in any persistent source/cache identity.
+    pub fn source_version(&self) -> u32 {
+        match self.params.recipe {
+            FbmRecipe::Legacy => FBM_SOURCE_VERSION,
+            FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
+        }
+    }
     /// Canonical column top plane (meters), excluding edits. Coordinates select
     /// half-open native columns, including at negative boundaries. The smooth
     /// generator is evaluated at that column's center and rounded down to 6.25cm.
@@ -92,6 +117,12 @@ impl FbmTerrain {
         (self.elevation(x, z) / VOXEL_SIZE).floor() as i64
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
+        match self.params.recipe {
+            FbmRecipe::Legacy => self.legacy_elevation(x, z),
+            FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => self.regional_elevation(x, z),
+        }
+    }
+    fn legacy_elevation(&self, x: f64, z: f64) -> f64 {
         // Continuous low-frequency domain warp bends ridgelines without a biome map.
         let wx = x + 0.32 * noise(x * 0.55 + 17.3, z * 0.55 - 8.7, self.seed ^ 0x1234);
         let wz = z + 0.32 * noise(x * 0.55 - 31.9, z * 0.55 + 4.2, self.seed ^ 0x5678);
@@ -110,6 +141,58 @@ impl FbmTerrain {
             freq *= 2.0;
         }
         self.params.amplitude * (0.85 * sum / norm + 0.4 * broad - 0.12)
+    }
+    fn regional_elevation(&self, x: f64, z: f64) -> f64 {
+        // x/z are canonical meters / horizontal_scale. Constants below correspond
+        // to physical wavelengths at the default 1800m scale, never display LOD.
+        let sample = |x: f64, z: f64, salt: u64| noise(x, z, self.seed ^ salt);
+        let (wx, wz) = if self.params.recipe == FbmRecipe::Regional {
+            (
+                x + (100.0 / 1800.0) * sample(x * 0.4 + 17.3, z * 0.4 - 8.7, 0x1234),
+                z + (100.0 / 1800.0) * sample(x * 0.4 - 31.9, z * 0.4 + 4.2, 0x5678),
+            )
+        } else {
+            (x, z)
+        };
+        let gain = 0.8 * self.params.roughness;
+        let bands = |wavelength: f64, count: u32, salt: u64, ridged: bool| {
+            let (mut sum, mut norm, mut weight) = (0.0, 0.0, 1.0);
+            let mut frequency = 1800.0 / wavelength;
+            for octave in 0..count {
+                let n = sample(
+                    wx * frequency + 12.7,
+                    wz * frequency - 29.1,
+                    salt.wrapping_add(octave as u64 * 0x9e3779b9),
+                );
+                // Smooth absolute value avoids the legacy ridge's derivative cusp.
+                let value = if ridged {
+                    let ridge = 1.0 - (n * n + 0.04).sqrt();
+                    ridge * ridge
+                } else {
+                    n
+                };
+                sum += weight * value;
+                norm += weight;
+                weight *= gain;
+                frequency *= 2.0;
+            }
+            sum / norm
+        };
+        // A separate 3–6km province field controls where ridges exist. Squared
+        // smoothstep gives quiet valley interiors and smooth mountain margins.
+        let province = (sample(wx * 0.3 + 3.1, wz * 0.3 - 7.8, 0xa53c)
+            + 0.35 * sample(wx * 0.6 - 19.4, wz * 0.6 + 2.6, 0x71b9))
+            / 1.35;
+        let t = ((province + 0.25) / 0.6).clamp(0.0, 1.0);
+        let smooth = t * t * (3.0 - 2.0 * t);
+        let mountain = smooth * smooth;
+        let macro_relief = 90.0 * bands(2500.0, 3, 0x9abc, false);
+        let ridges = 320.0 * mountain * bands(1400.0, 3, 0x24da, true);
+        let foothills = 12.0 * (0.3 + 0.7 * mountain) * bands(300.0, 1, 0x83e1, false);
+        let detail = 1.5 * (0.2 + 0.8 * mountain) * bands(40.0, self.params.octaves, 0xf13d, false);
+        // At defaults: 19 noise evaluations (17 unwarped), no per-voxel slope
+        // queries. Raising octaves adds exactly one detail evaluation per band.
+        self.params.amplitude / 1000.0 * (macro_relief + ridges + foothills + detail)
     }
     /// Same discrete material as the native top voxel. `height` is the canonical
     /// top plane from `height_m`; x/z are reserved for future source variation.
@@ -166,6 +249,183 @@ fn noise(x: f64, z: f64, seed: u64) -> f64 {
 mod tests {
     use super::*;
     use crate::{raycast, World};
+
+    #[test]
+    fn legacy_frozen_default_samples() {
+        // Exact f64 composition bits protect existing source versions, including
+        // negative coordinates; regional recipes must never replace this path.
+        for (seed, expected) in [
+            (
+                7,
+                [
+                    4641019009156913366,
+                    4636257216527400564,
+                    13864745307180359289,
+                ],
+            ),
+            (
+                77,
+                [
+                    4638551457045119077,
+                    4645312551394537888,
+                    4627992865413181849,
+                ],
+            ),
+            (
+                0xdead_beef,
+                [
+                    4639859225356663404,
+                    13861718415259605412,
+                    13848455563250511380,
+                ],
+            ),
+        ] {
+            let a = FbmTerrain::new(seed, FbmParams::default()).unwrap();
+            assert_eq!(a.params().recipe, FbmRecipe::Legacy);
+            assert_eq!(a.source_version(), 1);
+            assert_eq!(
+                [(-1.3125, 2.75), (0.0, 0.0), (53.375, -74.625)]
+                    .map(|(x, z)| a.elevation(x, z).to_bits()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn regional_columns_and_shared_anchors_are_canonical() {
+        for recipe in [FbmRecipe::Regional, FbmRecipe::RegionalUnwarped] {
+            let params = FbmParams {
+                recipe,
+                ..Default::default()
+            };
+            let world = World::fbm(0x19a3, params).unwrap();
+            let a = world.fbm_terrain().unwrap();
+            assert_eq!(a.source_version(), 2);
+            let coordinates = [-100_000.0, -1800.0625, -0.0625, -0.000001, 0.0, 1800.0];
+            let samples: Vec<_> = coordinates
+                .iter()
+                .map(|&x| a.height_m(x, -x - 0.03125))
+                .collect();
+            for (&x, &h) in coordinates.iter().zip(&samples).rev() {
+                let z = -x - 0.03125;
+                assert_eq!(a.height_m(x, z), h);
+                assert_eq!(world.height_m(x, z), h);
+                let c = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                let [cx, _, cz] = c.center_m();
+                assert_eq!(a.height_m(cx - 0.02, cz + 0.02), h);
+                assert_eq!(world.column(c.x, c.z).height_m(), h);
+                assert_eq!(world.material(Cell { y: c.y + 1, ..c }), Material::Air);
+                assert_eq!(world.material(c), a.surface_material(cx, cz, h));
+            }
+            let fine: Vec<_> = (-128..=128)
+                .map(|i| a.height_m(i as f64 * 2.0, -48.0))
+                .collect();
+            for i in (-8..=8).rev() {
+                assert_eq!(
+                    fine[(i * 16 + 128) as usize],
+                    a.height_m(i as f64 * 32.0, -48.0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn regional_reduces_local_slopes_on_held_out_seeds() {
+        // Broad fixed physical survey, independent of any display page size.
+        // These seeds differ from the canonical/material fixtures above.
+        for seed in [113, 997, 0x6d28, 0xdead_beef] {
+            let legacy = FbmTerrain::new(seed, FbmParams::default()).unwrap();
+            for recipe in [FbmRecipe::Regional, FbmRecipe::RegionalUnwarped] {
+                let regional = FbmTerrain::new(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut old_slopes = Vec::new();
+                let mut new_slopes = Vec::new();
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                let mut quiet = 0;
+                for ix in -24..24 {
+                    for iz in -24..24 {
+                        let (x, z) = (ix as f64 * 487.0 + 37.0, iz as f64 * 463.0 - 91.0);
+                        let slope = |terrain: &FbmTerrain| {
+                            let dx =
+                                (terrain.height_m(x + 2.0, z) - terrain.height_m(x - 2.0, z)) / 4.0;
+                            let dz =
+                                (terrain.height_m(x, z + 2.0) - terrain.height_m(x, z - 2.0)) / 4.0;
+                            dx.hypot(dz)
+                        };
+                        old_slopes.push(slope(&legacy));
+                        let s = slope(&regional);
+                        new_slopes.push(s);
+                        quiet += usize::from(s < 0.15);
+                        let h = regional.height_m(x, z);
+                        lo = lo.min(h);
+                        hi = hi.max(h);
+                    }
+                }
+                old_slopes.sort_by(f64::total_cmp);
+                new_slopes.sort_by(f64::total_cmp);
+                let n = new_slopes.len();
+                for percentile in [50, 95, 99] {
+                    let i = n * percentile / 100;
+                    assert!(
+                        new_slopes[i] < old_slopes[i] * 0.5,
+                        "seed={seed} recipe={recipe:?} p{percentile}: {} vs {}",
+                        new_slopes[i],
+                        old_slopes[i]
+                    );
+                }
+                assert!(quiet > n / 2, "quiet fraction={quiet}/{n}");
+                assert!(hi - lo > 150.0, "lost regional relief: {lo}..{hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn regional_parameters_change_source_without_hidden_clamps() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Regional,
+            ..Default::default()
+        };
+        let base = FbmTerrain::new(431, p).unwrap();
+        for params in [
+            FbmParams {
+                horizontal_scale: 3600.0,
+                ..p
+            },
+            FbmParams {
+                amplitude: 500.0,
+                ..p
+            },
+            FbmParams { octaves: 1, ..p },
+            FbmParams {
+                roughness: 0.8,
+                ..p
+            },
+            FbmParams {
+                recipe: FbmRecipe::RegionalUnwarped,
+                ..p
+            },
+        ] {
+            let other = FbmTerrain::new(431, params).unwrap();
+            assert_eq!(other.params(), params);
+            assert!((0..24).any(|i| base.height_m(i as f64 * 221.0, -1315.8)
+                != other.height_m(i as f64 * 221.0, -1315.8)));
+        }
+        let flat = FbmTerrain::new(
+            431,
+            FbmParams {
+                amplitude: 0.0,
+                ..p
+            },
+        )
+        .unwrap();
+        assert_eq!(flat.height_m(-431.0, 128.0), 0.0);
+    }
 
     #[test]
     fn rejects_invalid_parameters() {

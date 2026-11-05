@@ -11,6 +11,7 @@ pub struct Options {
     pub scene: String,
     pub camera_preset: String,
     pub seed: u64,
+    pub start_xz: [f64; 2],
     pub params: frontier_world::FbmParams,
     pub route: frontier_runtime::routes::Route,
     pub uncapped: bool,
@@ -40,7 +41,11 @@ pub fn parse() -> Result<Option<Options>> {
     let mut scene = String::from("fbm");
     let mut camera_preset = String::from("valley");
     let mut seed = SEED;
-    let mut params = frontier_world::FbmParams::default();
+    let mut params = frontier_world::FbmParams {
+        recipe: frontier_world::FbmRecipe::Regional,
+        ..Default::default()
+    };
+    let mut start_xz = [0f64; 2];
     let mut route = frontier_runtime::routes::Route::Stationary;
     let mut uncapped = false;
     let mut warmup = 0;
@@ -53,8 +58,8 @@ pub fn parse() -> Result<Option<Options>> {
     let mut msaa = 4;
     let mut capture_route_time: Option<f64> = None;
     let mut capture_coverage_shift: f64 = 0.;
-    // Experimental appearance transfer remains opt-in; MSAA is the default AA.
-    let mut voxel_filter = false;
+    // User selected the appearance transfer as the preferred default.
+    let mut voxel_filter = true;
     let mut renderer = String::from("mesh");
     let mut surface_layout = String::from("clipmap");
     let mut teleport_test = false;
@@ -71,6 +76,25 @@ pub fn parse() -> Result<Option<Options>> {
                 camera_preset = args
                     .next()
                     .ok_or("--camera requires valley|aerial|topology|cave|bridge")?
+            }
+            "--terrain-recipe" => {
+                params.recipe = match args.next().as_deref() {
+                    Some("legacy") => frontier_world::FbmRecipe::Legacy,
+                    Some("regional") => frontier_world::FbmRecipe::Regional,
+                    Some("regional-unwarped") => frontier_world::FbmRecipe::RegionalUnwarped,
+                    _ => {
+                        return Err(
+                            "--terrain-recipe requires legacy|regional|regional-unwarped".into(),
+                        )
+                    }
+                }
+            }
+            "--start-xz" => {
+                let value = args.next().ok_or("--start-xz requires X,Z meters")?;
+                let (x, z) = value
+                    .split_once(',')
+                    .ok_or("--start-xz requires X,Z meters")?;
+                start_xz = [x.parse()?, z.parse()?];
             }
             "--seed" => seed = args.next().ok_or("--seed requires integer")?.parse()?,
             "--scale" => {
@@ -182,7 +206,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -245,6 +269,12 @@ pub fn parse() -> Result<Option<Options>> {
         }
         terrain_static = true;
     }
+    if start_xz.iter().any(|v| !v.is_finite() || v.abs() > 1e9) {
+        return Err("--start-xz requires finite coordinates within ±1 billion meters".into());
+    }
+    if start_xz != [0., 0.] && !matches!(scene.as_str(), "fbm" | "hybrid") {
+        return Err("--start-xz supports fbm and hybrid scenes only".into());
+    }
     params.validate()?;
     if capture.is_some() && report_path.is_some() {
         return Err(
@@ -261,6 +291,7 @@ pub fn parse() -> Result<Option<Options>> {
         scene,
         camera_preset,
         seed,
+        start_xz,
         params,
         route,
         uncapped,

@@ -1490,6 +1490,7 @@ pub fn run() -> Result<()> {
         scene,
         camera_preset,
         seed,
+        start_xz,
         params,
         route,
         uncapped,
@@ -1530,16 +1531,33 @@ pub fn run() -> Result<()> {
     let mut hybrid_stream = None;
     let mut hybrid_initial = None;
     let mut camera = Camera::fixture();
+    let [start_x, start_z] = start_xz;
     let mesh = if fbm {
         let source = world.fbm_terrain().unwrap();
         let (position, target) = match camera_preset.as_str() {
             "valley" => (
-                DVec3::new(0., source.height_m(0., -20.) + 8., -20.),
-                DVec3::new(100., source.height_m(100., 400.) + 70., 400.),
+                DVec3::new(
+                    start_x,
+                    source.height_m(start_x, start_z - 20.) + 8.,
+                    start_z - 20.,
+                ),
+                DVec3::new(
+                    start_x + 100.,
+                    source.height_m(start_x + 100., start_z + 400.) + 70.,
+                    start_z + 400.,
+                ),
             ),
             "aerial" => (
-                DVec3::new(800., source.height_m(800., -900.) + 600., -900.),
-                DVec3::new(0., source.height_m(0., 200.), 200.),
+                DVec3::new(
+                    start_x + 800.,
+                    source.height_m(start_x + 800., start_z - 900.) + 600.,
+                    start_z - 900.,
+                ),
+                DVec3::new(
+                    start_x,
+                    source.height_m(start_x, start_z + 200.),
+                    start_z + 200.,
+                ),
             ),
             _ => return Err("--camera requires valley|aerial".into()),
         };
@@ -1596,7 +1614,7 @@ pub fn run() -> Result<()> {
                 DVec3::new(0., base - 1., -1.),
             ),
             "valley" => {
-                let position = DVec3::new(0., world.height_m(0., 0.) + 1.7, 0.);
+                let position = DVec3::new(start_x, world.height_m(start_x, start_z) + 1.7, start_z);
                 // Startup-only canonical probes choose an open/downhill view;
                 // keep the eye at walking height rather than lifting it over terrain.
                 let yaw = (0..16)
@@ -1605,8 +1623,10 @@ pub fn run() -> Result<()> {
                         let obstruction = [4., 16., 64., 256.]
                             .into_iter()
                             .map(|distance| {
-                                (world.height_m(yaw.sin() * distance, yaw.cos() * distance)
-                                    - position.y)
+                                (world.height_m(
+                                    start_x + yaw.sin() * distance,
+                                    start_z + yaw.cos() * distance,
+                                ) - position.y)
                                     .atan2(distance)
                             })
                             .fold(f64::NEG_INFINITY, f64::max);
@@ -1626,8 +1646,12 @@ pub fn run() -> Result<()> {
                 )
             }
             "aerial" => (
-                DVec3::new(70., world.height_m(0., 0.) + 90., -70.),
-                DVec3::new(0., world.height_m(0., 0.), 0.),
+                DVec3::new(
+                    start_x + 70.,
+                    world.height_m(start_x, start_z) + 90.,
+                    start_z - 70.,
+                ),
+                DVec3::new(start_x, world.height_m(start_x, start_z), start_z),
             ),
             _ => return Err("--camera requires valley|aerial".into()),
         };
@@ -1898,8 +1922,10 @@ pub fn run() -> Result<()> {
         };
         let mut json = report.to_json();
         json.pop();
+        json.push_str(&format!(",\"terrain_recipe\":\"{:?}\"}}", params.recipe));
+        json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
-            if scene!="fixture" {frontier_world::FBM_SOURCE_VERSION} else {frontier_world::SOURCE_VERSION},VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
+            viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
             if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.surface_probe.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles)),if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if scene == "hybrid" || scene == "hybrid-topology" {
             json.pop();

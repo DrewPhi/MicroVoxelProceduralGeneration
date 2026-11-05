@@ -26,7 +26,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     binary = OUT / (args.tag + '-bin')
     shutil.copy2(ROOT / 'target/release/frontier', binary)
-    base = [str(binary), '--scene', 'hybrid', '--seed', '7', '--width', '1920',
+    base = [str(binary), '--scene', 'hybrid', '--terrain-recipe', 'legacy', '--seed', '7', '--width', '1920',
             '--height', '1080', '--msaa', '4', '--voxel-filter', args.filter]
     views = [('ground', []), ('aerial', ['--camera', 'aerial']),
              ('moved', ['--route', 'fly', '--route-speed', '3', '--capture-route-time', '8']),

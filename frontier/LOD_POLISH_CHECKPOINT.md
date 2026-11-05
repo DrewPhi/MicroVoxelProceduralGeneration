@@ -6,6 +6,10 @@ Greenfield changes on `frontier-voxel-engine`, following prototype checkpoints
 from resolvable native stair geometry to a smooth two-metre collar/proxy; this
 pass improves stability/shading without claiming to solve that representation gap.
 
+Later user decision: voxel filtering is now enabled by default. The measurements
+and opt-in decision below describe the original experiment; see
+[the regional terrain checkpoint](REGIONAL_TERRAIN_CHECKPOINT.md) for current defaults.
+
 ## Iterations and decisions
 
 1. Tested perimeter-only appearance filtering and a grazing microfacet-occlusion

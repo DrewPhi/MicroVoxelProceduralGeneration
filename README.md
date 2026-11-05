@@ -9,6 +9,9 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 
 The default playtest launches an experimental moving FBM surface renderer.
+It now uses a gentler regional terrain recipe, voxel appearance filtering and
+4×MSAA by default. Use `--terrain-recipe legacy` for the original spiky terrain.
+See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;
 `--scene hybrid-static` keeps the earlier fixed reference. The new
 `--scene hybrid-topology` adds canonical caves, a bridge and editable voxels in a
@@ -28,7 +31,7 @@ cargo build --release --locked
 ./run.sh --scene fbm --seed 42 --scale 1200 --amplitude 700 --camera aerial
 ./run.sh --scene fbm-native
 ./run.sh --scene fbm --seed 7 --camera aerial --view-levels 11
-./run.sh --scene hybrid --seed 7 --msaa 4 --voxel-filter off
+./run.sh --scene hybrid --seed 7
 ./run.sh --scene hybrid-static --seed 7
 ./run.sh --scene hybrid-topology --camera topology
 ./run.sh --scene hybrid-topology --camera cave

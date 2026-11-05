@@ -10,7 +10,9 @@ use std::{
 };
 
 pub mod terrain;
-pub use terrain::{FbmError, FbmParams, FbmTerrain, FBM_SOURCE_VERSION};
+pub use terrain::{
+    FbmError, FbmParams, FbmRecipe, FbmTerrain, FBM_SOURCE_VERSION, REGIONAL_FBM_SOURCE_VERSION,
+};
 
 pub const VOXEL_SIZE: f64 = 0.0625;
 pub const SOURCE_VERSION: u32 = 1;

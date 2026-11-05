@@ -15,7 +15,7 @@ OUT = ROOT / "output/prototype-3-5"
 
 
 def run(name, flags, seconds=None):
-    args = [str(BIN), "--seed", "7", "--width", "1920", "--height", "1080"] + flags
+    args = [str(BIN), "--terrain-recipe", "legacy", "--voxel-filter", "off", "--seed", "7", "--width", "1920", "--height", "1080"] + flags
     if seconds is None:
         args += ["--capture", str(OUT / (name + ".png"))]
     else:
