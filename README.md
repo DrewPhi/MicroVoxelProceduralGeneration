@@ -11,7 +11,8 @@ The [developer guide](guide_for_devs.md) explains the current layout and next st
 The default playtest launches an experimental moving FBM surface renderer.
 It now uses a gentler regional terrain recipe, voxel appearance filtering and
 4×MSAA by default. Use `--terrain-recipe legacy` for the original spiky terrain.
-See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md).
+See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md) and
+[basic lighting/painting pass](frontier/BEAUTY_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;
 `--scene hybrid-static` keeps the earlier fixed reference. The new
 `--scene hybrid-topology` adds canonical caves, a bridge and editable voxels in a

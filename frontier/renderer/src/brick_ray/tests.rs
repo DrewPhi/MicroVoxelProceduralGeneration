@@ -373,3 +373,24 @@ fn tied_entry_keeps_exposed_face_when_lowest_axis_face_is_hidden() {
         assert_eq!(hit.2, [0, -1, 0]);
     }
 }
+
+#[test]
+fn all_backends_share_linear_rgb_lighting() {
+    fn lighting(shader: &str) -> &str {
+        shader
+            .split("fn terrain_lighting")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap()
+    }
+    let reference = lighting(include_str!("../voxel.wgsl"));
+    for shader in [
+        SHADER,
+        include_str!("../terrain.wgsl"),
+        include_str!("../surface_compare.wgsl"),
+    ] {
+        assert_eq!(reference, lighting(shader), "comparison lighting diverged");
+    }
+}

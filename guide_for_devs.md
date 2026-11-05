@@ -203,3 +203,5 @@ Latest transition work: [four-pass LOD experiment](frontier/LOD_POLISH_CHECKPOIN
 The CLI defaults to the regional recipe; `--terrain-recipe legacy` preserves the
 original world. See [regional terrain results](frontier/REGIONAL_TERRAIN_CHECKPOINT.md)
 and use `--start-xz X,Z` to inspect another physical region.
+
+Current lighting and deterministic terrain color: [beautification notes](frontier/BEAUTY_CHECKPOINT.md).

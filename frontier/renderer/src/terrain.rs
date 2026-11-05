@@ -332,7 +332,7 @@ impl TerrainGpu {
     ) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain camera"),
-            size: 64 + 32 * MAX_LEVELS as u64 + 48,
+            size: 64 + 32 * MAX_LEVELS as u64 + 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -570,6 +570,17 @@ impl TerrainGpu {
             &self.uniform,
             64 + 16 * MAX_LEVELS as u64 + 48,
             bytemuck::cast_slice(&morph_centers),
+        );
+        let paint_origin = [
+            (self.center[0] * 16.) as i64 as u32,
+            0u32,
+            (self.center[1] * 16.) as i64 as u32,
+            0u32,
+        ];
+        queue.write_buffer(
+            &self.uniform,
+            64 + 32 * MAX_LEVELS as u64 + 48,
+            bytemuck::cast_slice(&paint_origin),
         );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);

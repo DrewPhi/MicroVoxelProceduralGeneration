@@ -1,3 +1,14 @@
+// Shared linear-light response for native faces, the collar and terrain pages.
+// Warm directional sunlight keeps voxel faces legible; cool sky and restrained
+// ground bounce provide hemispherical fill without flattening the shaded faces.
+// No visibility/shadow approximation or camera-dependent exposure is applied.
+fn terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
+    let n=normalize(normal);
+    let sun=normalize(vec3<f32>(-0.5,0.8,-0.3));
+    let sky=0.5+0.5*n.y;
+    let ambient=mix(vec3<f32>(0.12,0.105,0.085),vec3<f32>(0.28,0.33,0.40),sky);
+    return ambient+vec3<f32>(0.78,0.70,0.58)*max(dot(n,sun),0.);
+}
 // Exact first exposed front face, matching native mesh's local-meter depth and
 // flat material/Lambert shading. No artificial fog or reduced internal resolution.
 struct Camera {
@@ -14,10 +25,10 @@ struct Camera {
 struct Fragment { @location(0) color:vec4<f32>, @builtin(frag_depth) depth:f32 };
 fn color(id:u32)->vec3<f32> {
     switch id {
-        case 1u:{return vec3<f32>(0.26,0.53,0.16);}
-        case 2u:{return vec3<f32>(0.40,0.27,0.15);}
-        case 3u:{return vec3<f32>(0.48,0.50,0.54);}
-        case 4u:{return vec3<f32>(0.57,0.34,0.14);}
+        case 1u:{return vec3<f32>(0.18,0.34,0.10);}
+        case 2u:{return vec3<f32>(0.32,0.22,0.13);}
+        case 3u:{return vec3<f32>(0.35,0.37,0.39);}
+        case 4u:{return vec3<f32>(0.41,0.25,0.13);}
         default:{return vec3<f32>(0.);}
     }
 }
@@ -83,9 +94,8 @@ fn forward_cell(p:vec3<f32>,d:vec3<f32>)->vec3<i32> {
             if depth<0. || depth>1. {discard;}
             var normal=vec3<f32>(0.);
             normal[face/2u]=select(-1.,1.,(face&1u)!=0u);
-            let sun=normalize(vec3<f32>(-0.5,0.8,-0.3));
             var result:Fragment;
-            result.color=vec4<f32>(color(word&255u)*(0.28+0.72*max(dot(normal,sun),0.)),1.);
+            result.color=vec4<f32>(color(word&255u)*terrain_lighting(normal),1.);
             result.depth=depth;
             return result;
         }

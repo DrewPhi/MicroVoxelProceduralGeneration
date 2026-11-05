@@ -138,7 +138,7 @@ impl Gpu {
         }
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera relative matrix"),
-            size: 80,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -436,10 +436,18 @@ impl Gpu {
             bytemuck::cast_slice(
                 &(camera.position - self.origin)
                     .as_vec3()
-                    .extend(1.)
+                    .extend(if self.volume_owner { 1. } else { 0. })
                     .to_array(),
             ),
         );
+        let paint_origin = [
+            (self.origin.x * 16.) as i64 as u32,
+            (self.origin.y * 16.) as i64 as u32,
+            (self.origin.z * 16.) as i64 as u32,
+            0u32,
+        ];
+        self.queue
+            .write_buffer(&self.uniform, 80, bytemuck::cast_slice(&paint_origin));
         if let Some(brick) = &self.brick {
             brick.update_camera(
                 &self.queue,
@@ -1922,7 +1930,14 @@ pub fn run() -> Result<()> {
         };
         let mut json = report.to_json();
         json.pop();
-        json.push_str(&format!(",\"terrain_recipe\":\"{:?}\"}}", params.recipe));
+        json.push_str(&format!(
+            ",\"terrain_recipe\":\"{:?}\",\"appearance_version\":{},\"render_appearance_version\":1}}",
+            params.recipe,
+            viewer
+                .world
+                .fbm_terrain()
+                .map_or(0, |source| source.appearance_version())
+        ));
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,

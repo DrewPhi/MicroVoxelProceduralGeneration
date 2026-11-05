@@ -323,7 +323,7 @@ impl DrawMesh {
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chunk camera"),
-            size: 80,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -448,6 +448,13 @@ impl DrawMesh {
                     .to_array(),
             ),
         );
+        let paint_origin = [
+            (self.origin.x * 16.) as i64 as u32,
+            (self.origin.y * 16.) as i64 as u32,
+            (self.origin.z * 16.) as i64 as u32,
+            0u32,
+        ];
+        queue.write_buffer(&self.uniform, 80, bytemuck::cast_slice(&paint_origin));
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);

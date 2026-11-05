@@ -11,7 +11,8 @@ use std::{
 
 pub mod terrain;
 pub use terrain::{
-    FbmError, FbmParams, FbmRecipe, FbmTerrain, FBM_SOURCE_VERSION, REGIONAL_FBM_SOURCE_VERSION,
+    FbmError, FbmParams, FbmRecipe, FbmTerrain, FBM_SOURCE_VERSION, REGIONAL_APPEARANCE_VERSION,
+    REGIONAL_FBM_SOURCE_VERSION,
 };
 
 pub const VOXEL_SIZE: f64 = 0.0625;
@@ -80,10 +81,10 @@ impl Material {
     pub fn color(self) -> [f32; 3] {
         match self {
             Self::Air => [0.0, 0.0, 0.0],
-            Self::Grass => [0.26, 0.53, 0.16],
-            Self::Soil => [0.40, 0.27, 0.15],
-            Self::Stone => [0.48, 0.50, 0.54],
-            Self::Wood => [0.57, 0.34, 0.14],
+            Self::Grass => [0.18, 0.34, 0.10],
+            Self::Soil => [0.32, 0.22, 0.13],
+            Self::Stone => [0.35, 0.37, 0.39],
+            Self::Wood => [0.41, 0.25, 0.13],
         }
     }
 }

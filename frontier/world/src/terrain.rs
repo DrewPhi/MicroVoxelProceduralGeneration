@@ -6,6 +6,8 @@ use crate::{Cell, Material, VOXEL_SIZE};
 pub const FBM_SOURCE_VERSION: u32 = 1;
 /// Regional composition version; recipe must also be included in source/cache keys.
 pub const REGIONAL_FBM_SOURCE_VERSION: u32 = 2;
+/// Regional material painting version. Elevation/source v2 remains unchanged.
+pub const REGIONAL_APPEARANCE_VERSION: u32 = 1;
 
 /// Explicit source identity: the legacy recipe retains existing worlds exactly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -95,11 +97,18 @@ impl FbmTerrain {
         self.params
     }
     /// Version of the selected canonical composition. Include params (including
-    /// recipe), seed and this version in any persistent source/cache identity.
+    /// recipe), seed, this version and `appearance_version` in any persistent
+    /// source/cache identity. Elevation and material recipes evolve separately.
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
+        }
+    }
+    pub fn appearance_version(&self) -> u32 {
+        match self.params.recipe {
+            FbmRecipe::Legacy => 0,
+            FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,
         }
     }
     /// Canonical column top plane (meters), excluding edits. Coordinates select
@@ -195,8 +204,30 @@ impl FbmTerrain {
         self.params.amplitude / 1000.0 * (macro_relief + ridges + foothills + detail)
     }
     /// Same discrete material as the native top voxel. `height` is the canonical
-    /// top plane from `height_m`; x/z are reserved for future source variation.
-    pub fn surface_material(&self, _x: f64, _z: f64, height: f64) -> Material {
+    /// top plane from `height_m`. Regional painting uses two coherent fields in
+    /// physical meters, independent of display spacing and terrain frequency.
+    /// A small material palette preserves greedy merging; no per-face or
+    /// sub-voxel texture is introduced. Cost is bounded, without slope queries.
+    pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
+        if self.params.recipe != FbmRecipe::Legacy {
+            let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
+            let exposure = noise(x / 220.0 + 13.7, z / 220.0 - 5.9, self.seed ^ 0x8ac1);
+            let soil = noise(x / 55.0 - 7.2, z / 55.0 + 21.4, self.seed ^ 0x3e57);
+            // Higher ground exposes more rock, but even low country contains
+            // outcrops. Never divide by amplitude: flat sources remain valid.
+            let relative_height = if self.params.amplitude > 0.0 {
+                height / self.params.amplitude
+            } else {
+                0.0
+            };
+            return if exposure + relative_height * 2.4 > 0.65 {
+                Material::Stone
+            } else if soil > 0.55 {
+                Material::Soil
+            } else {
+                Material::Grass
+            };
+        }
         if self.params.amplitude > 0.0 && height > self.params.amplitude * 0.48 {
             Material::Stone
         } else {
@@ -325,6 +356,59 @@ mod tests {
                     fine[(i * 16 + 128) as usize],
                     a.height_m(i as f64 * 32.0, -48.0)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn regional_paint_is_seeded_coherent_and_native_column_constant() {
+        for recipe in [FbmRecipe::Regional, FbmRecipe::RegionalUnwarped] {
+            for seed in [7, 113, 997] {
+                let params = FbmParams {
+                    recipe,
+                    ..Default::default()
+                };
+                let world = World::fbm(seed, params).unwrap();
+                let terrain = world.fbm_terrain().unwrap();
+                let repeated = FbmTerrain::new(seed, params).unwrap();
+                assert_eq!(terrain.source_version(), 2);
+                assert_eq!(terrain.appearance_version(), REGIONAL_APPEARANCE_VERSION);
+                let mut counts = [0; 3];
+                let mut adjacent_changes = 0;
+                for ix in -24..24 {
+                    for iz in -24..24 {
+                        let (x, z) = (ix as f64 * 81.0, iz as f64 * 79.0);
+                        let h = terrain.height_m(x, z);
+                        let cell = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                        let [cx, _, cz] = cell.center_m();
+                        let material = terrain.surface_material(x, z, h);
+                        counts[match material {
+                            Material::Grass => 0,
+                            Material::Soil => 1,
+                            Material::Stone => 2,
+                            other => panic!("unexpected terrain paint: {other:?}"),
+                        }] += 1;
+                        assert_eq!(material, repeated.surface_material(x, z, h));
+                        assert_eq!(material, world.material(cell));
+                        assert_eq!(material, world.column(cell.x, cell.z).material(cell.y));
+                        assert_eq!(material.color(), terrain.surface_color(x, z, h));
+                        // Includes both sides of zero and negative cell edges:
+                        // every point in a native column selects one base color.
+                        for (dx, dz) in [(-0.03, -0.03), (0.03, 0.03)] {
+                            assert_eq!(material, terrain.surface_material(cx + dx, cz + dz, h));
+                        }
+                        let nx = cx + VOXEL_SIZE;
+                        adjacent_changes += usize::from(
+                            material != terrain.surface_material(nx, cz, terrain.height_m(nx, cz)),
+                        );
+                    }
+                }
+                assert!(
+                    counts.iter().all(|&n| n > 20),
+                    "seed={seed} {recipe:?}: {counts:?}"
+                );
+                // Paint is coherent in meters, not a random native-cell mosaic.
+                assert!(adjacent_changes < 20, "adjacent changes={adjacent_changes}");
             }
         }
     }
