@@ -1,0 +1,56 @@
+name: Frontier CI
+
+on:
+  push:
+    branches: [frontier-voxel-engine]
+  pull_request:
+    branches: [frontier-voxel-engine]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontier-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, CPU tests, and release build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontier
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the workspace's pinned Rust toolchain
+        # Running inside frontier makes rustup read rust-toolchain.toml and
+        # install its exact channel, profile, and components (including rustfmt).
+        run: |
+          rustup show
+          cargo --version
+          rustfmt --version
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            frontier/target
+          key: frontier-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontier/rust-toolchain.toml') }}-${{ hashFiles('frontier/Cargo.lock') }}
+          restore-keys: |
+            frontier-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontier/rust-toolchain.toml') }}-
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace (including CPU WGSL validation)
+        # Existing naga tests parse and validate all four renderer WGSL files:
+        # voxel, terrain, surface_compare, and brick_ray. No GPU is required.
+        # This gate does not establish GPU execution parity or visual quality.
+        run: cargo test --locked --workspace
+      - name: Build release workspace
+        run: cargo build --locked --release
