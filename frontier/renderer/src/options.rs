@@ -23,6 +23,7 @@ pub struct Options {
     pub view_levels: u32,
     pub msaa: u32,
     pub capture_route_time: Option<f64>,
+    pub capture_coverage_shift: f64,
     pub voxel_filter: bool,
     pub renderer: String,
     pub surface_layout: String,
@@ -49,9 +50,10 @@ pub fn parse() -> Result<Option<Options>> {
     let mut route_realtime = false;
     let mut terrain_static = false;
     let mut view_levels = 7;
-    let mut msaa = 1;
+    let mut msaa = 4;
     let mut capture_route_time: Option<f64> = None;
-    // Opt in until the macro appearance model matches supersampled native faces.
+    let mut capture_coverage_shift: f64 = 0.;
+    // Experimental appearance transfer remains opt-in; MSAA is the default AA.
     let mut voxel_filter = false;
     let mut renderer = String::from("mesh");
     let mut surface_layout = String::from("clipmap");
@@ -102,6 +104,12 @@ pub fn parse() -> Result<Option<Options>> {
                     Some("off") => false,
                     _ => return Err("--voxel-filter requires on|off".into()),
                 }
+            }
+            "--capture-coverage-shift" => {
+                capture_coverage_shift = args
+                    .next()
+                    .ok_or("--capture-coverage-shift requires x meters")?
+                    .parse()?;
             }
             "--capture-route-time" => {
                 capture_route_time = Some(
@@ -174,7 +182,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -194,6 +202,16 @@ pub fn parse() -> Result<Option<Options>> {
     }
     if !(super::terrain::MIN_LEVELS..=super::terrain::MAX_LEVELS).contains(&view_levels) {
         return Err("--view-levels requires 7..11".into());
+    }
+    if !capture_coverage_shift.is_finite() || capture_coverage_shift.abs() > 24. {
+        return Err("--capture-coverage-shift requires finite x meters within ±24".into());
+    }
+    if capture_coverage_shift != 0.
+        && (capture.is_none() || !matches!(scene.as_str(), "hybrid" | "hybrid-topology"))
+    {
+        return Err(
+            "--capture-coverage-shift is only for hybrid headless publication comparisons".into(),
+        );
     }
     if capture_route_time.is_some_and(|t| !t.is_finite() || t < 0.) {
         return Err("--capture-route-time requires finite nonnegative seconds".into());
@@ -255,6 +273,7 @@ pub fn parse() -> Result<Option<Options>> {
         view_levels,
         msaa,
         capture_route_time,
+        capture_coverage_shift,
         voxel_filter,
         renderer,
         surface_layout,

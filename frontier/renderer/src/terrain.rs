@@ -251,6 +251,33 @@ impl TerrainData {
     }
 }
 
+/// Carry camera translation immediately; only relax the residual introduced by
+/// newly available page bounds. World-space anchors survive origin publication.
+fn advance_morph_anchors(
+    anchors: [[f64; 2]; MAX_LEVELS as usize],
+    previous_eye: [f64; 2],
+    eye: [f64; 2],
+    centers: [[f64; 2]; MAX_LEVELS as usize],
+    dt: f64,
+) -> [[f64; 2]; MAX_LEVELS as usize] {
+    let dt = dt.clamp(0., 0.05);
+    let alpha = 1. - (-dt / 0.15).exp();
+    std::array::from_fn(|level| {
+        let guard = 4. * (1u32 << level) as f64;
+        std::array::from_fn(|axis| {
+            let min = centers[level][axis] - guard;
+            let max = centers[level][axis] + guard;
+            let anchor = (anchors[level][axis] + eye[axis] - previous_eye[axis]).clamp(min, max);
+            let target = eye[axis].clamp(min, max);
+            anchor + ((target - anchor) * alpha).clamp(-32. * dt, 32. * dt)
+        })
+    })
+}
+struct MorphState {
+    anchors: [[f64; 2]; MAX_LEVELS as usize],
+    eye: [f64; 2],
+    drawn: Option<std::time::Instant>,
+}
 pub struct TerrainGpu {
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
@@ -267,6 +294,7 @@ pub struct TerrainGpu {
     volume_owner: bool,
     camera_position: std::cell::Cell<[f64; 3]>,
     voxel_filter: std::cell::Cell<bool>,
+    morph: std::cell::RefCell<MorphState>,
 }
 impl TerrainGpu {
     pub fn appearance_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -304,7 +332,7 @@ impl TerrainGpu {
     ) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain camera"),
-            size: 64 + 16 * MAX_LEVELS as u64 + 48,
+            size: 64 + 32 * MAX_LEVELS as u64 + 48,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -405,6 +433,11 @@ impl TerrainGpu {
             volume_owner: false,
             camera_position: std::cell::Cell::new([data.centers[0][0], 0., data.centers[0][1]]),
             voxel_filter: std::cell::Cell::new(true),
+            morph: std::cell::RefCell::new(MorphState {
+                anchors: data.centers,
+                eye: data.centers[0],
+                drawn: None,
+            }),
         }
     }
     pub fn set_hybrid_cutout(&mut self, center: Option<[f64; 2]>) {
@@ -478,6 +511,41 @@ impl TerrainGpu {
             ]
         });
         let camera_position = self.camera_position.get();
+        let morph_centers = {
+            let mut state = self.morph.borrow_mut();
+            let now = std::time::Instant::now();
+            let position = [camera_position[0], camera_position[2]];
+            state.anchors = if let Some(previous) = state.drawn {
+                advance_morph_anchors(
+                    state.anchors,
+                    state.eye,
+                    position,
+                    self.centers,
+                    now.duration_since(previous).as_secs_f64(),
+                )
+            } else {
+                // Cold/headless captures start at their exact camera target.
+                std::array::from_fn(|level| {
+                    let guard = 4. * (1u32 << level) as f64;
+                    std::array::from_fn(|axis| {
+                        position[axis].clamp(
+                            self.centers[level][axis] - guard,
+                            self.centers[level][axis] + guard,
+                        )
+                    })
+                })
+            };
+            state.eye = position;
+            state.drawn = Some(now);
+            state.anchors.map(|p| {
+                [
+                    (p[0] - self.center[0]) as f32,
+                    (p[1] - self.center[1]) as f32,
+                    0.,
+                    0.,
+                ]
+            })
+        };
         let eye = [
             (camera_position[0] - self.center[0]) as f32,
             (camera_position[2] - self.center[1]) as f32,
@@ -497,6 +565,11 @@ impl TerrainGpu {
                     if self.volume_owner { 1. } else { 0. },
                 ],
             ]),
+        );
+        queue.write_buffer(
+            &self.uniform,
+            64 + 16 * MAX_LEVELS as u64 + 48,
+            bytemuck::cast_slice(&morph_centers),
         );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
@@ -584,6 +657,71 @@ mod tests {
         t * t * (3. - 2. * t)
     }
     #[test]
+    fn temporal_morph_retains_publication_anchor_and_preserves_all_joins() {
+        use super::*;
+        let before = [[0.; 2]; MAX_LEVELS as usize];
+        let after = std::array::from_fn(|level| {
+            let snap = (1u32 << level) as f64;
+            [(8. / snap).floor() * snap, 0.]
+        });
+        let eye: [f64; 2] = [24., -2.];
+        let initial = std::array::from_fn(|level| {
+            let guard = 4. * (1u32 << level) as f64;
+            eye.map(|p| p.clamp(-guard, guard))
+        });
+        let mut anchors = advance_morph_anchors(initial, eye, eye, after, 0.);
+        assert_eq!(initial, anchors, "publication alone must not move the eye");
+        for _ in 0..240 {
+            let next = advance_morph_anchors(anchors, eye, eye, after, 1. / 60.);
+            for level in 0..MAX_LEVELS as usize {
+                let step = 0.5 * (1u32 << level) as f64;
+                for axis in 0..2 {
+                    assert!((next[level][axis] - after[level][axis]).abs() <= 8. * step);
+                    assert!((next[level][axis] - anchors[level][axis]).abs() <= 32. / 60. + 1e-12);
+                }
+                if level + 1 < MAX_LEVELS as usize {
+                    for x in [-64., 0., 64.] {
+                        for z in [-64., 0., 64.] {
+                            if x == 0. && z == 0. {
+                                continue;
+                            }
+                            let p = [after[level][0] + x * step, after[level][1] + z * step];
+                            assert_eq!(morph_weight(p, next[level], after[level], step), 1.);
+                            assert_eq!(
+                                morph_weight(p, next[level + 1], after[level + 1], step * 2.),
+                                0.
+                            );
+                        }
+                    }
+                }
+            }
+            anchors = next;
+        }
+        for level in 0..MAX_LEVELS as usize {
+            let guard = 4. * (1u32 << level) as f64;
+            for axis in 0..2 {
+                let target =
+                    eye[axis].clamp(after[level][axis] - guard, after[level][axis] + guard);
+                assert!((anchors[level][axis] - target).abs() < 1e-8);
+            }
+        }
+        assert_eq!(
+            advance_morph_anchors(before, [0., 0.], [1., -1.], before, 1. / 60.),
+            [[1., -1.]; MAX_LEVELS as usize],
+            "ordinary camera translation must not acquire smoothing lag"
+        );
+        let stalled = advance_morph_anchors(initial, eye, eye, after, 30.);
+        assert!((stalled[1][0] - initial[1][0]).abs() <= 1.6);
+        let destination = [[10000., -10000.]; MAX_LEVELS as usize];
+        let teleported = advance_morph_anchors(initial, eye, eye, destination, 0.);
+        for level in 0..MAX_LEVELS as usize {
+            let guard = 4. * (1u32 << level) as f64;
+            for axis in 0..2 {
+                assert!((teleported[level][axis] - destination[level][axis]).abs() <= guard);
+            }
+        }
+    }
+    #[test]
     fn continuous_camera_morph_preserves_joins_and_collar_during_grid_snaps() {
         use super::*;
         let source = frontier_world::FbmTerrain::new(
@@ -657,6 +795,80 @@ mod tests {
             }
         }
         eprintln!("camera-relative morph repeated8m/negative snaps common-vertex height delta={max_delta}m; all fine/coarse edges and collar pinned");
+    }
+    #[test]
+    fn historical_direct_clamp_publication_diagnostic_and_temporal_regression() {
+        use super::*;
+        // The <=8m result above is conditional on timely publication. Record the
+        // historical failure outside that guard: clamping the eye independently
+        // to old/new page centers changes weights at the same world vertex.
+        // Compare that baseline to retained anchors used by the active renderer.
+        let source = FbmTerrain::new(7, Default::default()).unwrap();
+        let before = TerrainData::at_center(&source, [0., 0.]);
+        let after = TerrainData::at_center(&source, [8., 0.]);
+        let count = ((N * 2 + 1).pow(2)) as usize;
+        let mut observed_displacement = false;
+        for lag in [8., 16., 24., 30.] {
+            let eye: [f64; 2] = [lag, 0.];
+            let mut max_delta = 0f64;
+            let initial = std::array::from_fn(|level| {
+                let guard = 4. * (1u32 << level) as f64;
+                std::array::from_fn(|axis| eye[axis].clamp(-guard, guard))
+            });
+            let retained = advance_morph_anchors(initial, eye, eye, after.centers, 0.);
+            assert_eq!(initial, retained);
+            let mut temporal_delta = 0f64;
+            for level in 1..LEVELS as usize - 1 {
+                let step = 0.5 * (1u32 << level) as f64;
+                for v in &before.vertices[level * count..(level + 1) * count] {
+                    let point = [
+                        v.position[0] as f64 + before.centers[level][0],
+                        v.position[1] as f64 + before.centers[level][1],
+                    ];
+                    let q = [
+                        (point[0] - after.centers[level][0]) / step,
+                        (point[1] - after.centers[level][1]) / step,
+                    ];
+                    // Exclude collapsed outer vertices and newly exposed area;
+                    // only compare identical canonical vertices in both pages.
+                    if v.position.iter().any(|p| p.abs() >= 60. * step as f32)
+                        || q.iter().any(|p| p.abs() >= 60.)
+                    {
+                        continue;
+                    }
+                    let bi = level * count
+                        + ((q[1] as i32 + N) * (2 * N + 1) + q[0] as i32 + N) as usize;
+                    let a = before.samples[v.sample as usize];
+                    let b = after.samples[bi];
+                    assert_eq!(a.heights, b.heights, "canonical samples remain fixed");
+                    let wa = morph_weight(point, eye, before.centers[level], step);
+                    let wb = morph_weight(point, eye, after.centers[level], step);
+                    let ha = a.heights[0] as f64 * (1. - wa) + a.heights[1] as f64 * wa;
+                    let hb = b.heights[0] as f64 * (1. - wb) + b.heights[1] as f64 * wb;
+                    max_delta = max_delta.max((ha - hb).abs());
+                    let wa = morph_weight(point, initial[level], before.centers[level], step);
+                    let wb = morph_weight(point, retained[level], after.centers[level], step);
+                    let ha = a.heights[0] as f64 * (1. - wa) + a.heights[1] as f64 * wa;
+                    let hb = b.heights[0] as f64 * (1. - wb) + b.heights[1] as f64 * wb;
+                    temporal_delta = temporal_delta.max((ha - hb).abs());
+                }
+            }
+            assert!(max_delta.is_finite());
+            if lag == 8. {
+                assert!(
+                    max_delta < 1e-9,
+                    "timely-publication displacement {max_delta}m"
+                );
+            } else {
+                observed_displacement |= max_delta > 1e-6;
+            }
+            assert!(temporal_delta < 1e-9);
+            eprintln!("publication seed7/8oct lag={lag}m: historical direct clamp displacement={max_delta:.8}m; retained anchor instantaneous displacement={temporal_delta:.8}m");
+        }
+        assert!(
+            observed_displacement,
+            "historical baseline should continue to expose its original failure"
+        );
     }
     #[test]
     fn native_and_proxy_share_one_projected_face_transfer() {

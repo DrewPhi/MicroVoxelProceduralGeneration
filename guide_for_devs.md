@@ -197,3 +197,6 @@ and both Frontier planning files before implementing later stages. Old engines
 remain on their remote branches; inspect with `git show` or a separate benchmark
 checkout. Do not restore old source trees here. Generated historical artifacts
 remain in the [archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
+
+Latest transition work: [four-pass LOD experiment](frontier/LOD_POLISH_CHECKPOINT.md).
+4×MSAA is now the default; `--voxel-filter on` remains experimental.

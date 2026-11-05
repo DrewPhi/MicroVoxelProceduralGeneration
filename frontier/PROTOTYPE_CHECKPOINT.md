@@ -7,6 +7,8 @@ G0–G4 production gates.** Visible LODs were explicitly deferred by the user;
 arbitrary volume streaming, pixel-error guarantees and aircraft coverage remain.
 Greenfield implementation; no legacy runtime transplanted.
 
+Later transition refinements: [four-pass LOD experiment](LOD_POLISH_CHECKPOINT.md).
+
 ## Playtest
 
 ```sh

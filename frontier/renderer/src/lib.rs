@@ -1502,6 +1502,7 @@ pub fn run() -> Result<()> {
         view_levels,
         msaa,
         capture_route_time,
+        capture_coverage_shift,
         voxel_filter,
         renderer,
         surface_layout,
@@ -1658,7 +1659,13 @@ pub fn run() -> Result<()> {
                 view_levels,
             )?;
             let prepared = loop {
-                stream.poll([camera.position.x, camera.position.z], true)?;
+                stream.poll(
+                    [
+                        camera.position.x + capture_coverage_shift,
+                        camera.position.z,
+                    ],
+                    true,
+                )?;
                 if let Some(ready) = stream.ready.take() {
                     break ready;
                 }
