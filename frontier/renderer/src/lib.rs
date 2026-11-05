@@ -1,5 +1,8 @@
 //! Greenfield bounded native-voxel playtest viewer; no streaming or distant LOD yet.
 pub mod mesh;
+mod native_fbm;
+mod options;
+mod terrain;
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
@@ -48,7 +51,7 @@ impl Camera {
     }
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
-        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.025, 500.)
+        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.025, 20000.)
             * Mat4::look_to_rh(eye, self.direction(), Vec3::Y)
     }
 }
@@ -64,6 +67,8 @@ struct Gpu {
     index_count: u32,
     origin: DVec3,
     format: wgpu::TextureFormat,
+    terrain: Option<terrain::TerrainGpu>,
+    adapter_info: String,
 }
 impl Gpu {
     async fn new(
@@ -203,6 +208,8 @@ impl Gpu {
                 mesh.origin.z as f64,
             ) * VOXEL_SIZE,
             format,
+            terrain: None,
+            adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
     fn replace_mesh(&mut self, mesh: &mesh::Mesh) {
@@ -291,6 +298,14 @@ impl Gpu {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        if let Some(terrain) = &self.terrain {
+            terrain.draw(
+                &self.queue,
+                &mut pass,
+                camera.matrix(DVec3::ZERO, width as f32 / height as f32),
+            );
+            return;
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
@@ -446,9 +461,22 @@ struct Viewer {
     stats: frontier_runtime::FrameStats,
     world: World,
     pending_edit: Option<PendingEdit>,
+    terrain_data: Option<terrain::TerrainData>,
+    fbm: bool,
+    initial_camera: Camera,
+    route: frontier_runtime::routes::Route,
+    uncapped: bool,
+    warmup: u64,
+    route_step: f64,
 }
 impl Viewer {
     fn edit(&mut self, place: bool) {
+        if self.world.fbm_terrain().is_some() {
+            eprintln!(
+                "FBM comparison scenes have edits disabled; use --scene fixture for exact editing"
+            );
+            return;
+        }
         let Some(cell) = edit_target(
             &self.world,
             self.camera.position.to_array(),
@@ -535,7 +563,7 @@ impl Viewer {
         self.poll_edit();
         let now = Instant::now();
         let interval = now.duration_since(self.last_frame);
-        if self.total_frames > 0 {
+        if self.total_frames > self.warmup {
             self.stats.record(interval.as_secs_f64() * 1000.);
         }
         let dt = interval.as_secs_f32().min(0.1);
@@ -560,11 +588,40 @@ impl Viewer {
             let speed = if self.keys.contains(&KeyCode::ShiftLeft)
                 || self.keys.contains(&KeyCode::ShiftRight)
             {
-                15.
+                if self.fbm {
+                    240.
+                } else {
+                    15.
+                }
             } else {
-                3.
+                if self.fbm {
+                    35.
+                } else {
+                    3.
+                }
             };
             self.camera.position += movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+        }
+        let pose = self.route.pose_at(
+            self.total_frames as f64 * self.route_step,
+            self.initial_camera.position.to_array(),
+            self.initial_camera.yaw as f64,
+            self.initial_camera.pitch as f64,
+            if self.fbm { 80. } else { 2. },
+        );
+        if !matches!(self.route, frontier_runtime::routes::Route::Stationary) {
+            self.camera.position = DVec3::from_array(pose.position);
+            if self.fbm {
+                let floor = self
+                    .world
+                    .fbm_terrain()
+                    .unwrap()
+                    .height_m(self.camera.position.x, self.camera.position.z)
+                    + 10.;
+                self.camera.position.y = self.camera.position.y.max(floor);
+            }
+            self.camera.yaw = pose.yaw as f32;
+            self.camera.pitch = pose.pitch as f32;
         }
         let (Some(gpu), Some(surface), Some(config), Some(depth)) =
             (&self.gpu, &self.surface, &self.config, &self.depth)
@@ -599,7 +656,7 @@ impl Viewer {
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
         if elapsed >= 0.5 {
-            window.set_title(&format!("Frontier native fixture | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", self.frames as f64 / elapsed, gpu.index_count / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental fixed rings (surface only; bounded ±2km)" } else { if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             self.frames = 0;
             self.fps_start = now;
         }
@@ -621,19 +678,26 @@ impl ApplicationHandler for Viewer {
             );
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let surface = instance.create_surface(window.clone())?;
-            let gpu = pollster::block_on(Gpu::new(
+            let mut gpu = pollster::block_on(Gpu::new(
                 &instance,
                 Some(&surface),
                 None,
                 self.mesh.as_ref().unwrap(),
             ))?;
+            if let Some(data) = self.terrain_data.take() {
+                gpu.terrain = Some(terrain::TerrainGpu::new(&gpu.device, gpu.format, &data));
+            }
             let size = window.inner_size();
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: gpu.format,
                 width: size.width.max(1),
                 height: size.height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: if self.uncapped {
+                    wgpu::PresentMode::AutoNoVsync
+                } else {
+                    wgpu::PresentMode::Fifo
+                },
                 desired_maximum_frame_latency: 2,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                 view_formats: vec![],
@@ -741,56 +805,90 @@ impl ApplicationHandler for Viewer {
 /// Runs the interactive fixture or captures it without a window using `--capture PATH`.
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
-    let mut capture = None;
-    let mut width = WIDTH;
-    let mut height = HEIGHT;
-    let mut frame_limit = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--capture" => {
-                capture = Some(PathBuf::from(
-                    args.next().ok_or("--capture requires a PNG path")?,
-                ))
-            }
-            "--width" => width = args.next().ok_or("--width requires an integer")?.parse()?,
-            "--height" => height = args.next().ok_or("--height requires an integer")?.parse()?,
-            "--frames" => {
-                frame_limit = Some(
-                    args.next()
-                        .ok_or("--frames requires an integer")?
-                        .parse::<u64>()?
-                        .max(1),
-                )
-            }
-            "--help" | "-h" => {
-                println!("Frontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
-                return Ok(());
-            }
-            _ => return Err(format!("unknown argument: {arg}").into()),
+    let Some(options::Options {
+        capture,
+        width,
+        height,
+        frame_limit,
+        scene,
+        camera_preset,
+        seed,
+        params,
+        route,
+        uncapped,
+        warmup,
+        report_path,
+        route_step,
+    }) = options::parse()?
+    else {
+        return Ok(());
+    };
+    let world = if scene == "fixture" {
+        World::new(seed)
+    } else {
+        World::fbm(seed, params)?
+    };
+    let fbm = match scene.as_str() {
+        "fbm" => true,
+        "fixture" | "fbm-native" => false,
+        _ => return Err("--scene requires fixture|fbm|fbm-native".into()),
+    };
+    let mut terrain_data = None;
+    let mut camera = Camera::fixture();
+    let mesh = if fbm {
+        let source = world.fbm_terrain().unwrap();
+        let (position, target) = match camera_preset.as_str() {
+            "valley" => (
+                DVec3::new(0., source.height_m(0., -20.) + 8., -20.),
+                DVec3::new(100., source.height_m(100., 400.) + 70., 400.),
+            ),
+            "aerial" => (
+                DVec3::new(800., source.height_m(800., -900.) + 600., -900.),
+                DVec3::new(0., source.height_m(0., 200.), 200.),
+            ),
+            _ => return Err("--camera requires valley|aerial".into()),
+        };
+        let direction = (target - position).normalize();
+        camera = Camera {
+            position,
+            yaw: direction.x.atan2(direction.z) as f32,
+            pitch: direction.y.asin() as f32,
+        };
+        terrain_data = Some(terrain::TerrainData::new(&source));
+        mesh::Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            origin: Cell { x: 0, y: 0, z: 0 },
+            exposed_native_faces: 0,
         }
-    }
-    if width == 0 || height == 0 || width > 8192 || height > 8192 {
-        return Err("dimensions must be in 1..=8192".into());
-    }
-    let world = World::new(SEED);
-    let started = Instant::now();
-    eprintln!(
-        "extracting bounded 16x14x16m fixture at native {}m cells (startup only)",
-        VOXEL_SIZE
-    );
-    let mesh = fixture_mesh(&world);
-    eprintln!(
-        "mesh: {} native exposed faces -> {} greedy quads, {} vertices in {:.2}s",
-        mesh.exposed_native_faces,
-        mesh.indices.len() / 6,
-        mesh.vertices.len(),
-        started.elapsed().as_secs_f64()
-    );
+    } else if scene == "fbm-native" {
+        let (mesh, position, target) = native_fbm::build(&world)?;
+        let position = DVec3::from_array(position);
+        let direction = (DVec3::from_array(target) - position).normalize();
+        camera = Camera {
+            position,
+            yaw: direction.x.atan2(direction.z) as f32,
+            pitch: direction.y.asin() as f32,
+        };
+        mesh
+    } else {
+        let started = Instant::now();
+        let mesh = fixture_mesh(&world);
+        eprintln!(
+            "native fixture: {} faces, {} greedy quads in {:.2}s",
+            mesh.exposed_native_faces,
+            mesh.indices.len() / 6,
+            started.elapsed().as_secs_f64()
+        );
+        mesh
+    };
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let gpu = pollster::block_on(Gpu::new(&instance, None, None, &mesh))?;
-        return gpu.capture(&Camera::fixture(), &path, width, height);
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, None, &mesh))?;
+        if let Some(data) = &terrain_data {
+            gpu.terrain = Some(terrain::TerrainGpu::new(&gpu.device, gpu.format, data));
+        }
+        return gpu.capture(&camera, &path, width, height);
     }
     let now = Instant::now();
     let mut viewer = Viewer {
@@ -800,7 +898,18 @@ pub fn run() -> Result<()> {
         gpu: None,
         config: None,
         depth: None,
-        camera: Camera::fixture(),
+        initial_camera: Camera {
+            position: camera.position,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+        },
+        camera,
+        terrain_data,
+        fbm,
+        route,
+        uncapped,
+        warmup,
+        route_step,
         keys: HashSet::new(),
         grabbed: false,
         last_frame: now,
@@ -821,6 +930,33 @@ pub fn run() -> Result<()> {
         "frame intervals (includes presentation; not isolated GPU timing): {:?}",
         viewer.stats.summary()
     );
+    if let Some(path) = report_path {
+        let report = frontier_runtime::benchmark::BenchmarkReport {
+            scene: scene.clone(),
+            seed,
+            route: format!("{:?}", route),
+            output_width: width,
+            output_height: height,
+            adapter: viewer
+                .gpu
+                .as_ref()
+                .map(|g| g.adapter_info.clone())
+                .unwrap_or_default(),
+            vsync: !uncapped,
+            warmup_frames: warmup,
+            frames: viewer.stats.summary(),
+            isolated_gpu_ms: None,
+            used_memory_bytes: None,
+            committed_memory_bytes: None,
+        };
+        let mut json = report.to_json();
+        json.pop();
+        json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
+            if scene!="fixture" {frontier_world::FBM_SOURCE_VERSION} else {frontier_world::SOURCE_VERSION},VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
+            if fbm {"experimental_static_nested_surface_grids"} else {"exact_native_greedy"},fbm,fbm,if fbm {terrain::HALF_EXTENT} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm {7} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3),if fbm {terrain::PAGE_BYTES} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+        std::fs::write(&path, json)?;
+        eprintln!("benchmark JSON: {}", path.display());
+    }
     if let Some(error) = viewer.error {
         return Err(error.into());
     }

@@ -65,6 +65,8 @@ Separate **content validity** (world/source version, region, edit/dependency rev
 
 ## Agreed quality and early experiment contract
 
+**Current user priority:** introduce a lightweight seeded FBM source immediately alongside the native fixture so renderer tests include real terrain variation. Full geology/erosion can follow. This changes source-development order, not the ownership or performance acceptance gates. Fixed-center surface prototypes must disclose their finite coverage and lack of native handoff; do not call them completed moving clipmaps.
+
 - The scene must appear voxel-built. Rasterized triangles, reusable grids and ray traversal are implementation choices, selected by image quality and measured cost. LOD caches are generated automatically, not handcrafted files.
 - Expose screen-space error/quality and resource-budget settings. A subpixel voxel is not automatically disposable: preserve collective coverage, silhouettes, materials, shadows and resolvable openings. Track geometric, appearance and temporal error separately. Filter distant signals instead of simply dropping small cells.
 - Target 60 FPS on the laptop with a 16.67 ms whole-frame budget, including streaming/upload/publication overhead and headroom for gameplay. Record CPU/GPU/frame p50/p95/p99, deadline misses and warm/cold cache results. Averages alone cannot pass; set explicit tail and quality thresholds in FV02 before comparisons. Disclose resolution and all settings. A fast but visibly popping result fails the combined quality/performance gate.

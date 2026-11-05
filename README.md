@@ -8,19 +8,24 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 [implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 
-The first runnable checkpoint is a bounded **16 × 14 × 16 m native-voxel
-reference scene** with a mountain, tunnel and bridge. It validates the world,
-mesh and camera foundations; it is not yet the distant-terrain/streaming engine.
-The laptop 60 FPS target and architecture gates remain unproven.
+The current playtest launches **seeded FBM terrain over 4.096 × 4.096 km**.
+It is an experimental surface renderer with fixed nested grids, not yet a
+streaming voxel renderer. An exact 6.25 cm FBM crop and the editable tunnel/bridge
+fixture remain available as separate correctness references.
 
 ```sh
 cd frontier
 cargo build --release --locked
-./run.sh
+./run.sh --seed 7 --camera valley
+./run.sh --scene fbm --seed 42 --scale 1200 --amplitude 700 --camera aerial
+./run.sh --scene fbm-native
+./run.sh --scene fixture
 ```
 
-Rust 1.99.1 is pinned. On Linux the initial window backend uses X11/XWayland.
-See the [developer guide](guide_for_devs.md) for controls, captures and tests.
+Rust 1.99.1 is pinned. On Linux the window backend uses X11/XWayland.
+See the [developer guide](guide_for_devs.md) for controls and measurements.
+The broad landscape currently uses a smooth surface proxy: nearby native voxel
+handoff, moving clipmaps and production quality/performance gates remain ahead.
 
 ## Legacy references
 

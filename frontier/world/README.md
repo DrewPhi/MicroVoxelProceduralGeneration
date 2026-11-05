@@ -37,9 +37,43 @@ is an unaccelerated correctness oracle, unsuitable for long per-pixel rendering.
 
 `LocalOrigin` subtracts integer addresses before producing local GPU floats.
 Meter conversion through f64 should remain within 2^53 cells; full i64 coordinates
-remain valid for canonical integer sampling but not exact f64 roundtrips.
+remain valid for fixture integer sampling but not exact f64 roundtrips. The FBM
+source additionally uses f64 meter coordinates internally and shares the 2^53-cell
+precision limit; it does not promise distinct adjacent columns beyond that limit.
 
 Run `cargo test -p frontier-world` from the Frontier workspace. Tests cover
 negative boundaries, 100 km coordinate precision/raycasting, tunnel continuity,
 bridge occupancy, immutable edits/revisions, DDA ties and inclusive endpoints,
 and 500 randomized rays against an independent analytic box intersection oracle.
+
+## Procedural FBM renderer test source
+
+`World::fbm(seed, FbmParams::default())` selects an independent, CPU-canonical
+mountain/valley heightfield. `World::new` retains the original fixture. Defaults
+are 1800 m horizontal scale, 1000 m relief scale, eight octaves and 0.5 octave
+amplitude gain. Validated finite parameter ranges are documented on `FbmParams`.
+This is a renderer test source, not erosion, rivers, biome generation or caves.
+It contains no bridge or fixture tunnel. Sparse edits and reference raycasts
+continue to use authoritative native materials.
+
+`FbmTerrain::height_m(x,z)` selects a half-open 6.25 cm native column, evaluates
+seeded warped mixed/ridged FBM at its center, then floors its top to the native
+vertical lattice. Every solid source cell satisfies `y < height_cells`; the
+returned height is the top plane, not the center of the highest occupied cell.
+`surface_material` and `surface_color` match the native top cell (grass or stone).
+The source has fixed world-meter frequencies and never takes a display spacing;
+CPU-generated surface pages sample this same function at every level. Pages are
+unedited heightfield proxies and cannot claim to represent arbitrary edits.
+`World::column(x,z)` computes the source height once for repeated `material(y)`
+queries, retaining exact fixture-volume and sparse-edit behavior.
+
+Noise and fractal composition are greenfield, with no added dependencies or
+copied source. Algorithm references: [Perlin's improved-noise reference](https://cs.nyu.edu/~perlin/noise/)
+for gradient interpolation and [FastNoiseLite's documentation](https://github.com/Auburn/FastNoiseLite/wiki/Documentation)
+for octave frequency/gain and ridged composition concepts. The CPU alone defines
+noise; shaders consume uploaded samples. There is no CPU/GPU noise-parity claim,
+certified interpolation error, erosion constraint, or omitted-band rejection
+bound. The current source uses all configured octaves at every display sample;
+proper footprint filtering and geometric-error measurement remain renderer work.
+Cache/save identities must include source kind, parameters, seed and version,
+plus the existing independent-world/edit revision identity requirements.

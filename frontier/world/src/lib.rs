@@ -1,6 +1,6 @@
-//! Greenfield canonical world fixture. All source occupancy uses integer cell
-//! coordinates; floating point is confined to meter conversion and ray traversal.
-//! This is a smoke scene, not the production geology or persistence system.
+//! Greenfield canonical native-cell world. A bounded integer fixture and a
+//! CPU-f64 procedural heightfield share material, edit and reference-ray semantics.
+//! These are test sources, not the production geology or persistence system.
 use std::{
     collections::BTreeMap,
     sync::{
@@ -8,6 +8,9 @@ use std::{
         Arc,
     },
 };
+
+pub mod terrain;
+pub use terrain::{FbmError, FbmParams, FbmTerrain, FBM_SOURCE_VERSION};
 
 pub const VOXEL_SIZE: f64 = 0.0625;
 pub const SOURCE_VERSION: u32 = 1;
@@ -90,17 +93,67 @@ impl Material {
 #[derive(Clone, Debug)]
 pub struct World {
     seed: u64,
+    terrain: Option<FbmTerrain>,
     edits: Arc<BTreeMap<Cell, Material>>,
     revision: u64,
     counter: Arc<AtomicU64>,
+}
+
+/// Read-only column snapshot borrowing its world. Reuses the canonical source
+/// height for many native y queries; material overrides and fixture volumes still
+/// apply. Useful for bounded native reference extraction, not a display LOD.
+pub struct WorldColumn<'a> {
+    world: &'a World,
+    x: i64,
+    z: i64,
+    height: i64,
+}
+impl WorldColumn<'_> {
+    pub fn height_m(&self) -> f64 {
+        self.height as f64 * VOXEL_SIZE
+    }
+    pub fn material(&self, y: i64) -> Material {
+        let c = Cell {
+            x: self.x,
+            y,
+            z: self.z,
+        };
+        self.world
+            .edits
+            .get(&c)
+            .copied()
+            .unwrap_or_else(|| self.world.source_with_height(c, self.height))
+    }
 }
 impl World {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
+            terrain: None,
             edits: Arc::default(),
             revision: 0,
             counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+    /// Procedural heightfield source. No fixture cave or bridge is added.
+    pub fn fbm(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
+        let terrain = FbmTerrain::new(seed, params)?;
+        Ok(Self {
+            terrain: Some(terrain),
+            ..Self::new(seed)
+        })
+    }
+    /// Immutable unedited surface source for CPU display-page generation.
+    /// Edits remain authoritative through `material`; these pages exclude edits.
+    pub fn fbm_terrain(&self) -> Option<&FbmTerrain> {
+        self.terrain.as_ref()
+    }
+    pub fn column(&self, x: i64, z: i64) -> WorldColumn<'_> {
+        WorldColumn {
+            world: self,
+            x,
+            z,
+            height: self.height_cells(x, z),
         }
     }
     pub fn revision(&self) -> u64 {
@@ -134,6 +187,9 @@ impl World {
             .unwrap_or_else(|| self.source(c))
     }
     fn height_cells(&self, x: i64, z: i64) -> i64 {
+        if let Some(terrain) = &self.terrain {
+            return terrain.height_cells(x, z);
+        }
         // Bounded quadratic mountain/ridge, with deterministic broad rolling hills.
         let dx = (x as i128 + 48).abs().min(128) as i64;
         let dz = (z as i128 - 32).abs().min(160) as i64;
@@ -148,6 +204,21 @@ impl World {
         h
     }
     fn source(&self, c: Cell) -> Material {
+        self.source_with_height(c, self.height_cells(c.x, c.z))
+    }
+    fn source_with_height(&self, c: Cell, h: i64) -> Material {
+        if let Some(terrain) = &self.terrain {
+            return if c.y >= h {
+                Material::Air
+            } else if c.y == h - 1 {
+                let [x, _, z] = c.center_m();
+                terrain.surface_material(x, z, h as f64 * VOXEL_SIZE)
+            } else if c.y >= h - 12 {
+                Material::Soil
+            } else {
+                Material::Stone
+            };
+        }
         // Bridge deck and posts. Deck bounds [2,7)x[4,4.25)x[-2,-1)m.
         if (32..112).contains(&c.x) && (-32..-16).contains(&c.z) {
             if (64..68).contains(&c.y) {
@@ -157,7 +228,6 @@ impl World {
                 return Material::Stone;
             }
         }
-        let h = self.height_cells(c.x, c.z);
         if c.y >= h {
             return Material::Air;
         }

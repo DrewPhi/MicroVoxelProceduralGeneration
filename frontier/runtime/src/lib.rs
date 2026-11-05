@@ -7,6 +7,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
+pub mod benchmark;
+pub mod routes;
+
 /// Identifies generated content. Camera state is intentionally absent.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContentKey {
