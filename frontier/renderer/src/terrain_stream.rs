@@ -6,7 +6,7 @@
 //! demand replaces queued work. A coherent older snapshot may publish only while
 //! its finest center is within 24m of current demand; far travel cancels per row.
 //! This is an empirical travel budget, not a game-speed or readiness guarantee.
-use super::{Sample, TerrainData, PAGE_BYTES};
+use super::{page_bytes, Sample, TerrainData, MAX_LEVELS, MIN_LEVELS};
 use frontier_world::FbmTerrain;
 use std::{
     collections::{HashMap, VecDeque},
@@ -21,7 +21,7 @@ struct Value {
     color: [f32; 4],
 }
 pub(super) struct SampleCache {
-    pub(super) pages: [Option<([f64; 2], Arc<[Sample]>)>; 7],
+    pub(super) pages: [Option<([f64; 2], Arc<[Sample]>)>; MAX_LEVELS as usize],
     pub(super) generated_pages: u64,
     pub(super) reused_samples: u64,
     values: HashMap<Key, Value>,
@@ -180,18 +180,26 @@ struct State {
     desired: Option<[f64; 2]>,
     epoch: u64,
     ready: Option<TerrainUpdate>,
-    published: Option<[[f64; 2]; 7]>,
+    published: Option<[[f64; 2]; MAX_LEVELS as usize]>,
     stop: bool,
     metrics: StreamMetrics,
 }
 pub struct TerrainStreamer {
     shared: Arc<(Mutex<State>, Condvar)>,
+    level_count: u32,
 }
 fn useful(a: [f64; 2], b: [f64; 2]) -> bool {
     (a[0] - b[0]).abs().max((a[1] - b[1]).abs()) <= 24.
 }
 impl TerrainStreamer {
+    #[cfg(test)]
     pub fn new(source: FbmTerrain) -> Self {
+        Self::with_levels(source, MIN_LEVELS).expect("default terrain level count")
+    }
+    pub fn with_levels(source: FbmTerrain, level_count: u32) -> Result<Self, String> {
+        if !(MIN_LEVELS..=MAX_LEVELS).contains(&level_count) {
+            return Err(format!("view levels must be {MIN_LEVELS}..={MAX_LEVELS}"));
+        }
         let shared = Arc::new((
             Mutex::new(State {
                 demand: None,
@@ -219,7 +227,7 @@ impl TerrainStreamer {
                         if s.stop {
                             break;
                         }
-                        s.metrics.inflight_bytes = PAGE_BYTES + PAGE_BYTES / 7;
+                        s.metrics.inflight_bytes = page_bytes(level_count) + page_bytes(1);
                         s.demand.take().unwrap()
                     };
                     let start = Instant::now();
@@ -229,10 +237,16 @@ impl TerrainStreamer {
                     let reused = cache.reused_samples;
                     // Near demand may supersede selection while this coherent snapshot
                     // is still useful. Far travel/teleport cancels at each generated row.
-                    let data = TerrainData::generate(&source, center, &mut cache, || {
-                        let s = worker.0.lock().unwrap();
-                        s.stop || !useful(center, s.desired.unwrap())
-                    });
+                    let data = TerrainData::generate_levels(
+                        &source,
+                        center,
+                        &mut cache,
+                        level_count,
+                        || {
+                            let s = worker.0.lock().unwrap();
+                            s.stop || !useful(center, s.desired.unwrap())
+                        },
+                    );
                     let metrics = GenerationMetrics {
                         reused_samples: cache.reused_samples - reused,
                         generation_ms: start.elapsed().as_secs_f64() * 1000.,
@@ -264,7 +278,10 @@ impl TerrainStreamer {
                 }
             })
             .expect("start terrain worker");
-        Self { shared }
+        Ok(Self {
+            shared,
+            level_count,
+        })
     }
     pub fn request(&mut self, position: [f64; 2]) -> u64 {
         let center = position.map(|v| v.floor());
@@ -293,10 +310,10 @@ impl TerrainStreamer {
         }
         s.metrics.publications += 1;
         s.metrics.generation_ms = update.metrics.generation_ms;
-        let dirty = (0..7)
+        let dirty = (0..self.level_count as usize)
             .filter(|&i| s.published.is_none_or(|p| p[i] != update.data.centers[i]))
             .count();
-        s.metrics.upload_bytes += PAGE_BYTES / 7 * dirty as u64;
+        s.metrics.upload_bytes += page_bytes(1) * dirty as u64;
         s.published = Some(update.data.centers);
         Some(update)
     }
@@ -304,7 +321,7 @@ impl TerrainStreamer {
         let state = self.shared.0.lock().unwrap();
         let mut metrics = state.metrics;
         if state.ready.is_some() {
-            metrics.inflight_bytes += PAGE_BYTES;
+            metrics.inflight_bytes += page_bytes(self.level_count);
         }
         metrics
     }
@@ -396,27 +413,33 @@ mod tests {
             },
         )
         .unwrap();
-        let mut stream = TerrainStreamer::new(source);
-        stream.request([0., 0.]);
-        let epoch = stream.request([-10000., 10000.]);
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(update) = stream.poll() {
-                assert_eq!(update.center, [-10000., 10000.]);
-                assert_eq!(update.epoch, epoch);
-                break;
+        for levels in [MIN_LEVELS, MAX_LEVELS] {
+            let mut stream = if levels == MIN_LEVELS {
+                TerrainStreamer::new(source.clone())
+            } else {
+                TerrainStreamer::with_levels(source.clone(), levels).unwrap()
+            };
+            stream.request([0., 0.]);
+            let epoch = stream.request([-10000., 10000.]);
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(update) = stream.poll() {
+                    assert_eq!(update.center, [-10000., 10000.]);
+                    assert_eq!(update.epoch, epoch);
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "destination generation timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            assert!(
-                Instant::now() < deadline,
-                "destination generation timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            let metrics = stream.metrics();
+            assert_eq!(metrics.publications, 1);
+            assert_eq!(metrics.requests, 2);
+            assert_eq!(metrics.upload_bytes, page_bytes(levels));
+            assert!(metrics.resident_bytes > page_bytes(levels));
         }
-        let metrics = stream.metrics();
-        assert_eq!(metrics.publications, 1);
-        assert_eq!(metrics.requests, 2);
-        assert_eq!(metrics.upload_bytes, PAGE_BYTES);
-        assert!(metrics.resident_bytes > PAGE_BYTES);
     }
     #[test]
     fn incremental_samples_equal_cold_generation_across_collapsed_edges() {

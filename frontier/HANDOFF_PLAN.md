@@ -2,6 +2,11 @@
 
 **Status:** proposed next fixture, not implemented or passed. The current FBM rings and native FBM crop remain separate experiments; neither is a handoff. This checkpoint is for the early ownership smoke gate (FV23/FV31), before selecting clipmaps or CDLOD.
 
+**Implementation update:** a limited fixed-window hybrid diagnostic now exists;
+see [HANDOFF_CHECKPOINT.md](HANDOFF_CHECKPOINT.md) for its scope, measurements,
+and remaining ownership work. The acceptance contract below is still proposed
+and its gate has not passed.
+
 ## Why this is the next gate
 
 Geometry clipmaps cache nested, viewer-centered regular grids and morph adjacent heightfield levels. Their source model is explicitly a 2D elevation image / height field, so the method does not itself represent caves, overhangs, bridges, or edits away from one surface ([Losasso & Hoppe 2004](https://hhoppe.com/geomclipmap.pdf), [Asirvatham & Hoppe 2005](https://hhoppe.com/gpugcm.pdf)). The later GPU version demonstrates the value of incremental grids and GPU-side terrain work, not a voxel/heightfield ownership solution. For voxel LOD, transition cells can close cracks between two sampled voxel resolutions, but that does not certify a boundary against a separately generated heightfield ([Lengyel 2010, *The Transvoxel Algorithm*](https://transvoxel.org/)). A recent matched multi-layer terrain study likewise finds that methods which look interchangeable top-down can lose coverage or walls at eye-level views ([Malyshau 2026](https://arxiv.org/abs/2608.17390)).

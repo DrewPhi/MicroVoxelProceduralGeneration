@@ -1,4 +1,6 @@
 //! Greenfield native fixture and experimental moving FBM surface viewer.
+pub mod column_mesh;
+mod hybrid;
 pub mod mesh;
 mod native_fbm;
 mod options;
@@ -31,6 +33,7 @@ struct Camera {
     position: DVec3,
     yaw: f32,
     pitch: f32,
+    far: f32,
 }
 impl Camera {
     fn fixture() -> Self {
@@ -38,6 +41,7 @@ impl Camera {
         let direction = (DVec3::new(-1., 3., 1.) - position).normalize();
         Self {
             position,
+            far: 20000.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         }
@@ -51,7 +55,7 @@ impl Camera {
     }
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
-        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.025, 20000.)
+        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.025, self.far)
             * Mat4::look_to_rh(eye, self.direction(), Vec3::Y)
     }
 }
@@ -108,6 +112,12 @@ impl Gpu {
                 None,
             )
             .await?;
+        let vertex_bytes = mesh.vertices.len() as u64 * std::mem::size_of::<mesh::Vertex>() as u64;
+        let index_bytes = mesh.indices.len() as u64 * std::mem::size_of::<u32>() as u64;
+        let limit = device.limits().max_buffer_size;
+        if vertex_bytes > limit || index_bytes > limit {
+            return Err(format!("scene exceeds GPU buffer budget: vertices={vertex_bytes} bytes, indices={index_bytes} bytes; per-buffer device limit={limit} bytes. Reduce source relief or native fixture extent.").into());
+        }
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera relative matrix"),
             size: 64,
@@ -467,6 +477,7 @@ struct Viewer {
     pending_edit: Option<PendingEdit>,
     terrain_data: Option<terrain::TerrainUpdate>,
     fbm: bool,
+    hybrid: bool,
     initial_camera: Camera,
     route: frontier_runtime::routes::Route,
     uncapped: bool,
@@ -703,7 +714,7 @@ impl Viewer {
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
         if elapsed >= 0.5 {
-            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental moving rings (surface only; ±2km from published center)" } else { if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {"fixed 64m native + approximate collar + static distant proxy (heightfield only)"} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             self.frames = 0;
             self.fps_start = now;
         }
@@ -877,6 +888,7 @@ pub fn run() -> Result<()> {
         route_speed,
         route_realtime,
         terrain_static,
+        view_levels,
     }) = options::parse()?
     else {
         return Ok(());
@@ -888,8 +900,8 @@ pub fn run() -> Result<()> {
     };
     let fbm = match scene.as_str() {
         "fbm" => true,
-        "fixture" | "fbm-native" => false,
-        _ => return Err("--scene requires fixture|fbm|fbm-native".into()),
+        "fixture" | "fbm-native" | "hybrid" => false,
+        _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid".into()),
     };
     let mut terrain_data = None;
     let mut terrain_streamer = None;
@@ -911,11 +923,12 @@ pub fn run() -> Result<()> {
         let direction = (target - position).normalize();
         camera = Camera {
             position,
+            far: 20000.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         };
         let preparing = Instant::now();
-        let mut streamer = terrain::TerrainStreamer::new(source.clone());
+        let mut streamer = terrain::TerrainStreamer::with_levels(source.clone(), view_levels)?;
         streamer.request([camera.position.x, camera.position.z]);
         eprintln!("preparing initial coherent FBM coverage on background worker");
         terrain_data = Some(loop {
@@ -936,12 +949,60 @@ pub fn run() -> Result<()> {
             origin: Cell { x: 0, y: 0, z: 0 },
             exposed_native_faces: 0,
         }
+    } else if scene == "hybrid" {
+        let mesh = hybrid::build(&world, view_levels)?;
+        let (position, target) = match camera_preset.as_str() {
+            "valley" => {
+                let position = DVec3::new(0., world.height_m(0., 0.) + 1.7, 0.);
+                // Startup-only canonical probes choose an open/downhill view;
+                // keep the eye at walking height rather than lifting it over terrain.
+                let yaw = (0..16)
+                    .map(|i| {
+                        let yaw = i as f64 * std::f64::consts::TAU / 16.;
+                        let obstruction = [4., 16., 64., 256.]
+                            .into_iter()
+                            .map(|distance| {
+                                (world.height_m(yaw.sin() * distance, yaw.cos() * distance)
+                                    - position.y)
+                                    .atan2(distance)
+                            })
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        (yaw, obstruction)
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap()
+                    .0;
+                eprintln!(
+                    "hybrid walking camera: open-view yaw {:.1} degrees, eye {:.3}m",
+                    yaw.to_degrees(),
+                    position.y
+                );
+                (
+                    position,
+                    position + DVec3::new(yaw.sin() * 40., -2., yaw.cos() * 40.),
+                )
+            }
+            "aerial" => (
+                DVec3::new(70., world.height_m(0., 0.) + 90., -70.),
+                DVec3::new(0., world.height_m(0., 0.), 0.),
+            ),
+            _ => return Err("--camera requires valley|aerial".into()),
+        };
+        let direction = (target - position).normalize();
+        camera = Camera {
+            position,
+            yaw: direction.x.atan2(direction.z) as f32,
+            pitch: direction.y.asin() as f32,
+            far: (terrain::half_extent(view_levels) * 3.) as f32,
+        };
+        mesh
     } else if scene == "fbm-native" {
         let (mesh, position, target) = native_fbm::build(&world)?;
         let position = DVec3::from_array(position);
         let direction = (DVec3::from_array(target) - position).normalize();
         camera = Camera {
             position,
+            far: 20000.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         };
@@ -957,6 +1018,7 @@ pub fn run() -> Result<()> {
         );
         mesh
     };
+    camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let mut gpu = pollster::block_on(Gpu::new(&instance, None, None, &mesh))?;
@@ -977,12 +1039,14 @@ pub fn run() -> Result<()> {
         depth: None,
         initial_camera: Camera {
             position: camera.position,
+            far: camera.far,
             yaw: camera.yaw,
             pitch: camera.pitch,
         },
         camera,
         terrain_data,
         fbm,
+        hybrid: scene == "hybrid",
         route,
         uncapped,
         warmup,
@@ -1048,7 +1112,11 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             if scene!="fixture" {frontier_world::FBM_SOURCE_VERSION} else {frontier_world::SOURCE_VERSION},VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if fbm {if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else {"exact_native_greedy"},fbm,fbm && terrain_static,if fbm {terrain::HALF_EXTENT} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm {7} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3),if fbm {terrain::PAGE_BYTES} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if fbm {if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene=="hybrid" {"fixed_native_64m_approximate_collar_static_proxy"} else {"exact_native_greedy"},fbm || scene=="hybrid",(fbm && terrain_static) || scene=="hybrid",if fbm || scene=="hybrid" {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene=="hybrid" {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3),if fbm {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+        if scene == "hybrid" {
+            json.pop();
+            json.push_str(",\"hybrid_scope\":{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":false,\"edits_supported\":false,\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}");
+        }
         let streaming = viewer
             .terrain_streamer
             .as_ref()

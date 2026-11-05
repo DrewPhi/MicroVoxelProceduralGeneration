@@ -4,9 +4,21 @@
 use frontier_world::FbmTerrain;
 use wgpu::util::DeviceExt;
 const N: i32 = 64;
-const LEVELS: u32 = 7;
-pub const HALF_EXTENT: f64 = 2048.;
-pub const PAGE_BYTES: u64 = 7 * 129 * 129 * 80;
+pub const MIN_LEVELS: u32 = 7;
+pub const MAX_LEVELS: u32 = 11;
+#[cfg(test)]
+const LEVELS: u32 = MIN_LEVELS;
+/// Outer square radius; callers validate `MIN_LEVELS..=MAX_LEVELS`.
+pub const fn half_extent(levels: u32) -> f64 {
+    32. * (1u32 << (levels - 1)) as f64
+}
+pub const fn page_bytes(levels: u32) -> u64 {
+    levels as u64 * 129 * 129 * 80
+}
+#[cfg(test)]
+pub const HALF_EXTENT: f64 = half_extent(MIN_LEVELS);
+#[cfg(test)]
+pub const PAGE_BYTES: u64 = page_bytes(MIN_LEVELS);
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GridVertex {
@@ -27,7 +39,8 @@ pub struct TerrainData {
     vertices: &'static [GridVertex],
     indices: &'static [u32],
     samples: Vec<Sample>,
-    centers: [[f64; 2]; LEVELS as usize],
+    centers: [[f64; 2]; MAX_LEVELS as usize],
+    level_count: u32,
     ranges: Vec<std::ops::Range<u32>>,
 }
 #[path = "terrain_stream.rs"]
@@ -39,19 +52,32 @@ impl TerrainData {
     pub fn new(source: &FbmTerrain) -> Self {
         Self::generate(source, [0., 0.], &mut SampleCache::new(), || false).unwrap()
     }
+    #[cfg(test)]
     fn generate(
         source: &FbmTerrain,
         center: [f64; 2],
         cache: &mut SampleCache,
         cancelled: impl Fn() -> bool,
     ) -> Option<Self> {
+        Self::generate_levels(source, center, cache, LEVELS, cancelled)
+    }
+    fn generate_levels(
+        source: &FbmTerrain,
+        center: [f64; 2],
+        cache: &mut SampleCache,
+        level_count: u32,
+        cancelled: impl Fn() -> bool,
+    ) -> Option<Self> {
+        assert!((MIN_LEVELS..=MAX_LEVELS).contains(&level_count));
         type Topology = (Vec<GridVertex>, Vec<u32>, Vec<Vec<std::ops::Range<u32>>>);
+        // Bounded shared topology: four trim variants for at most eleven levels.
+        // Active pages and draw ranges allocate only the requested level count.
         static TOPOLOGY: std::sync::OnceLock<Topology> = std::sync::OnceLock::new();
         let (vertices, indices, variants) = TOPOLOGY.get_or_init(|| {
             let mut vertices = Vec::new();
             let mut indices = Vec::new();
             let mut variants = Vec::new();
-            for level in 0..LEVELS {
+            for level in 0..MAX_LEVELS {
                 let step = 0.5 * (1u32 << level) as f64;
                 let base = vertices.len() as u32;
                 for z in -N..=N {
@@ -67,7 +93,7 @@ impl TerrainData {
                         vertices.push(GridVertex {
                             position: [gx as f32 * step as f32, gz as f32 * step as f32],
                             sample: vertices.len() as u32,
-                            morph: if level + 1 == LEVELS {
+                            morph: if level + 1 == MAX_LEVELS {
                                 0.
                             } else {
                                 ((x.abs().max(z.abs()) as f32 - 48.) / 16.).clamp(0., 1.)
@@ -121,7 +147,7 @@ impl TerrainData {
             let snap = (1u32 << level) as f64;
             center.map(|v| (v / snap).floor() * snap)
         });
-        let ranges = (0..LEVELS as usize)
+        let ranges = (0..level_count as usize)
             .map(|level| {
                 let parity = if level == 0 {
                     0
@@ -135,8 +161,8 @@ impl TerrainData {
             })
             .collect();
         let count = ((N * 2 + 1).pow(2)) as usize;
-        let mut samples = Vec::with_capacity(vertices.len());
-        for level in 0..LEVELS as usize {
+        let mut samples = Vec::with_capacity(count * level_count as usize);
+        for level in 0..level_count as usize {
             if cancelled() {
                 return None;
             }
@@ -193,6 +219,7 @@ impl TerrainData {
             vertices,
             indices,
             samples,
+            level_count,
             centers,
             ranges,
         })
@@ -207,7 +234,8 @@ pub struct TerrainGpu {
     indices: wgpu::Buffer,
     samples: wgpu::Buffer,
     center: [f64; 2],
-    centers: [[f64; 2]; LEVELS as usize],
+    centers: [[f64; 2]; MAX_LEVELS as usize],
+    level_count: u32,
     ranges: Vec<std::ops::Range<u32>>,
     pub index_count: u32,
 }
@@ -215,7 +243,7 @@ impl TerrainGpu {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, data: &TerrainData) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain camera"),
-            size: 64 + 16 * LEVELS as u64,
+            size: 64 + 16 * MAX_LEVELS as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -328,6 +356,7 @@ impl TerrainGpu {
             vertices,
             indices,
             samples,
+            level_count: data.level_count,
             center: data.centers[0],
             centers: data.centers,
             ranges: data.ranges.clone(),
@@ -340,7 +369,8 @@ impl TerrainGpu {
     pub fn upload(&mut self, queue: &wgpu::Queue, update: &TerrainUpdate) -> u64 {
         let mut bytes = 0;
         let count = ((N * 2 + 1).pow(2)) as usize;
-        for level in 0..LEVELS as usize {
+        assert_eq!(self.level_count, update.data.level_count);
+        for level in 0..self.level_count as usize {
             if self.centers[level] != update.data.centers[level] {
                 bytes += (count * std::mem::size_of::<Sample>()) as u64;
                 queue.write_buffer(
@@ -366,11 +396,16 @@ impl TerrainGpu {
             0,
             bytemuck::cast_slice(&matrix.to_cols_array()),
         );
-        let offsets: [[f32; 4]; LEVELS as usize] = std::array::from_fn(|i| {
+        let offsets: [[f32; 4]; MAX_LEVELS as usize] = std::array::from_fn(|i| {
             [
                 (self.centers[i][0] - self.center[0]) as f32,
                 (self.centers[i][1] - self.center[1]) as f32,
-                0.,
+                // The active outer ring has no displayed parent to morph toward.
+                if i + 1 < self.level_count as usize {
+                    1.
+                } else {
+                    0.
+                },
                 0.,
             ]
         });

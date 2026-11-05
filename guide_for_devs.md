@@ -10,8 +10,11 @@ coherent replacements. This remains a **surface prototype**, not a native-voxel
 handoff or a completed production renderer.
 
 `--scene fbm-native` displays an exact 8×8 m, 6.25 cm voxel crop from the same
-FBM source. `--scene fixture` preserves the original editable 16×14×16 m
-mountain/tunnel/bridge reference. All implementation is greenfield (tier G).
+FBM source. `--scene hybrid` shows a fixed 64×64 m exact native interior, an
+approximately 2 m collar, and a static outer proxy. It is diagnostic only: no
+moving native ownership, caves, edits, or certified error bound. `--scene
+fixture` preserves the original editable 16×14×16 m mountain/tunnel/bridge
+reference. All implementation is greenfield (tier G).
 
 ## Build and run
 
@@ -23,7 +26,10 @@ cd frontier
 cargo test --workspace --locked
 cargo build --release --locked
 ./run.sh --scene fbm --seed 7 --camera valley
+./run.sh --scene fbm --seed 7 --camera aerial --view-levels 11
 ./run.sh --scene fbm-native
+./run.sh --scene hybrid --seed 7
+./run.sh --scene hybrid --seed 7 --camera aerial
 ./run.sh --scene fixture
 ./run.sh --capture output/fixture.png --width 1920 --height 1080
 ./run.sh --seconds 15 --route stop-resume --route-clock realtime --warmup 30 --uncapped --report output/run.json --width 1920 --height 1080
@@ -57,6 +63,11 @@ See [moving coverage measurements](frontier/STREAMING_CHECKPOINT.md),
 [FBM checkpoint measurements](frontier/FBM_CHECKPOINT.md) and the earlier
 [native reference checkpoint](frontier/CHECKPOINT.md) for tests, hardware results
 and explicit limitations.
+The [handoff checkpoint](frontier/HANDOFF_CHECKPOINT.md) documents the partial
+hybrid prototype and the 7/9/11-level view-distance experiment. Its initial
+hybrid-ground report is provisional pending a retake. The screenshots show clear
+native/proxy aliasing and shading differences; no invisible-transition claim is
+made.
 
 ## FBM controls and repeatable captures
 
