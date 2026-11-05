@@ -1,5 +1,7 @@
 # Exact voxel reference checkpoint — issues #66 P0 and #68
 
+**Current primary visual check:** [player-height spiky terrain](PRIMARY_VISUAL_CHECK.md), selected by the user after the initial P0 checkpoint below.
+
 This delivers the **bounded P0 image-oracle checkpoint**, before changes to the
 LOD architecture. It does not complete the distant-landscape or temporal fidelity
 gates described in the broader #66 roadmap. Implementation is greenfield (tier G).

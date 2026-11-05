@@ -34,6 +34,7 @@ pub struct Options {
     pub target: Option<[f64; 3]>,
     pub fov_y: f32,
     pub capture_linear: bool,
+    pub capture_far: Option<f32>,
 }
 pub fn parse() -> Result<Option<Options>> {
     let mut capture = None;
@@ -72,6 +73,7 @@ pub fn parse() -> Result<Option<Options>> {
     let mut target = None;
     let mut fov_y = 60f32;
     let mut capture_linear = false;
+    let mut capture_far: Option<f32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -92,6 +94,13 @@ pub fn parse() -> Result<Option<Options>> {
                 }
             }
             "--capture-linear" => capture_linear = true,
+            "--capture-far" => {
+                capture_far = Some(
+                    args.next()
+                        .ok_or("--capture-far requires meters")?
+                        .parse()?,
+                )
+            }
             "--fov" | "--fov-y" => {
                 fov_y = args.next().ok_or("--fov-y requires degrees")?.parse()?
             }
@@ -234,7 +243,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Oracle fixture: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -319,11 +328,16 @@ pub fn parse() -> Result<Option<Options>> {
     if !fov_y.is_finite() || !(1.0..179.0).contains(&fov_y) {
         return Err("--fov-y must be in 1..179 degrees".into());
     }
-    if eye.is_some() && scene != "fixture" {
-        return Err("explicit oracle camera currently requires --scene fixture (streaming coverage uses preset cameras)".into());
+    if eye.is_some() && scene != "fixture" && capture.is_none() {
+        return Err("explicit terrain camera requires --capture".into());
     }
-    if capture_linear && (capture.is_none() || scene != "fixture" || msaa != 1) {
-        return Err("--capture-linear requires --capture, --scene fixture and --msaa 1".into());
+    if capture_far.is_some_and(|v| !v.is_finite() || v <= 0.025)
+        || (capture_far.is_some() && capture.is_none())
+    {
+        return Err("--capture-far requires a headless capture and finite distance >0.025m".into());
+    }
+    if capture_linear && (capture.is_none() || msaa != 1) {
+        return Err("--capture-linear requires --capture and --msaa 1".into());
     }
     params.validate()?;
     if capture.is_some() && report_path.is_some() {
@@ -364,5 +378,6 @@ pub fn parse() -> Result<Option<Options>> {
         target,
         fov_y,
         capture_linear,
+        capture_far,
     }))
 }

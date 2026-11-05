@@ -1,0 +1,100 @@
+{
+  "reference": {
+    "schema": "frontier-landscape-reference-v1",
+    "source": "FbmTerrain CPU f64",
+    "seed": 7,
+    "params": {
+      "horizontal_scale": 1800,
+      "amplitude": 1000,
+      "octaves": 8,
+      "roughness": 0.5
+    },
+    "terrain_recipe": "Legacy",
+    "source_version": 1,
+    "appearance_version": 0,
+    "voxel_size_m": 0.0625,
+    "lod": false,
+    "geometry": "all native columns; conservative exact-max rejection hierarchy",
+    "crop_policy": "exposed canonical faces only; no crop caps; unbounded downward solid columns",
+    "native_min_xz": [
+      -8192,
+      -8192
+    ],
+    "native_size_xz": 16384,
+    "width": 1920,
+    "height": 1080,
+    "spp": 256,
+    "eye": [
+      0.0,
+      94.8875,
+      0.0
+    ],
+    "target": [
+      -8.731370115810932e-08,
+      94.83756238296628,
+      -0.9987523555755615
+    ],
+    "fov_y_degrees": 60,
+    "near": 0.025,
+    "far": 300,
+    "fog": false,
+    "shadows": false,
+    "terrain_tint": true,
+    "tint": "same renderer 32m/4m coherent paint; fine grain zero",
+    "sampling": "deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation",
+    "sample_seed": 83,
+    "ray_count": 530841600,
+    "git_revision": "5909948a4059e604119d600baf4f13e1e270c0ee",
+    "git_dirty": true,
+    "source_fnv1a64": "15f641c6712febcf",
+    "cache_identity_fnv1a64": "c0d4d43f793859eb",
+    "raw_format": "little endian f32 top-left row-major",
+    "depth": "mean hit distance in meters; NaN on miss",
+    "build_seconds": 15.303278733,
+    "render_seconds": 153.192022298,
+    "snapshot_bytes": 1079334228,
+    "threads": 8,
+    "miss_fraction": 0.5333567075376158
+  },
+  "gpu": {
+    "width": 1920,
+    "height": 1080,
+    "eye": [
+      0.0,
+      94.8875,
+      0.0
+    ],
+    "target": [
+      -8.731370115810932e-08,
+      94.83756238296628,
+      -0.9987523555755615
+    ],
+    "fov_y_degrees": 60,
+    "near": 0.025,
+    "far": 300,
+    "samples": 1,
+    "depth_encoding": "ndc_0_1",
+    "color_encoding": "linear_rgb_float32_render_target",
+    "voxel_filter": true,
+    "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+    "seed": 7,
+    "scene": "hybrid",
+    "renderer": "mesh",
+    "source_version": 1,
+    "edit_revision": 0,
+    "native_voxel_m": 0.0625,
+    "terrain_recipe": "Legacy",
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5,
+    "appearance_version": 0,
+    "surface_layout": "clipmap",
+    "view_levels": 11
+  },
+  "linear_rgb_rmse": 0.04930703987367513,
+  "linear_rgb_mae": 0.015098356432560795,
+  "interpretation": "Appearance comparison, not a geometry error bound: exact sampled microfaces versus filtered LOD geometry/shading.",
+  "role": "Primary user-selected visual regression check, 2026-11-05",
+  "scope": "One player-height legacy-terrain still; 300m matched clip; secondary fixtures retain cave/bridge and other coverage."
+}

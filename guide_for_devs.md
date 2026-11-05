@@ -2,6 +2,8 @@
 
 ## Current checkpoint
 
+For rendering and LOD changes, start with the [primary player-view visual check](frontier/PRIMARY_VISUAL_CHECK.md). It fixes the original spiky terrain and player-height camera against a 256-sample exact-voxel reference.
+
 The default scene tests a CPU-canonical seeded FBM source on experimental
 moving nested GPU grids. Background workers prepare coherent coverage; native
 voxel identity remains 0.0625 m. All implementation is greenfield (tier G).

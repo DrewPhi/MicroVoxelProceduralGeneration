@@ -55,6 +55,15 @@ impl Camera {
             pitch: direction.y.asin() as f32,
         }
     }
+    /// Headless comparisons must apply the requested eye before planning coverage.
+    fn set_explicit_pose(&mut self, eye: Option<[f64; 3]>, target: Option<[f64; 3]>) {
+        if let (Some(eye), Some(target)) = (eye, target) {
+            self.position = DVec3::from_array(eye);
+            let direction = (DVec3::from_array(target) - self.position).normalize();
+            self.yaw = direction.x.atan2(direction.z) as f32;
+            self.pitch = direction.y.asin() as f32;
+        }
+    }
     fn direction(&self) -> Vec3 {
         Vec3::new(
             self.yaw.sin() * self.pitch.cos(),
@@ -1588,9 +1597,10 @@ pub fn run() -> Result<()> {
         teleport_test,
         edit_test,
         eye,
-        target,
+        target: explicit_target,
         fov_y,
         capture_linear,
+        capture_far,
     }) = options::parse()?
     else {
         return Ok(());
@@ -1659,6 +1669,7 @@ pub fn run() -> Result<()> {
             capture_route_time,
             false,
         );
+        camera.set_explicit_pose(eye, explicit_target);
         let preparing = Instant::now();
         let mut streamer = terrain::TerrainStreamer::with_levels(source.clone(), view_levels)?;
         streamer.request([camera.position.x, camera.position.z]);
@@ -1754,6 +1765,7 @@ pub fn run() -> Result<()> {
             capture_route_time,
             true,
         );
+        camera.set_explicit_pose(eye, explicit_target);
         if scene == "hybrid-static" {
             hybrid::build(&world, view_levels)?
         } else {
@@ -1850,12 +1862,10 @@ pub fn run() -> Result<()> {
     };
     camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
     camera.fov_y = fov_y;
-    if let (Some(eye), Some(target)) = (eye, target) {
-        camera.position = DVec3::from_array(eye);
-        let direction = (DVec3::from_array(target) - camera.position).normalize();
-        camera.yaw = direction.x.atan2(direction.z) as f32;
-        camera.pitch = direction.y.asin() as f32;
+    if let Some(far) = capture_far {
+        camera.far = far;
     }
+    camera.set_explicit_pose(eye, explicit_target);
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let mut gpu = pollster::block_on(Gpu::new(
@@ -1910,7 +1920,7 @@ pub fn run() -> Result<()> {
             .map_or(frontier_world::SOURCE_VERSION, |source| {
                 source.source_version()
             });
-        metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds}}}", world.revision()));
+        metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"native_voxel_m\":{VOXEL_SIZE},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
         std::fs::write(metadata_path, metadata)?;
         return Ok(());
     }

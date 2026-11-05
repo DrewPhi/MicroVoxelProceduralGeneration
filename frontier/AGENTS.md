@@ -36,6 +36,8 @@ When a task lists R or B, **do not 'just copy' old code**; when it lists P, copy
 
 ## 4. Tests and deliverables
 
+**Primary visual regression check (user-selected):** the fixed player-height spiky-terrain comparison in [PRIMARY_VISUAL_CHECK.md](PRIMARY_VISUAL_CHECK.md). Run it first for changes to LOD selection, transitions, geometry, filtering or lighting. Preserve the fixed source, camera, voxel size and matched 300 m clip; compare against the independent exact-voxel reference. Keep cave/bridge, regional terrain and motion tests as secondary coverage. A prettier aerial image does not replace this check.
+
 Before marking an issue done: commit code/docs and reproducible tests; include seed/world version, camera route, GPU/CPU model, 1080p resolution, geometry representation, actual native voxel size, frame time p50/p95/p99, page/mesh count, pending memory, and side-by-side images/video where visual impact matters.
 
 No 1 km GPU fit or extremely costly optimization campaign without a CPU or small-world gate. Preserve stable old launch behavior and saved worlds.

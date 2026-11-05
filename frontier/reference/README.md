@@ -34,3 +34,49 @@ Each histogram sums to coverage. `color.png` is the display image. `coverage.png
 `center_coverage.f32` and `center_depth.f32` contain one independent ray through each pixel center (coverage 0/1, ray distance in meters with NaN on misses). They permit matched geometry checks against a 1× GPU capture without interpreting finite-sample coverage/depth ranges as exact center geometry. `center_manifest.json` records the matched camera and independent source/seed/edit revision/bounds/voxel/provenance fields. Comparisons must validate these against the multisample manifest; `--centers-only` deliberately does not rewrite that older manifest. A world-only `canonical_source_fnv1a64` additionally distinguishes canonical-source changes from metadata-only changes to the full compiled-source fingerprint. These are written by normal renders. To supplement an existing reference directory without rerendering its multisample buffers or replacing its main manifest, run the same camera/dimensions/seed arguments with `--centers-only`.
 
 The CLI integration test renders a small fixture twice and requires byte identity of all seven raw buffers across two-worker accelerated and one-worker plain traversal, including jittered sampling and center provenance fields.
+
+### Exact kilometer landscape oracle
+
+`landscape` extends the reference to a bounded regional FBM landscape without
+allocating a dense three-dimensional volume. It samples **every native 6.25 cm
+column**, stores the canonical integer top plane in an i32 array, and constructs
+an exact maximum-height hierarchy over 16×16-column blocks. Hierarchy traversal
+only rejects space above the maximum; surviving rays traverse native columns
+and return their exact exposed top or side face. There is no geometric LOD,
+interpolation, coarse height substitute, bottom cap, or artificial crop wall.
+This representation is valid only for the unedited FBM heightfield source;
+it does not represent caves, overhangs, structures, or edits.
+
+```sh
+cargo run --release -p frontier-reference --bin landscape -- \
+  --cache /tmp/frontier-native-regional7-1156-3469-1024.bin \
+  --output output/km-reference/reference64 --center -1156,3469 --extent 1024 \
+  --eye -1156,900,3269 --target -1156,200,3469 --fov-y 35 --far 98304 \
+  --width 1920 --height 1080 --spp 64 --threads 8
+```
+
+The square extent must be a power of two in native cells, between 1 and 2048 m.
+At 1024 m, the 16384² native height array plus hierarchy uses 1,079,334,228 bytes.
+Cache identity includes canonical source text, all source parameters, seed,
+integer footprint and source version. A mismatched cache is rejected; choose a
+new cache path. `--build-only` generates the cache without rendering.
+
+The output contains `color.png`, `linear_rgb.f32` (RGB), `coverage.f32`
+(hit fraction), `depth.f32` (one hit-only mean ray distance, NaN on miss), and
+`manifest.json`. The landscape depth format differs from the four-channel
+fixture depth format. Sampling uses deterministic jittered square stratification (SplitMix64,
+`--sample-seed 19` by default) and a box filter, with f64 linear accumulation
+and sRGB PNG output. Lighting and flat
+material colors use the existing reference contract. CPU paint reproduces the
+current renderer's coordinate hash and 32 m/4 m coherent tint; fine grain is
+zero at landscape distances. `--no-tint` disables this paint. Materials remain
+canonical per native voxel, including the soil/stone beneath surface voxels.
+The manifest includes the complete source fingerprint, git revision/dirty state,
+cache identity, sampling seed and ray count. The finite crop is explicit;
+a missing sample remains sky and is counted in the
+manifest's `miss_fraction`. An all-ground view with zero misses avoids comparing
+the finite reference boundary against the GPU's larger coverage.
+
+Tests compare 2500 rays against an independent dense native snapshot, including
+hit cells, distances, materials and face normals. Separate tests exercise exact
+horizontal/top ties, vertical rays, crop walls and persistent cache identity.
