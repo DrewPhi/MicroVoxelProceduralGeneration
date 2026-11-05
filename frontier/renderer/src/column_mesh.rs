@@ -28,6 +28,9 @@ impl ColumnHeights {
     pub fn sampled_columns(&self) -> usize {
         self.values.len()
     }
+    pub fn allocated_bytes(&self) -> usize {
+        self.values.capacity() * std::mem::size_of::<i64>()
+    }
 }
 pub struct ColumnMesh {
     pub mesh: Mesh,

@@ -49,6 +49,31 @@ use streaming::SampleCache;
 pub use streaming::{TerrainStreamer, TerrainUpdate};
 impl TerrainData {
     #[cfg(test)]
+    pub(crate) fn at_center(source: &FbmTerrain, center: [f64; 2]) -> Self {
+        Self::generate(source, center, &mut SampleCache::new(), || false).unwrap()
+    }
+    /// Read the exact unmorphed level-one endpoint used by the GPU page.
+    /// The native collar stays inside this level's unmorphed inner annulus.
+    pub(crate) fn collar_sample(&self, x: f64, z: f64) -> Option<(f64, [f32; 3], [f32; 3])> {
+        let center = self.centers[1];
+        let gx = x - center[0];
+        let gz = z - center[1];
+        if gx.fract() != 0. || gz.fract() != 0. || gx.abs() > 64. || gz.abs() > 64. {
+            return None;
+        }
+        let count = ((N * 2 + 1).pow(2)) as usize;
+        let i = count + ((gz as i32 + N) * (2 * N + 1) + gx as i32 + N) as usize;
+        let s = self.samples[i];
+        Some((
+            s.heights[0] as f64,
+            s.normal[..3].try_into().unwrap(),
+            s.color[..3].try_into().unwrap(),
+        ))
+    }
+    pub(crate) fn collar_center(&self) -> [f64; 2] {
+        self.centers[1]
+    }
+    #[cfg(test)]
     pub fn new(source: &FbmTerrain) -> Self {
         Self::generate(source, [0., 0.], &mut SampleCache::new(), || false).unwrap()
     }
@@ -238,26 +263,18 @@ pub struct TerrainGpu {
     level_count: u32,
     ranges: Vec<std::ops::Range<u32>>,
     pub index_count: u32,
+    hybrid_cutout: Option<[f64; 2]>,
+    camera_position: std::cell::Cell<[f64; 3]>,
+    voxel_filter: std::cell::Cell<bool>,
 }
 impl TerrainGpu {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, data: &TerrainData) -> Self {
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("terrain camera"),
-            size: 64 + 16 * MAX_LEVELS as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let samples = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("canonical height pages"),
-            contents: bytemuck::cast_slice(&data.samples),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    pub fn appearance_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("terrain"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -267,7 +284,7 @@ impl TerrainGpu {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -276,7 +293,26 @@ impl TerrainGpu {
                     count: None,
                 },
             ],
+        })
+    }
+    pub fn new_with_samples(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        data: &TerrainData,
+        sample_count: u32,
+    ) -> Self {
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain camera"),
+            size: 64 + 16 * MAX_LEVELS as u64 + 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        let samples = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("canonical height pages"),
+            contents: bytemuck::cast_slice(&data.samples),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let layout = Self::appearance_layout(device);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("terrain"),
             layout: &layout,
@@ -335,7 +371,10 @@ impl TerrainGpu {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -361,7 +400,22 @@ impl TerrainGpu {
             centers: data.centers,
             ranges: data.ranges.clone(),
             index_count: data.ranges.iter().map(|r| r.end - r.start).sum(),
+            hybrid_cutout: None,
+            camera_position: std::cell::Cell::new([data.centers[0][0], 0., data.centers[0][1]]),
+            voxel_filter: std::cell::Cell::new(true),
         }
+    }
+    pub fn set_hybrid_cutout(&mut self, center: Option<[f64; 2]>) {
+        self.hybrid_cutout = center;
+    }
+    pub fn set_voxel_filter(&self, enabled: bool) {
+        self.voxel_filter.set(enabled);
+    }
+    pub fn set_view_position(&self, position: [f64; 3]) {
+        self.camera_position.set(position);
+    }
+    pub fn appearance_bind(&self) -> &wgpu::BindGroup {
+        &self.bind
     }
     pub fn center(&self) -> [f64; 2] {
         self.center
@@ -410,11 +464,35 @@ impl TerrainGpu {
             ]
         });
         queue.write_buffer(&self.uniform, 64, bytemuck::cast_slice(&offsets));
+        let cutout = self.hybrid_cutout.map_or([0.; 4], |c| {
+            [
+                (c[0] - self.center[0]) as f32,
+                (c[1] - self.center[1]) as f32,
+                34.,
+                1.,
+            ]
+        });
+        let camera_position = self.camera_position.get();
+        let eye = [
+            (camera_position[0] - self.center[0]) as f32,
+            (camera_position[2] - self.center[1]) as f32,
+            camera_position[1] as f32,
+            if self.voxel_filter.get() { 1. } else { 0. },
+        ];
+        queue.write_buffer(
+            &self.uniform,
+            64 + 16 * MAX_LEVELS as u64,
+            bytemuck::cast_slice(&[cutout, eye]),
+        );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for range in &self.ranges {
+        for range in self
+            .ranges
+            .iter()
+            .skip(usize::from(self.hybrid_cutout.is_some()))
+        {
             pass.draw_indexed(range.clone(), 0, 0..1);
         }
     }
@@ -482,6 +560,183 @@ mod tests {
                 );
             }
         }
+    }
+    fn morph_weight(point: [f64; 2], eye: [f64; 2], center: [f64; 2], step: f64) -> f64 {
+        let eye = std::array::from_fn::<_, 2, _>(|i| {
+            eye[i].clamp(center[i] - 8. * step, center[i] + 8. * step)
+        });
+        let distance = ((point[0] - eye[0]).abs().max((point[1] - eye[1]).abs())) / step;
+        let t = ((distance - 42.) / 12.).clamp(0., 1.);
+        t * t * (3. - 2. * t)
+    }
+    #[test]
+    fn continuous_camera_morph_preserves_joins_and_collar_during_grid_snaps() {
+        use super::*;
+        let source = frontier_world::FbmTerrain::new(
+            7,
+            frontier_world::FbmParams {
+                octaves: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut max_delta = 0f64;
+        for (before, after, eye) in [
+            ([0., 0.], [8., 8.], [8., 8.]),
+            ([-8., -8.], [0., 0.], [0., 0.]),
+            ([0., 0.], [-8., -8.], [-0.000001, -0.000001]),
+        ] {
+            let a = TerrainData::at_center(&source, before);
+            let b = TerrainData::at_center(&source, after);
+            let count = ((N * 2 + 1).pow(2)) as usize;
+            for level in 1..LEVELS as usize - 1 {
+                let step = 0.5 * (1u32 << level) as f64;
+                for v in &a.vertices[level * count..(level + 1) * count] {
+                    let point = [
+                        v.position[0] as f64 + a.centers[level][0],
+                        v.position[1] as f64 + a.centers[level][1],
+                    ];
+                    if v.position.iter().any(|v| v.abs() >= 60. * step as f32) {
+                        continue;
+                    }
+                    let q = [
+                        (point[0] - b.centers[level][0]) / step,
+                        (point[1] - b.centers[level][1]) / step,
+                    ];
+                    if q.iter().any(|q| q.abs() >= 60.) {
+                        continue;
+                    }
+                    let bi = level * count
+                        + ((q[1] as i32 + N) * (2 * N + 1) + q[0] as i32 + N) as usize;
+                    let sa = a.samples[v.sample as usize];
+                    let sb = b.samples[bi];
+                    let wa = morph_weight(point, eye, a.centers[level], step);
+                    let wb = morph_weight(point, eye, b.centers[level], step);
+                    let ha = sa.heights[0] as f64 * (1. - wa) + sa.heights[1] as f64 * wa;
+                    let hb = sb.heights[0] as f64 * (1. - wb) + sb.heights[1] as f64 * wb;
+                    max_delta = max_delta.max((ha - hb).abs());
+                }
+                for eye in [[1e6, -1e6], [-1e6, 1e6], [0., 0.]] {
+                    for x in [-64., 64.] {
+                        for z in [-64., 0., 64.] {
+                            let point = [
+                                a.centers[level][0] + x * step,
+                                a.centers[level][1] + z * step,
+                            ];
+                            assert_eq!(morph_weight(point, eye, a.centers[level], step), 1.);
+                            assert_eq!(
+                                morph_weight(point, eye, a.centers[level + 1], step * 2.),
+                                0.
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            max_delta < 1e-9,
+            "common-vertex snap displacement {max_delta}m"
+        );
+        for eye in [[-1000., 1000.], [1000., -1000.], [8., 8.]] {
+            for point in [[34., -34.], [-34., 34.]] {
+                assert_eq!(morph_weight(point, eye, [0., 0.], 1.), 0.);
+            }
+        }
+        eprintln!("camera-relative morph repeated8m/negative snaps common-vertex height delta={max_delta}m; all fine/coarse edges and collar pinned");
+    }
+    #[test]
+    fn native_and_proxy_share_one_projected_face_transfer() {
+        let terrain = include_str!("terrain.wgsl")
+            .split("struct Camera")
+            .next()
+            .unwrap();
+        let native = include_str!("voxel.wgsl")
+            .split("struct Camera")
+            .next()
+            .unwrap();
+        assert_eq!(
+            terrain, native,
+            "native and proxy face/material lighting diverged"
+        );
+        // Independent finite staircase oracle: sum the projected area of actual
+        // quantized top/side quads, then compare the macro projected-face model.
+        let sun = glam::DVec3::new(-0.5, 0.8, -0.3).normalize();
+        let grass = glam::DVec3::new(0.26, 0.53, 0.16);
+        let soil = glam::DVec3::new(0.4, 0.27, 0.15);
+        let mut max_error = 0f64;
+        for (p, q) in [
+            (0.1, 0.25),
+            (0.5, -0.25),
+            (1., 0.25),
+            (-1.5, 0.25),
+            (3., -0.25),
+            (-15., 3.),
+        ] {
+            let h = |x: i32, z: i32| (p * x as f64 + q * z as f64).floor() as i32;
+            for view in [
+                glam::DVec3::new(-0.8, 0.4, -0.4),
+                glam::DVec3::new(0.8, 0.5, 0.3),
+                glam::DVec3::new(-0.1, 0.9, 0.4),
+            ] {
+                let view = view.normalize();
+                let mut sum = glam::DVec3::ZERO;
+                let mut area = 0.;
+                let mut face = |normal: glam::DVec3, color: glam::DVec3, size: f64| {
+                    let a = size * normal.dot(view).max(0.);
+                    sum += color * (0.28 + 0.72 * normal.dot(sun).max(0.)) * a;
+                    area += a;
+                };
+                for z in 0..80 {
+                    for x in 0..80 {
+                        face(glam::DVec3::Y, grass, 1.);
+                        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            let drop = h(x, z) - h(x + dx, z + dz);
+                            if drop > 0 {
+                                // Enumerate each actual exposed voxel face using
+                                // canonical column depth/material rules.
+                                for depth in 0..drop {
+                                    let color = if depth == 0 {
+                                        grass
+                                    } else if depth < 12 {
+                                        soil
+                                    } else {
+                                        glam::DVec3::new(0.48, 0.50, 0.54)
+                                    };
+                                    face(glam::DVec3::new(dx as f64, 0., dz as f64), color, 1.);
+                                }
+                            }
+                        }
+                    }
+                }
+                let oracle = sum / area;
+                let n = glam::DVec3::new(-p, 1., -q);
+                let normals = [
+                    glam::DVec3::new(n.x.signum(), 0., 0.),
+                    glam::DVec3::Y,
+                    glam::DVec3::new(0., 0., n.z.signum()),
+                ];
+                let sizes = [n.x.abs(), 1., n.z.abs()];
+                let mut sum = glam::DVec3::ZERO;
+                let mut area = 0.;
+                for i in 0..3 {
+                    let a = sizes[i] * normals[i].dot(view).max(0.);
+                    let span = sizes[i];
+                    let side = (grass * span.min(1.)
+                        + soil * (span - 1.).clamp(0., 11.)
+                        + glam::DVec3::new(0.48, 0.50, 0.54) * (span - 12.).max(0.))
+                        / span.max(1e-10);
+                    let color = if i == 1 { grass } else { side };
+                    sum += color * (0.28 + 0.72 * normals[i].dot(sun).max(0.)) * a;
+                    area += a;
+                }
+                max_error = max_error.max((oracle - sum / area).abs().max_element());
+            }
+        }
+        assert!(
+            max_error < 1e-10,
+            "projected staircase mean linear RGB mismatch {max_error}"
+        );
+        eprintln!("projected face appearance vs6400-column canonical-layer finite stairs:18slope/view cases maxmeanlinearRGBerror={max_error:.12}");
     }
     #[test]
     fn shader_valid() {

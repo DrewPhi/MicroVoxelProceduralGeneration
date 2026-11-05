@@ -1,5 +1,9 @@
 # Native / proxy handoff prototype checkpoint
 
+Historical fixed-reference checkpoint. The current moving `--scene hybrid` is
+documented in [MOVING_NATIVE_CHECKPOINT.md](MOVING_NATIVE_CHECKPOINT.md); use
+`--scene hybrid-static` to launch the fixed reference described below.
+
 **Status:** partial, diagnostic prototype; no ownership or production gate passed.
 This records the next step after the moving FBM surface work. The proposed fixture
 contract and primary geometry clipmap / Transvoxel references remain in

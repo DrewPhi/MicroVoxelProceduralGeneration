@@ -120,6 +120,16 @@ impl SampleCache {
                 d.color[i] as f64,
             ) as f32;
         }
+        let normals = [(px, pz), (px + ps, pz), (px, pz + ps), (px + ps, pz + ps)]
+            .map(|(x, z)| self.normal(source, x, z, ps));
+        let parent_normal = std::array::from_fn(|i| {
+            interp(
+                normals[0][i] as f64,
+                normals[1][i] as f64,
+                normals[2][i] as f64,
+                normals[3][i] as f64,
+            ) as f32
+        });
         Sample {
             heights: [
                 own.height as f32,
@@ -128,7 +138,7 @@ impl SampleCache {
                 0.,
             ],
             normal: self.normal(source, x, z, step),
-            parent_normal: self.normal(source, x, z, ps),
+            parent_normal,
             color: own.color,
             parent_color: color,
         }

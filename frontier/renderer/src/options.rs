@@ -21,6 +21,9 @@ pub struct Options {
     pub route_realtime: bool,
     pub terrain_static: bool,
     pub view_levels: u32,
+    pub msaa: u32,
+    pub capture_route_time: Option<f64>,
+    pub voxel_filter: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
     let mut capture = None;
@@ -42,6 +45,10 @@ pub fn parse() -> Result<Option<Options>> {
     let mut route_realtime = false;
     let mut terrain_static = false;
     let mut view_levels = 7;
+    let mut msaa = 1;
+    let mut capture_route_time: Option<f64> = None;
+    // Opt in until the macro appearance model matches supersampled native faces.
+    let mut voxel_filter = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,6 +68,21 @@ pub fn parse() -> Result<Option<Options>> {
                 params.roughness = args.next().ok_or("--roughness requires gain")?.parse()?
             }
             "--uncapped" => uncapped = true,
+            "--voxel-filter" => {
+                voxel_filter = match args.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("--voxel-filter requires on|off".into()),
+                }
+            }
+            "--capture-route-time" => {
+                capture_route_time = Some(
+                    args.next()
+                        .ok_or("--capture-route-time requires seconds")?
+                        .parse()?,
+                )
+            }
+            "--msaa" => msaa = args.next().ok_or("--msaa requires 1|4")?.parse()?,
             "--terrain-static" => terrain_static = true,
             "--view-levels" => {
                 view_levels = args.next().ok_or("--view-levels requires 7..11")?.parse()?
@@ -124,7 +146,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Frontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: fixed 64m exact native heightfield interior, approximate 2m collar, static outer proxy; no caves, edits, moving ownership or certified proxy error. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Frontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; no caves, edits, collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -144,6 +166,12 @@ pub fn parse() -> Result<Option<Options>> {
     }
     if !(super::terrain::MIN_LEVELS..=super::terrain::MAX_LEVELS).contains(&view_levels) {
         return Err("--view-levels requires 7..11".into());
+    }
+    if capture_route_time.is_some_and(|t| !t.is_finite() || t < 0.) {
+        return Err("--capture-route-time requires finite nonnegative seconds".into());
+    }
+    if msaa != 1 && msaa != 4 {
+        return Err("--msaa requires 1|4".into());
     }
     params.validate()?;
     if capture.is_some() && report_path.is_some() {
@@ -171,5 +199,8 @@ pub fn parse() -> Result<Option<Options>> {
         route_realtime,
         terrain_static,
         view_levels,
+        msaa,
+        capture_route_time,
+        voxel_filter,
     }))
 }

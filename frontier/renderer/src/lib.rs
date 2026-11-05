@@ -1,8 +1,10 @@
 //! Greenfield native fixture and experimental moving FBM surface viewer.
 pub mod column_mesh;
 mod hybrid;
+mod hybrid_gpu;
 pub mod mesh;
 mod native_fbm;
+mod native_stream;
 mod options;
 mod terrain;
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
@@ -64,6 +66,9 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    native_layout: wgpu::BindGroupLayout,
+    hybrid_pipeline: wgpu::RenderPipeline,
+    hybrid: Option<hybrid_gpu::HybridGpu>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertices: wgpu::Buffer,
@@ -71,6 +76,8 @@ struct Gpu {
     index_count: u32,
     origin: DVec3,
     format: wgpu::TextureFormat,
+    sample_count: u32,
+    voxel_filter: bool,
     terrain: Option<terrain::TerrainGpu>,
     adapter_info: String,
 }
@@ -80,6 +87,8 @@ impl Gpu {
         surface: Option<&wgpu::Surface<'_>>,
         format: Option<wgpu::TextureFormat>,
         mesh: &mesh::Mesh,
+        sample_count: u32,
+        voxel_filter: bool,
     ) -> Result<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -120,7 +129,7 @@ impl Gpu {
         }
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera relative matrix"),
-            size: 64,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -128,7 +137,7 @@ impl Gpu {
             label: Some("camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -189,7 +198,58 @@ impl Gpu {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
+            multiview: None,
+            cache: None,
+        });
+        let appearance_layout = terrain::TerrainGpu::appearance_layout(&device);
+        let hybrid_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("hybrid appearance"),
+                bind_group_layouts: &[&layout, &appearance_layout],
+                push_constant_ranges: &[],
+            });
+        let hybrid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("native voxel"),
+            layout: Some(&hybrid_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attributes,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_hybrid"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -207,6 +267,9 @@ impl Gpu {
             device,
             queue,
             pipeline,
+            native_layout: layout,
+            hybrid_pipeline,
+            hybrid: None,
             uniform,
             bind_group,
             vertices,
@@ -218,9 +281,36 @@ impl Gpu {
                 mesh.origin.z as f64,
             ) * VOXEL_SIZE,
             format,
+            sample_count,
+            voxel_filter,
             terrain: None,
             adapter_info: format!("{:?}", adapter.get_info()),
         })
+    }
+    fn init_hybrid(&mut self, prepared: hybrid_gpu::Prepared) -> Result<()> {
+        let terrain = terrain::TerrainGpu::new_with_samples(
+            &self.device,
+            self.format,
+            &prepared.terrain.data,
+            self.sample_count,
+        );
+        terrain.set_voxel_filter(self.voxel_filter);
+        self.terrain = Some(terrain);
+        let center = prepared.native.center;
+        let mut hybrid = hybrid_gpu::HybridGpu::new();
+        hybrid.stage(prepared)?;
+        while !hybrid.upload(
+            &self.device,
+            &self.queue,
+            &self.native_layout,
+            self.terrain.as_mut().unwrap(),
+            center,
+        ) {
+            self.queue.submit(std::iter::empty());
+            self.device.poll(wgpu::Maintain::Wait);
+        }
+        self.hybrid = Some(hybrid);
+        Ok(())
     }
     fn replace_mesh(&mut self, mesh: &mesh::Mesh) {
         self.vertices = self
@@ -248,7 +338,7 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: if depth { self.sample_count } else { 1 },
             dimension: wgpu::TextureDimension::D2,
             format: if depth {
                 wgpu::TextureFormat::Depth32Float
@@ -264,10 +354,30 @@ impl Gpu {
             view_formats: &[],
         })
     }
+    fn multisample_texture(&self, width: u32, height: u32) -> Option<wgpu::Texture> {
+        if self.sample_count == 1 {
+            return None;
+        }
+        Some(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("MSAA coverage"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: self.sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        }))
+    }
     fn draw(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
+        resolve: Option<&wgpu::TextureView>,
         depth: &wgpu::TextureView,
         camera: &Camera,
         width: u32,
@@ -282,11 +392,21 @@ impl Gpu {
                     .to_cols_array(),
             ),
         );
+        self.queue.write_buffer(
+            &self.uniform,
+            64,
+            bytemuck::cast_slice(
+                &(camera.position - self.origin)
+                    .as_vec3()
+                    .extend(1.)
+                    .to_array(),
+            ),
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
-                resolve_target: None,
+                resolve_target: resolve,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.34,
@@ -309,6 +429,7 @@ impl Gpu {
             occlusion_query_set: None,
         });
         if let Some(terrain) = &self.terrain {
+            terrain.set_view_position(camera.position.to_array());
             terrain.draw(
                 &self.queue,
                 &mut pass,
@@ -317,6 +438,16 @@ impl Gpu {
                     width as f32 / height as f32,
                 ),
             );
+            if let Some(hybrid) = &self.hybrid {
+                pass.set_bind_group(1, terrain.appearance_bind(), &[]);
+                hybrid.draw(
+                    &self.queue,
+                    &mut pass,
+                    &self.hybrid_pipeline,
+                    camera,
+                    width as f32 / height as f32,
+                );
+            }
             return;
         }
         pass.set_pipeline(&self.pipeline);
@@ -336,9 +467,15 @@ impl Gpu {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let target = texture.create_view(&Default::default());
+        let multisample = self.multisample_texture(width, height);
+        let multisample_view = multisample
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
         self.draw(
             &mut encoder,
-            &texture.create_view(&Default::default()),
+            multisample_view.as_ref().unwrap_or(&target),
+            multisample_view.as_ref().map(|_| &target),
             &depth.create_view(&Default::default()),
             camera,
             width,
@@ -459,6 +596,7 @@ struct Viewer {
     gpu: Option<Gpu>,
     config: Option<wgpu::SurfaceConfiguration>,
     depth: Option<wgpu::Texture>,
+    multisample: Option<wgpu::Texture>,
     camera: Camera,
     keys: HashSet<KeyCode>,
     grabbed: bool,
@@ -476,8 +614,12 @@ struct Viewer {
     world: World,
     pending_edit: Option<PendingEdit>,
     terrain_data: Option<terrain::TerrainUpdate>,
+    hybrid_initial: Option<hybrid_gpu::Prepared>,
     fbm: bool,
     hybrid: bool,
+    hybrid_stream: Option<hybrid_gpu::Stream>,
+    sample_count: u32,
+    voxel_filter: bool,
     initial_camera: Camera,
     route: frontier_runtime::routes::Route,
     uncapped: bool,
@@ -497,6 +639,39 @@ struct Viewer {
 }
 impl Viewer {
     fn poll_terrain(&mut self) {
+        if let Some(stream) = &mut self.hybrid_stream {
+            if let Err(error) = stream.poll(
+                [self.camera.position.x, self.camera.position.z],
+                !self.terrain_static,
+            ) {
+                self.error = Some(error);
+                return;
+            }
+            if let Some(gpu) = &mut self.gpu {
+                if let (Some(hybrid), Some(terrain)) = (&mut gpu.hybrid, &mut gpu.terrain) {
+                    if !hybrid.has_pending() {
+                        if let Some(ready) = stream.ready.take() {
+                            if ready.native.center == stream.native.desired_center() {
+                                if let Err(error) = hybrid.stage(ready) {
+                                    self.error = Some(error);
+                                    return;
+                                }
+                            } else {
+                                stream.discard(ready);
+                            }
+                        }
+                    }
+                    hybrid.upload(
+                        &gpu.device,
+                        &gpu.queue,
+                        &gpu.native_layout,
+                        terrain,
+                        stream.native.desired_center(),
+                    );
+                }
+            }
+            return;
+        }
         let Some(streamer) = &mut self.terrain_streamer else {
             return;
         };
@@ -603,6 +778,7 @@ impl Viewer {
         config.height = height;
         surface.configure(&gpu.device, config);
         self.depth = Some(gpu.texture(width, height, true));
+        self.multisample = gpu.multisample_texture(width, height);
     }
     fn render(&mut self) -> Result<()> {
         self.poll_edit();
@@ -660,13 +836,13 @@ impl Viewer {
         );
         if !matches!(self.route, frontier_runtime::routes::Route::Stationary) {
             self.camera.position = DVec3::from_array(pose.position);
-            if self.fbm {
+            if self.fbm || self.hybrid {
                 let floor = self
                     .world
                     .fbm_terrain()
                     .unwrap()
                     .height_m(self.camera.position.x, self.camera.position.z)
-                    + 10.;
+                    + if self.hybrid { 1.7 } else { 10. };
                 self.camera.position.y = self.camera.position.y.max(floor);
             }
             self.camera.yaw = pose.yaw as f32;
@@ -700,9 +876,15 @@ impl Viewer {
             Err(error) => return Err(error.into()),
         };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = frame.texture.create_view(&Default::default());
+        let multisample_view = self
+            .multisample
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
         gpu.draw(
             &mut encoder,
-            &frame.texture.create_view(&Default::default()),
+            multisample_view.as_ref().unwrap_or(&target),
+            multisample_view.as_ref().map(|_| &target),
             &depth.create_view(&Default::default()),
             &self.camera,
             config.width,
@@ -714,7 +896,7 @@ impl Viewer {
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
         if elapsed >= 0.5 {
-            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {"fixed 64m native + approximate collar + static distant proxy (heightfield only)"} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {"moving 64m native chunks + coherent collar + GPU proxy (heightfield only)"} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             self.frames = 0;
             self.fps_start = now;
         }
@@ -741,11 +923,22 @@ impl ApplicationHandler for Viewer {
                 Some(&surface),
                 None,
                 self.mesh.as_ref().unwrap(),
+                self.sample_count,
+                self.voxel_filter,
             ))?;
             if let Some(data) = self.terrain_data.take() {
-                let mut terrain = terrain::TerrainGpu::new(&gpu.device, gpu.format, &data.data);
+                let mut terrain = terrain::TerrainGpu::new_with_samples(
+                    &gpu.device,
+                    gpu.format,
+                    &data.data,
+                    gpu.sample_count,
+                );
+                terrain.set_voxel_filter(gpu.voxel_filter);
                 terrain.upload(&gpu.queue, &data);
                 gpu.terrain = Some(terrain);
+            }
+            if let Some(prepared) = self.hybrid_initial.take() {
+                gpu.init_hybrid(prepared)?;
             }
             let size = window.inner_size();
             let config = wgpu::SurfaceConfiguration {
@@ -764,6 +957,7 @@ impl ApplicationHandler for Viewer {
             };
             surface.configure(&gpu.device, &config);
             self.depth = Some(gpu.texture(config.width, config.height, true));
+            self.multisample = gpu.multisample_texture(config.width, config.height);
             self.config = Some(config);
             self.gpu = Some(gpu);
             self.surface = Some(surface);
@@ -866,6 +1060,31 @@ impl ApplicationHandler for Viewer {
     }
 }
 
+fn capture_pose(
+    camera: &mut Camera,
+    world: &World,
+    route: frontier_runtime::routes::Route,
+    speed: f64,
+    time: Option<f64>,
+    hybrid: bool,
+) {
+    if let Some(time) = time {
+        let pose = route.pose_at(
+            time,
+            camera.position.to_array(),
+            camera.yaw as f64,
+            camera.pitch as f64,
+            speed,
+        );
+        camera.position = DVec3::from_array(pose.position);
+        camera.yaw = pose.yaw as f32;
+        camera.pitch = pose.pitch as f32;
+        camera.position.y = camera.position.y.max(
+            world.height_m(camera.position.x, camera.position.z) + if hybrid { 1.7 } else { 10. },
+        );
+    }
+}
+
 /// Runs the interactive fixture or captures it without a window using `--capture PATH`.
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
@@ -889,6 +1108,9 @@ pub fn run() -> Result<()> {
         route_realtime,
         terrain_static,
         view_levels,
+        msaa,
+        capture_route_time,
+        voxel_filter,
     }) = options::parse()?
     else {
         return Ok(());
@@ -900,12 +1122,14 @@ pub fn run() -> Result<()> {
     };
     let fbm = match scene.as_str() {
         "fbm" => true,
-        "fixture" | "fbm-native" | "hybrid" => false,
-        _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid".into()),
+        "fixture" | "fbm-native" | "hybrid" | "hybrid-static" => false,
+        _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid|hybrid-static".into()),
     };
     let mut terrain_data = None;
     let mut terrain_streamer = None;
     let mut terrain_prepare_ms = 0.;
+    let mut hybrid_stream = None;
+    let mut hybrid_initial = None;
     let mut camera = Camera::fixture();
     let mesh = if fbm {
         let source = world.fbm_terrain().unwrap();
@@ -927,6 +1151,14 @@ pub fn run() -> Result<()> {
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         };
+        capture_pose(
+            &mut camera,
+            &world,
+            route,
+            route_speed.unwrap_or(80.),
+            capture_route_time,
+            false,
+        );
         let preparing = Instant::now();
         let mut streamer = terrain::TerrainStreamer::with_levels(source.clone(), view_levels)?;
         streamer.request([camera.position.x, camera.position.z]);
@@ -949,8 +1181,7 @@ pub fn run() -> Result<()> {
             origin: Cell { x: 0, y: 0, z: 0 },
             exposed_native_faces: 0,
         }
-    } else if scene == "hybrid" {
-        let mesh = hybrid::build(&world, view_levels)?;
+    } else if scene == "hybrid" || scene == "hybrid-static" {
         let (position, target) = match camera_preset.as_str() {
             "valley" => {
                 let position = DVec3::new(0., world.height_m(0., 0.) + 1.7, 0.);
@@ -995,7 +1226,43 @@ pub fn run() -> Result<()> {
             pitch: direction.y.asin() as f32,
             far: (terrain::half_extent(view_levels) * 3.) as f32,
         };
-        mesh
+        capture_pose(
+            &mut camera,
+            &world,
+            route,
+            route_speed.unwrap_or(3.),
+            capture_route_time,
+            true,
+        );
+        if scene == "hybrid-static" {
+            hybrid::build(&world, view_levels)?
+        } else {
+            let preparing = Instant::now();
+            let mut stream = hybrid_gpu::Stream::new(world.clone(), view_levels)?;
+            let prepared = loop {
+                stream.poll([camera.position.x, camera.position.z], true)?;
+                if let Some(ready) = stream.ready.take() {
+                    break ready;
+                }
+                if preparing.elapsed().as_secs() > 120 {
+                    return Err("initial native/proxy cover timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            };
+            terrain_prepare_ms = preparing.elapsed().as_secs_f64() * 1000.;
+            eprintln!(
+                "initial coherent native/proxy/collar ready in {:.1}ms",
+                terrain_prepare_ms
+            );
+            hybrid_initial = Some(prepared);
+            hybrid_stream = Some(stream);
+            mesh::Mesh {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+                origin: Cell { x: 0, y: 0, z: 0 },
+                exposed_native_faces: 0,
+            }
+        }
     } else if scene == "fbm-native" {
         let (mesh, position, target) = native_fbm::build(&world)?;
         let position = DVec3::from_array(position);
@@ -1021,11 +1288,21 @@ pub fn run() -> Result<()> {
     camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let mut gpu = pollster::block_on(Gpu::new(&instance, None, None, &mesh))?;
+        let mut gpu =
+            pollster::block_on(Gpu::new(&instance, None, None, &mesh, msaa, voxel_filter))?;
         if let Some(data) = &terrain_data {
-            let mut terrain = terrain::TerrainGpu::new(&gpu.device, gpu.format, &data.data);
+            let mut terrain = terrain::TerrainGpu::new_with_samples(
+                &gpu.device,
+                gpu.format,
+                &data.data,
+                gpu.sample_count,
+            );
+            terrain.set_voxel_filter(gpu.voxel_filter);
             terrain.upload(&gpu.queue, data);
             gpu.terrain = Some(terrain);
+        }
+        if let Some(prepared) = hybrid_initial.take() {
+            gpu.init_hybrid(prepared)?;
         }
         return gpu.capture(&camera, &path, width, height);
     }
@@ -1037,6 +1314,9 @@ pub fn run() -> Result<()> {
         gpu: None,
         config: None,
         depth: None,
+        multisample: None,
+        sample_count: msaa,
+        voxel_filter,
         initial_camera: Camera {
             position: camera.position,
             far: camera.far,
@@ -1045,13 +1325,21 @@ pub fn run() -> Result<()> {
         },
         camera,
         terrain_data,
+        hybrid_initial,
+        hybrid_stream,
         fbm,
         hybrid: scene == "hybrid",
         route,
         uncapped,
         warmup,
         route_step,
-        route_speed: route_speed.unwrap_or(if fbm { 80. } else { 2. }),
+        route_speed: route_speed.unwrap_or(if fbm {
+            80.
+        } else if scene == "hybrid" {
+            3.
+        } else {
+            2.
+        }),
         route_realtime,
         route_started: now,
         terrain_streamer,
@@ -1110,17 +1398,18 @@ pub fn run() -> Result<()> {
         };
         let mut json = report.to_json();
         json.pop();
-        json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
+        json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             if scene!="fixture" {frontier_world::FBM_SOURCE_VERSION} else {frontier_world::SOURCE_VERSION},VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if fbm {if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene=="hybrid" {"fixed_native_64m_approximate_collar_static_proxy"} else {"exact_native_greedy"},fbm || scene=="hybrid",(fbm && terrain_static) || scene=="hybrid",if fbm || scene=="hybrid" {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene=="hybrid" {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3),if fbm {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if fbm {if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene=="hybrid" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else {"exact_native_greedy"},fbm || scene.starts_with("hybrid"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())),if fbm || scene=="hybrid" {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if scene == "hybrid" {
             json.pop();
-            json.push_str(",\"hybrid_scope\":{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":false,\"edits_supported\":false,\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}");
+            json.push_str(",\"hybrid_scope\":{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":false,\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}");
         }
         let streaming = viewer
             .terrain_streamer
             .as_ref()
             .map(|s| s.metrics())
+            .or_else(|| viewer.hybrid_stream.as_ref().map(|s| s.terrain.metrics()))
             .unwrap_or_default();
         json.pop();
         json.push_str(&format!(",\"route_clock\":\"{}\",\"route_elapsed_seconds\":{},\"route_speed_mps\":{},\"streaming\":{{\"initial_preparation_ms\":{},\"uploads\":{},\"upload_bytes\":{},\"upload_cpu_ms\":{},\"camera_to_center_max_m\":{},\"camera_to_center_end_m\":{},\"requests\":{},\"publications\":{},\"stale_rejections\":{},\"generated_pages\":{},\"generated_samples\":{},\"cache_hits\":{},\"reused_vertex_samples\":{},\"cancellations\":{},\"resident_bytes\":{},\"inflight_bytes\":{},\"generation_ms\":{}}}}}",
@@ -1132,6 +1421,22 @@ pub fn run() -> Result<()> {
             streaming.generated_pages, streaming.generated_samples, streaming.cache_hits, streaming.reused_samples,
             streaming.cancellations, streaming.resident_bytes, streaming.inflight_bytes,
             streaming.generation_ms));
+        json.pop();
+        json.push_str(&format!(
+            ",\"msaa_samples\":{msaa},\"voxel_filter\":{voxel_filter}}}"
+        ));
+        if let (Some(stream), Some(hybrid)) = (
+            &viewer.hybrid_stream,
+            viewer.gpu.as_ref().and_then(|g| g.hybrid.as_ref()),
+        ) {
+            let native = stream.native.metrics();
+            json.pop();
+            json.push_str(&format!(",\"native_streaming\":{{\"chunk_m\":8,\"core_m\":{},\"requests\":{},\"jobs\":{},\"cache_hits\":{},\"reused_chunks\":{},\"cancellations\":{},\"stale_rejections\":{},\"cpu_cache_chunks\":{},\"cpu_cache_bytes\":{},\"pending_chunks\":{},\"gpu_upload_queue\":{},\"gpu_resident_bytes\":{},\"gpu_chunk_uploads\":{},\"gpu_upload_bytes\":{},\"gpu_upload_cpu_ms\":{},\"coherent_publications\":{},\"last_upload_to_publish_ms\":{},\"last_cpu_generation_ms\":{},\"coverage_lag_end_m\":{}}}}}",native_stream::CORE_METERS,native.requests,native.jobs,native.cache_hits,native.reused_chunks,native.cancellations,native.stale_rejections,native.cache_chunks,native.cache_bytes,native.pending_chunks,hybrid.queued(),hybrid.bytes(),hybrid.uploads,hybrid.upload_bytes,hybrid.upload_ms,hybrid.publications,hybrid.last_publish_ms,native.last_job_ms,viewer.terrain_center_lag_end_m));
+        }
+        if let Some(hybrid) = viewer.gpu.as_ref().and_then(|g| g.hybrid.as_ref()) {
+            json.pop();
+            json.push_str(&format!(",\"native_gpu_budget\":{{\"cache_target_bytes\":536870912,\"hard_transition_bytes\":1073741824,\"cache_target_chunks\":128,\"active_and_pending_protected\":true,\"peak_resident_bytes\":{},\"oversized_single_chunk_uploads\":{},\"max_frame_chunk_upload_bytes\":{},\"stale_cover_rejections\":{},\"chunk_cache_hits\":{},\"published_epoch\":{},\"published_center\":[{},{}]}}}}",hybrid.peak_bytes,hybrid.oversized_uploads,hybrid.max_frame_upload_bytes,hybrid.stale_rejections,hybrid.cache_hits,hybrid.revision(),hybrid.center()[0],hybrid.center()[1]));
+        }
         std::fs::write(&path, json)?;
         eprintln!("benchmark JSON: {}", path.display());
     }
