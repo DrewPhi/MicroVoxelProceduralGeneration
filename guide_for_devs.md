@@ -37,6 +37,19 @@ implementation or a declared winner. No scene provides player collision or
 persistent edits.
 ## Build and run
 
+The `frontier/reference` crate is an independent CPU exact-voxel image oracle.
+It uses canonical materials but no renderer meshes or shared ray traversal.
+See [reference usage](frontier/reference/README.md) and the
+[measured checkpoint](frontier/REFERENCE_CHECKPOINT.md). From `frontier/`, run
+`python3 tools/reference_gate.py --output output/reference-gate` to build, render
+64/256-sample references, capture the same GPU camera and compare them. This
+analysis command needs NumPy, Pillow and a working graphics driver; it is not
+an interactive-performance benchmark. Generated raw buffers remain ignored.
+
+`.github/workflows/frontier-ci.yml` gates this branch on formatting, locked Rust
+tests (including CPU WGSL validation), the release build and CPU reference checks.
+Hardware performance and visual acceptance remain separate measured gates.
+
 Install Rust 1.99.1 with rustup; the workspace pins it. Linux needs an X11 or
 XWayland session, Vulkan/OpenGL drivers and the usual C linker/build tools.
 

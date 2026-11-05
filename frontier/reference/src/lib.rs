@@ -369,7 +369,10 @@ mod tests {
     // Half-open parallel slabs and strictly positive-length overlap reject
     // cells touched only at an edge/corner. Lowest entry axis defines normals.
     fn brute(s: &Snapshot, o: [f64; 3], direction: [f64; 3], far: f64) -> Option<Hit> {
-        let d = normalized(direction);
+        // Match the public ray's robust unit-direction contract; intersection
+        // itself remains independent exhaustive world-space AABB slabs.
+        let scale = direction.iter().fold(0f64, |v, d| v.max(d.abs()));
+        let d = normalized(direction.map(|v| v / scale));
         let mut best: Option<Hit> = None;
         for z in 0..s.size[2] {
             for y in 0..s.size[1] {

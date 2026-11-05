@@ -8,6 +8,10 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 [implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 
+An [independent offline voxel reference](frontier/reference/README.md) now provides
+supersampled images, coverage/depth data and matched GPU comparisons. See the
+[reference checkpoint](frontier/REFERENCE_CHECKPOINT.md) for measured results and scope.
+
 The default playtest launches an experimental moving FBM surface renderer.
 It now uses a gentler regional terrain recipe, voxel appearance filtering and
 4×MSAA by default. Use `--terrain-recipe legacy` for the original spiky terrain.
