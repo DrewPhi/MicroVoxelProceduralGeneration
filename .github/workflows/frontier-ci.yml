@@ -27,6 +27,13 @@ jobs:
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install comparison test dependencies
+        run: python -m pip install numpy==1.26.4 Pillow==10.3.0
+      - name: Test reference comparison classification
+        run: python -m unittest discover -s tools -p test_reference_compare.py -v
       - name: Install the workspace's pinned Rust toolchain
         # Running inside frontier makes rustup read rust-toolchain.toml and
         # install its exact channel, profile, and components (including rustfmt).
@@ -54,3 +61,8 @@ jobs:
         run: cargo test --locked --workspace
       - name: Build release workspace
         run: cargo build --locked --release
+      - name: Smoke test the CPU reference CLI
+        run: >-
+          ./target/release/frontier-reference
+          --width 64 --height 36 --spp 16
+          --output /tmp/frontier-reference-smoke

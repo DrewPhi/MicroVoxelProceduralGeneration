@@ -1,0 +1,8 @@
+[package]
+name = "frontier-reference"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frontier-world = { path = "../world" }
+png = "=0.17.16"

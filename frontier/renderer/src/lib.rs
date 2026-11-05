@@ -41,6 +41,7 @@ struct Camera {
     yaw: f32,
     pitch: f32,
     far: f32,
+    fov_y: f32,
 }
 impl Camera {
     fn fixture() -> Self {
@@ -49,6 +50,7 @@ impl Camera {
         Self {
             position,
             far: 20000.,
+            fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         }
@@ -62,7 +64,7 @@ impl Camera {
     }
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
-        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.025, self.far)
+        Mat4::perspective_rh(self.fov_y.to_radians(), aspect, 0.025, self.far)
             * Mat4::look_to_rh(eye, self.direction(), Vec3::Y)
     }
 }
@@ -534,7 +536,10 @@ impl Gpu {
     fn capture(&self, camera: &Camera, path: &Path, width: u32, height: u32) -> Result<()> {
         let texture = self.texture(width, height, false);
         let depth = self.texture(width, height, true);
-        let row = (width * 4 + 255) & !255;
+        let floating = self.format == wgpu::TextureFormat::Rgba32Float;
+        let bpp = if floating { 16 } else { 4 };
+        let row = (width * bpp + 255) & !255;
+        let depth_row = (width * 4 + 255) & !255;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("capture readback"),
             size: row as u64 * height as u64,
@@ -581,7 +586,7 @@ impl Gpu {
         let depth_buffer = (self.sample_count == 1).then(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("depth capture readback"),
-                size: row as u64 * height as u64,
+                size: depth_row as u64 * height as u64,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             })
@@ -598,7 +603,7 @@ impl Gpu {
                     buffer,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(row),
+                        bytes_per_row: Some(depth_row),
                         rows_per_image: Some(height),
                     },
                 },
@@ -621,7 +626,7 @@ impl Gpu {
         let mapped = buffer.slice(..).get_mapped_range();
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for scanline in mapped.chunks_exact(row as usize) {
-            pixels.extend_from_slice(&scanline[..(width * 4) as usize]);
+            pixels.extend_from_slice(&scanline[..(width * bpp) as usize]);
         }
         if self.format == wgpu::TextureFormat::Bgra8UnormSrgb
             || self.format == wgpu::TextureFormat::Bgra8Unorm
@@ -639,11 +644,76 @@ impl Gpu {
             rx.recv()??;
             let bytes = buffer.slice(..).get_mapped_range();
             let mut packed = Vec::with_capacity((width * height * 4) as usize);
-            for row_bytes in bytes.chunks_exact(row as usize) {
+            for row_bytes in bytes.chunks_exact(depth_row as usize) {
                 packed.extend_from_slice(&row_bytes[..width as usize * 4]);
             }
+            let coverage: Vec<u8> = packed
+                .chunks_exact(4)
+                .flat_map(|bytes| {
+                    let d = f32::from_le_bytes(bytes.try_into().unwrap());
+                    (if d.is_finite() && d >= 0. && d < 1. {
+                        1f32
+                    } else {
+                        0f32
+                    })
+                    .to_le_bytes()
+                })
+                .collect();
+            std::fs::write(path.with_extension("coverage.f32"), coverage)?;
             std::fs::write(path.with_extension("depth.f32"), packed)?;
         }
+        // Float captures preserve unclipped shader radiance. Ordinary captures
+        // decode their actual quantized target, retaining that limitation.
+        let srgb = matches!(
+            self.format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
+        );
+        let mut linear = Vec::with_capacity(width as usize * height as usize * 12);
+        if floating {
+            let mut preview = Vec::with_capacity(width as usize * height as usize * 4);
+            for pixel in pixels.chunks_exact(16) {
+                for channel in pixel[..12].chunks_exact(4) {
+                    linear.extend_from_slice(channel);
+                    let v = f32::from_le_bytes(channel.try_into().unwrap()).max(0.);
+                    let v = if v <= 0.0031308 {
+                        12.92 * v
+                    } else {
+                        1.055 * v.powf(1. / 2.4) - 0.055
+                    };
+                    preview.push((v.clamp(0., 1.) * 255. + 0.5) as u8);
+                }
+                preview.push(255);
+            }
+            pixels = preview;
+        } else {
+            for pixel in pixels.chunks_exact(4) {
+                for &byte in &pixel[..3] {
+                    let v = byte as f32 / 255.;
+                    let v = if srgb {
+                        if v <= 0.04045 {
+                            v / 12.92
+                        } else {
+                            ((v + 0.055) / 1.055).powf(2.4)
+                        }
+                    } else {
+                        v
+                    };
+                    linear.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        std::fs::write(path.with_extension("linear_rgb.f32"), linear)?;
+        let color_encoding = if floating {
+            "linear_rgb_float32_render_target"
+        } else {
+            "linear_rgb_decoded_from_8bit_target"
+        };
+        let eye = camera.position.to_array();
+        let target = (camera.position + camera.direction().as_dvec3()).to_array();
+        std::fs::write(path.with_extension("capture.json"), format!(
+            "{{\"width\":{width},\"height\":{height},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?}}}",
+            camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
+        ))?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
         png.set_depth(png::BitDepth::Eight);
@@ -1517,6 +1587,10 @@ pub fn run() -> Result<()> {
         surface_layout,
         teleport_test,
         edit_test,
+        eye,
+        target,
+        fov_y,
+        capture_linear,
     }) = options::parse()?
     else {
         return Ok(());
@@ -1573,6 +1647,7 @@ pub fn run() -> Result<()> {
         camera = Camera {
             position,
             far: 20000.,
+            fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         };
@@ -1669,6 +1744,7 @@ pub fn run() -> Result<()> {
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
             far: (terrain::half_extent(view_levels) * 3.) as f32,
+            fov_y: 60.,
         };
         capture_pose(
             &mut camera,
@@ -1731,6 +1807,7 @@ pub fn run() -> Result<()> {
         camera = Camera {
             position,
             far: 20000.,
+            fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
         };
@@ -1772,10 +1849,23 @@ pub fn run() -> Result<()> {
         mesh
     };
     camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
+    camera.fov_y = fov_y;
+    if let (Some(eye), Some(target)) = (eye, target) {
+        camera.position = DVec3::from_array(eye);
+        let direction = (DVec3::from_array(target) - camera.position).normalize();
+        camera.yaw = direction.x.atan2(direction.z) as f32;
+        camera.pitch = direction.y.asin() as f32;
+    }
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let mut gpu =
-            pollster::block_on(Gpu::new(&instance, None, None, &mesh, msaa, voxel_filter))?;
+        let mut gpu = pollster::block_on(Gpu::new(
+            &instance,
+            None,
+            capture_linear.then_some(wgpu::TextureFormat::Rgba32Float),
+            &mesh,
+            msaa,
+            voxel_filter,
+        ))?;
         gpu.volume_owner = world.topology_base_cells().is_some();
         if let Some(snapshot) = &brick_initial {
             gpu.install_bricks(snapshot, renderer == "brick-skip")?;
@@ -1806,7 +1896,23 @@ pub fn run() -> Result<()> {
         if let Some(prepared) = hybrid_initial.take() {
             gpu.init_hybrid(prepared)?;
         }
-        return gpu.capture(&camera, &path, width, height);
+        gpu.capture(&camera, &path, width, height)?;
+        let metadata_path = path.with_extension("capture.json");
+        let mut metadata = std::fs::read_to_string(&metadata_path)?;
+        metadata.pop(); // capture writes exactly one JSON object.
+        let bounds = if scene == "fixture" {
+            ",\"native_min_cell\":[-128,-32,-128],\"native_size_cells\":[256,224,256]"
+        } else {
+            ""
+        };
+        let source_version = world
+            .fbm_terrain()
+            .map_or(frontier_world::SOURCE_VERSION, |source| {
+                source.source_version()
+            });
+        metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds}}}", world.revision()));
+        std::fs::write(metadata_path, metadata)?;
+        return Ok(());
     }
     let now = Instant::now();
     let mut viewer = Viewer {
@@ -1849,6 +1955,7 @@ pub fn run() -> Result<()> {
         initial_camera: Camera {
             position: camera.position,
             far: camera.far,
+            fov_y: camera.fov_y,
             yaw: camera.yaw,
             pitch: camera.pitch,
         },
