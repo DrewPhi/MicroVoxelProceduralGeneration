@@ -17,6 +17,8 @@ measurements and remaining gates.
 | `hybrid` | Moving native terrain chunks, approximate collar and GPU surface proxy |
 | `hybrid-static` | Earlier fixed CPU hybrid reference |
 | `hybrid-topology` | Moving hybrid plus a fixed 16 × 16 m canonical cave/bridge/edit owner |
+| `adaptive` | Candidate projected-error cluster selection with canonical appearance summaries; `--pixel-error` controls requested geometric fidelity |
+| `adaptive-topology` | Same candidate with exclusive exact cave/bridge/edit ownership |
 | `fixture --renderer mesh` | Editable bounded mountain/tunnel/bridge greedy-mesh reference |
 | `fixture --renderer brick` | Exact bounded brick-ray comparison |
 | `fixture --renderer brick-skip` | Same traversal with conservative empty-brick distance skips |
@@ -27,7 +29,7 @@ ownership zone. Both ordinary native terrain and every proxy level exclude that
 zone. Edits publish their candidate canonical world and replacement volume mesh
 together; ordinary terrain chunks remain independent of those edits. This proves
 a bounded implementation path, not arbitrary world-wide volume streaming.
-Distant exact/proxy perimeter seams remain uncertified. See the
+Distant exact/proxy perimeter seams in the legacy hybrid scenes remain uncertified. See the
 [ownership notes](frontier/OWNERSHIP_CHECKPOINT3.md).
 
 The brick comparison is restricted to `--scene fixture`, with the same materials,
@@ -191,7 +193,15 @@ These mesh figures are not total process RSS or total GPU memory.
 
 ## What remains
 
-The surface prototype does not yet implement toroidal GPU strip uploads,
+The new selectable path is documented in
+[adaptive rendering](frontier/ADAPTIVE_RENDERING.md). It implements conservative
+screen-space selection and shared-edge joins without the old fixed native
+square. Keep its quality/readiness and memory diagnostics alongside FPS: a fast
+coarse fallback is not a successful quality benchmark. Use
+`--adaptive-wait-quality` for settled-performance runs and omit it to measure
+cold streaming. Existing scenes remain available as independent comparisons.
+
+The legacy `fbm`/`hybrid` surface prototypes do not yet implement toroidal GPU strip uploads,
 a production error-driven LOD selector, seamless exact-near voxel handoff,
 world-wide cave/edit ownership, persistent edits, walking collision, or production
 geography. The static quadtree and fixed topology zone are bounded probes of

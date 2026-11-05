@@ -84,6 +84,17 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'world mismatch: seed'):
                 compare(ref,gpu,root/'comparison',other)
 
+    def test_msaa_appearance_does_not_weaken_geometry_or_camera_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _,_,m,c=self.fixture(Path(tmp))
+            c['samples']=4
+            with self.assertRaisesRegex(ValueError, 'requires --msaa 1'):
+                same_camera(m,c)
+            same_camera(m,c,require_single_sample=False)
+            c['eye']=[1,0,0]
+            with self.assertRaisesRegex(ValueError, 'camera mismatch'):
+                same_camera(m,c,require_single_sample=False)
+
 
 if __name__ == '__main__':
     unittest.main()

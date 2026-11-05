@@ -1,4 +1,8 @@
 //! Greenfield native fixture and experimental moving FBM surface viewer.
+mod adaptive_geometry;
+mod adaptive_gpu;
+mod adaptive_stream;
+mod adaptive_view;
 pub mod brick_ray;
 pub mod column_mesh;
 mod gpu_probe;
@@ -8,9 +12,11 @@ pub mod mesh;
 mod native_fbm;
 mod native_stream;
 mod options;
+mod source_page_cache;
 mod surface_compare;
 mod terrain;
 pub mod volume;
+
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
@@ -35,7 +41,7 @@ const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 struct Camera {
     position: DVec3,
     yaw: f32,
@@ -85,6 +91,7 @@ struct Gpu {
     native_layout: wgpu::BindGroupLayout,
     hybrid_pipeline: wgpu::RenderPipeline,
     hybrid: Option<hybrid_gpu::HybridGpu>,
+    adaptive: Option<adaptive_gpu::AdaptiveGpu>,
     volume_owner: bool,
     brick: Option<brick_ray::BrickRayGpu>,
     brick_skip: bool,
@@ -290,6 +297,7 @@ impl Gpu {
             native_layout: layout,
             hybrid_pipeline,
             hybrid: None,
+            adaptive: None,
             volume_owner: false,
             brick: None,
             brick_skip: false,
@@ -495,6 +503,12 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.draw(&mut pass);
+            if !self.volume_owner {
+                return;
+            }
+        }
         if let Some(brick) = &self.brick {
             brick.draw(&mut pass);
             return;
@@ -717,10 +731,16 @@ impl Gpu {
         } else {
             "linear_rgb_decoded_from_8bit_target"
         };
+        let samples = self.sample_count as u64;
+        let capture_render_texture_bytes = width as u64
+            * height as u64
+            * (bpp as u64 + samples * 4 + if samples > 1 { samples * bpp as u64 } else { 0 });
+        let capture_readback_bytes =
+            (row as u64 + if samples == 1 { depth_row as u64 } else { 0 }) * height as u64;
         let eye = camera.position.to_array();
         let target = (camera.position + camera.direction().as_dvec3()).to_array();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?}}}",
+            "{{\"width\":{width},\"height\":{height},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
@@ -870,6 +890,13 @@ impl Default for EditTest {
 }
 
 struct Viewer {
+    adaptive_view: Option<adaptive_view::AdaptiveView>,
+    adaptive_route_quality: adaptive_view::RouteQualityStats,
+    adaptive_route_started: bool,
+    adaptive_wait_quality: bool,
+    last_preparation_present: Option<Instant>,
+    benchmark_input_lock: bool,
+    route_frame_origin: u64,
     renderer: String,
     surface_layout: String,
     brick_initial: Option<brick_ray::BrickSnapshot>,
@@ -962,6 +989,12 @@ impl Viewer {
         Ok(())
     }
     fn poll_terrain(&mut self) {
+        if let (Some(view), Some(gpu)) = (&mut self.adaptive_view, &mut self.gpu) {
+            if let Err(error) = view.poll(gpu, self.camera, self.width, self.height) {
+                self.error = Some(error);
+            }
+            return;
+        }
         if let Some(stream) = &mut self.hybrid_stream {
             if let Err(error) = stream.poll(
                 [self.camera.position.x, self.camera.position.z],
@@ -1143,6 +1176,9 @@ impl Viewer {
                     }
                     if let Some(staged) = &pending.staged_world {
                         self.world = staged.clone();
+                        if let Some(view) = &mut self.adaptive_view {
+                            view.publish_volume_revision(&self.world);
+                        }
                     }
                     self.edit_published_count += 1;
                     self.edit_build_ms = build_time.as_secs_f64() * 1000.;
@@ -1191,6 +1227,8 @@ impl Viewer {
         }
     }
     fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
         if width == 0 || height == 0 {
             return;
         }
@@ -1206,7 +1244,9 @@ impl Viewer {
     }
     fn render(&mut self) -> Result<()> {
         self.poll_edit();
-        self.drive_edit_test();
+        if self.adaptive_route_started {
+            self.drive_edit_test();
+        }
         if self.pending_teleport.is_none()
             && self.route_started.elapsed().as_secs_f64() >= self.next_teleport_seconds
         {
@@ -1216,12 +1256,14 @@ impl Viewer {
         }
         let now = Instant::now();
         let interval = now.duration_since(self.last_frame);
-        if self.total_frames > self.warmup {
+        let measure_interval = self.adaptive_route_started
+            && self.total_frames > self.warmup + self.route_frame_origin;
+        if measure_interval {
             self.stats.record(interval.as_secs_f64() * 1000.);
         }
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
-        if self.grabbed && self.pending_teleport.is_none() {
+        if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
             let right = forward.cross(Vec3::Y);
             let mut movement = Vec3::ZERO;
@@ -1256,17 +1298,20 @@ impl Viewer {
             self.camera.position += movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
         }
         let pose = self.route.pose_at(
-            if self.route_realtime {
+            if !self.adaptive_route_started {
+                0.
+            } else if self.route_realtime {
                 self.route_started.elapsed().as_secs_f64()
             } else {
-                self.total_frames as f64 * self.route_step
+                self.total_frames.saturating_sub(self.route_frame_origin) as f64 * self.route_step
             },
             self.initial_camera.position.to_array(),
             self.initial_camera.yaw as f64,
             self.initial_camera.pitch as f64,
             self.route_speed,
         );
-        if self.pending_teleport.is_none()
+        if self.adaptive_route_started
+            && self.pending_teleport.is_none()
             && !matches!(self.route, frontier_runtime::routes::Route::Stationary)
         {
             self.camera.position = DVec3::from_array(pose.position);
@@ -1283,6 +1328,48 @@ impl Viewer {
             self.camera.pitch = pose.pitch as f32;
         }
         self.poll_terrain();
+        if measure_interval {
+            if let Some(view) = &self.adaptive_view {
+                self.adaptive_route_quality.record(view);
+            }
+        }
+        if let Some(error) = &self.error {
+            return Err(error.clone().into());
+        }
+        if !self.adaptive_route_started && self.adaptive_wait_quality {
+            if let Some(view) = &self.adaptive_view {
+                if !view.refinement_ready
+                    && (view.preparation_refused() || view.preparation_elapsed_seconds() >= 120.)
+                {
+                    return Err(format!(
+                        "adaptive settled benchmark could not meet initial quality: {}",
+                        view.json()
+                    )
+                    .into());
+                }
+            }
+        }
+        if !self.adaptive_route_started
+            && self.adaptive_view.as_ref().is_some_and(|v| {
+                v.coverage_ready && (!self.adaptive_wait_quality || v.refinement_ready)
+            })
+        {
+            self.adaptive_route_started = true;
+            self.route_started = Instant::now();
+            self.route_frame_origin = self.total_frames;
+            self.stats = frontier_runtime::FrameStats::new(10000);
+            if let Some(probe) = &mut self.gpu_probe {
+                probe.stats = frontier_runtime::FrameStats::new(10000);
+            }
+            eprintln!(
+                "adaptive route starts after {} publication",
+                if self.adaptive_wait_quality {
+                    "settled quality with refinement reserve"
+                } else {
+                    "coarse coverage"
+                }
+            );
+        }
         if let Some(terrain) = self.gpu.as_ref().and_then(|g| g.terrain.as_ref()) {
             let center = terrain.center();
             self.terrain_center_lag_end_m =
@@ -1300,6 +1387,21 @@ impl Viewer {
         if window.inner_size().width == 0 || window.inner_size().height == 0 {
             return Ok(());
         }
+        let benchmark_preparing = self.adaptive_wait_quality && !self.adaptive_route_started;
+        if benchmark_preparing {
+            // Explicit settled-benchmark mode gives source preparation the UMA
+            // budget. Normal interactive coarse startup still renders normally.
+            gpu.queue.submit(std::iter::empty());
+            gpu.device.poll(wgpu::Maintain::Poll);
+            if self
+                .last_preparation_present
+                .is_some_and(|last| last.elapsed().as_secs_f64() < 1.)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                return Ok(());
+            }
+            self.last_preparation_present = Some(Instant::now());
+        }
         let frame = match surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1309,9 +1411,41 @@ impl Viewer {
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
             Err(error) => return Err(error.into()),
         };
+        if benchmark_preparing {
+            let target = frame.texture.create_view(&Default::default());
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("settled benchmark preparation clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.34,
+                                g: 0.57,
+                                b: 0.80,
+                                a: 1.,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            frame.present();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            return Ok(());
+        }
         let timing = self.gpu_probe.as_mut().and_then(|probe| {
             probe.poll(&gpu.device);
-            probe.acquire(self.total_frames >= self.warmup)
+            probe.acquire(
+                self.adaptive_route_started
+                    && self.total_frames >= self.warmup + self.route_frame_origin,
+            )
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = frame.texture.create_view(&Default::default());
@@ -1341,7 +1475,30 @@ impl Viewer {
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
         if elapsed >= 0.5 {
-            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            if let Some(view) = &self.adaptive_view {
+                let state = if self.pending_edit.is_some() {
+                    "edit building"
+                } else if !view.coverage_ready {
+                    "loading coverage"
+                } else if view.quality_ready {
+                    "quality ready"
+                } else {
+                    "refining"
+                };
+                let triangles = view.stats.triangles
+                    + if gpu.volume_owner {
+                        u64::from(gpu.index_count / 3)
+                    } else {
+                        0
+                    };
+                window.set_title(&format!(
+                    "Frontier adaptive clusters{} | {:.0} FPS | {} triangles | {} px error | {} | Esc release / F12",
+                    if gpu.volume_owner { " + exact cave/bridge owner" } else { "" },
+                    self.frames as f64 / elapsed, triangles, view.pixel_error, state
+                ));
+            } else {
+                window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            }
             self.frames = 0;
             self.fps_start = now;
         }
@@ -1375,6 +1532,9 @@ impl ApplicationHandler for Viewer {
                 gpu.install_bricks(&snapshot, self.renderer == "brick-skip")?;
             }
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
+            if let Some(view) = &mut self.adaptive_view {
+                view.poll(&mut gpu, self.camera, self.width, self.height)?;
+            }
             if let Some(data) = self.terrain_data.take() {
                 if self.surface_layout == "quadtree" {
                     let probe = surface_compare::SurfaceCompareGpu::new(
@@ -1443,7 +1603,7 @@ impl ApplicationHandler for Viewer {
         _device_id: winit::event::DeviceId,
         event: DeviceEvent,
     ) {
-        if self.grabbed && self.pending_teleport.is_none() {
+        if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             if let DeviceEvent::MouseMotion { delta } = event {
                 self.camera.yaw -= delta.0 as f32 * 0.002;
                 self.camera.pitch = (self.camera.pitch - delta.1 as f32 * 0.002).clamp(-1.55, 1.55);
@@ -1457,7 +1617,12 @@ impl ApplicationHandler for Viewer {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.benchmark_input_lock {
+                    self.error = Some("benchmark interrupted by window close".into());
+                }
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
             WindowEvent::Focused(false) => {
                 self.keys.clear();
@@ -1468,6 +1633,9 @@ impl ApplicationHandler for Viewer {
                 button,
                 ..
             } => {
+                if self.benchmark_input_lock {
+                    return;
+                }
                 if !self.grabbed {
                     self.grab(true);
                 } else if button == MouseButton::Left || button == MouseButton::Right {
@@ -1476,6 +1644,13 @@ impl ApplicationHandler for Viewer {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
+                    if self.benchmark_input_lock {
+                        if key == KeyCode::Escape && event.state == ElementState::Pressed {
+                            self.error = Some("benchmark interrupted by Escape".into());
+                            event_loop.exit();
+                        }
+                        return;
+                    }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
                         if key == KeyCode::KeyT && !event.repeat && self.hybrid_stream.is_some() {
@@ -1519,12 +1694,12 @@ impl ApplicationHandler for Viewer {
                     self.error = Some(error.to_string());
                     event_loop.exit();
                 }
-                if self
-                    .frame_limit
-                    .is_some_and(|limit| self.total_frames >= limit)
-                    || self
+                if self.adaptive_route_started
+                    && (self.frame_limit.is_some_and(|limit| {
+                        self.total_frames.saturating_sub(self.route_frame_origin) >= limit
+                    }) || self
                         .seconds
-                        .is_some_and(|limit| self.route_started.elapsed().as_secs_f64() >= limit)
+                        .is_some_and(|limit| self.route_started.elapsed().as_secs_f64() >= limit))
                 {
                     event_loop.exit();
                 }
@@ -1601,11 +1776,17 @@ pub fn run() -> Result<()> {
         fov_y,
         capture_linear,
         capture_far,
+        pixel_error,
+        capture_unresolved,
+        adaptive_wait_quality,
+        adaptive_cache_mib,
+        benchmark_input_lock,
+        native_bins,
     }) = options::parse()?
     else {
         return Ok(());
     };
-    let world = if scene == "hybrid-topology" {
+    let world = if scene == "hybrid-topology" || scene == "adaptive-topology" {
         World::fbm_topology(seed, params)?
     } else if scene == "fixture" {
         World::new(seed)
@@ -1614,9 +1795,11 @@ pub fn run() -> Result<()> {
     };
     let fbm = match scene.as_str() {
         "fbm" => true,
-        "fixture" | "fbm-native" | "hybrid" | "hybrid-static" | "hybrid-topology" => false,
+        "fixture" | "fbm-native" | "hybrid" | "hybrid-static" | "hybrid-topology" | "adaptive"
+        | "adaptive-topology" => false,
         _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid|hybrid-static".into()),
     };
+    let mut adaptive_view = None;
     let mut terrain_data = None;
     let mut terrain_streamer = None;
     let mut terrain_prepare_ms = 0.;
@@ -1624,7 +1807,67 @@ pub fn run() -> Result<()> {
     let mut hybrid_initial = None;
     let mut camera = Camera::fixture();
     let [start_x, start_z] = start_xz;
-    let mesh = if fbm {
+    let mesh = if scene.starts_with("adaptive") {
+        camera.position = DVec3::new(start_x, world.height_m(start_x, start_z) + 1.7, start_z);
+        camera.yaw = 0.;
+        camera.pitch = -0.08;
+        if scene == "adaptive-topology" {
+            let base = world.topology_base_cells().unwrap() as f64 * VOXEL_SIZE;
+            let pose = match camera_preset.as_str() {
+                "cave" => Some((
+                    DVec3::new(-3., base - 2., -6.8),
+                    DVec3::new(-3., base - 2., 1.),
+                )),
+                "bridge" => Some((
+                    DVec3::new(4., base - 2., -2.8),
+                    DVec3::new(4., base + 1., -1.5),
+                )),
+                "topology" => Some((
+                    DVec3::new(12., base + 10., -15.),
+                    DVec3::new(0., base - 1., -1.),
+                )),
+                _ => None,
+            };
+            if let Some((eye, target)) = pose {
+                let direction = (target - eye).normalize();
+                camera.position = eye;
+                camera.yaw = direction.x.atan2(direction.z) as f32;
+                camera.pitch = direction.y.asin() as f32;
+            }
+        }
+        if camera_preset == "aerial" {
+            camera.position.y += 300.;
+            camera.pitch = -0.3;
+        }
+        capture_pose(
+            &mut camera,
+            &world,
+            route,
+            route_speed.unwrap_or(3.),
+            capture_route_time,
+            true,
+        );
+        camera.set_explicit_pose(eye, explicit_target);
+        // Final capture clip and projection are applied before first worker demand.
+        camera.far = capture_far.unwrap_or(20000.);
+        camera.fov_y = fov_y;
+        adaptive_view = Some(adaptive_view::AdaptiveView::new(
+            world.clone(),
+            pixel_error,
+            adaptive_cache_mib * 1024 * 1024,
+            native_bins,
+        )?);
+        if scene == "adaptive-topology" {
+            volume::build(&world)?
+        } else {
+            mesh::Mesh {
+                vertices: vec![],
+                indices: vec![],
+                origin: Cell { x: 0, y: 0, z: 0 },
+                exposed_native_faces: 0,
+            }
+        }
+    } else if fbm {
         let source = world.fbm_terrain().unwrap();
         let (position, target) = match camera_preset.as_str() {
             "valley" => (
@@ -1906,6 +2149,9 @@ pub fn run() -> Result<()> {
         if let Some(prepared) = hybrid_initial.take() {
             gpu.init_hybrid(prepared)?;
         }
+        if let Some(view) = &mut adaptive_view {
+            view.settle(&mut gpu, camera, width, height, capture_unresolved)?;
+        }
         gpu.capture(&camera, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
@@ -1921,11 +2167,23 @@ pub fn run() -> Result<()> {
                 source.source_version()
             });
         metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"native_voxel_m\":{VOXEL_SIZE},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
+        if let Some(view) = &adaptive_view {
+            metadata.pop();
+            metadata.push_str(&format!(",\"adaptive\":{}}}", view.json()));
+        }
         std::fs::write(metadata_path, metadata)?;
         return Ok(());
     }
     let now = Instant::now();
+    let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
+        adaptive_view,
+        adaptive_route_quality: Default::default(),
+        adaptive_route_started,
+        adaptive_wait_quality,
+        last_preparation_present: None,
+        benchmark_input_lock: benchmark_input_lock || adaptive_wait_quality,
+        route_frame_origin: 0,
         renderer,
         surface_layout,
         brick_initial,
@@ -1974,14 +2232,14 @@ pub fn run() -> Result<()> {
         hybrid_initial,
         hybrid_stream,
         fbm,
-        hybrid: scene == "hybrid" || scene == "hybrid-topology",
+        hybrid: scene == "hybrid" || scene == "hybrid-topology" || scene.starts_with("adaptive"),
         route,
         uncapped,
         warmup,
         route_step,
         route_speed: route_speed.unwrap_or(if fbm {
             80.
-        } else if scene.starts_with("hybrid") {
+        } else if scene.starts_with("hybrid") || scene.starts_with("adaptive") {
             3.
         } else {
             2.
@@ -2013,10 +2271,30 @@ pub fn run() -> Result<()> {
         pending_edit: None,
     };
     EventLoop::new()?.run_app(&mut viewer)?;
-    let route_elapsed_seconds = viewer.route_started.elapsed().as_secs_f64();
+    let route_elapsed_seconds = if viewer.adaptive_route_started {
+        viewer.route_started.elapsed().as_secs_f64()
+    } else {
+        0.
+    };
     if let Some(path) = capture_on_exit {
         if let (Some(gpu), Some(config)) = (&viewer.gpu, &viewer.config) {
             gpu.capture(&viewer.camera, &path, config.width, config.height)?;
+            if let Some(adaptive) = &viewer.adaptive_view {
+                let metadata_path = path.with_extension("capture.json");
+                let mut metadata = std::fs::read_to_string(&metadata_path)?;
+                metadata.pop();
+                metadata.push_str(&format!(
+                    ",\"scene\":{scene:?},\"seed\":{seed},\"adaptive\":{}}}",
+                    adaptive.json()
+                ));
+                std::fs::write(metadata_path, metadata)?;
+                if !adaptive.quality_ready {
+                    eprintln!(
+                        "interactive diagnostic capture has unresolved adaptive quality: {}",
+                        adaptive.json()
+                    );
+                }
+            }
         }
     }
     eprintln!(
@@ -2028,8 +2306,8 @@ pub fn run() -> Result<()> {
             scene: scene.clone(),
             seed,
             route: format!("{:?}", route),
-            output_width: width,
-            output_height: height,
+            output_width: viewer.config.as_ref().map_or(width, |c| c.width),
+            output_height: viewer.config.as_ref().map_or(height, |c| c.height),
             adapter: viewer
                 .gpu
                 .as_ref()
@@ -2047,6 +2325,19 @@ pub fn run() -> Result<()> {
         };
         let mut json = report.to_json();
         json.pop();
+        json.push_str(&format!(",\"benchmark_interrupted\":{},\"benchmark_failed\":{},\"benchmark_requested_seconds\":{},\"benchmark_requested_frames\":{}}}",viewer.error.as_deref().is_some_and(|e|e.starts_with("benchmark interrupted")),viewer.error.is_some(),seconds.map_or("null".into(),|v|v.to_string()),frame_limit.map_or("null".into(),|v|v.to_string())));
+        if let Some(view) = &viewer.adaptive_view {
+            json.pop();
+            json.push_str(&format!(
+                ",\"adaptive\":{},\"adaptive_wait_quality\":{},\"adaptive_route_quality\":{},\"adaptive_preparation_policy\":\"{}\",\"benchmark_input_lock\":{}}}",
+                view.json(),
+                viewer.adaptive_wait_quality,
+                viewer.adaptive_route_quality.json(),
+                if viewer.adaptive_wait_quality {"clear1Hz_poll20Hz_until_refinement_reserve"} else {"normal_interactive_rendering"},
+                viewer.benchmark_input_lock
+            ));
+        }
+        json.pop();
         json.push_str(&format!(
             ",\"terrain_recipe\":\"{:?}\",\"appearance_version\":{},\"render_appearance_version\":1}}",
             params.recipe,
@@ -2058,7 +2349,7 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.surface_probe.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles)),if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if scene == "hybrid" || scene == "hybrid-topology" {
             json.pop();
             json.push_str(&format!(",\"hybrid_scope\":{{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":{},\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}}}",scene=="hybrid-topology"));

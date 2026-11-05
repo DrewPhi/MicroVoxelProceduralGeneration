@@ -22,7 +22,7 @@ def read(path, shape):
     return a.reshape(shape).astype(np.float64)
 
 
-def same_camera(a, b):
+def same_camera(a, b, require_single_sample=True):
     for field in ('width', 'height'):
         if a[field] != b[field]:
             raise ValueError(f'camera mismatch: {field}')
@@ -35,7 +35,7 @@ def same_camera(a, b):
     for field in ('fov_y_degrees', 'near', 'far'):
         if not np.isclose(a[field], b[field], atol=1e-5, rtol=1e-7):
             raise ValueError(f'camera mismatch: {field}')
-    if b['samples'] != 1:
+    if require_single_sample and b['samples'] != 1:
         raise ValueError('GPU geometry comparison requires --msaa 1')
 
 

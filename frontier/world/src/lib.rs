@@ -9,7 +9,10 @@ use std::{
     },
 };
 
+pub mod affine_bounds;
+pub mod summary;
 pub mod terrain;
+pub mod volume_summary;
 pub use terrain::{
     FbmError, FbmParams, FbmRecipe, FbmTerrain, FBM_SOURCE_VERSION, REGIONAL_APPEARANCE_VERSION,
     REGIONAL_FBM_SOURCE_VERSION,

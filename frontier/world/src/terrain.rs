@@ -239,7 +239,7 @@ impl FbmTerrain {
     }
 }
 
-fn hash(x: i64, z: i64, seed: u64) -> u64 {
+pub(crate) fn hash(x: i64, z: i64, seed: u64) -> u64 {
     let mut h = (x as u64).wrapping_mul(0x9e3779b97f4a7c15)
         ^ (z as u64).wrapping_mul(0xbf58476d1ce4e5b9)
         ^ seed;
@@ -247,7 +247,7 @@ fn hash(x: i64, z: i64, seed: u64) -> u64 {
     h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
     h ^ (h >> 31)
 }
-fn noise(x: f64, z: f64, seed: u64) -> f64 {
+pub(crate) fn noise(x: f64, z: f64, seed: u64) -> f64 {
     let ix = x.floor() as i64;
     let iz = z.floor() as i64;
     let u = x - x.floor();

@@ -29,6 +29,15 @@ bounded greedy-mesh versus exact brick-ray comparison. `--scene fbm
 --surface-layout clipmap|quadtree` compares the moving nested-grid baseline with
 a static quadtree selection probe. These experiments do not establish a production
 renderer winner, collision, persistence, or laptop performance acceptance.
+
+The new selectable `--scene adaptive` path replaces the fixed native square
+with world-aligned clusters selected by projected geometry error. It uses pooled
+GPU storage and canonical face/material summaries; `adaptive-topology` retains
+the exact cave/bridge owner. See [adaptive rendering](frontier/ADAPTIVE_RENDERING.md)
+for controls, mathematical guarantees, and validation limits. It is a candidate
+under comparison with the existing renderer, not a promotion of all quality or
+performance gates.
+
 ```sh
 cd frontier
 cargo build --release --locked
@@ -46,6 +55,8 @@ cargo build --release --locked
 ./run.sh --scene fixture --renderer brick --msaa 1
 ./run.sh --scene fixture --renderer brick-skip --msaa 1
 ./run.sh --scene fbm --surface-layout quadtree --camera aerial
+./run.sh --scene adaptive --pixel-error 4
+./run.sh --scene adaptive-topology --camera cave --pixel-error 4
 ```
 
 Rust 1.99.1 is pinned. On Linux the window backend uses X11/XWayland.

@@ -9,6 +9,48 @@ const MAX_QUADS: usize = 4_000_000;
 const MAX_RELIEF_CELLS: i64 = 65_536;
 const MAX_LOCAL_CELLS: i64 = 16_777_216;
 
+/// Exact data for the current unedited FBM column contract: its integer top,
+/// surface material, eleven-cell soil band, and deeper material. A cache may
+/// reuse this only for the same immutable seed/parameters/source version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SampledColumn {
+    pub height: i64,
+    pub bands: [Material; 3],
+}
+impl Default for SampledColumn {
+    fn default() -> Self {
+        Self {
+            height: 0,
+            bands: [Material::Air; 3],
+        }
+    }
+}
+impl SampledColumn {
+    pub fn canonical(world: &World, x: i64, z: i64) -> Self {
+        let column = world.column(x, z);
+        let height = (column.height_m() / VOXEL_SIZE) as i64;
+        Self {
+            height,
+            bands: [
+                column.material(height.saturating_sub(1)),
+                column.material(height.saturating_sub(2)),
+                column.material(height.saturating_sub(13)),
+            ],
+        }
+    }
+    pub fn material(self, y: i64) -> Material {
+        if y >= self.height {
+            Material::Air
+        } else if y == self.height - 1 {
+            self.bands[0]
+        } else if y >= self.height - 12 {
+            self.bands[1]
+        } else {
+            self.bands[2]
+        }
+    }
+}
+
 /// Canonical integer tops including a one-column halo. Reusable by boundary geometry.
 pub struct ColumnHeights {
     pub min: [i64; 2],
@@ -59,6 +101,20 @@ struct Span {
 /// Limits bound scratch storage (~230 MiB) and mesh data (672 MB); excessive
 /// relief or output returns an error rather than clipping or changing the source.
 pub fn build(world: &World, min: Cell, size: [usize; 2]) -> Result<ColumnMesh, String> {
+    build_sampled(world, min, size, |x, z| {
+        SampledColumn::canonical(world, x, z)
+    })
+}
+
+/// Same extraction and validation as `build`, with an exact canonical sampler.
+/// The caller must return `SampledColumn::canonical(world,x,z)` bit for bit;
+/// camera epochs, display LOD and edited volume data must not alter samples.
+pub fn build_sampled(
+    world: &World,
+    min: Cell,
+    size: [usize; 2],
+    mut sample: impl FnMut(i64, i64) -> SampledColumn,
+) -> Result<ColumnMesh, String> {
     if world.fbm_terrain().is_none() || world.topology_base_cells().is_some() {
         return Err(
             "height-column extraction requires World::fbm; volume fixtures are unsupported".into(),
@@ -94,8 +150,8 @@ pub fn build(world: &World, min: Cell, size: [usize; 2]) -> Result<ColumnMesh, S
     let (mut low, mut high) = (i64::MAX, i64::MIN);
     for z in 0..halo[1] {
         for x in 0..halo[0] {
-            let c = world.column(min.x + x as i64 - 1, min.z + z as i64 - 1);
-            let h = (c.height_m() / VOXEL_SIZE) as i64;
+            let c = sample(min.x + x as i64 - 1, min.z + z as i64 - 1);
+            let h = c.height;
             low = low.min(h);
             high = high.max(h);
             if (h as i128 - min.y as i128).abs() > MAX_LOCAL_CELLS as i128 {
@@ -342,6 +398,107 @@ mod tests {
         }
         assert_eq!(out.len(), m.exposed_native_faces);
         out
+    }
+
+    #[test]
+    fn exact_sampled_cache_and_uncached_meshes_are_bitwise_identical() {
+        use frontier_world::FbmRecipe;
+        use std::collections::HashMap;
+        for recipe in [FbmRecipe::Legacy, FbmRecipe::Regional] {
+            let world = World::fbm(
+                7,
+                FbmParams {
+                    recipe,
+                    horizontal_scale: 16.,
+                    amplitude: 40.,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for min in [
+                Cell {
+                    x: -17,
+                    y: -600,
+                    z: -33,
+                },
+                Cell {
+                    x: 1_600_000,
+                    y: 0,
+                    z: -1_600_000,
+                },
+            ] {
+                let expected = build(&world, min, [11, 9]).unwrap();
+                let mut cache = HashMap::new();
+                let mut generated = 0;
+                for _ in 0..2 {
+                    let actual = build_sampled(&world, min, [11, 9], |x, z| {
+                        *cache.entry([x, z]).or_insert_with(|| {
+                            generated += 1;
+                            SampledColumn::canonical(&world, x, z)
+                        })
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        generated,
+                        13 * 11,
+                        "warm native extraction must not regenerate columns"
+                    );
+                    assert_eq!(actual.heights.values, expected.heights.values);
+                    assert_eq!(actual.mesh.origin, expected.mesh.origin);
+                    assert_eq!(
+                        actual.mesh.exposed_native_faces,
+                        expected.mesh.exposed_native_faces
+                    );
+                    assert_eq!(actual.mesh.indices, expected.mesh.indices);
+                    assert_eq!(
+                        bytemuck::cast_slice::<Vertex, u8>(&actual.mesh.vertices),
+                        bytemuck::cast_slice::<Vertex, u8>(&expected.mesh.vertices)
+                    );
+                }
+                for z in min.z..min.z + 9 {
+                    for x in min.x..min.x + 11 {
+                        let column = SampledColumn::canonical(&world, x, z);
+                        for y in [
+                            column.height,
+                            column.height - 1,
+                            column.height - 2,
+                            column.height - 12,
+                            column.height - 13,
+                            column.height - 100,
+                        ] {
+                            assert_eq!(column.material(y), world.column(x, z).material(y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn sampled_extraction_keeps_validation_before_sampler_work() {
+        let world = World::fbm(7, Default::default()).unwrap();
+        for size in [[0, 1], [usize::MAX, 1], [4_200_000, 2]] {
+            assert!(build_sampled(&world, Cell::default(), size, |_, _| panic!(
+                "invalid job must not sample"
+            ))
+            .is_err());
+        }
+        assert!(
+            build_sampled(&World::new(7), Cell::default(), [1; 2], |_, _| panic!(
+                "invalid source must not sample"
+            ))
+            .is_err()
+        );
+        assert!(build_sampled(
+            &world,
+            Cell {
+                x: i64::MIN,
+                y: 0,
+                z: 0
+            },
+            [1; 2],
+            |_, _| panic!("invalid halo must not sample")
+        )
+        .is_err());
     }
 
     #[test]

@@ -8,6 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
 pub mod benchmark;
+pub mod occlusion;
+pub mod representation;
 pub mod routes;
 pub mod travel;
 
