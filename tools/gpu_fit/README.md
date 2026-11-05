@@ -77,3 +77,38 @@ pilot's different warm start. `audit_initialization.py` inspects an exported
 shared-parameter model on a prepared dataset without training or modifying it.
 These are evidence and hypotheses to separate with small controlled ablations,
 not a claim that the existing result is an optimum.
+
+`local_hermite_experiment.py` runs a CPU-only, bounded cave-crop ablation with
+original hinge, shared/independent Hermite quadratics and continuous local P2.
+See [setup, results and limitations](../../agent_context/LOCAL_HERMITE_EXPERIMENT.md).
+It writes separate models/previews and never replaces the launcher world.
+The local ablation requires NumPy, SciPy, Pillow and PyTorch (CPU is sufficient).
+
+## Scalable Hermite GPU job
+
+`hermite.py` builds a scalar sparse design for shared quadratic values and
+analytic derivatives, then solves five weighted least-squares systems with
+batched preconditioned conjugate gradients. It uses calibrated surface/normal
+constraints and signed distances to sampled surfaces, with outer branch
+assignment updates. A dense world-scale normal matrix is never allocated.
+The continuity space and rendering format stay the same; global capacity limits
+still apply. Unlike the earlier preflight, this gate must learn a cave crop from
+a height initialization before the dependent full job can start.
+
+`sampler/src/hermite.rs` streams bounded authoritative off-surface records and
+projected surface points with normals. Geometry sampling is approximate; it
+rejects failed projections and cannot certify exhaustive coverage of thin
+features. Training and independent native-center validation/test sets are kept
+separate. See [submission and method details](../../agent_context/BOUCHET_HERMITE_JOB.md).
+
+Submit from an isolated deployment with gpu_fit/,world.json,pilot-world.json:
+
+```sh
+check_id=$(sbatch --parsable gpu_fit/hermite_preflight.sbatch)
+sbatch --dependency=afterok:"$check_id" gpu_fit/hermite_world.sbatch
+```
+
+Do not repeat that command if jobs already exist; inspect submission.json and
+scheduler status first. Hermite jobs write result/ and leave existing worlds
+untouched. A failed GPU gate leaves the full job blocked rather than running
+an unverified large fit.

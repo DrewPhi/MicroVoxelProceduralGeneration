@@ -7,3 +7,11 @@ fastnoise-lite = { path = "vendor/fastnoise-lite-1.1.1", features = ["f64"] }
 [patch.crates-io]
 num-traits = { path = "vendor/num-traits-0.2.19" }
 autocfg = { path = "vendor/autocfg-1.5.1" }
+
+[[bin]]
+name = "hermite-sampler"
+path = "src/hermite.rs"
+
+[[bin]]
+name = "node-sampler"
+path = "src/nodes.rs"

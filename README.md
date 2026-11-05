@@ -1,4 +1,14 @@
-# Analytic terrain experiments
+# Archived analytic terrain experiments
+
+Development moved to the
+[`frontier-voxel-engine` branch](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/frontier-voxel-engine).
+This branch preserves the analytic renderer, fitting experiments, negative results,
+and Bouchet job tooling as research references. Generated previews, fitted models,
+datasets, and submission receipts are preserved in the
+[legacy research archive](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
+Extract `analytic-experiments-artifacts.tar.gz` into this branch's checkout to
+restore its original `output/` directory. Build caches and executables are omitted.
+See [the archive record](agent_context/ARCHIVE_STATUS.md).
 
 Rust terrain authoring and a native GPU analytic renderer, with Python fitting
 experiments and cluster tooling. Default world: **10 km × 10 km**, **6.25 cm voxels**,
