@@ -27,7 +27,7 @@ When a task lists R or B, **do not 'just copy' old code**; when it lists P, copy
 
 - At 6.25 cm exact voxel/native coordinates, terrain, cave, bridge, tree/building editing and physics agree, regardless of displayed LOD.
 - User can see mountain ridges and river valleys several miles away. No forced opaque fog to hide unavailable geometry. Use a no-haze debug/reference setting.
-- Walking, sprint, high-speed bank and teleport never publish old-camera tiles. Root landscape must be coherent/complete while high detail loads.
+- Walking, sprint, high-speed bank and teleport never publish obsolete visibility selections or stale world revisions. Valid cached content remains reusable across camera epochs. Destination coverage must be coherent before teleport presentation; measure cold readiness time separately.
 - A heightfield **cannot** represent a cave opening, overhang, building, edited tower or arbitrary vertical geometry. Separate volume ownership must be conserved at *all significant distances*. Never silently erase openings in coarse geometry.
 - Coarse display-cell size is **not** a silhouette-error guarantee. Track actual/permitted geometric deviation and use feature-aware conservative refinement.
 - Smooth-looking proxy transitions do not alter underlying integer voxel identity. Direct heightfield-to-exact-block handoff needs depth and ownership tests.
@@ -42,4 +42,4 @@ No 1 km GPU fit or extremely costly optimization campaign without a CPU or small
 
 ## 5. Suggested first implementation tasks
 
-[FV01 isolated workspace](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/25), [FV02 test harness](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/26), [FV03 canonical voxels](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/27), [FV04 precision](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/28). Then geography/fBm/erosion, coherent source pages, renderer A/B, scheduling and 3D integration.
+[FV01 isolated workspace](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/25), [FV02 test harness](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/26), [FV03 canonical voxels](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/27), [FV04 precision](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/28). Then a simple mountain/cave/bridge/edit ownership smoke gate (early FV23/FV31), minimal clipmap baseline and renderer A/B. Rich geology/erosion is not a prerequisite for these small experiments. Follow the agreed quality contract in ARCHITECTURE.md: laptop 60 FPS and voxel-faithful, screen-space-bounded appearance must pass together. Full G3/G4 remain later gates.
