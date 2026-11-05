@@ -1,5 +1,16 @@
 # MicroVoxel Procedural Generation
 
+**Frontier development branch:** the new engine starts under
+[`frontier/`](frontier/ARCHITECTURE.md). Read its
+[architecture](frontier/ARCHITECTURE.md) and [agent instructions](frontier/AGENTS.md)
+before implementation. This branch currently contains the plans and inherited
+reference engine; the new runtime has not been built yet.
+
+The older engine described below is retained for comparison, as required by the
+Frontier plan. Analytic experiments remain on `DrewsAnalyticRendering`; generated
+legacy datasets, fitted models and screenshots are preserved in the
+[research archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
+
 ![A voxel mountain valley, grasslands and lake, captured at 1440p in the native mesh renderer](assets/cover.png)
 
 An experimental Rust foundation for an Earth-like voxel world, built without a
