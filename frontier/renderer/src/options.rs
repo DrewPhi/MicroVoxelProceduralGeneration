@@ -24,6 +24,10 @@ pub struct Options {
     pub msaa: u32,
     pub capture_route_time: Option<f64>,
     pub voxel_filter: bool,
+    pub renderer: String,
+    pub surface_layout: String,
+    pub teleport_test: bool,
+    pub edit_test: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
     let mut capture = None;
@@ -49,11 +53,23 @@ pub fn parse() -> Result<Option<Options>> {
     let mut capture_route_time: Option<f64> = None;
     // Opt in until the macro appearance model matches supersampled native faces.
     let mut voxel_filter = false;
+    let mut renderer = String::from("mesh");
+    let mut surface_layout = String::from("clipmap");
+    let mut teleport_test = false;
+    let mut edit_test = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--scene" => scene = args.next().ok_or("--scene requires fixture|fbm")?,
-            "--camera" => camera_preset = args.next().ok_or("--camera requires valley|aerial")?,
+            "--scene" => {
+                scene = args
+                    .next()
+                    .ok_or("--scene requires fixture|fbm|hybrid|hybrid-topology")?
+            }
+            "--camera" => {
+                camera_preset = args
+                    .next()
+                    .ok_or("--camera requires valley|aerial|topology|cave|bridge")?
+            }
             "--seed" => seed = args.next().ok_or("--seed requires integer")?.parse()?,
             "--scale" => {
                 params.horizontal_scale = args.next().ok_or("--scale requires meters")?.parse()?
@@ -67,6 +83,18 @@ pub fn parse() -> Result<Option<Options>> {
             "--roughness" => {
                 params.roughness = args.next().ok_or("--roughness requires gain")?.parse()?
             }
+            "--surface-layout" => {
+                surface_layout = args
+                    .next()
+                    .ok_or("--surface-layout requires clipmap|quadtree")?
+            }
+            "--renderer" => {
+                renderer = args
+                    .next()
+                    .ok_or("--renderer requires mesh|brick|brick-skip")?
+            }
+            "--teleport-test" => teleport_test = true,
+            "--edit-test" => edit_test = true,
             "--uncapped" => uncapped = true,
             "--voxel-filter" => {
                 voxel_filter = match args.next().as_deref() {
@@ -146,7 +174,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Frontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; no caves, edits, collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|hybrid|hybrid-static|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -172,6 +200,32 @@ pub fn parse() -> Result<Option<Options>> {
     }
     if msaa != 1 && msaa != 4 {
         return Err("--msaa requires 1|4".into());
+    }
+    if !["mesh", "brick", "brick-skip"].contains(&renderer.as_str()) {
+        return Err("--renderer requires mesh|brick|brick-skip".into());
+    }
+    if renderer != "mesh" && scene != "fixture" {
+        return Err("brick comparison currently supports --scene fixture".into());
+    }
+    if edit_test && !["fixture", "hybrid-topology"].contains(&scene.as_str()) {
+        return Err("--edit-test requires fixture or hybrid-topology scene".into());
+    }
+    if edit_test && capture.is_some() {
+        return Err(
+            "--edit-test requires a window run; use --capture-on-exit with --seconds".into(),
+        );
+    }
+    if teleport_test && !["hybrid", "hybrid-topology"].contains(&scene.as_str()) {
+        return Err("--teleport-test requires moving hybrid scene".into());
+    }
+    if !["clipmap", "quadtree"].contains(&surface_layout.as_str()) {
+        return Err("--surface-layout requires clipmap|quadtree".into());
+    }
+    if surface_layout == "quadtree" {
+        if scene != "fbm" {
+            return Err("quadtree comparison requires --scene fbm".into());
+        }
+        terrain_static = true;
     }
     params.validate()?;
     if capture.is_some() && report_path.is_some() {
@@ -202,5 +256,9 @@ pub fn parse() -> Result<Option<Options>> {
         msaa,
         capture_route_time,
         voxel_filter,
+        renderer,
+        surface_layout,
+        teleport_test,
+        edit_test,
     }))
 }

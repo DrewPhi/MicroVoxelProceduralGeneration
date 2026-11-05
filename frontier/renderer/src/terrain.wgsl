@@ -25,7 +25,7 @@ fn voxel_appearance(color:vec3<f32>, normal:vec3<f32>, view:vec3<f32>) -> vec3<f
 }
 struct Camera {
     matrix: mat4x4<f32>, centers:array<vec4<f32>,11>,
-    cutout:vec4<f32>, eye:vec4<f32>,
+    cutout:vec4<f32>, eye:vec4<f32>, volume:vec4<f32>,
 };
 struct Sample { heights:vec4<f32>, normal:vec4<f32>, parent_normal:vec4<f32>, color:vec4<f32>, parent_color:vec4<f32> };
 @group(0) @binding(0) var<uniform> camera:Camera;
@@ -50,6 +50,8 @@ struct Out {
     o.color=mix(s.color.xyz,s.parent_color.xyz,blend); o.ground=ground; o.height=mix(s.heights.x,s.heights.y,blend); return o;
 }
 @fragment fn fs_main(i:Out)->@location(0) vec4<f32> {
+    let owner=abs(i.ground-camera.volume.xy);
+    if camera.volume.w>0. && max(owner.x,owner.y)<=camera.volume.z { discard; }
     let d=abs(i.ground-camera.cutout.xy);
     if camera.cutout.w>0. && max(d.x,d.y)<camera.cutout.z { discard; }
     let view=normalize(vec3<f32>(camera.eye.x-i.ground.x,camera.eye.z-i.height,camera.eye.y-i.ground.y));

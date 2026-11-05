@@ -59,7 +59,7 @@ struct Span {
 /// Limits bound scratch storage (~230 MiB) and mesh data (672 MB); excessive
 /// relief or output returns an error rather than clipping or changing the source.
 pub fn build(world: &World, min: Cell, size: [usize; 2]) -> Result<ColumnMesh, String> {
-    if world.fbm_terrain().is_none() {
+    if world.fbm_terrain().is_none() || world.topology_base_cells().is_some() {
         return Err(
             "height-column extraction requires World::fbm; volume fixtures are unsupported".into(),
         );

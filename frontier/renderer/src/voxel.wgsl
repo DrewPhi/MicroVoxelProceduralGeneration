@@ -47,7 +47,7 @@ struct VertexOut {
     return vec4<f32>(in.color * light, 1.0);
 }
 
-struct TerrainCamera { matrix:mat4x4<f32>, centers:array<vec4<f32>,11>,cutout:vec4<f32>,eye:vec4<f32> };
+struct TerrainCamera { matrix:mat4x4<f32>, centers:array<vec4<f32>,11>,cutout:vec4<f32>,eye:vec4<f32>,volume:vec4<f32> };
 struct TerrainSample { heights:vec4<f32>,normal:vec4<f32>,parent_normal:vec4<f32>,color:vec4<f32>,parent_color:vec4<f32> };
 @group(1) @binding(0) var<uniform> terrain:TerrainCamera;
 @group(1) @binding(1) var<storage,read> pages:array<TerrainSample>;
@@ -55,6 +55,8 @@ fn sample_index(p:vec2<i32>) -> u32 { return 16641u+u32((p.y+64)*129+p.x+64); }
 @fragment fn fs_hybrid(i:VertexOut)->@location(0) vec4<f32> {
     let view=normalize(camera.eye.xyz-i.local);
     let ground=i.local.xz-camera.eye.xz+terrain.eye.xy-terrain.centers[1].xy;
+    let owner=abs(ground+terrain.centers[1].xy-terrain.volume.xy);
+    if terrain.volume.w>0. && max(owner.x,owner.y)<=terrain.volume.z { discard; }
     let cell=clamp(vec2<i32>(floor(ground)),vec2<i32>(-64),vec2<i32>(63));
     let uv=clamp(ground-vec2<f32>(cell),vec2<f32>(0.),vec2<f32>(1.));
     let a=pages[sample_index(cell)]; let b=pages[sample_index(cell+vec2<i32>(1,0))];

@@ -1,5 +1,6 @@
 //! Bounded immutable FBM column streaming. Camera demand is separate from content
-//! identity. One worker cancels at 8m chunk boundaries; a complete latest square
+//! identity. One coordinator runs at most two chunk jobs and cancels between
+//! pairs; a complete latest square
 //! is the only publication unit. No edits or arbitrary volume sources are accepted.
 use crate::{
     column_mesh::{self, ColumnMesh},
@@ -158,6 +159,15 @@ fn keys(c: [i64; 2]) -> Vec<ChunkKey> {
             out.push(ChunkKey { x, z });
         }
     }
+    // Complete nearby chunks first. The set remains the same complete square;
+    // urgent center coverage never waits behind speculative far corners.
+    out.sort_by_key(|k| {
+        (
+            (2 * (k.x - c[0]) + 1).pow(2) + (2 * (k.z - c[1]) + 1).pow(2),
+            k.z,
+            k.x,
+        )
+    });
     out
 }
 fn snapped(previous: Option<[i64; 2]>, p: [f64; 2]) -> [i64; 2] {
@@ -262,11 +272,41 @@ impl NativeStreamer {
                             c
                         } else {
                             let start = Instant::now();
-                            let result = NativeChunk::build(&world, *key).map(Arc::new);
+                            // Two bounded jobs improve entering-edge throughput. No
+                            // queued thread pool or stale backlog: reconsider demand
+                            // after this pair, retaining both valid cached chunks.
+                            let next = wanted[index + 1..]
+                                .iter()
+                                .copied()
+                                .find(|k| !cache.map.contains_key(k));
+                            let (result, extra) = std::thread::scope(|scope| {
+                                let source = &world;
+                                let other = next.map(|k| {
+                                    scope.spawn(move || NativeChunk::build(source, k).map(Arc::new))
+                                });
+                                let result = NativeChunk::build(&world, *key).map(Arc::new);
+                                let extra = other
+                                    .map(|job| job.join().expect("native paired worker panicked"));
+                                (result, extra)
+                            });
                             let mut s = lock.lock().unwrap();
-                            s.metrics.jobs += 1;
+                            s.metrics.jobs += 1 + u64::from(extra.is_some());
                             s.metrics.last_job_ms = start.elapsed().as_secs_f64() * 1000.;
                             s.metrics.generation_ms += s.metrics.last_job_ms;
+                            if let Some(extra) = extra {
+                                match extra.and_then(|c| {
+                                    cache.insert(c.clone(), &wanted)?;
+                                    Ok(c)
+                                }) {
+                                    Ok(c) => s.metrics.generated_bytes += c.bytes as u64,
+                                    Err(error) => {
+                                        s.error = Some(error);
+                                        s.metrics.rejected_chunks += 1;
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                            }
                             match result.and_then(|c| {
                                 cache.insert(c.clone(), &wanted)?;
                                 Ok(c)
@@ -329,6 +369,9 @@ impl NativeStreamer {
         s.metrics.requests += 1;
         wake.notify_one();
         revision
+    }
+    pub fn desired_revision(&self) -> u64 {
+        self.shared.0.lock().unwrap().desired.map_or(0, |(r, _)| r)
     }
     pub fn desired_center(&self) -> [f64; 2] {
         self.shared

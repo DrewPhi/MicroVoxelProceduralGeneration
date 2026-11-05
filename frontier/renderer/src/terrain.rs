@@ -28,19 +28,19 @@ struct GridVertex {
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Sample {
-    heights: [f32; 4],
-    normal: [f32; 4],
-    parent_normal: [f32; 4],
-    color: [f32; 4],
-    parent_color: [f32; 4],
+pub(crate) struct Sample {
+    pub(crate) heights: [f32; 4],
+    pub(crate) normal: [f32; 4],
+    pub(crate) parent_normal: [f32; 4],
+    pub(crate) color: [f32; 4],
+    pub(crate) parent_color: [f32; 4],
 }
 pub struct TerrainData {
     vertices: &'static [GridVertex],
     indices: &'static [u32],
-    samples: Vec<Sample>,
-    centers: [[f64; 2]; MAX_LEVELS as usize],
-    level_count: u32,
+    pub(crate) samples: Vec<Sample>,
+    pub(crate) centers: [[f64; 2]; MAX_LEVELS as usize],
+    pub(crate) level_count: u32,
     ranges: Vec<std::ops::Range<u32>>,
 }
 #[path = "terrain_stream.rs"]
@@ -264,6 +264,7 @@ pub struct TerrainGpu {
     ranges: Vec<std::ops::Range<u32>>,
     pub index_count: u32,
     hybrid_cutout: Option<[f64; 2]>,
+    volume_owner: bool,
     camera_position: std::cell::Cell<[f64; 3]>,
     voxel_filter: std::cell::Cell<bool>,
 }
@@ -303,7 +304,7 @@ impl TerrainGpu {
     ) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain camera"),
-            size: 64 + 16 * MAX_LEVELS as u64 + 32,
+            size: 64 + 16 * MAX_LEVELS as u64 + 48,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -401,12 +402,16 @@ impl TerrainGpu {
             ranges: data.ranges.clone(),
             index_count: data.ranges.iter().map(|r| r.end - r.start).sum(),
             hybrid_cutout: None,
+            volume_owner: false,
             camera_position: std::cell::Cell::new([data.centers[0][0], 0., data.centers[0][1]]),
             voxel_filter: std::cell::Cell::new(true),
         }
     }
     pub fn set_hybrid_cutout(&mut self, center: Option<[f64; 2]>) {
         self.hybrid_cutout = center;
+    }
+    pub fn set_volume_owner(&mut self, enabled: bool) {
+        self.volume_owner = enabled;
     }
     pub fn set_voxel_filter(&self, enabled: bool) {
         self.voxel_filter.set(enabled);
@@ -482,7 +487,16 @@ impl TerrainGpu {
         queue.write_buffer(
             &self.uniform,
             64 + 16 * MAX_LEVELS as u64,
-            bytemuck::cast_slice(&[cutout, eye]),
+            bytemuck::cast_slice(&[
+                cutout,
+                eye,
+                [
+                    (-self.center[0]) as f32,
+                    (-self.center[1]) as f32,
+                    8.,
+                    if self.volume_owner { 1. } else { 0. },
+                ],
+            ]),
         );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);

@@ -1,12 +1,16 @@
 //! Greenfield native fixture and experimental moving FBM surface viewer.
+pub mod brick_ray;
 pub mod column_mesh;
+mod gpu_probe;
 mod hybrid;
 mod hybrid_gpu;
 pub mod mesh;
 mod native_fbm;
 mod native_stream;
 mod options;
+mod surface_compare;
 mod terrain;
+pub mod volume;
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
@@ -31,6 +35,7 @@ const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+#[derive(Clone)]
 struct Camera {
     position: DVec3,
     yaw: f32,
@@ -69,6 +74,10 @@ struct Gpu {
     native_layout: wgpu::BindGroupLayout,
     hybrid_pipeline: wgpu::RenderPipeline,
     hybrid: Option<hybrid_gpu::HybridGpu>,
+    volume_owner: bool,
+    brick: Option<brick_ray::BrickRayGpu>,
+    brick_skip: bool,
+    surface_probe: Option<surface_compare::SurfaceCompareGpu>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertices: wgpu::Buffer,
@@ -114,7 +123,7 @@ impl Gpu {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Frontier device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
@@ -270,6 +279,10 @@ impl Gpu {
             native_layout: layout,
             hybrid_pipeline,
             hybrid: None,
+            volume_owner: false,
+            brick: None,
+            brick_skip: false,
+            surface_probe: None,
             uniform,
             bind_group,
             vertices,
@@ -287,6 +300,21 @@ impl Gpu {
             adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
+    fn install_bricks(&mut self, snapshot: &brick_ray::BrickSnapshot, skip: bool) -> Result<()> {
+        self.brick = Some(brick_ray::BrickRayGpu::new(
+            &self.device,
+            snapshot,
+            self.format,
+            self.sample_count,
+        )?);
+        self.brick_skip = skip;
+        self.origin = DVec3::new(
+            snapshot.origin.x as f64,
+            snapshot.origin.y as f64,
+            snapshot.origin.z as f64,
+        ) * VOXEL_SIZE;
+        Ok(())
+    }
     fn init_hybrid(&mut self, prepared: hybrid_gpu::Prepared) -> Result<()> {
         let terrain = terrain::TerrainGpu::new_with_samples(
             &self.device,
@@ -295,8 +323,11 @@ impl Gpu {
             self.sample_count,
         );
         terrain.set_voxel_filter(self.voxel_filter);
+        let mut terrain = terrain;
+        terrain.set_volume_owner(self.volume_owner);
         self.terrain = Some(terrain);
         let center = prepared.native.center;
+        let revision = prepared.native.revision;
         let mut hybrid = hybrid_gpu::HybridGpu::new();
         hybrid.stage(prepared)?;
         while !hybrid.upload(
@@ -305,6 +336,7 @@ impl Gpu {
             &self.native_layout,
             self.terrain.as_mut().unwrap(),
             center,
+            revision,
         ) {
             self.queue.submit(std::iter::empty());
             self.device.poll(wgpu::Maintain::Wait);
@@ -328,6 +360,11 @@ impl Gpu {
                 usage: wgpu::BufferUsages::INDEX,
             });
         self.index_count = mesh.indices.len() as u32;
+        self.origin = DVec3::new(
+            mesh.origin.x as f64,
+            mesh.origin.y as f64,
+            mesh.origin.z as f64,
+        ) * VOXEL_SIZE;
     }
     fn texture(&self, width: u32, height: u32, depth: bool) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
@@ -346,7 +383,7 @@ impl Gpu {
                 self.format
             },
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | if depth {
+                | if depth && self.sample_count > 1 {
                     wgpu::TextureUsages::empty()
                 } else {
                     wgpu::TextureUsages::COPY_SRC
@@ -382,6 +419,7 @@ impl Gpu {
         camera: &Camera,
         width: u32,
         height: u32,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         self.queue.write_buffer(
             &self.uniform,
@@ -402,6 +440,16 @@ impl Gpu {
                     .to_array(),
             ),
         );
+        if let Some(brick) = &self.brick {
+            brick.update_camera(
+                &self.queue,
+                camera.matrix(self.origin, width as f32 / height as f32),
+                (camera.position - self.origin).as_vec3(),
+                width,
+                height,
+                self.brick_skip,
+            );
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -425,9 +473,26 @@ impl Gpu {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        if let Some(brick) = &self.brick {
+            brick.draw(&mut pass);
+            return;
+        }
+        if let Some(probe) = &self.surface_probe {
+            probe.set_view_position(camera.position.to_array());
+            let center = probe.center();
+            probe.draw(
+                &self.queue,
+                &mut pass,
+                camera.matrix(
+                    DVec3::new(center[0], 0., center[1]),
+                    width as f32 / height as f32,
+                ),
+            );
+            return;
+        }
         if let Some(terrain) = &self.terrain {
             terrain.set_view_position(camera.position.to_array());
             terrain.draw(
@@ -448,7 +513,9 @@ impl Gpu {
                     width as f32 / height as f32,
                 );
             }
-            return;
+            if !self.volume_owner {
+                return;
+            }
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
@@ -480,6 +547,7 @@ impl Gpu {
             camera,
             width,
             height,
+            None,
         );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -502,6 +570,37 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
+        let depth_buffer = (self.sample_count == 1).then(|| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("depth capture readback"),
+                size: row as u64 * height as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        });
+        if let Some(buffer) = &depth_buffer {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &depth,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         self.queue.submit(Some(encoder.finish()));
         let (tx, rx) = std::sync::mpsc::channel();
         buffer
@@ -522,6 +621,20 @@ impl Gpu {
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
+        }
+        if let Some(buffer) = &depth_buffer {
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            rx.recv()??;
+            let bytes = buffer.slice(..).get_mapped_range();
+            let mut packed = Vec::with_capacity((width * height * 4) as usize);
+            for row_bytes in bytes.chunks_exact(row as usize) {
+                packed.extend_from_slice(&row_bytes[..width as usize * 4]);
+            }
+            std::fs::write(path.with_extension("depth.f32"), packed)?;
         }
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
@@ -570,26 +683,124 @@ fn edit_target(
     } else {
         hit.cell
     };
-    inside_arena(cell).then_some(cell)
+    (if let Some(base) = world.topology_base_cells() {
+        world.volume_owned(cell) && (base - 80..base + 160).contains(&cell.y)
+    } else {
+        inside_arena(cell)
+    })
+    .then_some(cell)
 }
 struct PendingEdit {
-    receiver: std::sync::mpsc::Receiver<(mesh::Mesh, u64, std::time::Duration)>,
+    receiver: std::sync::mpsc::Receiver<(
+        mesh::Mesh,
+        u64,
+        std::time::Duration,
+        Option<brick_ray::BrickSnapshot>,
+    )>,
     started: Instant,
+    staged_world: Option<World>,
 }
 impl PendingEdit {
-    fn start(snapshot: World, min: Cell, size: [usize; 3]) -> Self {
+    fn start_volume(snapshot: World) -> Self {
         let revision = snapshot.revision();
         let (sender, receiver) = std::sync::mpsc::channel();
         let started = Instant::now();
+        let staged_world = Some(snapshot.clone());
+        std::thread::spawn(move || match volume::build(&snapshot) {
+            Ok(mesh) => {
+                let _ = sender.send((mesh, revision, started.elapsed(), None));
+            }
+            Err(error) => eprintln!("volume edit build failed: {error}"),
+        });
+        Self {
+            receiver,
+            started,
+            staged_world,
+        }
+    }
+    #[cfg(test)]
+    fn start(snapshot: World, min: Cell, size: [usize; 3]) -> Self {
+        Self::start_backend(snapshot, min, size, false)
+    }
+    fn start_backend(snapshot: World, min: Cell, size: [usize; 3], ray: bool) -> Self {
+        let revision = snapshot.revision();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        let staged_world = Some(snapshot.clone());
         std::thread::spawn(move || {
             let mesh = mesh::extract(|p| snapshot.material(p), min, size);
-            let _ = sender.send((mesh, revision, started.elapsed()));
+            let bricks =
+                ray.then(|| brick_ray::BrickSnapshot::build(|p| snapshot.material(p), min, size));
+            let _ = sender.send((mesh, revision, started.elapsed(), bricks));
         });
-        Self { receiver, started }
+        Self {
+            receiver,
+            started,
+            staged_world,
+        }
+    }
+}
+
+/// Deterministic edit transaction: save every original canonical material,
+/// including existing player overrides, before placing a 16³-cell stone cube.
+fn edit_test_addition(world: &World) -> (World, Vec<(Cell, Material)>) {
+    let bottom = world.topology_base_cells().map_or(84, |base| base + 36);
+    let mut snapshot = world.clone();
+    let mut original = Vec::with_capacity(16 * 16 * 16);
+    for z in -32..-16 {
+        for y in bottom..bottom + 16 {
+            for x in 64..80 {
+                let cell = Cell { x, y, z };
+                original.push((cell, world.material(cell)));
+                snapshot.set(cell, Material::Stone);
+            }
+        }
+    }
+    (snapshot, original)
+}
+fn edit_test_restore(world: &World, original: &[(Cell, Material)]) -> World {
+    let mut snapshot = world.clone();
+    for &(cell, material) in original {
+        snapshot.set(cell, material);
+    }
+    snapshot
+}
+struct EditTest {
+    /// 0 waiting to add, 1 addition queued/published, 2 restoration queued,
+    /// 3 restoration published. Publication, rather than request, starts delay.
+    phase: u8,
+    next_seconds: f64,
+    original: Vec<(Cell, Material)>,
+}
+impl Default for EditTest {
+    fn default() -> Self {
+        Self {
+            phase: 0,
+            next_seconds: 2.,
+            original: Vec::new(),
+        }
     }
 }
 
 struct Viewer {
+    renderer: String,
+    surface_layout: String,
+    brick_initial: Option<brick_ray::BrickSnapshot>,
+    gpu_probe: Option<gpu_probe::GpuProbe>,
+    pending_teleport: Option<(u64, Camera, Instant)>,
+    teleport_destinations: std::collections::VecDeque<[f64; 2]>,
+    next_teleport_seconds: f64,
+    teleport_count: u64,
+    teleport_last_ms: f64,
+    teleport_start_jobs: u64,
+    teleport_start_upload: u64,
+    teleport_records: Vec<String>,
+    edit_test: Option<EditTest>,
+    edit_published_count: u64,
+    edit_build_ms: f64,
+    edit_input_to_publish_ms: f64,
+    edit_records: Vec<String>,
+
     mesh: Option<mesh::Mesh>,
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -638,6 +849,31 @@ struct Viewer {
     terrain_center_lag_end_m: f64,
 }
 impl Viewer {
+    fn begin_teleport(&mut self, destination: [f64; 2]) -> Result<()> {
+        let Some(stream) = &mut self.hybrid_stream else {
+            return Ok(());
+        };
+        self.teleport_start_jobs = stream.native.metrics().jobs;
+        self.teleport_start_upload = self
+            .gpu
+            .as_ref()
+            .and_then(|g| g.hybrid.as_ref())
+            .map_or(0, |g| g.upload_bytes);
+        let id = stream.request_teleport(destination)?;
+        let mut target = self.camera.clone();
+        target.position = DVec3::new(
+            destination[0],
+            self.world.height_m(destination[0], destination[1]) + 1.7,
+            destination[1],
+        );
+        self.pending_teleport = Some((id, target, Instant::now()));
+        self.route = frontier_runtime::routes::Route::Stationary;
+        self.keys.clear();
+        if let Some(window) = &self.window {
+            window.set_title("Frontier — preparing teleport destination");
+        }
+        Ok(())
+    }
     fn poll_terrain(&mut self) {
         if let Some(stream) = &mut self.hybrid_stream {
             if let Err(error) = stream.poll(
@@ -661,13 +897,46 @@ impl Viewer {
                             }
                         }
                     }
-                    hybrid.upload(
+                    if hybrid.upload(
                         &gpu.device,
                         &gpu.queue,
                         &gpu.native_layout,
                         terrain,
                         stream.native.desired_center(),
-                    );
+                        stream.native.desired_revision(),
+                    ) {
+                        stream.published(hybrid.center());
+                    }
+                }
+            }
+            if self
+                .pending_teleport
+                .as_ref()
+                .is_some_and(|(id, _, _)| stream.teleport_ready(*id))
+            {
+                let (id, camera, started) = self.pending_teleport.take().unwrap();
+                self.camera = camera;
+                stream.finish_teleport(id);
+                self.teleport_count += 1;
+                self.teleport_last_ms = started.elapsed().as_secs_f64() * 1000.;
+                let jobs = stream.native.metrics().jobs - self.teleport_start_jobs;
+                let upload = self
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| g.hybrid.as_ref())
+                    .map_or(0, |g| g.upload_bytes)
+                    - self.teleport_start_upload;
+                self.teleport_records.push(format!(
+                    "{{\"readiness_ms\":{},\"native_jobs\":{},\"native_upload_bytes\":{}}}",
+                    self.teleport_last_ms, jobs, upload
+                ));
+                self.next_teleport_seconds = self.route_started.elapsed().as_secs_f64() + 2.;
+                eprintln!(
+                    "teleport {} ready in {:.1}ms at {:?}",
+                    id, self.teleport_last_ms, self.camera.position
+                );
+                if let Some(window) = &self.window {
+                    window.set_title("Frontier — destination ready");
                 }
             }
             return;
@@ -691,7 +960,7 @@ impl Viewer {
         }
     }
     fn edit(&mut self, place: bool) {
-        if self.world.fbm_terrain().is_some() {
+        if self.world.fbm_terrain().is_some() && self.world.topology_base_cells().is_none() {
             eprintln!(
                 "FBM comparison scenes have edits disabled; use --scene fixture for exact editing"
             );
@@ -706,7 +975,8 @@ impl Viewer {
         ) else {
             return;
         };
-        self.world.set(
+        let mut snapshot = self.world.clone();
+        snapshot.set(
             cell,
             if place {
                 Material::Stone
@@ -714,28 +984,95 @@ impl Viewer {
                 Material::Air
             },
         );
-        let snapshot = self.world.clone();
-        let revision = snapshot.revision();
-        self.pending_edit = Some(PendingEdit::start(snapshot, ARENA_MIN, ARENA_SIZE));
-        eprintln!(
-            "edit {:?} at {:?}: revision {} rebuilding; further edits wait",
+        self.queue_edit(
+            snapshot,
             if place { "place" } else { "remove" },
-            cell,
-            revision
+            Instant::now(),
         );
+    }
+    fn queue_edit(&mut self, snapshot: World, label: &str, input: Instant) {
+        let revision = snapshot.revision();
+        let mut pending = if self.world.topology_base_cells().is_some() {
+            PendingEdit::start_volume(snapshot)
+        } else {
+            PendingEdit::start_backend(snapshot, ARENA_MIN, ARENA_SIZE, self.renderer != "mesh")
+        };
+        pending.started = input;
+        self.pending_edit = Some(pending);
+        eprintln!("edit {label}: revision {revision} rebuilding; further edits wait");
+    }
+    fn drive_edit_test(&mut self) {
+        if self.pending_edit.is_some() {
+            return;
+        }
+        let Some(test) = &mut self.edit_test else {
+            return;
+        };
+        if self.route_started.elapsed().as_secs_f64() < test.next_seconds {
+            return;
+        }
+        let input = Instant::now();
+        match test.phase {
+            0 => {
+                let (snapshot, original) = edit_test_addition(&self.world);
+                test.original = original;
+                test.phase = 1;
+                test.next_seconds = f64::INFINITY;
+                self.queue_edit(snapshot, "test add 1m cube", input);
+            }
+            1 => {
+                let snapshot = edit_test_restore(&self.world, &test.original);
+                test.phase = 2;
+                test.next_seconds = f64::INFINITY;
+                self.queue_edit(snapshot, "test restore original materials", input);
+            }
+            _ => {}
+        }
     }
     fn poll_edit(&mut self) {
         let Some(pending) = &self.pending_edit else {
             return;
         };
         match pending.receiver.try_recv() {
-            Ok((mesh, revision, build_time)) => {
-                if revision == self.world.revision() {
+            Ok((mesh, revision, build_time, bricks)) => {
+                if revision
+                    == pending
+                        .staged_world
+                        .as_ref()
+                        .unwrap_or(&self.world)
+                        .revision()
+                {
                     if let Some(gpu) = &mut self.gpu {
-                        gpu.replace_mesh(&mesh);
+                        if let Some(bricks) = &bricks {
+                            if let Err(error) =
+                                gpu.install_bricks(bricks, self.renderer == "brick-skip")
+                            {
+                                self.error = Some(error.to_string());
+                                return;
+                            }
+                        } else {
+                            gpu.replace_mesh(&mesh);
+                        }
+                    }
+                    if let Some(staged) = &pending.staged_world {
+                        self.world = staged.clone();
+                    }
+                    self.edit_published_count += 1;
+                    self.edit_build_ms = build_time.as_secs_f64() * 1000.;
+                    self.edit_input_to_publish_ms = pending.started.elapsed().as_secs_f64() * 1000.;
+                    self.edit_records.push(format!(
+                        "{{\"revision\":{},\"build_ms\":{},\"input_to_publish_ms\":{}}}",
+                        revision, self.edit_build_ms, self.edit_input_to_publish_ms
+                    ));
+                    if let Some(test) = &mut self.edit_test {
+                        if test.phase == 1 && !test.next_seconds.is_finite() {
+                            test.next_seconds = self.route_started.elapsed().as_secs_f64() + 2.;
+                        } else if test.phase == 2 {
+                            test.phase = 3;
+                        }
                     }
                     eprintln!(
-                        "published edit revision {}: build {:.3}s, input-to-upload {:.3}s",
+                        "published edit revision {}: build {:.3}s, input-to-publish {:.3}s",
                         revision,
                         build_time.as_secs_f64(),
                         pending.started.elapsed().as_secs_f64()
@@ -782,6 +1119,14 @@ impl Viewer {
     }
     fn render(&mut self) -> Result<()> {
         self.poll_edit();
+        self.drive_edit_test();
+        if self.pending_teleport.is_none()
+            && self.route_started.elapsed().as_secs_f64() >= self.next_teleport_seconds
+        {
+            if let Some(destination) = self.teleport_destinations.pop_front() {
+                self.begin_teleport(destination)?;
+            }
+        }
         let now = Instant::now();
         let interval = now.duration_since(self.last_frame);
         if self.total_frames > self.warmup {
@@ -789,7 +1134,7 @@ impl Viewer {
         }
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
-        if self.grabbed {
+        if self.grabbed && self.pending_teleport.is_none() {
             let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
             let right = forward.cross(Vec3::Y);
             let mut movement = Vec3::ZERO;
@@ -834,7 +1179,9 @@ impl Viewer {
             self.initial_camera.pitch as f64,
             self.route_speed,
         );
-        if !matches!(self.route, frontier_runtime::routes::Route::Stationary) {
+        if self.pending_teleport.is_none()
+            && !matches!(self.route, frontier_runtime::routes::Route::Stationary)
+        {
             self.camera.position = DVec3::from_array(pose.position);
             if self.fbm || self.hybrid {
                 let floor = self
@@ -875,6 +1222,10 @@ impl Viewer {
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
             Err(error) => return Err(error.into()),
         };
+        let timing = self.gpu_probe.as_mut().and_then(|probe| {
+            probe.poll(&gpu.device);
+            probe.acquire(self.total_frames >= self.warmup)
+        });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = frame.texture.create_view(&Default::default());
         let multisample_view = self
@@ -889,14 +1240,21 @@ impl Viewer {
             &self.camera,
             config.width,
             config.height,
+            timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
         );
+        if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
+            probe.resolve(&mut encoder, slot);
+        }
         gpu.queue.submit(Some(encoder.finish()));
+        if let (Some(probe), Some(slot)) = (&mut self.gpu_probe, timing) {
+            probe.submitted(slot);
+        }
         frame.present();
         self.frames += 1;
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
         if elapsed >= 0.5 {
-            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {"moving 64m native chunks + coherent collar + GPU proxy (heightfield only)"} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+            window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             self.frames = 0;
             self.fps_start = now;
         }
@@ -926,19 +1284,39 @@ impl ApplicationHandler for Viewer {
                 self.sample_count,
                 self.voxel_filter,
             ))?;
-            if let Some(data) = self.terrain_data.take() {
-                let mut terrain = terrain::TerrainGpu::new_with_samples(
-                    &gpu.device,
-                    gpu.format,
-                    &data.data,
-                    gpu.sample_count,
-                );
-                terrain.set_voxel_filter(gpu.voxel_filter);
-                terrain.upload(&gpu.queue, &data);
-                gpu.terrain = Some(terrain);
+            if let Some(snapshot) = self.brick_initial.take() {
+                gpu.install_bricks(&snapshot, self.renderer == "brick-skip")?;
             }
+            self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
+            if let Some(data) = self.terrain_data.take() {
+                if self.surface_layout == "quadtree" {
+                    let probe = surface_compare::SurfaceCompareGpu::new(
+                        &gpu.device,
+                        gpu.format,
+                        gpu.sample_count,
+                        &data.data,
+                    );
+                    probe.set_voxel_filter(gpu.voxel_filter);
+                    gpu.surface_probe = Some(probe);
+                }
+                if gpu.surface_probe.is_none() {
+                    let mut terrain = terrain::TerrainGpu::new_with_samples(
+                        &gpu.device,
+                        gpu.format,
+                        &data.data,
+                        gpu.sample_count,
+                    );
+                    terrain.set_voxel_filter(gpu.voxel_filter);
+                    terrain.upload(&gpu.queue, &data);
+                    gpu.terrain = Some(terrain);
+                }
+            }
+            gpu.volume_owner = self.world.topology_base_cells().is_some();
             if let Some(prepared) = self.hybrid_initial.take() {
                 gpu.init_hybrid(prepared)?;
+                if let Some(stream) = &mut self.hybrid_stream {
+                    stream.published(gpu.hybrid.as_ref().unwrap().center());
+                }
             }
             let size = window.inner_size();
             let config = wgpu::SurfaceConfiguration {
@@ -978,7 +1356,7 @@ impl ApplicationHandler for Viewer {
         _device_id: winit::event::DeviceId,
         event: DeviceEvent,
     ) {
-        if self.grabbed {
+        if self.grabbed && self.pending_teleport.is_none() {
             if let DeviceEvent::MouseMotion { delta } = event {
                 self.camera.yaw -= delta.0 as f32 * 0.002;
                 self.camera.pitch = (self.camera.pitch - delta.1 as f32 * 0.002).clamp(-1.55, 1.55);
@@ -1013,6 +1391,20 @@ impl ApplicationHandler for Viewer {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
+                        if key == KeyCode::KeyT && !event.repeat && self.hybrid_stream.is_some() {
+                            let home = [
+                                self.initial_camera.position.x,
+                                self.initial_camera.position.z,
+                            ];
+                            let target = if (self.camera.position.x - home[0]).abs() > 100. {
+                                home
+                            } else {
+                                [home[0] + 512., home[1]]
+                            };
+                            if let Err(error) = self.begin_teleport(target) {
+                                self.error = Some(error.to_string());
+                            }
+                        }
                         if key == KeyCode::Escape {
                             self.grab(false);
                         }
@@ -1111,18 +1503,24 @@ pub fn run() -> Result<()> {
         msaa,
         capture_route_time,
         voxel_filter,
+        renderer,
+        surface_layout,
+        teleport_test,
+        edit_test,
     }) = options::parse()?
     else {
         return Ok(());
     };
-    let world = if scene == "fixture" {
+    let world = if scene == "hybrid-topology" {
+        World::fbm_topology(seed, params)?
+    } else if scene == "fixture" {
         World::new(seed)
     } else {
         World::fbm(seed, params)?
     };
     let fbm = match scene.as_str() {
         "fbm" => true,
-        "fixture" | "fbm-native" | "hybrid" | "hybrid-static" => false,
+        "fixture" | "fbm-native" | "hybrid" | "hybrid-static" | "hybrid-topology" => false,
         _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid|hybrid-static".into()),
     };
     let mut terrain_data = None;
@@ -1181,8 +1579,21 @@ pub fn run() -> Result<()> {
             origin: Cell { x: 0, y: 0, z: 0 },
             exposed_native_faces: 0,
         }
-    } else if scene == "hybrid" || scene == "hybrid-static" {
+    } else if scene.starts_with("hybrid") {
+        let base = world.topology_base_cells().unwrap_or(0) as f64 * VOXEL_SIZE;
         let (position, target) = match camera_preset.as_str() {
+            "cave" if scene == "hybrid-topology" => (
+                DVec3::new(-3., base - 2., -6.8),
+                DVec3::new(-3., base - 2., 1.),
+            ),
+            "bridge" if scene == "hybrid-topology" => (
+                DVec3::new(4., base - 2., -2.8),
+                DVec3::new(4., base + 1., -1.5),
+            ),
+            "topology" if scene == "hybrid-topology" => (
+                DVec3::new(12., base + 10., -15.),
+                DVec3::new(0., base - 1., -1.),
+            ),
             "valley" => {
                 let position = DVec3::new(0., world.height_m(0., 0.) + 1.7, 0.);
                 // Startup-only canonical probes choose an open/downhill view;
@@ -1238,7 +1649,14 @@ pub fn run() -> Result<()> {
             hybrid::build(&world, view_levels)?
         } else {
             let preparing = Instant::now();
-            let mut stream = hybrid_gpu::Stream::new(world.clone(), view_levels)?;
+            let mut stream = hybrid_gpu::Stream::new(
+                if world.topology_base_cells().is_some() {
+                    World::fbm(seed, params)?
+                } else {
+                    world.clone()
+                },
+                view_levels,
+            )?;
             let prepared = loop {
                 stream.poll([camera.position.x, camera.position.z], true)?;
                 if let Some(ready) = stream.ready.take() {
@@ -1256,11 +1674,15 @@ pub fn run() -> Result<()> {
             );
             hybrid_initial = Some(prepared);
             hybrid_stream = Some(stream);
-            mesh::Mesh {
-                vertices: Vec::new(),
-                indices: Vec::new(),
-                origin: Cell { x: 0, y: 0, z: 0 },
-                exposed_native_faces: 0,
+            if world.topology_base_cells().is_some() {
+                volume::build(&world)?
+            } else {
+                mesh::Mesh {
+                    vertices: Vec::new(),
+                    indices: Vec::new(),
+                    origin: Cell { x: 0, y: 0, z: 0 },
+                    exposed_native_faces: 0,
+                }
             }
         }
     } else if scene == "fbm-native" {
@@ -1285,21 +1707,62 @@ pub fn run() -> Result<()> {
         );
         mesh
     };
+    if scene == "fixture" {
+        let view = match camera_preset.as_str() {
+            "cave" => Some((DVec3::new(-3., 3., -7.), DVec3::new(-3., 3., 6.))),
+            "bridge" => Some((DVec3::new(4.5, 2.8, -2.5), DVec3::new(4.5, 4.1, -1.5))),
+            _ => None,
+        };
+        if let Some((eye, target)) = view {
+            let direction = (target - eye).normalize();
+            camera.position = eye;
+            camera.yaw = direction.x.atan2(direction.z) as f32;
+            camera.pitch = direction.y.asin() as f32;
+        }
+    }
+    let brick_initial = (renderer != "mesh")
+        .then(|| brick_ray::BrickSnapshot::build(|p| world.material(p), ARENA_MIN, ARENA_SIZE));
+    let mesh = if brick_initial.is_some() {
+        mesh::Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            origin: ARENA_MIN,
+            exposed_native_faces: 0,
+        }
+    } else {
+        mesh
+    };
     camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let mut gpu =
             pollster::block_on(Gpu::new(&instance, None, None, &mesh, msaa, voxel_filter))?;
+        gpu.volume_owner = world.topology_base_cells().is_some();
+        if let Some(snapshot) = &brick_initial {
+            gpu.install_bricks(snapshot, renderer == "brick-skip")?;
+        }
         if let Some(data) = &terrain_data {
-            let mut terrain = terrain::TerrainGpu::new_with_samples(
-                &gpu.device,
-                gpu.format,
-                &data.data,
-                gpu.sample_count,
-            );
-            terrain.set_voxel_filter(gpu.voxel_filter);
-            terrain.upload(&gpu.queue, data);
-            gpu.terrain = Some(terrain);
+            if surface_layout == "quadtree" {
+                let probe = surface_compare::SurfaceCompareGpu::new(
+                    &gpu.device,
+                    gpu.format,
+                    gpu.sample_count,
+                    &data.data,
+                );
+                probe.set_voxel_filter(gpu.voxel_filter);
+                gpu.surface_probe = Some(probe);
+            }
+            if gpu.surface_probe.is_none() {
+                let mut terrain = terrain::TerrainGpu::new_with_samples(
+                    &gpu.device,
+                    gpu.format,
+                    &data.data,
+                    gpu.sample_count,
+                );
+                terrain.set_voxel_filter(gpu.voxel_filter);
+                terrain.upload(&gpu.queue, data);
+                gpu.terrain = Some(terrain);
+            }
         }
         if let Some(prepared) = hybrid_initial.take() {
             gpu.init_hybrid(prepared)?;
@@ -1308,6 +1771,33 @@ pub fn run() -> Result<()> {
     }
     let now = Instant::now();
     let mut viewer = Viewer {
+        renderer,
+        surface_layout,
+        brick_initial,
+        gpu_probe: None,
+        pending_teleport: None,
+        teleport_destinations: if teleport_test {
+            [
+                [512., 0.],
+                [camera.position.x, camera.position.z],
+                [512., 0.],
+                [512., 0.],
+            ]
+            .into()
+        } else {
+            Default::default()
+        },
+        next_teleport_seconds: 2.,
+        teleport_count: 0,
+        teleport_last_ms: 0.,
+        teleport_start_jobs: 0,
+        teleport_start_upload: 0,
+        teleport_records: Vec::new(),
+        edit_test: edit_test.then(EditTest::default),
+        edit_published_count: 0,
+        edit_build_ms: 0.,
+        edit_input_to_publish_ms: 0.,
+        edit_records: Vec::new(),
         mesh: Some(mesh),
         window: None,
         surface: None,
@@ -1328,14 +1818,14 @@ pub fn run() -> Result<()> {
         hybrid_initial,
         hybrid_stream,
         fbm,
-        hybrid: scene == "hybrid",
+        hybrid: scene == "hybrid" || scene == "hybrid-topology",
         route,
         uncapped,
         warmup,
         route_step,
         route_speed: route_speed.unwrap_or(if fbm {
             80.
-        } else if scene == "hybrid" {
+        } else if scene.starts_with("hybrid") {
             3.
         } else {
             2.
@@ -1392,7 +1882,10 @@ pub fn run() -> Result<()> {
             vsync: !uncapped,
             warmup_frames: warmup,
             frames: viewer.stats.summary(),
-            isolated_gpu_ms: None,
+            isolated_gpu_ms: viewer
+                .gpu_probe
+                .as_ref()
+                .and_then(|p| p.stats.summary().p50_ms),
             used_memory_bytes: None,
             committed_memory_bytes: None,
         };
@@ -1400,10 +1893,10 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             if scene!="fixture" {frontier_world::FBM_SOURCE_VERSION} else {frontier_world::SOURCE_VERSION},VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if fbm {if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene=="hybrid" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else {"exact_native_greedy"},fbm || scene.starts_with("hybrid"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())),if fbm || scene=="hybrid" {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
-        if scene == "hybrid" {
+            if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.surface_probe.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles)),if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+        if scene == "hybrid" || scene == "hybrid-topology" {
             json.pop();
-            json.push_str(",\"hybrid_scope\":{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":false,\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}");
+            json.push_str(&format!(",\"hybrid_scope\":{{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":{},\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}}}",scene=="hybrid-topology"));
         }
         let streaming = viewer
             .terrain_streamer
@@ -1437,6 +1930,30 @@ pub fn run() -> Result<()> {
             json.pop();
             json.push_str(&format!(",\"native_gpu_budget\":{{\"cache_target_bytes\":536870912,\"hard_transition_bytes\":1073741824,\"cache_target_chunks\":128,\"active_and_pending_protected\":true,\"peak_resident_bytes\":{},\"oversized_single_chunk_uploads\":{},\"max_frame_chunk_upload_bytes\":{},\"stale_cover_rejections\":{},\"chunk_cache_hits\":{},\"published_epoch\":{},\"published_center\":[{},{}]}}}}",hybrid.peak_bytes,hybrid.oversized_uploads,hybrid.max_frame_upload_bytes,hybrid.stale_rejections,hybrid.cache_hits,hybrid.revision(),hybrid.center()[0],hybrid.center()[1]));
         }
+        json.pop();
+        let gpu_stats = viewer.gpu_probe.as_ref().map(|p| p.stats.summary());
+        let number = |x: Option<f64>| x.map_or("null".into(), |v| v.to_string());
+        json.push_str(&format!(",\"renderer_backend\":\"{}\",\"gpu_render_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{}}},\"teleports\":{{\"completed\":{},\"last_readiness_ms\":{}}},\"prediction_horizon_seconds\":{},\"brick_gpu_bytes\":{}}}",
+            viewer.renderer, gpu_stats.as_ref().map_or(0,|s| s.sample_count), number(gpu_stats.as_ref().and_then(|s|s.p50_ms)), number(gpu_stats.as_ref().and_then(|s|s.p95_ms)), number(gpu_stats.as_ref().and_then(|s|s.p99_ms)), viewer.teleport_count, viewer.teleport_last_ms,
+            number(viewer.hybrid_stream.as_ref().map(|s|s.prediction_horizon_seconds())), viewer.gpu.as_ref().and_then(|g|g.brick.as_ref()).map_or(0,|b|b.resident_bytes)));
+        json.pop();
+        json.push_str(&format!(",\"topology_owner\":{{\"enabled\":{},\"world_revision\":{},\"exact_at_all_distances\":{},\"full_G3_passed\":false}}}}",viewer.world.topology_base_cells().is_some(),viewer.world.revision(),viewer.world.topology_base_cells().is_some()));
+        if let Some(probe) = viewer.gpu.as_ref().and_then(|g| g.surface_probe.as_ref()) {
+            let stats = probe.stats();
+            json.pop();
+            json.push_str(&format!(",\"surface_comparison\":{{\"layout\":\"quadtree\",\"leaves\":{},\"triangles\":{},\"last_selection_ms\":{},\"page_bytes\":{},\"instance_upload_bytes\":{},\"static_source_pages\":true,\"full_CDLOD\":false}}}}",stats.leaves,stats.triangles,stats.selection_ms,stats.page_bytes,stats.instance_upload_bytes));
+        }
+        json.pop();
+        json.push_str(&format!(
+            ",\"teleport_readiness\":[{}],\"gpu_timing_dropped\":{}}}",
+            viewer.teleport_records.join(","),
+            viewer.gpu_probe.as_ref().map_or(0, |p| p.dropped)
+        ));
+        json.pop();
+        json.push_str(&format!(",\"edits\":{{\"test_enabled\":{},\"test_restored\":{},\"published_count\":{},\"last_build_ms\":{},\"last_input_to_publish_ms\":{},\"world_revision\":{},\"records\":[{}]}}}}",
+            viewer.edit_test.is_some(),viewer.edit_test.as_ref().is_some_and(|t|t.phase==3),
+            viewer.edit_published_count,viewer.edit_build_ms,viewer.edit_input_to_publish_ms,
+            viewer.world.revision(),viewer.edit_records.join(",")));
         std::fs::write(&path, json)?;
         eprintln!("benchmark JSON: {}", path.display());
     }
@@ -1448,6 +1965,53 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scripted_cube_snapshot_restores_original_materials_including_existing_edits() {
+        use super::*;
+        for mut world in [
+            World::new(SEED),
+            World::fbm_topology(SEED, Default::default()).unwrap(),
+        ] {
+            let (_, cells) = edit_test_addition(&world);
+            assert_eq!(cells.len(), 4096);
+            assert!(cells.iter().all(|(c, m)| *m == Material::Air
+                && if world.topology_base_cells().is_some() {
+                    world.volume_owned(*c)
+                } else {
+                    inside_arena(*c)
+                }));
+            let a = cells[0].0;
+            let b = cells[1].0;
+            world.set(a, Material::Wood);
+            world.set(b, Material::Soil);
+            let original_revision = world.revision();
+            let (added, original) = edit_test_addition(&world);
+            assert_eq!(world.material(a), Material::Wood);
+            assert!(added.revision() > original_revision);
+            assert!(original
+                .iter()
+                .all(|(c, _)| added.material(*c) == Material::Stone));
+            // Exercise the same immutable background snapshot contract with a
+            // small extraction extent, independently of renderer publication.
+            let pending = PendingEdit::start(added.clone(), a, [16; 3]);
+            world.set(a, Material::Air);
+            let built = pending
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            assert_eq!(built.1, added.revision());
+            assert!(!built.0.indices.is_empty());
+            let restored = edit_test_restore(&added, &original);
+            assert!(restored.revision() > added.revision());
+            for &(cell, material) in &original {
+                assert_eq!(restored.material(cell), material);
+            }
+            assert_eq!(restored.material(a), Material::Wood);
+            assert_eq!(restored.material(b), Material::Soil);
+            let outside = Cell { x: 63, ..a };
+            assert_eq!(restored.material(outside), added.material(outside));
+        }
+    }
     #[test]
     fn asynchronous_edit_snapshot_preserves_revision_and_changes_geometry() {
         use super::*;

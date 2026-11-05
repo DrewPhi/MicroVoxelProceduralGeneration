@@ -8,16 +8,19 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 [implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 
-The default playtest launches seeded FBM terrain over a 4.096 × 4.096 km square.
-It is an experimental surface renderer with independently moving nested grids
-and background sample caching. `--scene hybrid` combines a moving 64 × 64 m
-exact-voxel interior, reusable 8 m chunks, an approximate 2 m collar, and the GPU
-proxy. Matched replacements publish together after bounded chunk uploads.
-`--scene hybrid-static` preserves the old fixed CPU reference. These FBM scenes
-represent surface terrain only: cave/edit handoff and collision remain absent,
-and transitions can remain visible. The editable tunnel/bridge fixture is a
-separate correctness reference.
+The default playtest launches an experimental moving FBM surface renderer.
+`--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;
+`--scene hybrid-static` keeps the earlier fixed reference. The new
+`--scene hybrid-topology` adds canonical caves, a bridge and editable voxels in a
+fixed **16 × 16 m volume ownership zone**. Exact volume geometry remains resident
+at every distance while terrain coverage moves. This is a bounded correctness
+prototype; distant boundary seams and the production ownership gate remain open.
 
+The editable `fixture` also supports `--renderer mesh|brick|brick-skip` for a
+bounded greedy-mesh versus exact brick-ray comparison. `--scene fbm
+--surface-layout clipmap|quadtree` compares the moving nested-grid baseline with
+a static quadtree selection probe. These experiments do not establish a production
+renderer winner, collision, persistence, or laptop performance acceptance.
 ```sh
 cd frontier
 cargo build --release --locked
@@ -27,11 +30,24 @@ cargo build --release --locked
 ./run.sh --scene fbm --seed 7 --camera aerial --view-levels 11
 ./run.sh --scene hybrid --seed 7 --msaa 4 --voxel-filter off
 ./run.sh --scene hybrid-static --seed 7
-./run.sh --scene fixture
+./run.sh --scene hybrid-topology --camera topology
+./run.sh --scene hybrid-topology --camera cave
+./run.sh --scene hybrid-topology --camera bridge
+./run.sh --scene hybrid --teleport-test --seconds 30
+./run.sh --scene fixture --renderer mesh --msaa 1
+./run.sh --scene fixture --renderer brick --msaa 1
+./run.sh --scene fixture --renderer brick-skip --msaa 1
+./run.sh --scene fbm --surface-layout quadtree --camera aerial
 ```
 
 Rust 1.99.1 is pinned. On Linux the window backend uses X11/XWayland.
 See the [developer guide](guide_for_devs.md) for controls and measurements.
+See the [prototype checkpoints 3–5](frontier/PROTOTYPE_CHECKPOINT.md) for the
+current comparison evidence and limitations, and the
+[bounded topology ownership notes](frontier/OWNERSHIP_CHECKPOINT3.md) for the
+canonical volume contract. Press **T** in either moving hybrid scene to prepare
+and publish a teleport destination before switching the camera. GPU render-pass
+timestamps are recorded automatically when supported by the adapter.
 See the [moving native checkpoint](frontier/MOVING_NATIVE_CHECKPOINT.md) for
 measurements and limits, and the [earlier handoff checkpoint](frontier/HANDOFF_CHECKPOINT.md)
 for the fixed reference and view-distance experiment. `--msaa 1|4` controls sample

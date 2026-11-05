@@ -3,9 +3,9 @@
 //! A worker owns one immutable source (seed/parameters/version); camera epochs
 //! never enter sample keys. Each level moves on its own fixed global lattice.
 //! Complete per-level pages survive cancelled selections, while a single newest
-//! demand replaces queued work. A coherent older snapshot may publish only while
-//! its finest center is within 24m of current demand; far travel cancels per row.
-//! This is an empirical travel budget, not a game-speed or readiness guarantee.
+//! demand replaces queued work. Only the exact accepted selection may publish;
+//! changed demand cancels per row, retaining completed canonical cache pages.
+//! The hybrid coordinator holds accepted demand through coherent GPU publication.
 use super::{page_bytes, Sample, TerrainData, MAX_LEVELS, MIN_LEVELS};
 use frontier_world::FbmTerrain;
 use std::{
@@ -199,7 +199,7 @@ pub struct TerrainStreamer {
     level_count: u32,
 }
 fn useful(a: [f64; 2], b: [f64; 2]) -> bool {
-    (a[0] - b[0]).abs().max((a[1] - b[1]).abs()) <= 24.
+    a == b
 }
 impl TerrainStreamer {
     #[cfg(test)]
@@ -245,8 +245,8 @@ impl TerrainStreamer {
                     let misses = cache.misses;
                     let pages = cache.generated_pages;
                     let reused = cache.reused_samples;
-                    // Near demand may supersede selection while this coherent snapshot
-                    // is still useful. Far travel/teleport cancels at each generated row.
+                    // Accepted demand belongs to one coherent selection. Cache pages
+                    // survive cancellation; selection identity does not.
                     let data = TerrainData::generate_levels(
                         &source,
                         center,
@@ -294,9 +294,30 @@ impl TerrainStreamer {
         })
     }
     pub fn request(&mut self, position: [f64; 2]) -> u64 {
+        self.request_selection(position, false)
+    }
+    /// Coordinator already owns an accepted coherent target; replace it exactly,
+    /// including nearby changed teleport destinations.
+    pub fn request_exact(&mut self, position: [f64; 2]) -> u64 {
+        self.request_selection(position, true)
+    }
+    fn request_selection(&mut self, position: [f64; 2], exact: bool) -> u64 {
         let center = position.map(|v| v.floor());
         let mut s = self.shared.0.lock().unwrap();
         if s.desired == Some(center) {
+            return s.epoch;
+        }
+        // Hold accepted coherent demand through CPU publication, also for the
+        // standalone proxy path. Ordinary per-meter camera motion must not
+        // continually cancel generation. A jump beyond the finest-page safe
+        // interior immediately supersedes it; the bound derives from geometry.
+        let pending = s.demand.is_some() || s.metrics.inflight_bytes > 0 || s.ready.is_some();
+        let interior = super::N as f64 * 0.5 - 1.;
+        if !exact
+            && pending
+            && s.desired
+                .is_some_and(|old| (0..2).all(|i| (old[i] - center[i]).abs() <= interior))
+        {
             return s.epoch;
         }
         s.epoch += 1;
@@ -314,7 +335,7 @@ impl TerrainStreamer {
     pub fn poll(&mut self) -> Option<TerrainUpdate> {
         let mut s = self.shared.0.lock().unwrap();
         let update = s.ready.take()?;
-        if update.epoch > s.epoch || !useful(update.center, s.desired.unwrap()) {
+        if update.epoch != s.epoch || !useful(update.center, s.desired.unwrap()) {
             s.metrics.stale_rejections += 1;
             return None;
         }
@@ -346,6 +367,16 @@ impl Drop for TerrainStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nearby_motion_keeps_accepted_epoch_until_ready_but_jump_supersedes() {
+        let source = FbmTerrain::new(7, Default::default()).unwrap();
+        let mut stream = TerrainStreamer::new(source);
+        let first = stream.request([0., 0.]);
+        assert_eq!(stream.request([15., 0.]), first);
+        let jump = stream.request([-800., 800.]);
+        assert!(jump > first);
+        assert_eq!(stream.request([-790., 810.]), jump);
+    }
     #[test]
     fn translated_negative_centers_reuse_canonical_cache_and_join() {
         let source = FbmTerrain::new(7, Default::default()).unwrap();

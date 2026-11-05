@@ -1,5 +1,9 @@
 # Moving native terrain and transition-quality checkpoint
 
+Later travel improvements and volume/renderer experiments are recorded in
+[Prototype checkpoints 3–5](PROTOTYPE_CHECKPOINT.md). Measurements below describe
+the earlier checkpoint.
+
 Implemented on `frontier-voxel-engine`, greenfield (tier G). This supersedes
 the fixed hybrid experiment in [HANDOFF_CHECKPOINT.md](HANDOFF_CHECKPOINT.md).
 The moving heightfield prototype is playable; the invisible-transition and

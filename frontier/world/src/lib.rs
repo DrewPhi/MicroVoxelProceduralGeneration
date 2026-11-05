@@ -94,6 +94,7 @@ impl Material {
 pub struct World {
     seed: u64,
     terrain: Option<FbmTerrain>,
+    topology_base: Option<i64>,
     edits: Arc<BTreeMap<Cell, Material>>,
     revision: u64,
     counter: Arc<AtomicU64>,
@@ -130,6 +131,7 @@ impl World {
         Self {
             seed,
             terrain: None,
+            topology_base: None,
             edits: Arc::default(),
             revision: 0,
             counter: Arc::new(AtomicU64::new(0)),
@@ -142,6 +144,24 @@ impl World {
             terrain: Some(terrain),
             ..Self::new(seed)
         })
+    }
+    /// Bounded ownership smoke fixture on the same FBM landscape. The source
+    /// height remains the unedited page generator; this explicit volume owns
+    /// x/z=[-8,8)m at every display distance.
+    pub fn fbm_topology(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
+        let mut world = Self::fbm(seed, params)?;
+        world.topology_base = Some(world.height_cells(-48, 0));
+        Ok(world)
+    }
+    pub fn topology_base_cells(&self) -> Option<i64> {
+        self.topology_base
+    }
+    pub fn volume_owned(&self, c: Cell) -> bool {
+        self.topology_base.is_some() && (-128..128).contains(&c.x) && (-128..128).contains(&c.z)
+    }
+    /// Effective edit bounds are exposed for bounded exact extraction, never for LOD.
+    pub fn edit_cells(&self) -> impl Iterator<Item = Cell> + '_ {
+        self.edits.keys().copied()
     }
     /// Immutable unedited surface source for CPU display-page generation.
     /// Edits remain authoritative through `material`; these pages exclude edits.
@@ -207,6 +227,36 @@ impl World {
         self.source_with_height(c, self.height_cells(c.x, c.z))
     }
     fn source_with_height(&self, c: Cell, h: i64) -> Material {
+        let mut h = h;
+        if let Some(base) = self.topology_base.filter(|_| self.volume_owned(c)) {
+            // An open excavation reveals a tunnel mouth; a second trench runs
+            // under an elevated bridge. Every change stays strictly inside owner.
+            if (-80..-16).contains(&c.x) && (-112..-80).contains(&c.z) {
+                h = h.min(base - 64);
+            }
+            if (32..96).contains(&c.x) && (-48..0).contains(&c.z) {
+                h = h.min(base - 64);
+            }
+            if (16..112).contains(&c.x) && (-32..-16).contains(&c.z) {
+                if (base + 16..base + 20).contains(&c.y) {
+                    return Material::Wood;
+                }
+                if (base - 64..base + 16).contains(&c.y)
+                    && ((16..20).contains(&c.x) || (108..112).contains(&c.x))
+                {
+                    return Material::Stone;
+                }
+            }
+            let dx = c.x + 48;
+            let dy = c.y - (base - 32);
+            if (-80..80).contains(&c.z)
+                && dx.abs() <= 24
+                && dy.abs() <= 24
+                && dx * dx + dy * dy < 24 * 24
+            {
+                return Material::Air;
+            }
+        }
         if let Some(terrain) = &self.terrain {
             return if c.y >= h {
                 Material::Air
@@ -363,6 +413,57 @@ pub fn raycast(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn topology_footprint_is_canonical_and_independent_of_camera() {
+        let params = FbmParams {
+            octaves: 1,
+            ..Default::default()
+        };
+        let topology = World::fbm_topology(7, params).unwrap();
+        let plain = World::fbm(7, params).unwrap();
+        let base = topology.topology_base_cells().unwrap();
+        for (x, z) in [
+            (-129, 0),
+            (-128, 0),
+            (127, 0),
+            (128, 0),
+            (0, -129),
+            (0, -128),
+            (0, 127),
+            (0, 128),
+            (-1, -1),
+        ] {
+            assert_eq!(
+                topology.height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE),
+                plain.height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE)
+            );
+            for y in base - 80..base + 24 {
+                let c = Cell { x, y, z };
+                if !topology.volume_owned(c) {
+                    assert_eq!(topology.material(c), plain.material(c));
+                }
+            }
+        }
+        let cave = Cell {
+            x: -48,
+            y: base - 32,
+            z: 0,
+        };
+        assert_eq!(topology.material(cave), Material::Air);
+        let o = [-3.03125, (base as f64 - 31.5) * VOXEL_SIZE, -6.8];
+        let hit = raycast(&topology, o, [0., 0., 1.], 20.).unwrap();
+        assert_eq!(hit.cell.z, 80); // real tunnel back wall, never a mouth cap
+        let deck = Cell {
+            x: 64,
+            y: base + 16,
+            z: -24,
+        };
+        assert_eq!(topology.material(deck), Material::Wood);
+        let below = [4.03125, (base as f64 - 20.) * VOXEL_SIZE, -1.46875];
+        let underside = raycast(&topology, below, [0., 1., 0.], 5.).unwrap();
+        assert_eq!(underside.cell.y, base + 16);
+        assert_eq!(underside.normal, [0, -1, 0]);
+    }
     #[test]
     fn negative_grid_and_local_precision() {
         assert_eq!(

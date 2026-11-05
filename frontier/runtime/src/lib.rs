@@ -9,6 +9,7 @@ use std::hash::Hash;
 
 pub mod benchmark;
 pub mod routes;
+pub mod travel;
 
 /// Identifies generated content. Camera state is intentionally absent.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

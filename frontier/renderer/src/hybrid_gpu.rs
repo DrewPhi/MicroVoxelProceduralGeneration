@@ -2,9 +2,10 @@
 //! while its predecessor remains drawable. This is not a volume handoff.
 use crate::{
     hybrid, mesh,
-    native_stream::{ChunkKey, NativeCoverage, NativeStreamer},
+    native_stream::{ChunkKey, NativeCoverage, NativeStreamer, CHUNK_METERS, CORE_METERS},
     terrain, Camera,
 };
+use frontier_runtime::travel::{TeleportGate, TravelPredictor};
 use glam::{DVec3, Vec3, Vec4};
 use std::{
     collections::{HashMap, VecDeque},
@@ -86,6 +87,12 @@ pub struct Stream {
     pub ready: Option<Prepared>,
     requested: bool,
     recycler: Recycler,
+    predictor: TravelPredictor,
+    clock: Instant,
+    selection_started: Instant,
+    awaiting_publication: bool,
+    published_center: Option<[f64; 2]>,
+    teleport: TeleportGate,
 }
 impl Stream {
     pub fn new(world: frontier_world::World, levels: u32) -> Result<Self, String> {
@@ -102,15 +109,93 @@ impl Stream {
             ready: None,
             requested: false,
             recycler: Recycler::new(),
+            predictor: TravelPredictor::default(),
+            clock: Instant::now(),
+            selection_started: Instant::now(),
+            awaiting_publication: false,
+            published_center: None,
+            teleport: TeleportGate::default(),
         })
     }
     pub fn discard(&mut self, prepared: Prepared) {
         self.recycler.retire(prepared);
     }
+    /// Call only after the complete native/collar/proxy selection reached GPU
+    /// publication (including initial construction), never after CPU readiness.
+    pub fn published(&mut self, center: [f64; 2]) {
+        if center != self.native.desired_center() {
+            return;
+        }
+        if self.awaiting_publication
+            && self.published_center.is_some()
+            && self.teleport.destination().is_none()
+        {
+            self.predictor
+                .record_latency(self.selection_started.elapsed().as_secs_f64());
+        }
+        self.published_center = Some(center);
+        self.awaiting_publication = false;
+        self.teleport.published(center);
+    }
+    /// Supersedes all ordinary travel immediately; caller retains the presented
+    /// camera until teleport_ready(id), then calls finish_teleport(id).
+    pub fn request_teleport(&mut self, destination: [f64; 2]) -> Result<u64, String> {
+        if destination.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
+            return Err("teleport destination outside supported coordinate range".into());
+        }
+        let center = destination.map(|v| (v / 8.).round() * 8.);
+        let id = self.teleport.request(center);
+        self.predictor.reset_motion();
+        self.native.request(center);
+        self.requested = true;
+        self.selection_started = Instant::now();
+        self.awaiting_publication = true;
+        if self.published_center == Some(center) {
+            self.teleport.published(center);
+            self.awaiting_publication = false;
+        }
+        Ok(id)
+    }
+    pub fn teleport_ready(&self, id: u64) -> bool {
+        self.teleport.is_ready(id)
+    }
+    pub fn finish_teleport(&mut self, id: u64) -> bool {
+        self.teleport.finish(id)
+    }
+    pub fn prediction_horizon_seconds(&self) -> f64 {
+        self.predictor.horizon_seconds()
+    }
     pub fn poll(&mut self, position: [f64; 2], moving: bool) -> Result<(), String> {
-        if moving || !self.requested {
-            self.native.request(position);
-            self.requested = true;
+        self.predictor
+            .observe(position, self.clock.elapsed().as_secs_f64());
+        if self.teleport.destination().is_none() && (moving || !self.requested) {
+            let desired = self.native.desired_center();
+            // A selected coherent cover is accepted demand until publication,
+            // rather than an obsolete visibility snapshot. Abandon it if a turn
+            // or jump takes the camera beyond its safe interior (one chunk guard).
+            let guard = CORE_METERS * 0.5 - CHUNK_METERS;
+            let safe = (0..2).all(|i| (position[i] - desired[i]).abs() <= guard);
+            if !self.awaiting_publication || !safe {
+                if (0..2).any(|i| (position[i] - desired[i]).abs() > CORE_METERS) {
+                    self.predictor.reset_motion();
+                }
+                let mut target = self.predictor.target(position);
+                // Prediction has no fixed distance cap. A 64m native square can
+                // only present a target with the current camera in its interior;
+                // constrain this selection by that geometric coverage contract.
+                for i in 0..2 {
+                    let min = ((position[i] - guard) / CHUNK_METERS).ceil() * CHUNK_METERS;
+                    let max = ((position[i] + guard) / CHUNK_METERS).floor() * CHUNK_METERS;
+                    target[i] = target[i].clamp(min, max);
+                }
+                let old = self.native.desired_center();
+                self.native.request(target);
+                if !self.requested || self.native.desired_center() != old {
+                    self.selection_started = Instant::now();
+                    self.awaiting_publication = true;
+                }
+                self.requested = true;
+            }
         }
         if let Some(error) = self.native.take_error() {
             return Err(error);
@@ -119,7 +204,7 @@ impl Stream {
             return Ok(());
         }
         let desired = self.native.desired_center();
-        self.terrain.request(desired);
+        self.terrain.request_exact(desired);
         if let Some(n) = self.native.take_ready() {
             let old = self.native_ready.replace(n);
             self.recycler.retire(old);
@@ -133,7 +218,9 @@ impl Stream {
                 Ok(result) => {
                     let ready = result?;
                     self.joining = None;
-                    if ready.native.center == desired {
+                    if ready.native.center == desired
+                        && ready.native.revision == self.native.desired_revision()
+                    {
                         self.ready = Some(ready)
                     } else {
                         self.recycler.retire(ready)
@@ -145,11 +232,9 @@ impl Stream {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self
-            .ready
-            .as_ref()
-            .is_some_and(|p| p.native.center != desired)
-        {
+        if self.ready.as_ref().is_some_and(|p| {
+            p.native.center != desired || p.native.revision != self.native.desired_revision()
+        }) {
             let old = self.ready.take();
             self.recycler.retire(old);
         }
@@ -159,7 +244,11 @@ impl Stream {
                 .native_ready
                 .as_ref()
                 .zip(self.terrain_ready.as_ref())
-                .is_some_and(|(n, t)| n.center == desired && n.center == t.center)
+                .is_some_and(|(n, t)| {
+                    n.center == desired
+                        && n.revision == self.native.desired_revision()
+                        && n.center == t.center
+                })
         {
             let native = self.native_ready.take().unwrap();
             let terrain = self.terrain_ready.take().unwrap();
@@ -520,6 +609,7 @@ impl HybridGpu {
         layout: &wgpu::BindGroupLayout,
         terrain: &mut terrain::TerrainGpu,
         desired: [f64; 2],
+        desired_revision: u64,
     ) -> bool {
         if !self.recycler.flush() {
             return false;
@@ -527,7 +617,7 @@ impl HybridGpu {
         if self
             .pending
             .as_ref()
-            .is_some_and(|p| p.native.center != desired)
+            .is_some_and(|p| p.native.center != desired || p.native.revision != desired_revision)
         {
             let stale = self.pending.take();
             self.recycler.retire(stale);
@@ -638,6 +728,77 @@ impl HybridGpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn flat_stream() -> Stream {
+        Stream::new(
+            frontier_world::World::fbm(
+                7,
+                frontier_world::FbmParams {
+                    amplitude: 0.,
+                    octaves: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            terrain::MIN_LEVELS,
+        )
+        .unwrap()
+    }
+    fn prepared(stream: &mut Stream, position: [f64; 2]) -> Prepared {
+        let start = Instant::now();
+        loop {
+            stream.poll(position, true).unwrap();
+            if let Some(ready) = stream.ready.take() {
+                return ready;
+            }
+            assert!(
+                start.elapsed().as_secs() < 20,
+                "coherent preparation timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    #[test]
+    fn cold_warm_changed_teleport_waits_for_complete_gpu_publication() {
+        let mut stream = flat_stream();
+        let first = stream.request_teleport([800., 0.]).unwrap();
+        let latest = stream.request_teleport([-800., 0.]).unwrap();
+        let ready = prepared(&mut stream, [0., 0.]);
+        assert_eq!(ready.native.center, [-800., 0.]);
+        assert_eq!(ready.native.revision, stream.native.desired_revision());
+        assert!(!stream.teleport_ready(first));
+        assert!(!stream.teleport_ready(latest)); // CPU/collar complete is insufficient.
+        stream.published(ready.native.center);
+        assert!(stream.teleport_ready(latest));
+        assert!(stream.finish_teleport(latest));
+        let jobs = stream.native.metrics().jobs;
+        let warm = stream.request_teleport([-800., 0.]).unwrap();
+        assert!(stream.teleport_ready(warm));
+        assert_eq!(stream.native.metrics().jobs, jobs);
+        assert!(stream.finish_teleport(warm));
+    }
+    #[test]
+    fn nearby_motion_finishes_accepted_target_and_far_turn_supersedes_it() {
+        let mut stream = flat_stream();
+        stream.poll([0., 0.], true).unwrap();
+        let initial = stream.native.desired_revision();
+        stream.poll([16., 0.], true).unwrap();
+        assert_eq!(stream.native.desired_revision(), initial);
+        let ready = prepared(&mut stream, [16., 0.]);
+        assert_eq!(ready.native.center, [0., 0.]);
+        stream.published(ready.native.center);
+        stream.poll([16., 0.], true).unwrap();
+        assert!(stream.native.desired_revision() > initial);
+        stream.poll([-800., 0.], true).unwrap();
+        let latest = stream.native.desired_revision();
+        let ready = prepared(&mut stream, [-800., 0.]);
+        assert_eq!(ready.native.revision, latest);
+        assert_eq!(ready.native.center, [-800., 0.]);
+        stream.published(ready.native.center);
+        stream.poll([-800., 0.], true).unwrap(); // stop does not create fresh content.
+        assert_eq!(stream.native.desired_revision(), latest);
+        stream.poll([-784., 0.], true).unwrap(); // resume requests entering coverage.
+        assert!(stream.native.desired_revision() > latest);
+    }
     #[test]
     fn steep_chunk_uploads_are_aligned_and_strictly_bounded_across_frames() {
         for total in [
