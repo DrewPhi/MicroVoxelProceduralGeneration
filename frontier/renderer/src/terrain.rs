@@ -1,5 +1,6 @@
-//! Experimental fixed-center surface proxy. Immutable nested grid footprints and
-//! CPU-sampled canonical source pages; deliberately no streaming or native handoff.
+//! Moving surface baseline: immutable nested footprints, worker-generated canonical
+//! samples. Independent level centers keep canonical parent anchors stationary.
+//! Four immutable trim variants preserve nested joins; no native/volume handoff.
 use frontier_world::FbmTerrain;
 use wgpu::util::DeviceExt;
 const N: i32 = 64;
@@ -23,187 +24,205 @@ struct Sample {
     parent_color: [f32; 4],
 }
 pub struct TerrainData {
-    vertices: Vec<GridVertex>,
-    indices: Vec<u32>,
+    vertices: &'static [GridVertex],
+    indices: &'static [u32],
     samples: Vec<Sample>,
+    centers: [[f64; 2]; LEVELS as usize],
+    ranges: Vec<std::ops::Range<u32>>,
 }
-fn filtered(source: &FbmTerrain, x: f64, z: f64, step: f64) -> f64 {
-    // Box footprint filter is empirical, not a silhouette-error bound.
-    let d = step * 0.25;
-    [
-        (x - d, z - d),
-        (x + d, z - d),
-        (x - d, z + d),
-        (x + d, z + d),
-    ]
-    .into_iter()
-    .map(|(x, z)| source.height_m(x, z))
-    .sum::<f64>()
-        * 0.25
-}
-fn parent_height(source: &FbmTerrain, x: f64, z: f64, step: f64) -> f64 {
-    let px = (x / step).floor() * step;
-    let pz = (z / step).floor() * step;
-    let u = (x - px) / step;
-    let v = (z - pz) / step;
-    let a = filtered(source, px, pz, step);
-    let b = filtered(source, px + step, pz, step);
-    let c = filtered(source, px, pz + step, step);
-    let d = filtered(source, px + step, pz + step, step);
-    // Matches the grid's a-b-c / b-d-c diagonal exactly, including odd edge points.
-    if u + v <= 1. {
-        a + (b - a) * u + (c - a) * v
-    } else {
-        d + (c - d) * (1. - u) + (b - d) * (1. - v)
-    }
-}
-fn filtered_color(source: &FbmTerrain, x: f64, z: f64, step: f64) -> [f32; 3] {
-    let d = step * 0.25;
-    let mut color = [0.; 3];
-    for (x, z) in [
-        (x - d, z - d),
-        (x + d, z - d),
-        (x - d, z + d),
-        (x + d, z + d),
-    ] {
-        let c = source.surface_color(x, z, source.height_m(x, z));
-        for i in 0..3 {
-            color[i] += c[i] * 0.25;
-        }
-    }
-    color
-}
-fn parent_color(source: &FbmTerrain, x: f64, z: f64, step: f64) -> [f32; 4] {
-    let px = (x / step).floor() * step;
-    let pz = (z / step).floor() * step;
-    let u = ((x - px) / step) as f32;
-    let v = ((z - pz) / step) as f32;
-    let colors = [
-        (px, pz),
-        (px + step, pz),
-        (px, pz + step),
-        (px + step, pz + step),
-    ]
-    .map(|(x, z)| filtered_color(source, x, z, step));
-    let mut out = [0.; 4];
-    for i in 0..3 {
-        let [a, b, c, d] = colors.map(|c| c[i]);
-        out[i] = if u + v <= 1. {
-            a + (b - a) * u + (c - a) * v
-        } else {
-            d + (c - d) * (1. - u) + (b - d) * (1. - v)
-        };
-    }
-    out[3] = 1.;
-    out
-}
-fn normal(source: &FbmTerrain, x: f64, z: f64, step: f64) -> [f32; 4] {
-    let dx = filtered(source, x - step, z, step) - filtered(source, x + step, z, step);
-    let dz = filtered(source, x, z - step, step) - filtered(source, x, z + step, step);
-    let n = glam::DVec3::new(dx, 2. * step, dz).normalize();
-    [n.x as f32, n.y as f32, n.z as f32, 0.]
-}
+#[path = "terrain_stream.rs"]
+mod streaming;
+use streaming::SampleCache;
+pub use streaming::{TerrainStreamer, TerrainUpdate};
 impl TerrainData {
+    #[cfg(test)]
     pub fn new(source: &FbmTerrain) -> Self {
-        let mut data = Self {
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            samples: Vec::new(),
-        };
-        for level in 0..LEVELS {
-            let step = 0.5 * (1u32 << level) as f64;
-            let base = data.vertices.len() as u32;
-            for z in -N..=N {
-                for x in -N..=N {
-                    // Collapse every odd outer-edge point onto an even parent anchor.
-                    // This removes the T junction rather than merely hiding it with skirts.
-                    let (mut gx, mut gz) = (x, z);
-                    if x.abs() == N && z % 2 != 0 {
-                        gz -= 1;
-                    }
-                    if z.abs() == N && x % 2 != 0 {
-                        gx -= 1;
-                    }
-                    let wx = gx as f64 * step;
-                    let wz = gz as f64 * step;
-                    let morph = if level + 1 == LEVELS {
-                        0.
-                    } else {
-                        ((x.abs().max(z.abs()) as f32 - 48.) / 16.).clamp(0., 1.)
-                    };
-                    let h = filtered(source, wx, wz, step);
-                    let parent = parent_height(source, wx, wz, step * 2.);
-                    let color = filtered_color(source, wx, wz, step);
-                    data.vertices.push(GridVertex {
-                        position: [wx as f32, wz as f32],
-                        sample: data.samples.len() as u32,
-                        morph,
-                    });
-                    data.samples.push(Sample {
-                        heights: [h as f32, parent as f32, 0., 0.],
-                        normal: normal(source, wx, wz, step),
-                        parent_normal: normal(source, wx, wz, step * 2.),
-                        color: [color[0], color[1], color[2], 1.],
-                        parent_color: parent_color(source, wx, wz, step * 2.),
-                    });
-                }
-            }
-            let row = (2 * N + 1) as u32;
-            for z in -N..N {
-                for x in -N..N {
-                    if level > 0 && (-N / 2..N / 2).contains(&x) && (-N / 2..N / 2).contains(&z) {
-                        continue;
-                    }
-                    let a = base + (z + N) as u32 * row + (x + N) as u32;
-                    if x == N - 1 && z == N - 1 {
-                        // At the corner, two collapsed edge points and the inner vertex
-                        // are collinear. Split the remaining face through that inner
-                        // vertex to avoid a diagonal T junction.
-                        data.indices.extend_from_slice(&[
-                            a,
-                            a + row,
-                            a + row + 1,
-                            a,
-                            a + row + 1,
-                            a + 1,
-                        ]);
-                    } else {
-                        data.indices.extend_from_slice(&[
-                            a,
-                            a + row,
-                            a + 1,
-                            a + 1,
-                            a + row,
-                            a + row + 1,
-                        ]);
+        Self::generate(source, [0., 0.], &mut SampleCache::new(), || false).unwrap()
+    }
+    fn generate(
+        source: &FbmTerrain,
+        center: [f64; 2],
+        cache: &mut SampleCache,
+        cancelled: impl Fn() -> bool,
+    ) -> Option<Self> {
+        type Topology = (Vec<GridVertex>, Vec<u32>, Vec<Vec<std::ops::Range<u32>>>);
+        static TOPOLOGY: std::sync::OnceLock<Topology> = std::sync::OnceLock::new();
+        let (vertices, indices, variants) = TOPOLOGY.get_or_init(|| {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            let mut variants = Vec::new();
+            for level in 0..LEVELS {
+                let step = 0.5 * (1u32 << level) as f64;
+                let base = vertices.len() as u32;
+                for z in -N..=N {
+                    for x in -N..=N {
+                        let (mut gx, mut gz) = (x, z);
+                        // Global even parent anchors: center is a multiple of 2*step.
+                        if x.abs() == N && z % 2 != 0 {
+                            gz -= 1;
+                        }
+                        if z.abs() == N && x % 2 != 0 {
+                            gx -= 1;
+                        }
+                        vertices.push(GridVertex {
+                            position: [gx as f32 * step as f32, gz as f32 * step as f32],
+                            sample: vertices.len() as u32,
+                            morph: if level + 1 == LEVELS {
+                                0.
+                            } else {
+                                ((x.abs().max(z.abs()) as f32 - 48.) / 16.).clamp(0., 1.)
+                            },
+                        });
                     }
                 }
+                let row = (2 * N + 1) as u32;
+                let mut ranges = Vec::new();
+                for parity in 0..4 {
+                    let start = indices.len() as u32;
+                    let dx = parity % 2;
+                    let dz = parity / 2;
+                    for z in -N..N {
+                        for x in -N..N {
+                            if level > 0
+                                && (-N / 2 + dx..N / 2 + dx).contains(&x)
+                                && (-N / 2 + dz..N / 2 + dz).contains(&z)
+                            {
+                                continue;
+                            }
+                            let a = base + (z + N) as u32 * row + (x + N) as u32;
+                            if x == N - 1 && z == N - 1 {
+                                indices.extend_from_slice(&[
+                                    a,
+                                    a + row,
+                                    a + row + 1,
+                                    a,
+                                    a + row + 1,
+                                    a + 1,
+                                ]);
+                            } else {
+                                indices.extend_from_slice(&[
+                                    a,
+                                    a + row,
+                                    a + 1,
+                                    a + 1,
+                                    a + row,
+                                    a + row + 1,
+                                ]);
+                            }
+                        }
+                    }
+                    ranges.push(start..indices.len() as u32);
+                }
+                variants.push(ranges);
             }
+            (vertices, indices, variants)
+        });
+        let centers = std::array::from_fn(|level| {
+            let snap = (1u32 << level) as f64;
+            center.map(|v| (v / snap).floor() * snap)
+        });
+        let ranges = (0..LEVELS as usize)
+            .map(|level| {
+                let parity = if level == 0 {
+                    0
+                } else {
+                    let step = 0.5 * (1u32 << level) as f64;
+                    let dx = ((centers[level - 1][0] - centers[level][0]) / step).round() as usize;
+                    let dz = ((centers[level - 1][1] - centers[level][1]) / step).round() as usize;
+                    dx + 2 * dz
+                };
+                variants[level][parity].clone()
+            })
+            .collect();
+        let count = ((N * 2 + 1).pow(2)) as usize;
+        let mut samples = Vec::with_capacity(vertices.len());
+        for level in 0..LEVELS as usize {
+            if cancelled() {
+                return None;
+            }
+            if let Some((old_center, page)) = &cache.pages[level] {
+                if *old_center == centers[level] {
+                    samples.extend_from_slice(page);
+                    cache.reused_samples += count as u64;
+                    continue;
+                }
+            }
+            let previous = cache.pages[level].clone();
+            let mut page = Vec::with_capacity(count);
+            for (i, vertex) in vertices[level * count..(level + 1) * count]
+                .iter()
+                .enumerate()
+            {
+                if i % (N * 2 + 1) as usize == 0 && cancelled() {
+                    return None;
+                }
+                let step = 0.5 * (1u32 << level) as f64;
+                let x = centers[level][0] + vertex.position[0] as f64;
+                let z = centers[level][1] + vertex.position[1] as f64;
+                // Whole Sample content is keyed by canonical position and level,
+                // not by the camera. Copy overlapping rows/columns directly.
+                // A nominal point on the old collapsed outer edge may represent
+                // its even neighbor; verify the physical point before reuse.
+                let reused = previous.as_ref().and_then(|(old_center, old_page)| {
+                    let ox = ((x - old_center[0]) / step) as i32;
+                    let oz = ((z - old_center[1]) / step) as i32;
+                    if !(-N..=N).contains(&ox) || !(-N..=N).contains(&oz) {
+                        return None;
+                    }
+                    let old_index = ((oz + N) * (2 * N + 1) + ox + N) as usize;
+                    let old_vertex = &vertices[level * count + old_index];
+                    if old_vertex.position[0] as f64 + old_center[0] != x
+                        || old_vertex.position[1] as f64 + old_center[1] != z
+                    {
+                        return None;
+                    }
+                    Some(old_page[old_index])
+                });
+                if let Some(sample) = reused {
+                    cache.reused_samples += 1;
+                    page.push(sample);
+                } else {
+                    page.push(cache.sample(source, x, z, step, [0., 0.]));
+                }
+            }
+            cache.generated_pages += 1;
+            samples.extend_from_slice(&page);
+            cache.pages[level] = Some((centers[level], page.into()));
         }
-        eprintln!("FBM fixed rings: {} vertices, {} triangles, {:.2} MiB pages; coverage ±{}m; no recenter/edits/native handoff",data.vertices.len(),data.indices.len()/3,data.samples.len() as f64*80./1048576.,HALF_EXTENT);
-        data
+        Some(Self {
+            vertices,
+            indices,
+            samples,
+            centers,
+            ranges,
+        })
     }
 }
+
 pub struct TerrainGpu {
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
+    samples: wgpu::Buffer,
+    center: [f64; 2],
+    centers: [[f64; 2]; LEVELS as usize],
+    ranges: Vec<std::ops::Range<u32>>,
     pub index_count: u32,
 }
 impl TerrainGpu {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, data: &TerrainData) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("terrain camera"),
-            size: 64,
+            size: 64 + 16 * LEVELS as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let samples = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("canonical height pages"),
             contents: bytemuck::cast_slice(&data.samples),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("terrain"),
@@ -308,8 +327,33 @@ impl TerrainGpu {
             uniform,
             vertices,
             indices,
-            index_count: data.indices.len() as u32,
+            samples,
+            center: data.centers[0],
+            centers: data.centers,
+            ranges: data.ranges.clone(),
+            index_count: data.ranges.iter().map(|r| r.end - r.start).sum(),
         }
+    }
+    pub fn center(&self) -> [f64; 2] {
+        self.center
+    }
+    pub fn upload(&mut self, queue: &wgpu::Queue, update: &TerrainUpdate) -> u64 {
+        let mut bytes = 0;
+        let count = ((N * 2 + 1).pow(2)) as usize;
+        for level in 0..LEVELS as usize {
+            if self.centers[level] != update.data.centers[level] {
+                bytes += (count * std::mem::size_of::<Sample>()) as u64;
+                queue.write_buffer(
+                    &self.samples,
+                    (level * count * std::mem::size_of::<Sample>()) as u64,
+                    bytemuck::cast_slice(&update.data.samples[level * count..(level + 1) * count]),
+                );
+            }
+        }
+        self.center = update.center;
+        self.centers = update.data.centers;
+        self.ranges = update.data.ranges.clone();
+        bytes
     }
     pub fn draw<'a>(
         &'a self,
@@ -322,11 +366,22 @@ impl TerrainGpu {
             0,
             bytemuck::cast_slice(&matrix.to_cols_array()),
         );
+        let offsets: [[f32; 4]; LEVELS as usize] = std::array::from_fn(|i| {
+            [
+                (self.centers[i][0] - self.center[0]) as f32,
+                (self.centers[i][1] - self.center[1]) as f32,
+                0.,
+                0.,
+            ]
+        });
+        queue.write_buffer(&self.uniform, 64, bytemuck::cast_slice(&offsets));
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.index_count, 0, 0..1);
+        for range in &self.ranges {
+            pass.draw_indexed(range.clone(), 0, 0..1);
+        }
     }
 }
 #[cfg(test)]
@@ -359,7 +414,11 @@ mod tests {
             }
             let mut area = 0f64;
             let mut edges = std::collections::HashMap::new();
-            for t in data.indices.chunks_exact(3) {
+            for t in data
+                .ranges
+                .iter()
+                .flat_map(|r| data.indices[r.start as usize..r.end as usize].chunks_exact(3))
+            {
                 let [a, b, c] = [t[0], t[1], t[2]].map(|i| data.vertices[i as usize].position);
                 let signed = (b[1] - a[1]) as f64 * (c[0] - a[0]) as f64
                     - (b[0] - a[0]) as f64 * (c[1] - a[1]) as f64;
@@ -400,3 +459,7 @@ mod tests {
         .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "terrain_tests.rs"]
+mod moving_tests;

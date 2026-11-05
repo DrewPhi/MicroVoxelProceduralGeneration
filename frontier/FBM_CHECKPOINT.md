@@ -1,5 +1,9 @@
 # Early FBM renderer checkpoint
 
+Historical fixed-center baseline at `9550ed1`. See
+[STREAMING_CHECKPOINT.md](STREAMING_CHECKPOINT.md) for the subsequent moving-level
+implementation and current performance/limitations.
+
 User priority: move a lightweight procedural source forward so rendering is
 measured on varied terrain now. This is partial work on FV05/FV09/FV12/FV02
 (#29/#33/#36/#26), not completion of their production acceptance criteria.

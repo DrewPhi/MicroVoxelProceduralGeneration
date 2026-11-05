@@ -3,6 +3,8 @@ use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
     pub capture: Option<PathBuf>,
+    pub capture_on_exit: Option<PathBuf>,
+    pub seconds: Option<f64>,
     pub width: u32,
     pub height: u32,
     pub frame_limit: Option<u64>,
@@ -15,9 +17,14 @@ pub struct Options {
     pub warmup: u64,
     pub report_path: Option<PathBuf>,
     pub route_step: f64,
+    pub route_speed: Option<f64>,
+    pub route_realtime: bool,
+    pub terrain_static: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
     let mut capture = None;
+    let mut capture_on_exit = None;
+    let mut seconds: Option<f64> = None;
     let mut width = WIDTH;
     let mut height = HEIGHT;
     let mut frame_limit = None;
@@ -30,6 +37,9 @@ pub fn parse() -> Result<Option<Options>> {
     let mut warmup = 0;
     let mut report_path = None;
     let mut route_step: f64 = 1. / 60.;
+    let mut route_speed: Option<f64> = None;
+    let mut route_realtime = false;
+    let mut terrain_static = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,11 +59,26 @@ pub fn parse() -> Result<Option<Options>> {
                 params.roughness = args.next().ok_or("--roughness requires gain")?.parse()?
             }
             "--uncapped" => uncapped = true,
+            "--terrain-static" => terrain_static = true,
+            "--route-clock" => {
+                route_realtime = match args.next().as_deref() {
+                    Some("realtime") => true,
+                    Some("frame") => false,
+                    _ => return Err("--route-clock requires realtime|frame".into()),
+                }
+            }
             "--warmup" => warmup = args.next().ok_or("--warmup requires frames")?.parse()?,
             "--report" => {
                 report_path = Some(PathBuf::from(
                     args.next().ok_or("--report requires JSON path")?,
                 ))
+            }
+            "--route-speed" => {
+                route_speed = Some(
+                    args.next()
+                        .ok_or("--route-speed requires meters per second")?
+                        .parse()?,
+                )
             }
             "--route-step" => {
                 route_step = args
@@ -69,6 +94,14 @@ pub fn parse() -> Result<Option<Options>> {
                     Some("turn-return") => frontier_runtime::routes::Route::TurnReturn,
                     _ => return Err("--route requires static|fly|stop-resume|turn-return".into()),
                 }
+            }
+            "--seconds" => {
+                seconds = Some(args.next().ok_or("--seconds requires duration")?.parse()?)
+            }
+            "--capture-on-exit" => {
+                capture_on_exit = Some(PathBuf::from(
+                    args.next().ok_or("--capture-on-exit requires PNG path")?,
+                ))
             }
             "--capture" => {
                 capture = Some(PathBuf::from(
@@ -86,7 +119,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Frontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --uncapped --warmup N --report PATH\nFBM: immutable fixed-center nested GPU grids, bounded ±2048m, surface-only, no editing/streaming/native handoff. WASD 35m/s; Shift 240m/s.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Frontier experimental FBM terrain (default) / exact native fixture\n--scene fbm|fbm-native|fixture --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -98,6 +131,12 @@ pub fn parse() -> Result<Option<Options>> {
     if !route_step.is_finite() || route_step <= 0. {
         return Err("--route-step must be finite and positive".into());
     }
+    if seconds.is_some_and(|s| !s.is_finite() || s <= 0.) {
+        return Err("--seconds must be finite and positive".into());
+    }
+    if route_speed.is_some_and(|s| !s.is_finite() || s <= 0.) {
+        return Err("--route-speed must be finite and positive".into());
+    }
     params.validate()?;
     if capture.is_some() && report_path.is_some() {
         return Err(
@@ -106,6 +145,8 @@ pub fn parse() -> Result<Option<Options>> {
     }
     Ok(Some(Options {
         capture,
+        capture_on_exit,
+        seconds,
         width,
         height,
         frame_limit,
@@ -118,5 +159,8 @@ pub fn parse() -> Result<Option<Options>> {
         warmup,
         report_path,
         route_step,
+        route_speed,
+        route_realtime,
+        terrain_static,
     }))
 }

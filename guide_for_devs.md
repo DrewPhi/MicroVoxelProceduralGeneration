@@ -3,10 +3,11 @@
 ## Current checkpoint
 
 The default scene now tests a CPU-canonical seeded FBM source on an experimental
-4.096 km square landscape. Seven fixed-center nested GPU grids share sampled
-source data and match boundary heights, normals and filtered colors. Geometry
-is reused during camera motion. This is a **fixed surface prototype**, not yet a
-moving/toroidal clipmap or a native-voxel handoff.
+4.096 km square landscape. Seven independently moving nested GPU grids share
+cached canonical samples and match boundary heights, normals and filtered colors.
+Geometry is reused during camera motion; a bounded background worker prepares
+coherent replacements. This remains a **surface prototype**, not a native-voxel
+handoff or a completed production renderer.
 
 `--scene fbm-native` displays an exact 8×8 m, 6.25 cm voxel crop from the same
 FBM source. `--scene fixture` preserves the original editable 16×14×16 m
@@ -25,7 +26,7 @@ cargo build --release --locked
 ./run.sh --scene fbm-native
 ./run.sh --scene fixture
 ./run.sh --capture output/fixture.png --width 1920 --height 1080
-./run.sh --frames 360 --route stop-resume --warmup 30 --uncapped --report output/run.json --width 1920 --height 1080
+./run.sh --seconds 15 --route stop-resume --route-clock realtime --warmup 30 --uncapped --report output/run.json --width 1920 --height 1080
 ```
 
 Create the output directory before capture (`mkdir -p output`). `run.sh` runs
@@ -52,7 +53,8 @@ controller.
 | `frontier/ARCHITECTURE.md` | Production design and staged renderer decisions |
 | `frontier/AGENTS.md` | Scope, reuse and measurement rules |
 
-See [FBM checkpoint measurements](frontier/FBM_CHECKPOINT.md) and the earlier
+See [moving coverage measurements](frontier/STREAMING_CHECKPOINT.md),
+[FBM checkpoint measurements](frontier/FBM_CHECKPOINT.md) and the earlier
 [native reference checkpoint](frontier/CHECKPOINT.md) for tests, hardware results
 and explicit limitations.
 
@@ -65,18 +67,28 @@ FBM defaults: seed 7, scale 1800 m, amplitude 1000 m, 8 octaves, roughness 0.5.
 The source combines warped gradient noise and ridged FBM; it is not an erosion,
 hydrology or tectonic simulation. Material coloring is currently grass and rock.
 
-WASD speed is 35 m/s (Shift 240 m/s) in the broad FBM scene, 3 m/s (Shift 15 m/s)
+WASD speed is 35 m/s (Shift 80 m/s) in the broad FBM scene, 3 m/s (Shift 15 m/s)
 in the native references. Free flight has no collision. The broad scene does not
-recenter: its square is fixed at x/z ±2048 m, with 0.5 m finest to 32 m outer grid
-spacing. Going outside this square or below ground is possible. Both FBM scenes
+use infinite resident terrain: its outer grid covers ±2048 m around its published
+center, with 0.5 m finest to 32 m outer spacing. Levels recenter independently;
+generation can lag rapid travel. Going outside loaded coverage or below ground
+is possible. Both FBM scenes
 disable editing until the correct rendering ownership/update path exists.
+
+Run `./tools/smoke_streaming.sh` for real-time stop–resume and turn–return routes,
+end-of-route PNGs, and streaming metrics. `--route-speed` sets benchmark speed
+in m/s (default 80 for FBM); 240 m/s currently fails streaming and is a stress
+test, not a supported travel profile. `--terrain-static` freezes initial
+coverage for comparison; `--seconds` limits wall-clock run duration and
+`--capture-on-exit` captures the final displayed scene.
 
 Run `./tools/smoke_fbm.sh` after building for a seed/camera PNG sweep and a
 360-frame stop–resume report. `--route static|fly|stop-resume|turn-return` uses
 absolute simulated time `frame_index * --route-step` (default 1/60 s), independent
 of achieved FPS. Broad FBM benchmark routes stay at least 10 m above the canonical
 surface; interactive flight does not. These are repeatable synthetic workloads,
-not measurements of streaming at actual real-time travel speeds.
+not measurements of streaming at actual real-time travel speeds unless
+`--route-clock realtime` is selected.
 
 JSON reports include source parameters, native size, representation, camera,
 route, adapter, warmup and frame percentiles. GPU timestamps and total RSS/VRAM
@@ -86,7 +98,7 @@ ignored `frontier/output/`.
 
 ## What remains
 
-The fixed surface prototype does not yet implement moving/toroidal page updates,
+The surface prototype does not yet implement toroidal GPU strip uploads,
 error-driven LOD selection, seamless exact-near voxel handoff, hybrid cave/edit
 ownership, persistent edits, walking collision, or production geography. The
 simple footprint filter has no certified silhouette bound. Do not claim G0–G4
