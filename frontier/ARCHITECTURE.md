@@ -5,8 +5,8 @@ This document governs the **new, isolated** `frontier-voxel-engine` branch and t
 **Fresh-start checkout (2026-11-04):** inherited engine source, tools, tests, assets,
 build manifests and obsolete CI have been removed from this branch at the user's
 request. Legacy paths below identify files on the named reference branches, not
-files that must remain in this checkout. No Frontier runtime has been implemented
-yet. Generated legacy artifacts are preserved in the
+files that must remain in this checkout. The bounded native reference checkpoint now exists; production streaming and
+renderer gates remain unimplemented/unproven. See ../guide_for_devs.md. Generated legacy artifacts are preserved in the
 [archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
 
 ## Product contract / invariants

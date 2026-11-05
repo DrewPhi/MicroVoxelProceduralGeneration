@@ -1,0 +1,17 @@
+[package]
+name = "frontier-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frontier-world = { path = "../world" }
+frontier-runtime = { path = "../runtime" }
+wgpu = "=24.0.5"
+winit = { version = "=0.30.13", default-features = false, features = ["x11", "rwh_06"] }
+glam = "=0.29.3"
+pollster = "=0.4.0"
+bytemuck = { version = "=1.25.2", features = ["derive"] }
+png = "=0.17.16"
+
+[dev-dependencies]
+naga = { version = "=24.0.0", features = ["wgsl-in"] }
