@@ -258,6 +258,7 @@ impl PreparedView {
     }
 }
 pub struct AdaptiveGpu {
+    lighting: [f32; 12],
     prepared_view: Option<PreparedView>,
     prepared_view_hits: u64,
     prepared_view_misses: u64,
@@ -307,7 +308,7 @@ impl AdaptiveGpu {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(96),
+                        min_binding_size: std::num::NonZeroU64::new(144),
                     },
                     count: None,
                 },
@@ -440,6 +441,7 @@ impl AdaptiveGpu {
             usage: wgpu::BufferUsages::VERTEX,
         });
         Self {
+            lighting: [0.; 12],
             prepared_view: None,
             prepared_view_hits: 0,
             prepared_view_misses: 0,
@@ -474,6 +476,32 @@ impl AdaptiveGpu {
             slots: (0..MAX_CLUSTERS as u32).rev().collect(),
             visible: vec![],
             camera_upload: vec![],
+        }
+    }
+    pub fn set_visual_lighting(
+        &mut self,
+        settings: &crate::settings::VisualSettings,
+        regional: bool,
+        amplitude: f32,
+    ) {
+        let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
+        let value = [
+            sun.x,
+            sun.y,
+            sun.z,
+            if regional { 1. } else { 0. },
+            settings.overcast,
+            0.,
+            0.,
+            0.,
+            if regional { 1. } else { 0. },
+            amplitude,
+            0.,
+            0.,
+        ];
+        if value != self.lighting {
+            self.lighting = value;
+            self.prepared_view = None;
         }
     }
     pub fn set_native_bins(&mut self, enabled: bool) {
@@ -899,7 +927,7 @@ impl AdaptiveGpu {
                 } else {
                     (None, c.count)
                 };
-            let mut bytes = [0u8; 96];
+            let mut bytes = [0u8; 144];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(
                 &(camera.position - c.origin).as_vec3().extend(1.).to_array(),
@@ -910,11 +938,12 @@ impl AdaptiveGpu {
                 (c.origin.z * 16.) as i64 as u32,
                 (self.voxel_filter as u32) | ((c.exact as u32) << 1),
             ];
-            bytes[80..].copy_from_slice(bytemuck::cast_slice(&paint));
+            bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
+            bytes[96..144].copy_from_slice(bytemuck::cast_slice(&self.lighting));
             let offset = self.camera_upload.len();
             self.camera_upload
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
-            self.camera_upload[offset..offset + 96].copy_from_slice(&bytes);
+            self.camera_upload[offset..offset + 144].copy_from_slice(&bytes);
             self.visible.push(DrawItem { key, bin_mask });
             stats.visible_clusters += 1;
             stats.draw_calls += bin_mask.map_or(1, |m| m.count_ones() as u64);
@@ -1258,7 +1287,7 @@ fn profile_bind(
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: uniform,
                     offset: 0,
-                    size: std::num::NonZeroU64::new(96),
+                    size: std::num::NonZeroU64::new(144),
                 }),
             },
             wgpu::BindGroupEntry {
@@ -1332,7 +1361,7 @@ mod tests {
         for i in [0, super::MAX_CLUSTERS - 1] {
             let offset = i as u64 * super::UNIFORM_STRIDE;
             assert_eq!(offset % 256, 0);
-            assert!(offset + 96 <= super::CAMERA_UNIFORM_BYTES);
+            assert!(offset + 144 <= super::CAMERA_UNIFORM_BYTES);
             assert!(offset <= u32::MAX as u64);
         }
         assert_eq!(super::MAX_BYTES, 512 * 1024 * 1024);
@@ -1499,7 +1528,12 @@ mod tests {
     fn canonical_lighting_and_tint_match_native_source() {
         let shader = include_str!("adaptive.wgsl");
         let native = include_str!("voxel.wgsl");
-        assert!(native.starts_with(shader.split("// Coordinate-only paint").next().unwrap()));
+        let legacy = shader
+            .split("fn terrain_lighting(")
+            .next()
+            .unwrap()
+            .replace("fn legacy_terrain_lighting(", "fn terrain_lighting(");
+        assert!(native.starts_with(&legacy));
         let paint = shader.split("// Coordinate-only paint").nth(1).unwrap();
         assert!(native.contains(paint.split("struct Camera").next().unwrap().trim()));
     }

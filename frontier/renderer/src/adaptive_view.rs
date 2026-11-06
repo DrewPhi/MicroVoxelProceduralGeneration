@@ -7,8 +7,9 @@ use crate::{
     Camera, Gpu,
 };
 use std::{collections::HashSet, time::Instant};
-const UPLOAD_BUDGET: u64 = 8 * 1024 * 1024;
+
 pub struct AdaptiveView {
+    upload_budget: u64,
     worker: Worker,
     pending: Option<SelectionFrame>,
     deferred: Option<SelectionFrame>,
@@ -73,6 +74,9 @@ pub struct AdaptiveView {
     frame_attachment_bytes: u64,
 }
 impl AdaptiveView {
+    pub fn set_upload_budget(&mut self, mib: usize) {
+        self.upload_budget = mib.clamp(1, 64) as u64 * 1024 * 1024;
+    }
     pub fn new(
         world: frontier_world::World,
         pixel_error: f64,
@@ -87,6 +91,7 @@ impl AdaptiveView {
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
         Ok(Self {
+            upload_budget: 8 * 1024 * 1024,
             worker: Worker::new_with_cache(
                 world,
                 StreamSettings {
@@ -251,6 +256,11 @@ impl AdaptiveView {
             }
         }
         let adaptive = gpu.adaptive.as_mut().unwrap();
+        adaptive.set_visual_lighting(
+            &gpu.visual_settings.clone().unwrap_or_default(),
+            gpu.regional_appearance,
+            gpu.terrain_amplitude,
+        );
         adaptive.set_voxel_filter(gpu.voxel_filter);
         adaptive.set_native_bins(self.native_bins);
         let mut keep = self.owners.clone();
@@ -273,7 +283,7 @@ impl AdaptiveView {
                     + tile.proxy_triangles.len() * 64) as u64;
                 // One bounded cluster is the upload quantum. A cluster larger
                 // than the frame budget is disclosed by max_upload_frame_bytes.
-                if uploaded > 0 && uploaded + bytes > UPLOAD_BUDGET {
+                if uploaded > 0 && uploaded + bytes > self.upload_budget {
                     break;
                 }
                 let upload_started = Instant::now();
@@ -288,7 +298,7 @@ impl AdaptiveView {
                     return Err(error);
                 }
                 uploaded += bytes;
-                if uploaded >= UPLOAD_BUDGET {
+                if uploaded >= self.upload_budget {
                     break;
                 }
             }

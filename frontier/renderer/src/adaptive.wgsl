@@ -2,12 +2,23 @@
 // Warm directional sunlight keeps voxel faces legible; cool sky and restrained
 // ground bounce provide hemispherical fill without flattening the shaded faces.
 // No visibility/shadow approximation or camera-dependent exposure is applied.
-fn terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
+fn legacy_terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
     let n=normalize(normal);
     let sun=normalize(vec3<f32>(-0.5,0.8,-0.3));
     let sky=0.5+0.5*n.y;
     let ambient=mix(vec3<f32>(0.12,0.105,0.085),vec3<f32>(0.28,0.33,0.40),sky);
     return ambient+vec3<f32>(0.78,0.70,0.58)*max(dot(n,sun),0.);
+}
+fn terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
+    let n=normalize(normal);
+    if camera.sun.w > 0.5 {
+        let sky=0.5+0.5*n.y;
+        let overcast=camera.sky.x;
+        let ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
+        let direct=vec3(0.83,0.75,0.60)*max(dot(n,camera.sun.xyz),0.);
+        return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast);
+    }
+    return legacy_terrain_lighting(normal);
 }
 // Coordinate-only paint: stable across chunk publication, no per-cell payload.
 fn paint_hash(p:vec3<u32>) -> f32 {
@@ -34,7 +45,7 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
                      1.+broad*0.15+local*0.08+speckle,
                      1.+broad*0.07+local*0.06+speckle);
 }
-struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32> };
+struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct FaceProfile {top:vec4<f32>,px:vec4<f32>,nx:vec4<f32>,pz:vec4<f32>,nz:vec4<f32>};
 @group(0) @binding(1) var<storage,read> face_profiles:array<FaceProfile>;

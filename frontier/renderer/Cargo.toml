@@ -12,6 +12,9 @@ glam = "=0.29.3"
 pollster = "=0.4.0"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 png = "=0.17.16"
+egui = "=0.31.1"
+egui-wgpu = { version = "=0.31.1", default-features = false }
+egui-winit = { version = "=0.31.1", default-features = false, features = ["x11"] }
 
 [dev-dependencies]
 naga = { version = "=24.0.0", features = ["wgsl-in"] }

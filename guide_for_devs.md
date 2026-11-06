@@ -2,6 +2,12 @@
 
 ## Current checkpoint
 
+The default `./run.sh` preview now uses the adaptive renderer with Regional
+terrain. Press **Esc** for live sun, atmosphere and exposure controls; image
+quality and loading settings use **Apply quality & loading**. See the
+[interactive visual preview](frontier/VISUAL_PREVIEW.md) for the current controls,
+material-painting scope and outstanding integrated validation.
+
 Adaptive loading now defaults to eight refinement selections per coherent
 transaction (at most four builders), cached GPU draw commands, and unchanged
 voxel/reference quality. `--adaptive-refinements 1..32` exposes the batch size;
@@ -13,8 +19,9 @@ multi-kilometre quality/performance gates.
 
 For rendering and LOD changes, start with the [primary player-view visual check](frontier/PRIMARY_VISUAL_CHECK.md). It fixes the original spiky terrain and player-height camera against a 256-sample exact-voxel reference.
 
-The default scene tests a CPU-canonical seeded FBM source on experimental
-moving nested GPU grids. Background workers prepare coherent coverage; native
+The default scene tests a CPU-canonical seeded FBM source using adaptive
+terrain clusters. The explicit `fbm` scene retains experimental moving nested
+GPU grids. Background workers prepare coherent coverage; native
 voxel identity remains 0.0625 m. All implementation is greenfield (tier G).
 The [prototype checkpoints 3–5](frontier/PROTOTYPE_CHECKPOINT.md) record the current
 measurements and remaining gates.
@@ -112,7 +119,7 @@ samples remain null. Frame intervals and GPU render-pass timings measure differe
 parts of a frame. Neither alone establishes production performance acceptance.
 
 Click the window to capture the mouse. WASD moves horizontally, mouse looks,
-Space/Ctrl moves vertically, Shift accelerates, Esc releases the mouse, F12 saves
+Space/Ctrl moves vertically, Shift accelerates, Esc opens settings and releases the mouse, F12 saves
 a PNG. Aim at screen center: left click removes a cell, right click places stone
 within 8 m in the fixture or inside the `hybrid-topology` ownership zone. One
 background rebuild runs at a time; wait for it before editing again. Edits are
@@ -155,7 +162,7 @@ relief in meters), `--octaves` and `--roughness` configure the source. These cha
 the landscape, not the voxel size. `--camera valley|aerial` selects a starting view.
 FBM defaults: seed 7, scale 1800 m, amplitude 1000 m, 8 octaves, roughness 0.5.
 The source combines warped gradient noise and ridged FBM; it is not an erosion,
-hydrology or tectonic simulation. Material coloring is currently grass and rock.
+hydrology or tectonic simulation. Regional painting uses landform slope, elevation and continuous moisture for grass, soil and exposed rock; see the [painting checkpoint](frontier/REGIONAL_PAINTING.md).
 
 WASD speed is 35 m/s (Shift 80 m/s) in the broad FBM scene, 3 m/s (Shift 15 m/s)
 in the hybrid and native references. Free flight has no collision. The broad scene does not

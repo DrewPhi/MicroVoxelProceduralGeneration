@@ -7,7 +7,7 @@ pub const FBM_SOURCE_VERSION: u32 = 1;
 /// Regional composition version; recipe must also be included in source/cache keys.
 pub const REGIONAL_FBM_SOURCE_VERSION: u32 = 2;
 /// Regional material painting version. Elevation/source v2 remains unchanged.
-pub const REGIONAL_APPEARANCE_VERSION: u32 = 1;
+pub const REGIONAL_APPEARANCE_VERSION: u32 = 3;
 
 /// Explicit source identity: the legacy recipe retains existing worlds exactly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -203,30 +203,118 @@ impl FbmTerrain {
         // queries. Raising octaves adds exactly one detail evaluation per band.
         self.params.amplitude / 1000.0 * (macro_relief + ridges + foothills + detail)
     }
+    /// Slope of the actual regional macro, ridge and foothill composition.
+    /// Fine 40m-and-smaller relief is intentionally excluded from cover: a grass
+    /// hummock must not become a rock outcrop just because it contains small bumps.
+    /// Analytic derivatives avoid four additional full height queries per column.
+    fn regional_cover_landform(&self, x: f64, z: f64) -> Field {
+        let sample = |x: Field, z: Field, salt| {
+            let [v, dx, dz] = noise_gradient(x.v, z.v, self.seed ^ salt);
+            Field {
+                v,
+                dx: dx * x.dx + dz * z.dx,
+                dz: dx * x.dz + dz * z.dz,
+            }
+        };
+        let x = Field {
+            v: x / self.params.horizontal_scale,
+            dx: 1.0,
+            dz: 0.0,
+        };
+        let z = Field {
+            v: z / self.params.horizontal_scale,
+            dx: 0.0,
+            dz: 1.0,
+        };
+        let (wx, wz) = if self.params.recipe == FbmRecipe::Regional {
+            (
+                x.add(
+                    sample(x.scale(0.4).offset(17.3), z.scale(0.4).offset(-8.7), 0x1234)
+                        .scale(100.0 / 1800.0),
+                ),
+                z.add(
+                    sample(x.scale(0.4).offset(-31.9), z.scale(0.4).offset(4.2), 0x5678)
+                        .scale(100.0 / 1800.0),
+                ),
+            )
+        } else {
+            (x, z)
+        };
+        let bands = |wavelength: f64, count: u32, salt: u64, ridged: bool| {
+            let (mut sum, mut norm, mut weight) = (Field::constant(0.0), 0.0, 1.0);
+            let mut frequency = 1800.0 / wavelength;
+            for octave in 0..count {
+                let n = sample(
+                    wx.scale(frequency).offset(12.7),
+                    wz.scale(frequency).offset(-29.1),
+                    salt.wrapping_add(octave as u64 * 0x9e3779b9),
+                );
+                let value = if ridged {
+                    let root = (n.v * n.v + 0.04).sqrt();
+                    let ridge = Field {
+                        v: 1.0 - root,
+                        dx: -n.v * n.dx / root,
+                        dz: -n.v * n.dz / root,
+                    };
+                    ridge.mul(ridge)
+                } else {
+                    n
+                };
+                sum = sum.add(value.scale(weight));
+                norm += weight;
+                weight *= 0.8 * self.params.roughness;
+                frequency *= 2.0;
+            }
+            sum.scale(1.0 / norm)
+        };
+        let province = sample(
+            wx.scale(0.3).offset(3.1),
+            wz.scale(0.3).offset(-7.8),
+            0xa53c,
+        )
+        .add(
+            sample(
+                wx.scale(0.6).offset(-19.4),
+                wz.scale(0.6).offset(2.6),
+                0x71b9,
+            )
+            .scale(0.35),
+        )
+        .scale(1.0 / 1.35);
+        let t = province.offset(0.25).scale(1.0 / 0.6).unit_clamp();
+        let smooth = t.mul(t).mul(t.scale(-2.0).offset(3.0));
+        let mountain = smooth.mul(smooth);
+        let macro_relief = bands(2500.0, 3, 0x9abc, false).scale(90.0);
+        let ridges = mountain.mul(bands(1400.0, 3, 0x24da, true)).scale(320.0);
+        let foothills = mountain
+            .scale(0.7)
+            .offset(0.3)
+            .mul(bands(300.0, 1, 0x83e1, false))
+            .scale(12.0);
+        let relief = macro_relief.add(ridges).add(foothills);
+        relief.scale(self.params.amplitude / 1000.0)
+    }
+    fn regional_cover_slope(&self, x: f64, z: f64) -> f64 {
+        let field = self.regional_cover_landform(x, z);
+        field.dx.hypot(field.dz) / self.params.horizontal_scale
+    }
     /// Same discrete material as the native top voxel. `height` is the canonical
-    /// top plane from `height_m`. Regional painting uses two coherent fields in
-    /// physical meters, independent of display spacing and terrain frequency.
-    /// A small material palette preserves greedy merging; no per-face or
-    /// sub-voxel texture is introduced. Cost is bounded, without slope queries.
+    /// top plane from `height_m`. Cover follows physical landform slope, elevation
+    /// and continuous moisture, never a display normal or an independent patch map.
+    /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
         if self.params.recipe != FbmRecipe::Legacy {
             let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
-            let exposure = noise(x / 220.0 + 13.7, z / 220.0 - 5.9, self.seed ^ 0x8ac1);
-            let soil = noise(x / 55.0 - 7.2, z / 55.0 + 21.4, self.seed ^ 0x3e57);
-            // Higher ground exposes more rock, but even low country contains
-            // outcrops. Never divide by amplitude: flat sources remain valid.
+            let slope = self.regional_cover_slope(x, z);
+            // Broad rainfall/soil-retention variation moves a cover boundary only
+            // where the landform already permits exposed rock or thin dry soil.
+            let moisture = noise(x / 900.0 + 13.7, z / 900.0 - 5.9, self.seed ^ 0x8ac1);
             let relative_height = if self.params.amplitude > 0.0 {
                 height / self.params.amplitude
             } else {
                 0.0
             };
-            return if exposure + relative_height * 2.4 > 0.65 {
-                Material::Stone
-            } else if soil > 0.55 {
-                Material::Soil
-            } else {
-                Material::Grass
-            };
+            return regional_cover_material(slope, relative_height, moisture);
         }
         if self.params.amplitude > 0.0 && height > self.params.amplitude * 0.48 {
             Material::Stone
@@ -236,6 +324,126 @@ impl FbmTerrain {
     }
     pub fn surface_color(&self, x: f64, z: f64, height: f64) -> [f32; 3] {
         self.surface_material(x, z, height).color()
+    }
+}
+
+// Regional cover is an authored highland-meadow model, not erosion simulation.
+// Rolling ground keeps continuous turf, including high meadows. Only genuinely
+// steep faces lose cover; moisture alone never paints lowland patches.
+fn regional_cover_material(slope: f64, relative_height: f64, moisture: f64) -> Material {
+    let highland = ((relative_height - 0.09) / 0.17).clamp(0.0, 1.0);
+    // About 35–39 degrees: elevation changes the threshold only mildly and
+    // can never expose a gentle summit solely because of its altitude.
+    let rock_limit = 0.78 + 0.035 * moisture - 0.045 * highland;
+    if slope > rock_limit {
+        Material::Stone
+    } else if slope > rock_limit - 0.045 && moisture < -0.15 {
+        Material::Soil
+    } else {
+        Material::Grass
+    }
+}
+
+/// Value and derivatives for composition of the material-support landform.
+#[derive(Clone, Copy)]
+struct Field {
+    v: f64,
+    dx: f64,
+    dz: f64,
+}
+impl Field {
+    fn constant(v: f64) -> Self {
+        Self {
+            v,
+            dx: 0.0,
+            dz: 0.0,
+        }
+    }
+    fn offset(self, v: f64) -> Self {
+        Self {
+            v: self.v + v,
+            ..self
+        }
+    }
+    fn scale(self, v: f64) -> Self {
+        Self {
+            v: self.v * v,
+            dx: self.dx * v,
+            dz: self.dz * v,
+        }
+    }
+    fn add(self, b: Self) -> Self {
+        Self {
+            v: self.v + b.v,
+            dx: self.dx + b.dx,
+            dz: self.dz + b.dz,
+        }
+    }
+    fn mul(self, b: Self) -> Self {
+        Self {
+            v: self.v * b.v,
+            dx: self.dx * b.v + self.v * b.dx,
+            dz: self.dz * b.v + self.v * b.dz,
+        }
+    }
+    fn unit_clamp(self) -> Self {
+        if self.v <= 0.0 {
+            Self::constant(0.0)
+        } else if self.v >= 1.0 {
+            Self::constant(1.0)
+        } else {
+            self
+        }
+    }
+}
+
+/// Derivative of the same clamped gradient noise used by canonical height.
+fn noise_gradient(x: f64, z: f64, seed: u64) -> [f64; 3] {
+    let (ix, iz) = (x.floor() as i64, z.floor() as i64);
+    let u = Field {
+        v: x - x.floor(),
+        dx: 1.0,
+        dz: 0.0,
+    };
+    let v = Field {
+        v: z - z.floor(),
+        dx: 0.0,
+        dz: 1.0,
+    };
+    let fade = |t: Field| {
+        let f = t.v * t.v * t.v * (t.v * (t.v * 6.0 - 15.0) + 10.0);
+        let d = 30.0 * t.v * t.v * (t.v - 1.0) * (t.v - 1.0);
+        Field {
+            v: f,
+            dx: d * t.dx,
+            dz: d * t.dz,
+        }
+    };
+    let grad = |dx: i64, dz: i64| {
+        let a = u.offset(-(dx as f64));
+        let b = v.offset(-(dz as f64));
+        match hash(ix.wrapping_add(dx), iz.wrapping_add(dz), seed) & 7 {
+            0 => a,
+            1 => a.scale(-1.0),
+            2 => b,
+            3 => b.scale(-1.0),
+            4 => a.add(b).scale(std::f64::consts::FRAC_1_SQRT_2),
+            5 => a.add(b.scale(-1.0)).scale(std::f64::consts::FRAC_1_SQRT_2),
+            6 => b.add(a.scale(-1.0)).scale(std::f64::consts::FRAC_1_SQRT_2),
+            _ => a.add(b).scale(-std::f64::consts::FRAC_1_SQRT_2),
+        }
+    };
+    let lerp = |a: Field, b: Field, t: Field| a.add(b.add(a.scale(-1.0)).mul(t));
+    let n = lerp(
+        lerp(grad(0, 0), grad(1, 0), fade(u)),
+        lerp(grad(0, 1), grad(1, 1), fade(u)),
+        fade(v),
+    )
+    .scale(1.6);
+    if n.v <= -1.0 || n.v >= 1.0 {
+        [n.v.clamp(-1.0, 1.0), 0.0, 0.0]
+    } else {
+        [n.v, n.dx, n.dz]
     }
 }
 
@@ -361,6 +569,103 @@ mod tests {
     }
 
     #[test]
+    fn gradient_noise_matches_finite_differences() {
+        for seed in [7, 113, 0xdead_beef] {
+            for (x, z) in [
+                (-3.21, 8.76),
+                (-0.0001, 0.0001),
+                (0.0, 0.0),
+                (1.0, -2.0),
+                (19.345, 7.891),
+            ] {
+                let [value, dx, dz] = noise_gradient(x, z, seed);
+                let e = 1e-6;
+                assert!((value - noise(x, z, seed)).abs() < 1e-14);
+                assert!(
+                    (dx - (noise(x + e, z, seed) - noise(x - e, z, seed)) / (2.0 * e)).abs() < 1e-7
+                );
+                assert!(
+                    (dz - (noise(x, z + e, seed) - noise(x, z - e, seed)) / (2.0 * e)).abs() < 1e-7
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn regional_landform_gradient_matches_physical_slopes() {
+        for recipe in [FbmRecipe::Regional, FbmRecipe::RegionalUnwarped] {
+            for scale in [900.0, 1800.0, 3600.0] {
+                let terrain = FbmTerrain::new(
+                    113,
+                    FbmParams {
+                        recipe,
+                        horizontal_scale: scale,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                for (x, z) in [(-3123.4, 8765.4), (-0.01, 0.03), (19345.0, 7891.0)] {
+                    let f = terrain.regional_cover_landform(x, z);
+                    let e = 0.001;
+                    let dx = (terrain.regional_cover_landform(x + e, z).v
+                        - terrain.regional_cover_landform(x - e, z).v)
+                        / (2.0 * e);
+                    let dz = (terrain.regional_cover_landform(x, z + e).v
+                        - terrain.regional_cover_landform(x, z - e).v)
+                        / (2.0 * e);
+                    assert!((f.dx / scale - dx).abs() < 1e-7);
+                    assert!((f.dz / scale - dz).abs() < 1e-7);
+                    assert!((terrain.regional_cover_slope(x, z) - dx.hypot(dz)).abs() < 1e-7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn regional_cover_requires_landform_exposure() {
+        for moisture in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            // Moisture never creates random bare patches on gentle low ground.
+            assert_eq!(
+                regional_cover_material(0.08, 0.03, moisture),
+                Material::Grass
+            );
+            assert_eq!(
+                regional_cover_material(0.9, 0.03, moisture),
+                Material::Stone
+            );
+            assert_eq!(
+                regional_cover_material(0.1, 0.30, moisture),
+                Material::Grass
+            );
+        }
+        // Rolling hills stay meadow at every altitude/moisture combination.
+        for elevation in [0.0, 0.15, 0.30, 1.0] {
+            for moisture in [-1.0, 0.0, 1.0] {
+                assert_eq!(
+                    regional_cover_material(0.6, elevation, moisture),
+                    Material::Grass
+                );
+            }
+        }
+        assert_eq!(regional_cover_material(0.74, 0.03, -0.5), Material::Soil);
+        assert_eq!(regional_cover_material(0.74, 0.03, 0.5), Material::Grass);
+        // Zero-amplitude sources cannot contain steep or high cover regions.
+        let terrain = FbmTerrain::new(
+            7,
+            FbmParams {
+                recipe: FbmRecipe::Regional,
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (x, z) in [(-2000.0, 3000.0), (0.0, 0.0), (9000.0, -8000.0)] {
+            assert_eq!(terrain.regional_cover_slope(x, z), 0.0);
+            assert_eq!(terrain.surface_material(x, z, 0.0), Material::Grass);
+        }
+    }
+
+    #[test]
     fn regional_paint_is_seeded_coherent_and_native_column_constant() {
         for recipe in [FbmRecipe::Regional, FbmRecipe::RegionalUnwarped] {
             for seed in [7, 113, 997] {
@@ -377,7 +682,7 @@ mod tests {
                 let mut adjacent_changes = 0;
                 for ix in -24..24 {
                     for iz in -24..24 {
-                        let (x, z) = (ix as f64 * 81.0, iz as f64 * 79.0);
+                        let (x, z) = (ix as f64 * 331.0, iz as f64 * 329.0);
                         let h = terrain.height_m(x, z);
                         let cell = Cell::from_meters([x, h - VOXEL_SIZE, z]);
                         let [cx, _, cz] = cell.center_m();
@@ -404,7 +709,7 @@ mod tests {
                     }
                 }
                 assert!(
-                    counts.iter().all(|&n| n > 20),
+                    counts[0] * 5 > counts.iter().sum::<usize>() * 4,
                     "seed={seed} {recipe:?}: {counts:?}"
                 );
                 // Paint is coherent in meters, not a random native-cell mosaic.

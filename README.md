@@ -12,9 +12,11 @@ An [independent offline voxel reference](frontier/reference/README.md) now provi
 supersampled images, coverage/depth data and matched GPU comparisons. See the
 [reference checkpoint](frontier/REFERENCE_CHECKPOINT.md) for measured results and scope.
 
-The default playtest launches an experimental moving FBM surface renderer.
-It now uses a gentler regional terrain recipe, voxel appearance filtering and
-4×MSAA by default. Use `--terrain-recipe legacy` for the original spiky terrain.
+The default playtest launches the experimental adaptive renderer with Regional
+terrain, voxel appearance filtering and 4×MSAA. Press **Esc** for live light and
+atmosphere controls plus image-quality and loading settings. See the
+[interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
+Use `--terrain-recipe legacy` for the original spiky terrain.
 See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md) and
 [basic lighting/painting pass](frontier/BEAUTY_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;
@@ -30,7 +32,7 @@ bounded greedy-mesh versus exact brick-ray comparison. `--scene fbm
 a static quadtree selection probe. These experiments do not establish a production
 renderer winner, collision, persistence, or laptop performance acceptance.
 
-The new selectable `--scene adaptive` path replaces the fixed native square
+The default `--scene adaptive` path replaces the fixed native square
 with world-aligned clusters selected by projected geometry error. It uses pooled
 GPU storage and canonical face/material summaries; `adaptive-topology` retains
 the exact cave/bridge owner. See [adaptive rendering](frontier/ADAPTIVE_RENDERING.md)

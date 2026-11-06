@@ -3,6 +3,7 @@ mod adaptive_geometry;
 mod adaptive_gpu;
 mod adaptive_stream;
 mod adaptive_view;
+mod atmosphere;
 pub mod brick_ray;
 mod build_memory;
 pub mod column_mesh;
@@ -16,9 +17,12 @@ pub mod mesh;
 mod native_fbm;
 mod native_stream;
 mod options;
+mod settings;
+mod settings_ui;
 mod source_page_cache;
 mod surface_compare;
 mod terrain;
+mod viewer_visual;
 pub mod volume;
 
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
@@ -97,6 +101,9 @@ impl Camera {
 }
 
 struct Gpu {
+    visual_settings: Option<settings::VisualSettings>,
+    regional_appearance: bool,
+    terrain_amplitude: f32,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
@@ -308,6 +315,9 @@ impl Gpu {
             usage: wgpu::BufferUsages::INDEX,
         });
         Ok(Self {
+            visual_settings: None,
+            regional_appearance: false,
+            terrain_amplitude: 1000.,
             device,
             queue,
             pipeline,
@@ -633,16 +643,53 @@ impl Gpu {
         let multisample_view = multisample
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
-        self.draw(
-            &mut encoder,
-            multisample_view.as_ref().unwrap_or(&target),
-            multisample_view.as_ref().map(|_| &target),
-            &depth.create_view(&Default::default()),
-            camera,
-            width,
-            height,
-            None,
-        );
+        let post_settings = self
+            .visual_settings
+            .as_ref()
+            .filter(|s| (s.atmosphere || s.exposure != 1. || s.render_scale != 1.) && !floating);
+        if let Some(settings) = post_settings {
+            let atmosphere = atmosphere::Atmosphere::new(
+                &self.device,
+                self.format,
+                width,
+                height,
+                settings.render_scale,
+                self.sample_count,
+            );
+            let (rw, rh) = atmosphere.dimensions();
+            atmosphere.prepare(
+                &self.queue,
+                camera
+                    .matrix(camera.position, rw as f32 / rh as f32)
+                    .inverse(),
+                Vec3::ZERO,
+                camera.position,
+                settings,
+                0.,
+            );
+            self.draw(
+                &mut encoder,
+                atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
+                atmosphere.msaa_view().map(|_| atmosphere.scene_view()),
+                atmosphere.depth_view(),
+                camera,
+                rw,
+                rh,
+                None,
+            );
+            atmosphere.encode(&mut encoder, &target);
+        } else {
+            self.draw(
+                &mut encoder,
+                multisample_view.as_ref().unwrap_or(&target),
+                multisample_view.as_ref().map(|_| &target),
+                &depth.create_view(&Default::default()),
+                camera,
+                width,
+                height,
+                None,
+            );
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -664,7 +711,7 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
-        let depth_buffer = (self.sample_count == 1).then(|| {
+        let depth_buffer = (self.sample_count == 1 && post_settings.is_none()).then(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("depth capture readback"),
                 size: depth_row as u64 * height as u64,
@@ -742,6 +789,15 @@ impl Gpu {
                 .collect();
             std::fs::write(path.with_extension("coverage.f32"), coverage)?;
             std::fs::write(path.with_extension("depth.f32"), packed)?;
+        } else {
+            // Do not leave diagnostic files from an earlier non-postprocessed capture.
+            for extension in ["depth.f32", "coverage.f32"] {
+                match std::fs::remove_file(path.with_extension(extension)) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
         // Float captures preserve unclipped shader radiance. Ordinary captures
         // decode their actual quantized target, retaining that limitation.
@@ -790,17 +846,39 @@ impl Gpu {
             "linear_rgb_decoded_from_8bit_target"
         };
         let samples = self.sample_count as u64;
-        let capture_render_texture_bytes = width as u64
+        let mut capture_render_texture_bytes = width as u64
             * height as u64
             * (bpp as u64 + samples * 4 + if samples > 1 { samples * bpp as u64 } else { 0 });
-        let capture_readback_bytes =
-            (row as u64 + if samples == 1 { depth_row as u64 } else { 0 }) * height as u64;
+        if let Some(settings) = post_settings {
+            let rw = ((width as f32 * settings.render_scale).round() as u64).max(1);
+            let rh = ((height as f32 * settings.render_scale).round() as u64).max(1);
+            // Resolved scene + composite, depth, and optional multisample scene.
+            capture_render_texture_bytes += rw
+                * rh
+                * (2 * bpp as u64
+                    + samples * 4
+                    + if samples > 1 { samples * bpp as u64 } else { 0 });
+        }
+        let capture_readback_bytes = (row as u64
+            + if depth_buffer.is_some() {
+                depth_row as u64
+            } else {
+                0
+            })
+            * height as u64;
         let eye = camera.position.to_array();
         let target = (camera.position + camera.direction().as_dvec3()).to_array();
         std::fs::write(path.with_extension("capture.json"), format!(
             "{{\"width\":{width},\"height\":{height},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
+        if let Some(settings) = &self.visual_settings {
+            let metadata_path = path.with_extension("capture.json");
+            let mut metadata = std::fs::read_to_string(&metadata_path)?;
+            metadata.pop();
+            metadata.push_str(&format!(",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{}}}", settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some()));
+            std::fs::write(metadata_path, metadata)?;
+        }
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
         png.set_depth(png::BitDepth::Eight);
@@ -948,6 +1026,16 @@ impl Default for EditTest {
 }
 
 struct Viewer {
+    visual_settings: settings::VisualSettings,
+    settings_ui: Option<settings_ui::SettingsUi>,
+    atmosphere: Option<atmosphere::Atmosphere>,
+    visual_menu_enabled: bool,
+    visual_started: Instant,
+    display_frame_ms: f64,
+    visual_build_mib: usize,
+    visual_disk_cache: Option<PathBuf>,
+    visual_disk_mib: usize,
+
     adaptive_view: Option<adaptive_view::AdaptiveView>,
     adaptive_route_quality: adaptive_view::RouteQualityStats,
     adaptive_route_started: bool,
@@ -1048,7 +1136,11 @@ impl Viewer {
     }
     fn poll_terrain(&mut self) {
         if let (Some(view), Some(gpu)) = (&mut self.adaptive_view, &mut self.gpu) {
-            if let Err(error) = view.poll(gpu, self.camera, self.width, self.height) {
+            let (width, height) = self
+                .atmosphere
+                .as_ref()
+                .map_or((self.width, self.height), |a| a.dimensions());
+            if let Err(error) = view.poll(gpu, self.camera, width, height) {
                 self.error = Some(error);
             }
             return;
@@ -1299,6 +1391,15 @@ impl Viewer {
         surface.configure(&gpu.device, config);
         self.depth = Some(gpu.texture(width, height, true));
         self.multisample = gpu.multisample_texture(width, height);
+        if let Some(atmosphere) = &mut self.atmosphere {
+            atmosphere.resize(
+                &gpu.device,
+                width,
+                height,
+                self.visual_settings.render_scale,
+                gpu.sample_count,
+            );
+        }
     }
     fn render(&mut self) -> Result<()> {
         self.poll_edit();
@@ -1321,6 +1422,7 @@ impl Viewer {
         }
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
+        self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
             let right = forward.cross(Vec3::Y);
@@ -1511,16 +1613,44 @@ impl Viewer {
             .multisample
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
-        gpu.draw(
-            &mut encoder,
-            multisample_view.as_ref().unwrap_or(&target),
-            multisample_view.as_ref().map(|_| &target),
-            &depth.create_view(&Default::default()),
-            &self.camera,
-            config.width,
-            config.height,
-            timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
-        );
+        if let Some(atmosphere) = &self.atmosphere {
+            let (width, height) = atmosphere.dimensions();
+            atmosphere.prepare(
+                &gpu.queue,
+                self.camera
+                    .matrix(self.camera.position, width as f32 / height as f32)
+                    .inverse(),
+                Vec3::ZERO,
+                self.camera.position,
+                &self.visual_settings,
+                self.visual_started.elapsed().as_secs_f32(),
+            );
+            gpu.draw(
+                &mut encoder,
+                atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
+                atmosphere.msaa_view().map(|_| atmosphere.scene_view()),
+                atmosphere.depth_view(),
+                &self.camera,
+                width,
+                height,
+                timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
+            );
+            atmosphere.encode(&mut encoder, &target);
+        } else {
+            gpu.draw(
+                &mut encoder,
+                multisample_view.as_ref().unwrap_or(&target),
+                multisample_view.as_ref().map(|_| &target),
+                &depth.create_view(&Default::default()),
+                &self.camera,
+                config.width,
+                config.height,
+                timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
+            );
+        }
+        if let Some(ui) = &self.settings_ui {
+            ui.render(&mut encoder, &target);
+        }
         if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
             probe.resolve(&mut encoder, slot);
         }
@@ -1529,6 +1659,9 @@ impl Viewer {
             probe.submitted(slot);
         }
         frame.present();
+        if let Some(ui) = &mut self.settings_ui {
+            ui.finish_frame();
+        }
         self.frames += 1;
         self.total_frames += 1;
         let elapsed = now.duration_since(self.fps_start).as_secs_f64();
@@ -1550,12 +1683,12 @@ impl Viewer {
                         0
                     };
                 window.set_title(&format!(
-                    "Frontier adaptive clusters{} | {:.0} FPS | {} triangles | {} px error | {} | Esc release / F12",
+                    "Frontier adaptive clusters{} | {:.0} FPS | {} triangles | {} px error | {} | Esc settings / F12",
                     if gpu.volume_owner { " + exact cave/bridge owner" } else { "" },
                     self.frames as f64 / elapsed, triangles, view.pixel_error, state
                 ));
             } else {
-                window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc release / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
+                window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc settings / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             }
             self.frames = 0;
             self.fps_start = now;
@@ -1590,6 +1723,7 @@ impl ApplicationHandler for Viewer {
             if let Some(snapshot) = self.brick_initial.take() {
                 gpu.install_bricks(&snapshot, self.renderer == "brick-skip")?;
             }
+            gpu.configure_visuals(&self.world, &self.visual_settings);
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
             if let Some(view) = &mut self.adaptive_view {
                 view.poll(&mut gpu, self.camera, self.width, self.height)?;
@@ -1642,6 +1776,27 @@ impl ApplicationHandler for Viewer {
             surface.configure(&gpu.device, &config);
             self.depth = Some(gpu.texture(config.width, config.height, true));
             self.multisample = gpu.multisample_texture(config.width, config.height);
+            if self.visual_menu_enabled {
+                self.settings_ui = Some(settings_ui::SettingsUi::new(
+                    &window,
+                    &gpu.device,
+                    gpu.format,
+                    self.visual_settings.clone(),
+                ));
+            }
+            if self.visual_menu_enabled
+                || self.visual_settings.atmosphere
+                || self.visual_settings.render_scale != 1.
+            {
+                self.atmosphere = Some(atmosphere::Atmosphere::new(
+                    &gpu.device,
+                    gpu.format,
+                    config.width,
+                    config.height,
+                    self.visual_settings.render_scale,
+                    gpu.sample_count,
+                ));
+            }
             self.config = Some(config);
             self.gpu = Some(gpu);
             self.surface = Some(surface);
@@ -1675,6 +1830,9 @@ impl ApplicationHandler for Viewer {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.visual_input(&event) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if self.benchmark_input_lock {
@@ -1802,6 +1960,8 @@ fn capture_pose(
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
     let Some(options::Options {
+        atmosphere: atmosphere_option,
+        render_scale,
         capture,
         capture_on_exit,
         seconds,
@@ -1851,6 +2011,30 @@ pub fn run() -> Result<()> {
     else {
         return Ok(());
     };
+    let visual_menu_enabled =
+        scene == "adaptive" && !benchmark_input_lock && !adaptive_wait_quality;
+    let visual_disk_cache = adaptive_disk_cache.clone();
+    let mut visual_settings = settings::VisualSettings {
+        pixel_error,
+        view_distance: capture_far.unwrap_or(20000.),
+        render_scale,
+        msaa,
+        workers: adaptive_workers,
+        refinements: adaptive_refinements,
+        cache_mib: adaptive_cache_mib,
+        voxel_filter,
+        atmosphere: atmosphere_option.unwrap_or(
+            params.recipe != frontier_world::FbmRecipe::Legacy
+                && !capture_linear
+                && !benchmark_input_lock
+                && !adaptive_wait_quality,
+        ),
+        ..Default::default()
+    };
+    if capture_linear {
+        visual_settings.atmosphere = false;
+        visual_settings.render_scale = 1.;
+    }
     let world = if scene == "hybrid-topology" || scene == "adaptive-topology" {
         World::fbm_topology(seed, params)?
     } else if scene == "fixture" {
@@ -2224,6 +2408,7 @@ pub fn run() -> Result<()> {
         if let Some(prepared) = hybrid_initial.take() {
             gpu.init_hybrid(prepared)?;
         }
+        gpu.configure_visuals(&world, &visual_settings);
         if let Some(view) = &mut adaptive_view {
             view.settle(&mut gpu, camera, width, height, capture_unresolved)?;
         }
@@ -2252,6 +2437,15 @@ pub fn run() -> Result<()> {
     let now = Instant::now();
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
+        visual_settings,
+        settings_ui: None,
+        atmosphere: None,
+        visual_menu_enabled,
+        visual_started: now,
+        display_frame_ms: 0.,
+        visual_build_mib: adaptive_build_mib,
+        visual_disk_cache,
+        visual_disk_mib: adaptive_disk_mib,
         adaptive_view,
         adaptive_route_quality: Default::default(),
         adaptive_route_started,

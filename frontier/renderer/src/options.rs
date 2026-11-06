@@ -2,6 +2,8 @@
 use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
+    pub atmosphere: Option<bool>,
+    pub render_scale: f32,
     pub capture: Option<PathBuf>,
     pub capture_on_exit: Option<PathBuf>,
     pub seconds: Option<f64>,
@@ -49,13 +51,15 @@ pub struct Options {
     pub native_bins: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
+    let mut atmosphere = None;
+    let mut render_scale = 1.0f32;
     let mut capture = None;
     let mut capture_on_exit = None;
     let mut seconds: Option<f64> = None;
     let mut width = WIDTH;
     let mut height = HEIGHT;
     let mut frame_limit = None;
-    let mut scene = String::from("fbm");
+    let mut scene = String::from("adaptive");
     let mut camera_preset = String::from("valley");
     let mut seed = SEED;
     let mut params = frontier_world::FbmParams {
@@ -101,6 +105,23 @@ pub fn parse() -> Result<Option<Options>> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--atmosphere" => {
+                atmosphere = Some(match args.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("--atmosphere requires on|off".into()),
+                });
+            }
+            "--render-scale" => {
+                render_scale = args
+                    .next()
+                    .ok_or("--render-scale requires 0.5..1")?
+                    .parse()?;
+                if !render_scale.is_finite() || !(0.5..=1.0).contains(&render_scale) {
+                    return Err("--render-scale requires 0.5..1".into());
+                }
+            }
+
             "--adaptive-build-mib" => {
                 adaptive_build_mib = args
                     .next()
@@ -349,7 +370,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Adaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("Visual preview: Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
@@ -464,6 +485,8 @@ pub fn parse() -> Result<Option<Options>> {
         return Err("--adaptive-wait-quality requires an adaptive window benchmark".into());
     }
     Ok(Some(Options {
+        atmosphere,
+        render_scale,
         capture,
         capture_on_exit,
         seconds,
