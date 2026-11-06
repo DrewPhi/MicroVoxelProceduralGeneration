@@ -493,6 +493,11 @@ impl AdaptiveView {
     pub fn json(&self) -> String {
         let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved,self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
         json.pop();
+        json.push_str(&format!(
+            ",\"upload_budget_bytes_per_frame\":{}}}",
+            self.upload_budget
+        ));
+        json.pop();
         json.push_str(&format!(",\"elapsed_preparation_ms\":{},\"first_coverage_ms\":{},\"empirical_geometry_error_m\":{},\"uncertified_clusters\":{},\"selected_cpu_bytes\":{},\"selected_sampled_columns\":{}}}",self.preparation_started.elapsed().as_secs_f64()*1000.,self.first_coverage_ms.map_or("null".into(),|v|v.to_string()),self.empirical_error_m,self.uncertified_clusters,self.selected_bytes,self.sampled_columns));
         json.pop();
         json.push_str(&format!(",\"total_build_ms\":{},\"max_build_ms\":{},\"surface_source_revision\":{},\"displayed_world_revision\":{},\"base_source_reused_outside_edited_owner\":{}}}",self.total_build_ms,self.max_build_ms,self.surface_source_revision,self.displayed_world_revision,self.topology_supported));

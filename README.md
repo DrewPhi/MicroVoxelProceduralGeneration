@@ -7,6 +7,8 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 [agent instructions](frontier/AGENTS.md), and
 [implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
+The [#74 optimization plan](frontier/ISSUE74_PLAN.md) and
+[first measured checkpoint](frontier/reference/issue74/README.md) track the current research and remaining performance work.
 
 An [independent offline voxel reference](frontier/reference/README.md) now provides
 supersampled images, coverage/depth data and matched GPU comparisons. See the

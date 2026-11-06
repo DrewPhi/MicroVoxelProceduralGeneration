@@ -56,22 +56,32 @@ pub struct ColumnHeights {
     pub min: [i64; 2],
     pub size: [usize; 2],
     values: Vec<i64>,
+    // Retain only the already sampled top band for native appearance. Repainting
+    // regional cover would repeat its analytic landform derivatives per column.
+    top_materials: Vec<Material>,
 }
 impl ColumnHeights {
-    pub fn height(&self, x: i64, z: i64) -> Option<i64> {
+    fn index(&self, x: i64, z: i64) -> Option<usize> {
         let dx = x as i128 - self.min[0] as i128 + 1;
         let dz = z as i128 - self.min[1] as i128 + 1;
         if dx < 0 || dz < 0 || dx >= (self.size[0] + 2) as i128 || dz >= (self.size[1] + 2) as i128
         {
             return None;
         }
-        Some(self.values[dz as usize * (self.size[0] + 2) + dx as usize])
+        Some(dz as usize * (self.size[0] + 2) + dx as usize)
+    }
+    pub fn height(&self, x: i64, z: i64) -> Option<i64> {
+        self.index(x, z).map(|i| self.values[i])
+    }
+    pub fn top_material(&self, x: i64, z: i64) -> Option<Material> {
+        self.index(x, z).map(|i| self.top_materials[i])
     }
     pub fn sampled_columns(&self) -> usize {
         self.values.len()
     }
     pub fn allocated_bytes(&self) -> usize {
         self.values.capacity() * std::mem::size_of::<i64>()
+            + self.top_materials.capacity() * std::mem::size_of::<Material>()
     }
 }
 pub struct ColumnMesh {
@@ -147,6 +157,7 @@ pub fn build_sampled(
     }
     let mut columns = Vec::with_capacity(count);
     let mut values = Vec::with_capacity(count);
+    let mut top_materials = Vec::with_capacity(count);
     let (mut low, mut high) = (i64::MAX, i64::MIN);
     for z in 0..halo[1] {
         for x in 0..halo[0] {
@@ -160,6 +171,7 @@ pub fn build_sampled(
                 );
             }
             values.push(h);
+            top_materials.push(c.bands[0]);
             columns.push(c);
         }
     }
@@ -170,6 +182,7 @@ pub fn build_sampled(
         min: [min.x, min.z],
         size,
         values,
+        top_materials,
     };
     let index = |x: usize, z: usize| z * halo[0] + x;
     let mut mesh = Mesh {
@@ -444,6 +457,7 @@ mod tests {
                         "warm native extraction must not regenerate columns"
                     );
                     assert_eq!(actual.heights.values, expected.heights.values);
+                    assert_eq!(actual.heights.top_materials, expected.heights.top_materials);
                     assert_eq!(actual.mesh.origin, expected.mesh.origin);
                     assert_eq!(
                         actual.mesh.exposed_native_faces,
@@ -458,6 +472,7 @@ mod tests {
                 for z in min.z..min.z + 9 {
                     for x in min.x..min.x + 11 {
                         let column = SampledColumn::canonical(&world, x, z);
+                        assert_eq!(expected.heights.top_material(x, z), Some(column.bands[0]));
                         for y in [
                             column.height,
                             column.height - 1,
@@ -748,7 +763,7 @@ mod tests {
             [1024, 1024],
         )
         .unwrap();
-        eprintln!("64m exact native columns seed=7: {:.3}s; {} sampled columns; {} exposed faces; {} quads; {} vertex/index bytes; {} height cache bytes",start.elapsed().as_secs_f64(),out.heights.sampled_columns(),out.mesh.exposed_native_faces,out.mesh.indices.len()/6,out.mesh.vertices.len()*std::mem::size_of::<Vertex>()+out.mesh.indices.len()*4,out.heights.values.len()*8);
+        eprintln!("64m exact native columns seed=7: {:.3}s; {} sampled columns; {} exposed faces; {} quads; {} vertex/index bytes; {} height/material cache bytes",start.elapsed().as_secs_f64(),out.heights.sampled_columns(),out.mesh.exposed_native_faces,out.mesh.indices.len()/6,out.mesh.vertices.len()*std::mem::size_of::<Vertex>()+out.mesh.indices.len()*4,out.heights.allocated_bytes());
         assert_eq!(out.heights.sampled_columns(), 1026 * 1026);
     }
 }

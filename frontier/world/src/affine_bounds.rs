@@ -683,7 +683,19 @@ struct Context {
     cells: u32,
     fallbacks: u32,
 }
+#[cfg(test)]
+thread_local! {
+    // Preserve the previous allocation/reduction path for exact same-binary A/B.
+    static RETAIN_NOISE_BRANCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn noise(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
+    #[cfg(test)]
+    if RETAIN_NOISE_BRANCHES.get() {
+        return noise_impl::<true>(x, z, seed, c);
+    }
+    noise_impl::<false>(x, z, seed, c)
+}
+fn noise_impl<const RETAIN: bool>(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
     let ix = x.range();
     let iz = z.range();
     if !ix.lo.is_finite() || !ix.hi.is_finite() || !iz.lo.is_finite() || !iz.hi.is_finite() {
@@ -700,7 +712,9 @@ fn noise(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
         c.fallbacks += 1;
         return Aa::interval(-1.0, 1.0);
     }
-    let mut branches = vec![];
+    let mut branches = Vec::new();
+    let mut first: Option<Aa> = None;
+    let mut radius = 0.0_f64;
     for j in lo[1]..=hi[1] {
         for i in lo[0]..=hi[0] {
             c.cells += 1;
@@ -732,13 +746,42 @@ fn noise(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
             .scale(1.6)
             .clamp(-1.0, 1.0);
             let taylor = noise_taylor(u, v, i, j, seed);
-            branches.push(if taylor.r < ordinary.r {
+            let branch = if taylor.r < ordinary.r {
                 taylor
             } else {
                 ordinary
-            });
+            };
+            if RETAIN {
+                branches.push(branch);
+            } else {
+                let reference = *first.get_or_insert_with(|| {
+                    radius = branch.r;
+                    branch
+                });
+                // Keep the original first-branch comparison and j/i reduction
+                // order, including outward rounding. Only storage is removed.
+                let delta = up_add(
+                    I::point(branch.c).sub(I::point(reference.c)).abs_max(),
+                    up_add(
+                        I::point(branch.a[0])
+                            .sub(I::point(reference.a[0]))
+                            .abs_max(),
+                        I::point(branch.a[1])
+                            .sub(I::point(reference.a[1]))
+                            .abs_max(),
+                    ),
+                );
+                radius = radius.max(up_add(delta, branch.r));
+            }
         }
     }
+    if !RETAIN {
+        return Aa {
+            r: radius,
+            ..first.expect("positive branch count was checked above")
+        };
+    }
+    // Test oracle: retain the previous Vec implementation verbatim.
     let reference = branches[0];
     let mut radius = reference.r;
     for b in branches {
@@ -894,6 +937,175 @@ fn elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
 mod tests {
     use super::*;
     use crate::{terrain, FbmParams};
+    fn retained<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RETAIN_NOISE_BRANCHES.set(self.0);
+            }
+        }
+        let _reset = Reset(RETAIN_NOISE_BRANCHES.replace(enabled));
+        f()
+    }
+    fn bound_bits(bound: HeightBound) -> ([u64; 10], u32, u32) {
+        (
+            [
+                bound.center_xz[0],
+                bound.center_xz[1],
+                bound.half_extent_m[0],
+                bound.half_extent_m[1],
+                bound.center_height_m,
+                bound.coefficients[0],
+                bound.coefficients[1],
+                bound.remainder_m,
+                bound.height_range[0],
+                bound.height_range[1],
+            ]
+            .map(f64::to_bits),
+            bound.noise_cells,
+            bound.full_range_fallbacks,
+        )
+    }
+    #[test]
+    fn streamed_noise_branches_match_retained_bounds_bit_for_bit() {
+        for recipe in [
+            FbmRecipe::Legacy,
+            FbmRecipe::Regional,
+            FbmRecipe::RegionalUnwarped,
+        ] {
+            for seed in [7, 113] {
+                let terrain = FbmTerrain::new(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        horizontal_scale: 1800.0,
+                        amplitude: 1000.0,
+                        octaves: 8,
+                        roughness: 0.5,
+                    },
+                )
+                .unwrap();
+                for (min, size_cells) in [
+                    ([0, 0], [1, 1]),
+                    ([-129, -33], [128, 64]),
+                    ([0, -512], [128, 128]),
+                    ([-2048, 2047], [512, 256]),
+                    ([8192, -16384], [2048, 2048]),
+                ] {
+                    for budget in [
+                        BoundBudget::default(),
+                        BoundBudget {
+                            max_noise_cells: 2,
+                            max_cells_per_noise: 4,
+                        },
+                        BoundBudget {
+                            max_noise_cells: 4096,
+                            max_cells_per_noise: 16,
+                        },
+                        BoundBudget {
+                            max_noise_cells: 0,
+                            max_cells_per_noise: 0,
+                        },
+                    ] {
+                        let region = ColumnBox { min, size_cells };
+                        let before =
+                            retained(true, || bound_native_height(&terrain, region, budget));
+                        let after =
+                            retained(false, || bound_native_height(&terrain, region, budget));
+                        assert_eq!(
+                            before.map(bound_bits),
+                            after.map(bound_bits),
+                            "{recipe:?} seed={seed} region={region:?} budget={budget:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn streamed_noise_branch_counts_match_retained_oracle() {
+        // A single cell, either crossed axis, both axes, and a budget fallback.
+        for (center, extent, limit, cells, fallbacks) in [
+            ([0.5, 0.5], 0.1, 4, 1, 0),
+            ([1.0, 0.5], 0.1, 4, 2, 0),
+            ([0.5, 1.0], 0.1, 4, 2, 0),
+            ([1.0, 1.0], 0.1, 4, 4, 0),
+            ([1.0, 1.0], 0.1, 1, 0, 1),
+        ] {
+            let x = Aa {
+                c: center[0],
+                a: [extent, 0.0],
+                r: 0.0,
+            };
+            let z = Aa {
+                c: center[1],
+                a: [0.0, extent],
+                r: 0.0,
+            };
+            let run = |retain| {
+                let mut context = Context {
+                    budget: BoundBudget {
+                        max_noise_cells: 4096,
+                        max_cells_per_noise: limit,
+                    },
+                    cells: 0,
+                    fallbacks: 0,
+                };
+                let result = retained(retain, || noise(x, z, 7, &mut context));
+                (
+                    [result.c, result.a[0], result.a[1], result.r].map(f64::to_bits),
+                    context.cells,
+                    context.fallbacks,
+                )
+            };
+            let before = run(true);
+            let after = run(false);
+            assert_eq!(before, after);
+            assert_eq!((after.1, after.2), (cells, fallbacks));
+        }
+    }
+    #[test]
+    #[ignore = "bounded same-binary CPU allocation A/B; no timing threshold"]
+    fn profile_streamed_noise_bounds() {
+        let terrain = FbmTerrain::new(
+            7,
+            FbmParams {
+                horizontal_scale: 1800.0,
+                amplitude: 1000.0,
+                octaves: 8,
+                roughness: 0.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Alternate order to expose warmup/order effects, keeping work fixed.
+        for order in [[true, false], [false, true], [true, false], [false, true]] {
+            for retain in order {
+                let started = std::time::Instant::now();
+                let mut digest = 0_u64;
+                retained(retain, || {
+                    for repeat in 0..4 {
+                        for z in 0..16 {
+                            for x in 0..16 {
+                                let bound = bound_native_height(
+                                    &terrain,
+                                    ColumnBox {
+                                        min: [x * 128, z * 128 - 512],
+                                        size_cells: [128; 2],
+                                    },
+                                    BoundBudget::default(),
+                                )
+                                .unwrap();
+                                digest ^= std::hint::black_box(bound.remainder_m.to_bits())
+                                    .rotate_left(repeat);
+                            }
+                        }
+                    }
+                });
+                eprintln!("noise_bounds retained={retain} calls=1024 elapsed_ms={:.3} digest={digest:016x}", started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
     #[test]
     fn shared_symbols_and_independent_remainders_survive_products() {
         let a = Aa {

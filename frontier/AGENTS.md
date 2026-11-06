@@ -36,6 +36,19 @@ When a task lists R or B, **do not 'just copy' old code**; when it lists P, copy
 
 ## 4. Tests and deliverables
 
+**Reference-first visual workflow (user direction, 2026-11-06):** for every visual
+feature where practical, first produce a non-real-time, high-quality reference
+with explicit source, camera, materials, lighting and sampling. Let the user
+approve the visual target, then optimize the interactive result toward it.
+Keep exact/native data independent of the display approximation. A beautiful
+reference is an artistic target, not proof of a real-time implementation's speed
+or correctness. For motion and LOD transitions use offline reference trajectories
+and temporal comparisons too; one still cannot certify invisible transitions.
+Keep existing correctness tests active while detailed transition polish is deferred.
+New Regional/atmospheric targets supplement rather than overwrite the approved
+Legacy comparison. #74 coordinates efficiency research; do not silently turn an
+unmatched lighting or terrain change into an apparent optimization win.
+
 **Primary visual regression check (user-selected):** the fixed player-height spiky-terrain comparison in [PRIMARY_VISUAL_CHECK.md](PRIMARY_VISUAL_CHECK.md). Run it first for changes to LOD selection, transitions, geometry, filtering or lighting. Preserve the fixed source, camera, voxel size and matched 300 m clip; compare against the independent exact-voxel reference. Keep cave/bridge, regional terrain and motion tests as secondary coverage. A prettier aerial image does not replace this check.
 
 Before marking an issue done: commit code/docs and reproducible tests; include seed/world version, camera route, GPU/CPU model, 1080p resolution, geometry representation, actual native voxel size, frame time p50/p95/p99, page/mesh count, pending memory, and side-by-side images/video where visual impact matters.

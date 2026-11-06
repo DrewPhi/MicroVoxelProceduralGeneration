@@ -1012,12 +1012,36 @@ fn finish(
 /// Preserve canonical quads while splitting only at one-meter X/Z profile
 /// boundaries. Every resulting face belongs to exactly one canonical block;
 /// no integer profile address is interpolated across a long greedy rectangle.
+pub(super) fn native_profile_reuse_enabled() -> bool {
+    static REUSE_TOP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Reuse sampled canonical materials by default. Zero retains the direct
+    // painter for same-binary A/B; neither path changes float accumulation.
+    *REUSE_TOP
+        .get_or_init(|| std::env::var_os("FRONTIER_NATIVE_PROFILE_REUSE").is_none_or(|v| v != "0"))
+}
 fn native_profiles(
     world: &World,
     key: TileKey,
     mesh: Mesh,
     heights: &column_mesh::ColumnHeights,
     cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>), String> {
+    native_profiles_with_top_reuse(
+        world,
+        key,
+        mesh,
+        heights,
+        cancelled,
+        native_profile_reuse_enabled(),
+    )
+}
+fn native_profiles_with_top_reuse(
+    world: &World,
+    key: TileKey,
+    mesh: Mesh,
+    heights: &column_mesh::ColumnHeights,
+    cancelled: &mut impl FnMut() -> bool,
+    reuse_top: bool,
 ) -> Result<(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>), String> {
     const BLOCK: i64 = 16;
     let end = [
@@ -1042,11 +1066,17 @@ fn native_profiles(
                     let h = heights
                         .height(x, z)
                         .ok_or("missing native profile column")?;
-                    let top = terrain.surface_material(
-                        (x as f64 + 0.5) * VOXEL_SIZE,
-                        (z as f64 + 0.5) * VOXEL_SIZE,
-                        h as f64 * VOXEL_SIZE,
-                    );
+                    let top = if reuse_top {
+                        heights
+                            .top_material(x, z)
+                            .ok_or("missing native profile material")?
+                    } else {
+                        terrain.surface_material(
+                            (x as f64 + 0.5) * VOXEL_SIZE,
+                            (z as f64 + 0.5) * VOXEL_SIZE,
+                            h as f64 * VOXEL_SIZE,
+                        )
+                    };
                     let add = |profile: &mut [[f32; 4]; 5], a: usize, n: i64, m: Material| {
                         for (c, v) in m.color().into_iter().enumerate() {
                             profile[a][c] += n as f32 * v;
@@ -4074,6 +4104,135 @@ mod tests {
             tile.face_profiles.len() <= 1025,
             "one directional profile perpatch, not pervertex"
         );
+    }
+    #[test]
+    fn native_profile_top_reuse_matches_direct_paint_bits_and_quads() {
+        use frontier_world::FbmRecipe;
+        for recipe in [
+            FbmRecipe::Legacy,
+            FbmRecipe::Regional,
+            FbmRecipe::RegionalUnwarped,
+        ] {
+            for seed in [7, 11] {
+                let world = World::fbm(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        horizontal_scale: 16.,
+                        amplitude: 40.,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                // Nonaligned footprints exercise clipped profile blocks, negative
+                // coordinates, slopes and their soil/stone side strata.
+                for min in [[-127, -511], [31, -33]] {
+                    let mut k = key(1);
+                    k.min = min;
+                    k.width_cells = 33;
+                    let original = column_mesh::build(
+                        &world,
+                        Cell {
+                            x: min[0],
+                            y: 0,
+                            z: min[1],
+                        },
+                        [33; 2],
+                    )
+                    .unwrap();
+                    let run = |reuse_top| {
+                        native_profiles_with_top_reuse(
+                            &world,
+                            k,
+                            Mesh {
+                                vertices: original.mesh.vertices.clone(),
+                                indices: original.mesh.indices.clone(),
+                                origin: original.mesh.origin,
+                                exposed_native_faces: original.mesh.exposed_native_faces,
+                            },
+                            &original.heights,
+                            &mut || false,
+                            reuse_top,
+                        )
+                        .unwrap()
+                    };
+                    let direct = run(false);
+                    let reused = run(true);
+                    assert_eq!(direct.0.indices, reused.0.indices);
+                    assert_eq!(direct.0.origin, reused.0.origin);
+                    assert_eq!(direct.0.exposed_native_faces, reused.0.exposed_native_faces);
+                    assert_eq!(
+                        bytemuck::cast_slice::<Vertex, u8>(&direct.0.vertices),
+                        bytemuck::cast_slice::<Vertex, u8>(&reused.0.vertices)
+                    );
+                    assert_eq!(
+                        direct
+                            .1
+                            .iter()
+                            .map(|p| p.map(|a| a.map(f32::to_bits)))
+                            .collect::<Vec<_>>(),
+                        reused
+                            .1
+                            .iter()
+                            .map(|p| p.map(|a| a.map(f32::to_bits)))
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(direct.2, reused.2);
+                }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "bounded same-binary CPU comparison; no timing pass threshold"]
+    fn profile_native_top_material_reuse() {
+        use frontier_world::FbmRecipe;
+        for recipe in [FbmRecipe::Legacy, FbmRecipe::Regional] {
+            let world = World::fbm(
+                7,
+                FbmParams {
+                    recipe,
+                    horizontal_scale: 1800.,
+                    amplitude: 1000.,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut k = key(1);
+            k.min = [-127, -511];
+            k.width_cells = 128;
+            let original = column_mesh::build(
+                &world,
+                Cell {
+                    x: k.min[0],
+                    y: 0,
+                    z: k.min[1],
+                },
+                [128; 2],
+            )
+            .unwrap();
+            for reuse_top in [false, true, true, false] {
+                let mesh = Mesh {
+                    vertices: original.mesh.vertices.clone(),
+                    indices: original.mesh.indices.clone(),
+                    origin: original.mesh.origin,
+                    exposed_native_faces: original.mesh.exposed_native_faces,
+                };
+                let started = std::time::Instant::now();
+                let out = native_profiles_with_top_reuse(
+                    &world,
+                    k,
+                    mesh,
+                    &original.heights,
+                    &mut || false,
+                    reuse_top,
+                )
+                .unwrap();
+                eprintln!("native_profile recipe={recipe:?} reuse_top={reuse_top} ms={:.3} avoided_paints={} workspace_bytes={} profiles={} quads={}",
+                    started.elapsed().as_secs_f64() * 1000., if reuse_top { 128 * 128 } else { 0 },
+                    original.heights.allocated_bytes(), out.1.len(), out.0.vertices.len() / 4);
+                std::hint::black_box(out);
+            }
+        }
     }
     #[test]
     fn one_meter_native_profile_splits_preserve_exact_unit_face_identity_and_materials() {

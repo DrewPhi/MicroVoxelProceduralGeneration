@@ -2641,7 +2641,25 @@ pub fn run() -> Result<()> {
             streaming.generation_ms));
         json.pop();
         json.push_str(&format!(
-            ",\"msaa_samples\":{msaa},\"voxel_filter\":{voxel_filter}}}"
+            ",\"msaa_samples\":{},\"voxel_filter\":{}}}",
+            viewer.sample_count, viewer.voxel_filter
+        ));
+        // Record the actual presentation settings, including interactive changes.
+        // Terrain pass timestamps exclude atmosphere/UI; frame intervals include them.
+        json.pop();
+        json.push_str(&format!(
+            ",\"experiments\":{{\"native_profile_reuse\":{}}}}}",
+            adaptive_geometry::native_profile_reuse_enabled()
+        ));
+        let visual = &viewer.visual_settings;
+        json.pop();
+        json.push_str(&format!(
+            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"menu_enabled\":{},\"gpu_timing_scope\":\"terrain_pass_only\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
+            visual.atmosphere, visual.render_scale, visual.exposure,
+            visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
+            visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,
+            visual.overcast, viewer.visual_menu_enabled, viewer.visual_menu_enabled,
+            viewer.camera.fov_y, viewer.camera.far
         ));
         if let (Some(stream), Some(hybrid)) = (
             &viewer.hybrid_stream,

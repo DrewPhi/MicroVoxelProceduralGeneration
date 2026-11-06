@@ -5,6 +5,9 @@ Run with DISPLAY pointing to the laptop session and the hardware GPU accessible.
 Quality/readiness in each report are acceptance conditions, not implied by FPS.
 """
 import argparse
+from datetime import datetime, timezone
+import hashlib
+import os
 import json
 import math
 from pathlib import Path
@@ -12,6 +15,41 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# Explicit allowlist: do not serialize the environment or arbitrary FRONTIER_* keys.
+EXPERIMENT_ENV_KEYS = (
+    'FRONTIER_NATIVE_PROFILE_REUSE', 'FRONTIER_PROFILE_CENTER_REUSE',
+    'FRONTIER_PROFILE_SOURCE', 'FRONTIER_RENDER_BUNDLES',
+    'FRONTIER_PREPARED_VIEW_CACHE', 'FRONTIER_GPU_SUMMARY_CONTENTION',
+    'FRONTIER_VISIBLE_ERROR_BOUND', 'FRONTIER_DEBT_PREDICTION',
+)
+
+
+def capture_provenance(binary, root=ROOT, environ=None):
+    environ = os.environ if environ is None else environ
+    digest = None
+    error = None
+    try:
+        with Path(binary).open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    except OSError as exc:
+        error = str(exc)
+    commit = dirty = None
+    try:
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root,
+                              capture_output=True, text=True, check=True)
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=root,
+                                capture_output=True, text=True, check=True)
+        commit, dirty = head.stdout.strip(), bool(status.stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return {
+        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'binary_path': str(Path(binary).resolve()), 'binary_sha256': digest,
+        'binary_hash_error': error,
+        'observed_checkout_commit': commit, 'observed_checkout_dirty': dirty,
+        'checkout_identity_note': 'Checkout observed before run; not a guaranteed binary build revision.',
+        'experiments': {key: environ.get(key) for key in EXPERIMENT_ENV_KEYS},
+    }
 
 
 def main():
@@ -67,6 +105,7 @@ def main():
         # Never attach a stale successful report to a failed new run.
         for suffix in ('.json', '.png'):
             (out / f'{name}{suffix}').unlink(missing_ok=True)
+        provenance = capture_provenance(command[0])
         started = time.monotonic()
         with (out / f'{name}.log').open('w') as log:
             result = subprocess.run(['/usr/bin/time', '-v', '-o', str(out / f'{name}.time.txt')]
@@ -79,8 +118,9 @@ def main():
                                                or result.returncode < 0 or result.returncode >= 128)
             report['benchmark_requested_seconds'] = args.seconds
             report['benchmark_run_exit_code'] = result.returncode
+            report['capture_provenance'] = provenance
             report_path.write_text(json.dumps(report, indent=2) + '\n')
-        runs.append({'speed_mps': speed, 'command': command,
+        runs.append({'speed_mps': speed, 'command': command, 'capture_provenance': provenance,
                      'wall_seconds': time.monotonic() - started, 'exit_code': result.returncode})
         (out / 'runs.json').write_text(json.dumps(runs, indent=2) + '\n')
         if result.returncode:

@@ -1,0 +1,21 @@
+affine-profile
+test affine_bounds::tests::profile_streamed_noise_bounds ... noise_bounds retained=true calls=1024 elapsed_ms=57.316 digest=00bd8719107d94bc
+noise_bounds retained=false calls=1024 elapsed_ms=54.451 digest=00bd8719107d94bc
+noise_bounds retained=false calls=1024 elapsed_ms=50.612 digest=00bd8719107d94bc
+noise_bounds retained=true calls=1024 elapsed_ms=49.943 digest=00bd8719107d94bc
+noise_bounds retained=true calls=1024 elapsed_ms=46.605 digest=00bd8719107d94bc
+noise_bounds retained=false calls=1024 elapsed_ms=46.693 digest=00bd8719107d94bc
+noise_bounds retained=false calls=1024 elapsed_ms=43.503 digest=00bd8719107d94bc
+noise_bounds retained=true calls=1024 elapsed_ms=43.410 digest=00bd8719107d94bc
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.39s
+
+native-profile
+test adaptive_geometry::tests::profile_native_top_material_reuse ... native_profile recipe=Legacy reuse_top=false ms=4.587 avoided_paints=0 workspace_bytes=152100 profiles=82 quads=19816
+native_profile recipe=Legacy reuse_top=true ms=4.646 avoided_paints=16384 workspace_bytes=152100 profiles=82 quads=19816
+native_profile recipe=Legacy reuse_top=true ms=2.459 avoided_paints=16384 workspace_bytes=152100 profiles=82 quads=19816
+native_profile recipe=Legacy reuse_top=false ms=2.422 avoided_paints=0 workspace_bytes=152100 profiles=82 quads=19816
+native_profile recipe=Regional reuse_top=false ms=4.305 avoided_paints=0 workspace_bytes=152100 profiles=82 quads=1958
+native_profile recipe=Regional reuse_top=true ms=0.462 avoided_paints=16384 workspace_bytes=152100 profiles=82 quads=1958
+native_profile recipe=Regional reuse_top=true ms=0.471 avoided_paints=16384 workspace_bytes=152100 profiles=82 quads=1958
+native_profile recipe=Regional reuse_top=false ms=4.291 avoided_paints=0 workspace_bytes=152100 profiles=82 quads=1958
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 197 filtered out; finished in 0.05s
