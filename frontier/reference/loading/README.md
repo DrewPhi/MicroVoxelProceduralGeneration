@@ -8,7 +8,15 @@ binary or randomized repeated trials. Final memoization/direct-native groups
 record the final executable SHA256. Optional direct-native images differ from the
 approved default. Default primary float RGB remains byte-identical.
 
+See [follow-up evidence and reproduction commands](remaining-issues-notes.md)
+and [completed follow-up reports](followup-measurements.json) for local disk
+dependencies, resident GPU contention, 1 km reference crops and failed motion/
+wide-view gates. Sequential checkpoints and pre-fix routes remain distinguished.
+
 Full raw captures, logs, cached terrain and frozen executables remain ignored in
 `frontier/output/`. Reproduction scripts and settings are tracked; no generated
 terrain cache is committed. Failed convergence and movement frames remain in the
 evidence and must not be counted as acceptance passes.
+
+The [exclusive CPU diagnostic](exclusive-profile.md) documents instrumentation
+overhead and reconciled worker costs; it is not a normal-mode throughput test.

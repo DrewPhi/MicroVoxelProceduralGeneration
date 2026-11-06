@@ -80,3 +80,44 @@ the finite reference boundary against the GPU's larger coverage.
 Tests compare 2500 rays against an independent dense native snapshot, including
 hit cells, distances, materials and face normals. Separate tests exercise exact
 horizontal/top ties, vertical rays, crop walls and persistent cache identity.
+
+### Pixel crops preserve the full camera
+
+The landscape CLI accepts `--crop X,Y,WIDTH,HEIGHT` in top-left viewport pixels.
+`--width` and `--height` still specify the **full viewport**: aspect ratio, FOV,
+camera rays, jitter hashes and sample indices use global viewport coordinates.
+Only the selected pixels are rendered and written. Raw buffers and PNG dimensions
+are the crop dimensions. The manifest records output `width`/`height`, full
+`viewport_width`/`viewport_height`, and `pixel_crop: [x,y,width,height]` explicitly.
+Omitting `--crop` is equivalent to selecting the full viewport. Empty, overflowing
+or out-of-viewport rectangles fail before native-column construction.
+
+For a bounded 64×64 center crop of the primary camera with a 1 km forward clip,
+reuse an **existing matching** native cache centered at `[0,-512]` meters with a
+1024 m extent. Set `REFERENCE_CACHE` to that existing file; the guard below avoids
+creating the roughly 1 GiB native array cache accidentally:
+
+```sh
+test -f "$REFERENCE_CACHE" && target/release/landscape \
+  --cache "$REFERENCE_CACHE" --output output/km-center-reference64 \
+  --terrain-recipe legacy --seed 7 --center 0,-512 --extent 1024 \
+  --eye 0,94.8875,0 \
+  --target -8.731370115810932e-08,94.83756238296628,-0.9987523555755615 \
+  --fov-y 60 --near .025 --far 1000 --width 1920 --height 1080 \
+  --crop 928,508,64,64 --spp 64 --sample-seed 83 --threads 8
+```
+
+The camera and source match the primary fixture; the 1 km far clip is an explicit
+extension of its usual 300 m comparison. Pixel cropping reduces ray/output work,
+not native snapshot memory. The finite native footprint remains authoritative
+only inside its recorded bounds. `finite_domain_miss_samples` and
+`finite_domain_miss_fraction` conservatively count missed rays whose near-to-far
+horizontal segment leaves those bounds. They identify incomplete oracle coverage;
+such misses remain sky and cannot establish a geometry pass. Other misses remain
+reported by `miss_fraction`. Compare the matching pixel rectangle from the full
+renderer image, and do not treat a center crop as full-view quality acceptance.
+
+CPU tests require byte-identical RGB, coverage and depth between a tiny full
+landscape render and its pixel crop, verify sample/ray identity, reject malformed
+crops and exercise finite-domain miss classification. They build only an 8 m
+native fixture; no kilometer cache or GPU run is required.

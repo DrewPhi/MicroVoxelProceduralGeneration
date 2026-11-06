@@ -135,6 +135,11 @@ impl AsyncDiskCache {
         })
     }
     pub(crate) fn load(&mut self, key: TileKey) -> Option<GeometryTile> {
+        if !self.keyer.supported(key) {
+            let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+            s.fast_misses += 1;
+            return None;
+        }
         let name = self.keyer.name(key);
         let (send, receive) = mpsc::sync_channel(1);
         {
@@ -418,6 +423,44 @@ mod tests {
         assert_eq!(loaded.certified_error_m, tile.certified_error_m);
         assert_eq!(warm.stats().hits, 1);
         assert_eq!(warm.stats().writes, 0);
+        drop(warm);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn restart_after_local_edit_keeps_async_index_and_rejects_obsolete_revision() {
+        let (_, _, path) = fixture();
+        let original = World::fbm_topology(7, frontier_world::FbmParams::default()).unwrap();
+        let key = TileKey {
+            min: [256, -16],
+            width_cells: 16,
+            step_cells: 4,
+            edge_steps: [4; 4],
+            source_revision: 0,
+        };
+        let tile = Arc::new(crate::adaptive_geometry::build(&original, key, || false).unwrap());
+        {
+            let mut cache =
+                AsyncDiskCache::new(path.clone(), 4 * 1024 * 1024, 1024 * 1024, &original).unwrap();
+            assert!(cache.queue_store(tile.clone()));
+        }
+        let mut edited = original.clone();
+        edited.set(
+            frontier_world::Cell { x: 0, y: 500, z: 0 },
+            frontier_world::Material::Wood,
+        );
+        let current = TileKey {
+            source_revision: edited.revision(),
+            ..key
+        };
+        let mut warm =
+            AsyncDiskCache::new(path.clone(), 4 * 1024 * 1024, 1024 * 1024, &edited).unwrap();
+        assert!(warm.load(key).is_none());
+        assert_eq!(warm.stats().read_ms, 0.);
+        let restored = warm.load(current).unwrap();
+        assert_eq!(restored.key, current);
+        assert_eq!(restored.mesh.indices, tile.mesh.indices);
+        assert_eq!(restored.face_profiles, tile.face_profiles);
+        assert_eq!(warm.stats().hits, 1);
         drop(warm);
         std::fs::remove_dir_all(path).unwrap();
     }

@@ -44,6 +44,14 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+/// CPU command encoding only; GPU execution is measured separately.
+struct EncodeTimer<'a>(&'a std::cell::Cell<f64>, Instant);
+impl Drop for EncodeTimer<'_> {
+    fn drop(&mut self) {
+        self.0
+            .set(self.0.get() + self.1.elapsed().as_secs_f64() * 1000.);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 struct Camera {
@@ -96,6 +104,11 @@ struct Gpu {
     hybrid_pipeline: wgpu::RenderPipeline,
     hybrid: Option<hybrid_gpu::HybridGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
+    summary_contention: Option<gpu_summary_probe::GpuSummaryProbe>,
+    summary_contention_startup_ms: f64,
+    draw_encode_cpu_ms: std::cell::Cell<f64>,
+    draw_encode_calls: std::cell::Cell<u64>,
+    summary_contention_dispatches: std::cell::Cell<u64>,
     volume_owner: bool,
     brick: Option<brick_ray::BrickRayGpu>,
     brick_skip: bool,
@@ -302,6 +315,11 @@ impl Gpu {
             hybrid_pipeline,
             hybrid: None,
             adaptive: None,
+            summary_contention: None,
+            summary_contention_startup_ms: 0.,
+            draw_encode_cpu_ms: std::cell::Cell::new(0.),
+            draw_encode_calls: std::cell::Cell::new(0),
+            summary_contention_dispatches: std::cell::Cell::new(0),
             volume_owner: false,
             brick: None,
             brick_skip: false,
@@ -336,6 +354,33 @@ impl Gpu {
             snapshot.origin.y as f64,
             snapshot.origin.z as f64,
         ) * VOXEL_SIZE;
+        Ok(())
+    }
+    /// Opt-in contention experiment. Startup checks exact parity; frames only
+    /// enqueue resident compute and never wait for or consume its output.
+    fn init_summary_contention(&mut self, world: &World) -> Result<()> {
+        if std::env::var_os("FRONTIER_GPU_SUMMARY_CONTENTION").is_none_or(|v| v != "1") {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let pages = (0..gpu_summary_probe::MAX_PAGES)
+            .map(|i| gpu_summary_probe::CanonicalPage::sample(world, [i as i64 * 128, -512]))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let expected = pages
+            .iter()
+            .map(|p| p.cpu_patch_counts(16))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut probe = gpu_summary_probe::GpuSummaryProbe::new(&self.device, pages.len())?;
+        probe.upload(&self.queue, &pages)?;
+        let (actual, _) = probe.run_blocking(&self.device, &self.queue)?;
+        if actual != expected {
+            return Err("GPU contention probe canonical parity failed".into());
+        }
+        self.summary_contention_startup_ms = started.elapsed().as_secs_f64() * 1000.;
+        self.summary_contention = Some(probe);
         Ok(())
     }
     fn init_hybrid(&mut self, prepared: hybrid_gpu::Prepared) -> Result<()> {
@@ -444,6 +489,8 @@ impl Gpu {
         height: u32,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        let _encode_timer = EncodeTimer(&self.draw_encode_cpu_ms, Instant::now());
+        self.draw_encode_calls.set(self.draw_encode_calls.get() + 1);
         self.queue.write_buffer(
             &self.uniform,
             0,
@@ -480,6 +527,13 @@ impl Gpu {
                 height,
                 self.brick_skip,
             );
+        }
+        if let Some(probe) = &self.summary_contention {
+            probe
+                .encode_resident(encoder)
+                .expect("initialized bounded summary diagnostic");
+            self.summary_contention_dispatches
+                .set(self.summary_contention_dispatches.get() + 1);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
@@ -1532,6 +1586,7 @@ impl ApplicationHandler for Viewer {
                 self.sample_count,
                 self.voxel_filter,
             ))?;
+            gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
                 gpu.install_bricks(&snapshot, self.renderer == "brick-skip")?;
             }
@@ -1785,6 +1840,7 @@ pub fn run() -> Result<()> {
         adaptive_wait_quality,
         adaptive_cache_mib,
         adaptive_workers,
+        adaptive_refinements,
         adaptive_direct_native,
         adaptive_build_mib,
         adaptive_disk_cache,
@@ -1866,6 +1922,7 @@ pub fn run() -> Result<()> {
             adaptive_cache_mib * 1024 * 1024,
             native_bins,
             adaptive_workers,
+            adaptive_refinements,
             adaptive_direct_native,
             adaptive_build_mib * 1024 * 1024,
             adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
@@ -2136,6 +2193,7 @@ pub fn run() -> Result<()> {
             msaa,
             voxel_filter,
         ))?;
+        gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();
         if let Some(snapshot) = &brick_initial {
             gpu.install_bricks(snapshot, renderer == "brick-skip")?;
@@ -2402,6 +2460,14 @@ pub fn run() -> Result<()> {
         if let Some(hybrid) = viewer.gpu.as_ref().and_then(|g| g.hybrid.as_ref()) {
             json.pop();
             json.push_str(&format!(",\"native_gpu_budget\":{{\"cache_target_bytes\":536870912,\"hard_transition_bytes\":1073741824,\"cache_target_chunks\":128,\"active_and_pending_protected\":true,\"peak_resident_bytes\":{},\"oversized_single_chunk_uploads\":{},\"max_frame_chunk_upload_bytes\":{},\"stale_cover_rejections\":{},\"chunk_cache_hits\":{},\"published_epoch\":{},\"published_center\":[{},{}]}}}}",hybrid.peak_bytes,hybrid.oversized_uploads,hybrid.max_frame_upload_bytes,hybrid.stale_rejections,hybrid.cache_hits,hybrid.revision(),hybrid.center()[0],hybrid.center()[1]));
+        }
+        if let Some(gpu) = &viewer.gpu {
+            json.pop();
+            json.push_str(&format!(",\"gpu_summary_contention\":{{\"enabled\":{},\"pages\":{},\"logical_buffer_bytes\":{},\"startup_ms\":{},\"dispatches\":{},\"per_frame_readback\":false}}}}", gpu.summary_contention.is_some(), gpu.summary_contention.as_ref().map_or(0, |p| p.loaded_pages()), gpu.summary_contention.as_ref().map_or(0, |p| p.resident_bytes()), gpu.summary_contention_startup_ms, gpu.summary_contention_dispatches.get()));
+        }
+        if let Some(gpu) = &viewer.gpu {
+            json.pop();
+            json.push_str(&format!(",\"draw_encode_cpu\":{{\"total_ms\":{},\"calls\":{},\"includes_warmup_capture\":true}}}}", gpu.draw_encode_cpu_ms.get(), gpu.draw_encode_calls.get()));
         }
         json.pop();
         let gpu_stats = viewer.gpu_probe.as_ref().map(|p| p.stats.summary());

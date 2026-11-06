@@ -2,6 +2,15 @@
 
 ## Current checkpoint
 
+Adaptive loading now defaults to eight refinement selections per coherent
+transaction (at most four builders), cached GPU draw commands, and unchanged
+voxel/reference quality. `--adaptive-refinements 1..32` exposes the batch size;
+`--adaptive-disk-cache PATH --adaptive-disk-mib 768` enables the optional,
+disposable persistent cache. See [loading measurements](frontier/LOADING_OPTIMIZATION.md)
+for cold/restart timings, opt-in experiments and the still-failing motion and
+multi-kilometre quality/performance gates.
+
+
 For rendering and LOD changes, start with the [primary player-view visual check](frontier/PRIMARY_VISUAL_CHECK.md). It fixes the original spiky terrain and player-height camera against a 256-sample exact-voxel reference.
 
 The default scene tests a CPU-canonical seeded FBM source on experimental

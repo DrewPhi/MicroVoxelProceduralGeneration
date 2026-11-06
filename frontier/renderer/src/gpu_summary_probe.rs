@@ -155,6 +155,14 @@ fn patch_side(width: usize) -> Result<usize, String> {
     }
     Ok(WIDTH / width)
 }
+/// Pure validation shared by resident encoding and the standalone readback path.
+fn resident_dispatch(loaded: usize, patch_width: usize) -> Result<(u32, u64), String> {
+    if loaded == 0 || loaded > MAX_PAGES {
+        return Err("no canonical pages uploaded or page count exceeds probe limit".into());
+    }
+    let patches = patch_side(patch_width)?.pow(2);
+    Ok((patches as u32, (loaded * patches * 100) as u64))
+}
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProbeTimings {
     pub submit_ms: f64,
@@ -296,18 +304,40 @@ impl GpuSummaryProbe {
         self.loaded = pages.len();
         Ok(start.elapsed().as_secs_f64() * 1000.)
     }
+    pub fn loaded_pages(&self) -> usize {
+        self.loaded
+    }
+    /// Logical allocated probe buffers, including the standalone readback and
+    /// timestamp resources even when the resident dispatch does not use them.
+    pub fn resident_bytes(&self) -> u64 {
+        let patches = (WIDTH / self.patch_width).pow(2);
+        (self.capacity * (HALO_SIDE * HALO_SIDE * 16 + patches * 200)) as u64
+            + if self.timestamps.is_some() { 32 } else { 0 }
+    }
+    /// Record resident canonical-page compute alongside drawing. The caller
+    /// submits the encoder; this method never maps, reads back, polls or waits.
+    /// Results are deliberately unused by production appearance construction.
+    pub fn encode_resident(&self, encoder: &mut wgpu::CommandEncoder) -> Result<(), String> {
+        let (patches, bytes) = resident_dispatch(self.loaded, self.patch_width)?;
+        encoder.clear_buffer(&self.output, 0, Some(bytes));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("resident summary contention probe"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.dispatch_workgroups(patches, self.loaded as u32, 1);
+        Ok(())
+    }
     /// Synchronous experiment ONLY. Never call from the production render loop.
     pub fn run_blocking(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(Vec<FaceCounts>, ProbeTimings), String> {
-        if self.loaded == 0 {
-            return Err("no canonical pages uploaded".into());
-        }
+        let (patches, n) = resident_dispatch(self.loaded, self.patch_width)?;
+        let patches = patches as usize;
         let start = Instant::now();
-        let patches = (WIDTH / self.patch_width).pow(2);
-        let n = (self.loaded * patches * 100) as u64;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("summary experiment"),
         });
@@ -379,9 +409,7 @@ impl GpuSummaryProbe {
                 submit_ms,
                 wait_readback_ms: wait.elapsed().as_secs_f64() * 1000.,
                 gpu_ms,
-                resident_bytes: (self.capacity * (HALO_SIDE * HALO_SIDE * 16 + patches * 200))
-                    as u64
-                    + if self.timestamps.is_some() { 32 } else { 0 },
+                resident_bytes: self.resident_bytes(),
             },
         ))
     }
@@ -390,6 +418,20 @@ impl GpuSummaryProbe {
 mod tests {
     use super::*;
     use frontier_world::{Cell, FbmParams, FbmRecipe};
+    #[test]
+    fn resident_dispatch_rejects_empty_batches_and_bounds_clear_to_loaded_pages() {
+        for width in [16, 32, 128] {
+            assert!(resident_dispatch(0, width).is_err());
+            assert!(resident_dispatch(MAX_PAGES + 1, width).is_err());
+            for loaded in [1, MAX_PAGES] {
+                let (patches, bytes) = resident_dispatch(loaded, width).unwrap();
+                assert_eq!(patches as usize, (WIDTH / width).pow(2));
+                assert_eq!(bytes, loaded as u64 * patches as u64 * 100);
+            }
+        }
+        assert!(resident_dispatch(1, 0).is_err());
+        assert!(resident_dispatch(1, 64).is_err());
+    }
     #[test]
     fn shader_validates() {
         let module = naga::front::wgsl::parse_str(include_str!("gpu_summary_probe.wgsl")).unwrap();

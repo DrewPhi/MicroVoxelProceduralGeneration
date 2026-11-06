@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--refinements', type=int, choices=range(1,33), default=4)
     parser.add_argument('--workers', default='1,2,4')
     parser.add_argument('--distances', default='300')
     parser.add_argument('--seconds', type=float, default=12.)
@@ -47,7 +48,7 @@ def main():
             command = [sys.executable, str(ROOT / 'tools/adaptive_motion_check.py'),
                        '--output', str(directory), '--static-only', '--settled',
                        '--seconds', str(args.seconds), '--pixel-error', '5', '--msaa', '4',
-                       '--native-bins', 'on', '--workers', str(worker), '--far', str(distance)]
+                       '--native-bins', 'on', '--workers', str(worker), '--far', str(distance), '--refinements', str(args.refinements)]
             if args.disk_cache:
                 command += ['--disk-cache', str(args.disk_cache.resolve()), '--disk-mib', str(args.disk_mib)]
             print('+', ' '.join(command), flush=True)
@@ -55,7 +56,7 @@ def main():
                 continue
             started = time.monotonic()
             run = subprocess.run(command, cwd=ROOT)
-            result = {'far_m': distance, 'workers': worker, 'exit_code': run.returncode,
+            result = {'far_m': distance, 'workers': worker, 'refinements': args.refinements, 'exit_code': run.returncode,
                       'wall_seconds': time.monotonic() - started, 'binary_sha256': digest,
                       'disk_cache_path': str(args.disk_cache.resolve()) if args.disk_cache else None,
                       'disk_cache_initial_state': 'not asserted; use a new path for cold cache',
@@ -72,6 +73,8 @@ def main():
             (out / 'sweep.json').write_text(json.dumps(results, indent=2) + '\n')
             if run.returncode < 0 or run.returncode >= 128:
                 raise SystemExit(run.returncode)
+    if any(result['exit_code'] != 0 for result in results):
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

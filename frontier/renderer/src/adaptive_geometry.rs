@@ -16,7 +16,10 @@ use frontier_world::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 /// Integer source addresses, independent of camera/view epoch. A cache belongs to
@@ -92,7 +95,19 @@ impl NativeBin {
         }
     }
 }
+/// Counts an admitted allocation once, until its final Arc owner disappears.
+/// This avoids retaining/scanning Weak records on every cache admission.
+pub(crate) struct PayloadLifetime {
+    total: Arc<AtomicUsize>,
+    bytes: usize,
+}
+impl Drop for PayloadLifetime {
+    fn drop(&mut self) {
+        self.total.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
 pub struct GeometryTile {
+    pub(crate) payload_lifetime: Option<PayloadLifetime>,
     pub key: TileKey,
     pub mesh: Mesh,
     pub native_quads: Vec<NativeQuad>,
@@ -184,6 +199,7 @@ fn build_cached(
     cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
 ) -> Result<GeometryTile, String> {
+    samples.source_stage = SourceStage::Proxy;
     samples.begin_job();
     if world.topology_base_cells().is_none() {
         let mut tile = build_surface(world, key, cancelled, samples)?;
@@ -254,6 +270,63 @@ fn build_cached(
     configure_occlusion_bounds(world, &mut tile);
     samples.stages.finalize_ms += finalize_started.elapsed().as_secs_f64() * 1000.;
     Ok(tile)
+}
+
+/// Validate disk eligibility using the same ownership and bounded-job contracts
+/// as generation. Persisted payloads cannot bypass unsupported source edits.
+pub(crate) fn disk_cache_key_supported(world: &World, key: TileKey) -> bool {
+    if world.fbm_terrain().is_none()
+        || key.source_revision != world.revision()
+        || key.width_cells == 0
+        || key.width_cells > MAX_WIDTH
+        || key.step_cells == 0
+        || key.step_cells > key.width_cells
+        || key.width_cells % key.step_cells != 0
+        || key
+            .edge_steps
+            .iter()
+            .any(|&e| e == 0 || e > key.step_cells || key.step_cells % e != 0)
+        || (key.width_cells / key.step_cells) as u64 * (key.width_cells / key.step_cells) as u64
+            > 65_536
+        || key
+            .edge_steps
+            .iter()
+            .map(|&e| key.width_cells as u64 / e as u64)
+            .sum::<u64>()
+            > 65_536
+        || (key.step_cells == 1 && key.width_cells > MAX_NATIVE_WIDTH)
+        || key
+            .min
+            .iter()
+            .any(|&p| (p as i128).abs() + key.width_cells as i128 + 1 >= (1_i128 << 53))
+    {
+        return false;
+    }
+    if world.topology_base_cells().is_none() {
+        return world.revision() == 0;
+    }
+    if world.edit_cells().any(|c| !world.volume_owned(c)) {
+        return false;
+    }
+    let max = [
+        key.min[0] as i128 + key.width_cells as i128,
+        key.min[1] as i128 + key.width_cells as i128,
+    ];
+    let overlap_x = key.min[0] < 128 && max[0] > -128;
+    let overlap_z = key.min[1] < 128 && max[1] > -128;
+    if overlap_x && overlap_z {
+        return false;
+    }
+    let touching = [
+        key.min[0] == 128 && overlap_z,
+        max[1] == -128 && overlap_x,
+        max[0] == -128 && overlap_z,
+        key.min[1] == 128 && overlap_x,
+    ];
+    !touching
+        .into_iter()
+        .enumerate()
+        .any(|(edge, touches)| touches && key.edge_steps[edge] != 1)
 }
 
 fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
@@ -732,6 +805,7 @@ fn build_surface(
         if key.width_cells > MAX_NATIVE_WIDTH {
             return Err("native adaptive job exceeds 128-column cancellation quantum".into());
         }
+        samples.source_stage = SourceStage::NativeMesh;
         let native_started = std::time::Instant::now();
         let out = column_mesh::build_sampled(
             world,
@@ -744,6 +818,7 @@ fn build_surface(
             |x, z| samples.column(world, [x, z]),
         )?;
         samples.stages.native_mesh_ms += native_started.elapsed().as_secs_f64() * 1000.;
+        samples.source_stage = SourceStage::Proxy;
         if cancelled() {
             return Err("adaptive geometry cancelled".into());
         }
@@ -838,7 +913,9 @@ fn build_surface(
         .resize(generator.mesh.vertices.len(), 0);
     let certificate = if key.width_cells <= MAX_CERTIFICATE_WIDTH {
         let started = std::time::Instant::now();
+        generator.samples.source_stage = SourceStage::Certificate;
         let result = certify(&mut generator, proxy_triangles, &mut cancelled)?;
+        generator.samples.source_stage = SourceStage::Proxy;
         generator.samples.stages.certificate_ms += started.elapsed().as_secs_f64() * 1000.;
         Some(result)
     } else {
@@ -906,6 +983,7 @@ fn finish(
     let bytes =
         mesh.vertices.capacity() * std::mem::size_of::<Vertex>() + mesh.indices.capacity() * 4;
     GeometryTile {
+        payload_lifetime: None,
         key,
         mesh,
         native_quads: vec![],
@@ -1184,58 +1262,36 @@ impl SharedSourcePages {
             shard.lock().unwrap().pages.begin_job();
         }
     }
-    fn allocated_bytes(&self) -> usize {
-        self.shards
-            .iter()
-            .map(|s| {
-                let s = s.lock().unwrap();
-                s.pages.allocated_bytes() + s.bound_bytes + s.profile_bytes
-            })
-            .sum()
-    }
-    fn len(&self) -> usize {
-        self.shards
-            .iter()
-            .map(|s| s.lock().unwrap().pages.len())
-            .sum()
-    }
-    fn page_count(&self) -> usize {
-        self.shards
-            .iter()
-            .map(|s| s.lock().unwrap().pages.page_count())
-            .sum()
-    }
-    fn stats(&self) -> crate::source_page_cache::Stats {
-        let mut out = crate::source_page_cache::Stats::default();
+    /// A single pass locks each shard once; callers need a coherent per-shard
+    /// snapshot, not five independent passes through the same locks.
+    fn snapshot(&self) -> CacheStats {
+        let mut out = CacheStats::default();
         for shard in &self.shards {
             let shard = shard.lock().unwrap();
-            let s = shard.pages.stats();
-            out.hits += s.hits;
-            out.misses += s.misses;
-            out.promotions += s.promotions;
-            out.page_evictions += s.page_evictions;
-            // Sum of independent per-shard peaks is conservative even when
-            // their peaks occur at different times.
-            out.peak_allocated_bytes +=
-                s.peak_allocated_bytes + shard.bound_bytes + shard.profile_bytes;
+            let stats = shard.pages.stats();
+            out.source_cache_bytes +=
+                shard.pages.allocated_bytes() + shard.bound_bytes + shard.profile_bytes;
+            out.source_cache_peak_bytes +=
+                stats.peak_allocated_bytes + shard.bound_bytes + shard.profile_bytes;
+            out.source_cache_pages += shard.pages.page_count();
+            out.source_cache_columns += shard.pages.len();
+            out.source_cache_promotions += stats.promotions;
+            out.source_cache_page_evictions += stats.page_evictions;
+            out.affine_cache_hits += shard.bound_hits;
+            out.affine_cache_misses += shard.bound_misses;
+            out.affine_cache_bytes += shard.bound_bytes;
+            out.appearance_cache_hits += shard.profile_hits;
+            out.appearance_cache_misses += shard.profile_misses;
+            out.appearance_cache_bytes += shard.profile_bytes;
         }
         out
     }
-    fn bound_stats(&self) -> (u64, u64, usize) {
-        self.shards.iter().fold((0, 0, 0), |(h, m, b), s| {
-            let s = s.lock().unwrap();
-            (h + s.bound_hits, m + s.bound_misses, b + s.bound_bytes)
-        })
-    }
-    fn profile_stats(&self) -> (u64, u64, usize) {
-        self.shards.iter().fold((0, 0, 0), |(h, m, b), s| {
-            let s = s.lock().unwrap();
-            (
-                h + s.profile_hits,
-                m + s.profile_misses,
-                b + s.profile_bytes,
-            )
-        })
+    #[cfg(test)]
+    fn stats(&self) -> crate::source_page_cache::Stats {
+        crate::source_page_cache::Stats {
+            peak_allocated_bytes: self.snapshot().source_cache_peak_bytes,
+            ..Default::default()
+        }
     }
     fn profile_index(key: ProfileKey, slots: usize) -> Option<usize> {
         if slots == 0 {
@@ -1315,7 +1371,40 @@ struct BuildStages {
     native_mesh_ms: f64,
     finalize_ms: f64,
 }
+#[derive(Clone, Copy, Default)]
+enum SourceStage {
+    #[default]
+    Proxy,
+    Appearance,
+    Certificate,
+    NativeMesh,
+}
+#[derive(Clone, Copy, Default)]
+struct SourceTimings {
+    lock_ms: f64,
+    lookup_ms: f64,
+    generate_ms: f64,
+    appearance_ms: f64,
+    certificate_ms: f64,
+    native_mesh_ms: f64,
+}
+impl SourceTimings {
+    fn total_ms(self) -> f64 {
+        self.lock_ms + self.lookup_ms + self.generate_ms
+    }
+    fn merge(&mut self, other: Self) {
+        self.lock_ms += other.lock_ms;
+        self.lookup_ms += other.lookup_ms;
+        self.generate_ms += other.generate_ms;
+        self.appearance_ms += other.appearance_ms;
+        self.certificate_ms += other.certificate_ms;
+        self.native_mesh_ms += other.native_mesh_ms;
+    }
+}
 struct SourceSamples {
+    profile_enabled: bool,
+    source_stage: SourceStage,
+    timings: SourceTimings,
     pages: SharedSourcePages,
     hits: u64,
     generated: u64,
@@ -1324,6 +1413,9 @@ struct SourceSamples {
 impl SourceSamples {
     fn new(bytes: usize) -> Self {
         Self {
+            profile_enabled: std::env::var_os("FRONTIER_PROFILE_SOURCE").is_some_and(|v| v == "1"),
+            source_stage: SourceStage::default(),
+            timings: SourceTimings::default(),
             pages: SharedSourcePages::new(bytes),
             hits: 0,
             generated: 0,
@@ -1332,6 +1424,9 @@ impl SourceSamples {
     }
     fn fork(&self) -> Self {
         Self {
+            profile_enabled: self.profile_enabled,
+            source_stage: SourceStage::default(),
+            timings: SourceTimings::default(),
             pages: self.pages.clone(),
             hits: 0,
             generated: 0,
@@ -1342,6 +1437,11 @@ impl SourceSamples {
         self.pages.begin_job();
     }
     fn column(&mut self, world: &World, p: [i64; 2]) -> NativeColumn {
+        // No clock reads in the default per-column path. Detailed diagnostics
+        // deliberately perturb work; never compare enabled and disabled runs.
+        if self.profile_enabled {
+            return self.profiled_column(world, p);
+        }
         let mut page = self.pages.shards[self.pages.shard(p)].lock().unwrap();
         if let Some(c) = page.pages.get(p) {
             self.hits += 1;
@@ -1352,8 +1452,38 @@ impl SourceSamples {
         page.pages.insert(p, c);
         c
     }
-    fn allocated_bytes(&self) -> usize {
-        self.pages.allocated_bytes()
+    fn profiled_column(&mut self, world: &World, p: [i64; 2]) -> NativeColumn {
+        let started = std::time::Instant::now();
+        let mut page = self.pages.shards[self.pages.shard(p)].lock().unwrap();
+        let lock_ms = started.elapsed().as_secs_f64() * 1000.;
+        let lookup_started = std::time::Instant::now();
+        let cached = page.pages.get(p);
+        let mut lookup_ms = lookup_started.elapsed().as_secs_f64() * 1000.;
+        let mut generate_ms = 0.;
+        let c = if let Some(c) = cached {
+            self.hits += 1;
+            c
+        } else {
+            let generate_started = std::time::Instant::now();
+            let c = NativeColumn::canonical(world, p[0], p[1]);
+            generate_ms = generate_started.elapsed().as_secs_f64() * 1000.;
+            self.generated += 1;
+            let insert_started = std::time::Instant::now();
+            page.pages.insert(p, c);
+            lookup_ms += insert_started.elapsed().as_secs_f64() * 1000.;
+            c
+        };
+        self.timings.lock_ms += lock_ms;
+        self.timings.lookup_ms += lookup_ms;
+        self.timings.generate_ms += generate_ms;
+        let total_ms = lock_ms + lookup_ms + generate_ms;
+        match self.source_stage {
+            SourceStage::Appearance => self.timings.appearance_ms += total_ms,
+            SourceStage::Certificate => self.timings.certificate_ms += total_ms,
+            SourceStage::NativeMesh => self.timings.native_mesh_ms += total_ms,
+            SourceStage::Proxy => {}
+        }
+        c
     }
     fn clear(&mut self) {
         self.pages.clear();
@@ -1589,7 +1719,9 @@ impl Generator<'_> {
         }
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
+        self.samples.source_stage = SourceStage::Appearance;
         let profile = self.patch_profile(x, z, s)?;
+        self.samples.source_stage = SourceStage::Proxy;
         self.samples.stages.appearance_ms += started.elapsed().as_secs_f64() * 1000.;
         let index = self.face_profiles.len() as u32;
         self.face_profiles.push(profile);
@@ -1706,6 +1838,21 @@ impl Generator<'_> {
         stride: i64,
         key: ProfileKey,
     ) -> Result<ProfileEntry, String> {
+        static REUSE_CENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let reuse_center = *REUSE_CENTER.get_or_init(|| {
+            std::env::var_os("FRONTIER_PROFILE_CENTER_REUSE").is_some_and(|value| value == "1")
+        });
+        self.compute_patch_profile_with_center_reuse(x, z, s, stride, key, reuse_center)
+    }
+    fn compute_patch_profile_with_center_reuse(
+        &mut self,
+        x: i64,
+        z: i64,
+        s: i64,
+        stride: i64,
+        key: ProfileKey,
+        reuse_center: bool,
+    ) -> Result<ProfileEntry, String> {
         let mut profile = [[0.; 4]; 5];
         let mut extreme_heights = [i64::MAX, i64::MIN];
         let mut extrema = [key.min; 2];
@@ -1740,6 +1887,11 @@ impl Generator<'_> {
                     (xx, zz)
                 };
                 let h = self.height(xx, zz)?;
+                // Canonical column material depends only on this immutable
+                // center value. Keep every height query, side-run and float
+                // addition in its original order; avoid re-querying the same
+                // local column for each exposed material span.
+                let center = reuse_center.then(|| self.heights[&[xx, zz]]);
                 note([self.key.min[0] + xx, self.key.min[1] + zz], h);
                 let add =
                     |profile: &mut [[f32; 4]; 5], axis: usize, cells: i64, material: Material| {
@@ -1749,13 +1901,21 @@ impl Generator<'_> {
                         }
                         profile[axis][3] += a;
                     };
-                add(&mut profile, 0, 1, self.material(xx, zz, h - 1)?);
+                let top_material = match center {
+                    Some(column) => column.material(h - 1),
+                    None => self.material(xx, zz, h - 1)?,
+                };
+                add(&mut profile, 0, 1, top_material);
                 for (axis, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
                     let mut lo = self.height(xx + dx, zz + dz)?;
                     note([self.key.min[0] + xx + dx, self.key.min[1] + zz + dz], lo);
                     for hi in [h - 12, h - 1, h] {
                         if hi > lo {
-                            add(&mut profile, axis, hi - lo, self.material(xx, zz, lo)?);
+                            let material = match center {
+                                Some(column) => column.material(lo),
+                                None => self.material(xx, zz, lo)?,
+                            };
+                            add(&mut profile, axis, hi - lo, material);
                             lo = hi
                         }
                     }
@@ -2009,11 +2169,34 @@ pub struct CacheStats {
     pub appearance_cache_misses: u64,
     pub appearance_cache_bytes: usize,
     pub peak_live_tile_payload_bytes: usize,
+    /// Detailed source instrumentation is opt-in via FRONTIER_PROFILE_SOURCE=1.
+    pub profile_enabled: bool,
+    pub source_lock_ms: f64,
+    pub source_lookup_ms: f64,
+    pub source_generate_ms: f64,
+    /// Exclusive CPU stage sums. Valid only when profile_enabled; source lock,
+    /// lookup and generation are removed from their enclosing stages.
+    pub appearance_exclusive_ms: f64,
+    pub certificate_exclusive_ms: f64,
+    pub native_mesh_exclusive_ms: f64,
+    pub proxy_exclusive_ms: f64,
+    pub lru_metadata_bytes: usize,
+    /// Main-thread source snapshot, exclusive admission and eviction CPU time.
+    /// Snapshot time covers the admission path; stats observer cost is separate.
+    pub cache_snapshot_ms: f64,
+    pub cache_admission_ms: f64,
+    pub cache_eviction_ms: f64,
 }
 struct Entry {
     tile: Arc<GeometryTile>,
-    stamp: u64,
+    previous: Option<TileKey>,
+    next: Option<TileKey>,
 }
+// Charge added resident link and lifetime-guard storage compared with the former
+// u64 stamp. Original fixed Arc/cache headers remain outside payload accounting.
+const LRU_ENTRY_BYTES: usize =
+    std::mem::size_of::<Entry>() - std::mem::size_of::<Arc<GeometryTile>>() - 8
+        + std::mem::size_of::<Option<PayloadLifetime>>();
 /// Bounded source cache. Returned Arc handles may outlive eviction; the caller
 /// must include upload/active handles in its independent in-flight budget.
 pub struct GeometryCache {
@@ -2021,13 +2204,14 @@ pub struct GeometryCache {
     budget: usize,
     source_budget: usize,
     mesh_budget: usize,
-    clock: u64,
+    oldest: Option<TileKey>,
+    newest: Option<TileKey>,
     entries: HashMap<TileKey, Entry>,
     samples: SourceSamples,
     mesh_bytes: usize,
     stats: CacheStats,
     disk: Option<crate::derived_disk_writeback::AsyncDiskCache>,
-    evicted: Vec<(Weak<GeometryTile>, usize)>,
+    live_payload_bytes: Arc<AtomicUsize>,
 }
 impl GeometryCache {
     pub fn new(world: World, budget_bytes: usize) -> Self {
@@ -2037,13 +2221,14 @@ impl GeometryCache {
             budget: budget_bytes,
             source_budget,
             mesh_budget: budget_bytes - source_budget,
-            clock: 0,
+            oldest: None,
+            newest: None,
             entries: HashMap::new(),
             samples: SourceSamples::new(source_budget),
             mesh_bytes: 0,
             stats: CacheStats::default(),
             disk: None,
-            evicted: Vec::new(),
+            live_payload_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
     pub(crate) fn enable_disk_cache(
@@ -2065,18 +2250,54 @@ impl GeometryCache {
     pub fn mesh_budget_bytes(&self) -> usize {
         self.mesh_budget
     }
+    /// Exact mesh-cache admission charge for one owner, including resident LRU
+    /// links and payload lifetime metadata. Unknown payloads still reserve this
+    /// per-key charge when planning a complete coherent replacement.
+    pub(crate) fn entry_resident_bytes(payload_bytes: usize) -> usize {
+        payload_bytes.saturating_add(LRU_ENTRY_BYTES)
+    }
     pub fn contains(&self, key: &TileKey) -> bool {
         self.entries.contains_key(key)
     }
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+    fn unlink(&mut self, key: TileKey) {
+        let entry = &self.entries[&key];
+        let (previous, next) = (entry.previous, entry.next);
+        if let Some(previous) = previous {
+            self.entries.get_mut(&previous).unwrap().next = next;
+        } else {
+            self.oldest = next;
+        }
+        if let Some(next) = next {
+            self.entries.get_mut(&next).unwrap().previous = previous;
+        } else {
+            self.newest = previous;
+        }
+    }
+    fn link_newest(&mut self, key: TileKey) {
+        if let Some(newest) = self.newest {
+            self.entries.get_mut(&newest).unwrap().next = Some(key);
+        } else {
+            self.oldest = Some(key);
+        }
+        let entry = self.entries.get_mut(&key).unwrap();
+        entry.previous = self.newest;
+        entry.next = None;
+        self.newest = Some(key);
+    }
+    fn lru_metadata_bytes(&self) -> usize {
+        self.entries.len() * LRU_ENTRY_BYTES
+    }
     pub fn get(&mut self, key: TileKey) -> Option<Arc<GeometryTile>> {
-        self.clock += 1;
-        let e = self.entries.get_mut(&key)?;
-        e.stamp = self.clock;
+        let tile = self.entries.get(&key)?.tile.clone();
+        if self.newest != Some(key) {
+            self.unlink(key);
+            self.link_newest(key);
+        }
         self.stats.hits += 1;
-        Some(e.tile.clone())
+        Some(tile)
     }
     pub fn get_or_build(
         &mut self,
@@ -2159,6 +2380,7 @@ impl GeometryCache {
         for (_, _, _, _, samples) in &built {
             self.samples.hits += samples.hits;
             self.samples.generated += samples.generated;
+            self.samples.timings.merge(samples.timings);
             self.samples.stages.appearance_ms += samples.stages.appearance_ms;
             self.samples.stages.certificate_ms += samples.stages.certificate_ms;
             self.samples.stages.native_mesh_ms += samples.stages.native_mesh_ms;
@@ -2192,7 +2414,10 @@ impl GeometryCache {
         self.stats.total_build_ms += elapsed;
         self.stats.max_build_ms = self.stats.max_build_ms.max(elapsed);
         self.stats.builds += u64::from(elapsed > 0.);
-        let source_bytes = self.samples.allocated_bytes();
+        let snapshot_started = std::time::Instant::now();
+        let source_stats = self.samples.pages.snapshot();
+        self.stats.cache_snapshot_ms += snapshot_started.elapsed().as_secs_f64() * 1000.;
+        let source_bytes = source_stats.source_cache_bytes;
         self.stats.appearance_ms = self.samples.stages.appearance_ms;
         self.stats.certificate_ms = self.samples.stages.certificate_ms;
         self.stats.native_mesh_ms = self.samples.stages.native_mesh_ms;
@@ -2200,22 +2425,20 @@ impl GeometryCache {
         self.stats.source_cache_hits = self.samples.hits;
         self.stats.generated_columns = self.samples.generated;
         self.stats.source_cache_bytes = source_bytes;
-        let source_stats = self.samples.pages.stats();
-        self.stats.source_cache_peak_bytes = source_stats.peak_allocated_bytes;
-        self.stats.source_cache_pages = self.samples.pages.page_count();
-        self.stats.source_cache_columns = self.samples.pages.len();
-        self.stats.source_cache_promotions = source_stats.promotions;
-        self.stats.source_cache_page_evictions = source_stats.page_evictions;
+        self.stats.source_cache_peak_bytes = source_stats.source_cache_peak_bytes;
+        self.stats.source_cache_pages = source_stats.source_cache_pages;
+        self.stats.source_cache_columns = source_stats.source_cache_columns;
+        self.stats.source_cache_promotions = source_stats.source_cache_promotions;
+        self.stats.source_cache_page_evictions = source_stats.source_cache_page_evictions;
         debug_assert!(source_bytes <= self.source_budget);
-        debug_assert!(source_stats.peak_allocated_bytes <= self.source_budget);
+        debug_assert!(source_stats.source_cache_peak_bytes <= self.source_budget);
         // Mesh residency is fixed during the source build. Its reservation
         // therefore bounds combined cache memory even during page promotion.
-        self.stats.peak_bytes = self
-            .stats
-            .peak_bytes
-            .max(self.mesh_bytes + source_stats.peak_allocated_bytes);
+        self.stats.peak_bytes = self.stats.peak_bytes.max(
+            self.mesh_bytes + self.lru_metadata_bytes() + source_stats.source_cache_peak_bytes,
+        );
         debug_assert!(self.stats.peak_bytes <= self.budget);
-        self.stats.resident_bytes = self.mesh_bytes + source_bytes;
+        self.stats.resident_bytes = self.mesh_bytes + self.lru_metadata_bytes() + source_bytes;
         let mut built = built?;
         let packing_started = std::time::Instant::now();
         pack_proxy_triangles(&mut built)?;
@@ -2226,6 +2449,12 @@ impl GeometryCache {
             self.stats.total_build_ms += packing_ms;
             self.stats.max_build_ms = self.stats.max_build_ms.max(elapsed + packing_ms);
         }
+        self.live_payload_bytes
+            .fetch_add(built.bytes, Ordering::Relaxed);
+        built.payload_lifetime = Some(PayloadLifetime {
+            total: self.live_payload_bytes.clone(),
+            bytes: built.bytes,
+        });
         let tile = Arc::new(built);
         if elapsed > 0. {
             self.stats.affine_quad_bounds += tile.affine_stats.quad_bounds;
@@ -2234,44 +2463,53 @@ impl GeometryCache {
             self.stats.affine_unavailable_quads += tile.affine_stats.unavailable_quads;
             self.stats.affine_ms += tile.affine_stats.cpu_ms;
         }
-        if tile.bytes > self.mesh_budget {
+        let admission_started = std::time::Instant::now();
+        if tile.bytes.saturating_add(LRU_ENTRY_BYTES) > self.mesh_budget {
             return Err("single adaptive tile exceeds reserved mesh cache budget".into());
         }
-        while self.mesh_bytes.saturating_add(tile.bytes) > self.mesh_budget {
-            let oldest = *self
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.stamp)
-                .ok_or("adaptive cache accounting error")?
-                .0;
+        let eviction_started = std::time::Instant::now();
+        while self
+            .mesh_bytes
+            .saturating_add(self.lru_metadata_bytes())
+            .saturating_add(tile.bytes)
+            .saturating_add(LRU_ENTRY_BYTES)
+            > self.mesh_budget
+        {
+            let oldest = self.oldest.ok_or("adaptive cache accounting error")?;
+            self.unlink(oldest);
             let old = self.entries.remove(&oldest).unwrap();
             self.mesh_bytes -= old.tile.bytes;
-            self.evicted
-                .push((Arc::downgrade(&old.tile), old.tile.bytes));
             self.stats.evictions += 1;
         }
-        self.clock += 1;
+        let eviction_ms = eviction_started.elapsed().as_secs_f64() * 1000.;
+        self.stats.cache_eviction_ms += eviction_ms;
         self.mesh_bytes += tile.bytes;
-        self.stats.resident_bytes = self.mesh_bytes + source_bytes;
-        self.stats.peak_bytes = self
-            .stats
-            .peak_bytes
-            .max(self.mesh_bytes + source_stats.peak_allocated_bytes);
+        self.stats.resident_bytes =
+            self.mesh_bytes + self.lru_metadata_bytes() + LRU_ENTRY_BYTES + source_bytes;
+        self.stats.peak_bytes = self.stats.peak_bytes.max(
+            self.mesh_bytes
+                + self.lru_metadata_bytes()
+                + LRU_ENTRY_BYTES
+                + source_stats.source_cache_peak_bytes,
+        );
         debug_assert!(
             self.stats.resident_bytes <= self.budget && self.stats.peak_bytes <= self.budget
         );
-        self.evicted.retain(|(tile, _)| tile.strong_count() > 0);
         self.stats.peak_live_tile_payload_bytes = self
             .stats
             .peak_live_tile_payload_bytes
-            .max(self.mesh_bytes + self.evicted.iter().map(|(_, bytes)| *bytes).sum::<usize>());
+            .max(self.live_payload_bytes.load(Ordering::Relaxed));
         self.entries.insert(
             key,
             Entry {
                 tile: tile.clone(),
-                stamp: self.clock,
+                previous: None,
+                next: None,
             },
         );
+        self.link_newest(key);
+        self.stats.cache_admission_ms +=
+            (admission_started.elapsed().as_secs_f64() * 1000. - eviction_ms).max(0.);
         if elapsed > 0. {
             if let Some(disk) = &mut self.disk {
                 disk.queue_store(tile.clone());
@@ -2280,57 +2518,63 @@ impl GeometryCache {
         Ok(tile)
     }
     pub fn stats(&self) -> CacheStats {
-        let (affine_cache_hits, affine_cache_misses, affine_cache_bytes) =
-            self.samples.pages.bound_stats();
-        let (appearance_cache_hits, appearance_cache_misses, appearance_cache_bytes) =
-            self.samples.pages.profile_stats();
-        let source_bytes = self.samples.allocated_bytes();
-        let source_stats = self.samples.pages.stats();
+        let source = self.samples.pages.snapshot();
+        let live_tile_payload_bytes = self.live_payload_bytes.load(Ordering::Relaxed);
+        let live_evicted_payload_bytes = live_tile_payload_bytes.saturating_sub(self.mesh_bytes);
+        let timing = self.samples.timings;
+        let stages = self.samples.stages;
+        let proxy_source_ms = timing.total_ms()
+            - timing.appearance_ms
+            - timing.certificate_ms
+            - timing.native_mesh_ms;
         CacheStats {
-            source_cache_bytes: source_bytes,
-            source_cache_peak_bytes: source_stats.peak_allocated_bytes,
-            source_cache_pages: self.samples.pages.page_count(),
-            source_cache_columns: self.samples.pages.len(),
-            resident_bytes: self.mesh_bytes + source_bytes,
+            profile_enabled: self.samples.profile_enabled,
+            source_lock_ms: timing.lock_ms,
+            source_lookup_ms: timing.lookup_ms,
+            source_generate_ms: timing.generate_ms,
+            appearance_exclusive_ms: (stages.appearance_ms - timing.appearance_ms).max(0.),
+            certificate_exclusive_ms: (stages.certificate_ms - timing.certificate_ms).max(0.),
+            native_mesh_exclusive_ms: (stages.native_mesh_ms - timing.native_mesh_ms).max(0.),
+            proxy_exclusive_ms: (self.stats.total_build_ms
+                - stages.appearance_ms
+                - stages.certificate_ms
+                - stages.native_mesh_ms
+                - stages.finalize_ms
+                - self.stats.affine_ms
+                - proxy_source_ms)
+                .max(0.),
+            source_cache_bytes: source.source_cache_bytes,
+            source_cache_peak_bytes: source.source_cache_peak_bytes,
+            source_cache_pages: source.source_cache_pages,
+            source_cache_columns: source.source_cache_columns,
+            source_cache_promotions: source.source_cache_promotions,
+            source_cache_page_evictions: source.source_cache_page_evictions,
+            resident_bytes: self.mesh_bytes + self.lru_metadata_bytes() + source.source_cache_bytes,
             peak_bytes: self
                 .stats
                 .peak_bytes
-                .max(self.mesh_bytes + source_stats.peak_allocated_bytes),
-            live_evicted_payload_bytes: self
-                .evicted
-                .iter()
-                .filter(|(tile, _)| tile.strong_count() > 0)
-                .map(|(_, bytes)| *bytes)
-                .sum(),
-            affine_cache_hits,
-            affine_cache_misses,
-            affine_cache_bytes,
-            appearance_cache_hits,
-            appearance_cache_misses,
-            appearance_cache_bytes,
+                .max(self.mesh_bytes + self.lru_metadata_bytes() + source.source_cache_peak_bytes),
+            live_evicted_payload_bytes,
+            live_tile_payload_bytes,
+            lru_metadata_bytes: self.lru_metadata_bytes(),
+            affine_cache_hits: source.affine_cache_hits,
+            affine_cache_misses: source.affine_cache_misses,
+            affine_cache_bytes: source.affine_cache_bytes,
+            appearance_cache_hits: source.appearance_cache_hits,
+            appearance_cache_misses: source.appearance_cache_misses,
+            appearance_cache_bytes: source.appearance_cache_bytes,
             disk: self
                 .disk
                 .as_ref()
                 .map(|disk| disk.stats())
                 .unwrap_or_default(),
-            live_tile_payload_bytes: self.mesh_bytes
-                + self
-                    .evicted
-                    .iter()
-                    .filter(|(tile, _)| tile.strong_count() > 0)
-                    .map(|(_, bytes)| *bytes)
-                    .sum::<usize>(),
             ..self.stats
         }
     }
     pub fn clear(&mut self) {
-        self.evicted.extend(
-            self.entries
-                .values()
-                .map(|entry| (Arc::downgrade(&entry.tile), entry.tile.bytes)),
-        );
-        self.evicted.retain(|(tile, _)| tile.strong_count() > 0);
         self.entries.clear();
+        self.oldest = None;
+        self.newest = None;
         self.samples.clear();
         self.mesh_bytes = 0;
         self.stats.source_cache_bytes = 0;
@@ -3224,6 +3468,82 @@ mod tests {
         assert_eq!(cleared.live_tile_payload_bytes, tile.bytes);
     }
     #[test]
+    fn appearance_center_column_reuse_preserves_float_bits_extrema_and_sample_addresses() {
+        for seed in [7, 11] {
+            let world = World::fbm(seed, FbmParams::default()).unwrap();
+            for (width, size, stride) in [(128, 4, 1), (128, 16, 1), (128, 32, 1), (256, 32, 8)] {
+                let run = |reuse_center| {
+                    let mut samples = SourceSamples::new(0);
+                    let key = TileKey {
+                        min: [-127, -511],
+                        width_cells: width,
+                        step_cells: size as u32,
+                        edge_steps: [size as u32; 4],
+                        source_revision: 0,
+                    };
+                    let mut generator = Generator {
+                        experiment: None,
+                        world: &world,
+                        key,
+                        samples: &mut samples,
+                        heights: LocalColumns::new(width),
+                        mesh: Mesh {
+                            vertices: vec![],
+                            indices: vec![],
+                            origin: Cell::default(),
+                            exposed_native_faces: 0,
+                        },
+                        empirical_error_m: 0.0,
+                        affine_error: 0.0,
+                        affine_range: [f64::INFINITY, f64::NEG_INFINITY],
+                        affine_complete: true,
+                        affine_stats: AffineStats::default(),
+                        face_profiles: vec![[[0.; 4]; 5]],
+                        face_profile_indices: vec![],
+                        appearance: FaceAppearance::default(),
+                    };
+                    let profile = generator
+                        .compute_patch_profile_with_center_reuse(
+                            0,
+                            0,
+                            size,
+                            stride,
+                            ProfileKey {
+                                min: key.min,
+                                size,
+                                stride,
+                            },
+                            reuse_center,
+                        )
+                        .unwrap();
+                    let addresses: Vec<_> = (-1..=size)
+                        .flat_map(|z| (-1..=size).map(move |x| [x, z]))
+                        .filter_map(|p| {
+                            generator.heights.get(&p).copied().map(|column| (p, column))
+                        })
+                        .collect();
+                    let count = generator.heights.len();
+                    let bits = profile.value.map(|axis| axis.map(f32::to_bits));
+                    (
+                        bits,
+                        profile.extrema,
+                        addresses,
+                        count,
+                        samples.generated,
+                        samples.hits,
+                    )
+                };
+                let control = run(false);
+                let reused = run(true);
+                assert_eq!(
+                    reused, control,
+                    "seed={seed}, width={width}, size={size}, stride={stride}"
+                );
+                assert!(reused.4 > 0);
+            }
+        }
+    }
+    #[test]
     fn appearance_cache_preserves_tile_bits_across_edges_widths_and_clear() {
         let world = World::fbm(7, FbmParams::default()).unwrap();
         let mut cache = GeometryCache::new(world.clone(), 128 * 1024 * 1024);
@@ -3379,6 +3699,122 @@ mod tests {
             .bounds
             .iter()
             .all(Option::is_none)));
+    }
+    #[test]
+    fn linked_lru_matches_reference_order_and_charges_metadata() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let mut cache = GeometryCache::new(world, 128 * 1024);
+        cache.mesh_budget = 3 * (1024 + LRU_ENTRY_BYTES);
+        let mut reference = std::collections::VecDeque::new();
+        // Repeated newest hits, middle hits, misses and eviction pressure.
+        for i in 0..1000 {
+            let k = TileKey {
+                min: [(i * 17 % 7) * 64, 0],
+                ..key(8)
+            };
+            if cache.get(k).is_none() {
+                if reference.len() == 3 {
+                    reference.pop_front();
+                }
+                let mut tile = finish(
+                    k,
+                    Mesh {
+                        vertices: vec![],
+                        indices: vec![],
+                        origin: Cell { x: 0, y: 0, z: 0 },
+                        exposed_native_faces: 0,
+                    },
+                    0,
+                    0.,
+                    false,
+                );
+                tile.bytes = 1024;
+                cache.admit_built(k, Ok(tile), 0.).unwrap();
+            } else {
+                let index = reference.iter().position(|&entry| entry == k).unwrap();
+                reference.remove(index);
+            }
+            reference.push_back(k);
+            let mut actual = Vec::new();
+            let mut current = cache.oldest;
+            let mut previous = None;
+            while let Some(k) = current {
+                assert!(
+                    actual.len() < cache.entries.len(),
+                    "LRU links must not cycle"
+                );
+                let entry = &cache.entries[&k];
+                assert_eq!(entry.previous, previous);
+                previous = current;
+                current = entry.next;
+                actual.push(k);
+            }
+            assert_eq!(previous, cache.newest);
+            assert_eq!(actual, reference.iter().copied().collect::<Vec<_>>());
+            assert_eq!(
+                cache.lru_metadata_bytes(),
+                cache.entries.len() * LRU_ENTRY_BYTES
+            );
+            assert!(cache.mesh_bytes + cache.lru_metadata_bytes() <= cache.mesh_budget);
+            assert_eq!(cache.stats().live_tile_payload_bytes, cache.mesh_bytes);
+        }
+        let retained = cache.get(*reference.front().unwrap()).unwrap();
+        let size = retained.bytes;
+        cache.clear();
+        assert_eq!(cache.oldest, None);
+        assert_eq!(cache.newest, None);
+        assert_eq!(cache.stats().lru_metadata_bytes, 0);
+        assert_eq!(cache.stats().live_evicted_payload_bytes, size);
+        drop(retained);
+        assert_eq!(cache.stats().live_tile_payload_bytes, 0);
+    }
+    #[test]
+    fn optional_source_profile_preserves_bits_and_partitions_worker_cost() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let mut detailed = GeometryCache::new(world.clone(), 16 * 1024 * 1024);
+        detailed.samples.profile_enabled = true;
+        let mut normal = GeometryCache::new(world, 16 * 1024 * 1024);
+        normal.samples.profile_enabled = false;
+        for k in [key(8), key(1)] {
+            let a = detailed.get_or_build(k, || false).unwrap();
+            let b = normal.get_or_build(k, || false).unwrap();
+            assert_eq!(proxy_primitive_bits(&a), proxy_primitive_bits(&b));
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&a.native_quads),
+                bytemuck::cast_slice::<_, u8>(&b.native_quads)
+            );
+            assert_eq!(a.face_profiles, b.face_profiles);
+            assert_eq!(a.certified_error_m, b.certified_error_m);
+        }
+        let stats = detailed.stats();
+        assert!(stats.profile_enabled);
+        assert!(
+            stats.source_lock_ms > 0.
+                && stats.source_lookup_ms > 0.
+                && stats.source_generate_ms > 0.
+        );
+        let exclusive_sum = stats.appearance_exclusive_ms
+            + stats.certificate_exclusive_ms
+            + stats.native_mesh_exclusive_ms
+            + stats.proxy_exclusive_ms
+            + stats.affine_ms
+            + stats.finalize_ms
+            + stats.source_lock_ms
+            + stats.source_lookup_ms
+            + stats.source_generate_ms;
+        assert!(
+            (exclusive_sum - stats.total_build_ms).abs() < 1e-6,
+            "exclusive sum {exclusive_sum}, worker total {}",
+            stats.total_build_ms
+        );
+        let disabled = normal.stats();
+        assert!(!disabled.profile_enabled);
+        assert_eq!(
+            disabled.source_lock_ms + disabled.source_lookup_ms + disabled.source_generate_ms,
+            0.
+        );
+        assert_eq!(stats.generated_columns, disabled.generated_columns);
+        assert_eq!(stats.source_cache_hits, disabled.source_cache_hits);
     }
     #[test]
     fn live_payload_tracks_evicted_arcs_until_last_external_owner_drops() {
@@ -4205,7 +4641,7 @@ mod tests {
                 .unwrap();
             assert!(cache.mesh_bytes <= cache.mesh_budget_bytes());
         }
-        let mesh_during_build = cache.mesh_bytes;
+        let mesh_during_build = cache.mesh_bytes + cache.lru_metadata_bytes();
         assert!(mesh_during_build > cache.mesh_budget_bytes() * 9 / 10);
         cache.samples.clear();
         cache
@@ -4394,6 +4830,11 @@ mod tests {
                 let exact_px = crate::adaptive_stream::projected_cached_vertical_error(
                     exact_e,
                     exact.bounds,
+                    glam::DVec3::new(
+                        exact.mesh.origin.x as f64,
+                        exact.mesh.origin.y as f64,
+                        exact.mesh.origin.z as f64,
+                    ) * VOXEL_SIZE,
                     &camera,
                     1920,
                     1080,
@@ -4408,6 +4849,11 @@ mod tests {
                     let px = crate::adaptive_stream::projected_cached_vertical_error(
                         e,
                         tile.bounds,
+                        glam::DVec3::new(
+                            tile.mesh.origin.x as f64,
+                            tile.mesh.origin.y as f64,
+                            tile.mesh.origin.z as f64,
+                        ) * VOXEL_SIZE,
                         &camera,
                         1920,
                         1080,

@@ -171,3 +171,20 @@ cold end-to-end advantage is small and floating appearance parity, asynchronous
 integration and render-contention validation are still required. Treat a broader
 GPU terrain-generation or production-speedup requirement as remaining work;
 the successful standalone kernel does not satisfy it.
+
+## Drawing contention and decision
+
+`FRONTIER_GPU_SUMMARY_CONTENTION=1` adds a bounded diagnostic to a normal GPU
+frame: eight resident canonical pages are summarized with no per-frame readback,
+CPU page generation or blocking wait. Startup verifies integer parity once.
+The summaries are not consumed by production geometry. Reports expose the
+startup time, logical buffer bytes, dispatch count and readback policy.
+
+The matched primary pair records 9.930 ms frame p95 without the diagnostic and
+10.102 ms with it; both images are byte-identical. This is one sequential pair,
+not a statistically established overhead estimate. Combined with the standalone
+source/transfer timings above, it does not demonstrate a whole-frame preparation
+benefit. The experiment is complete as a **do-not-promote-yet** result: retain the
+CPU fallback and keep GPU preparation opt-in until a useful asynchronous consumer
+and equivalent floating appearance pipeline are demonstrated. Exact commands,
+hardware and timings are in [follow-up evidence](reference/loading/remaining-issues-notes.md).

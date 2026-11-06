@@ -20,8 +20,10 @@ reference as a pixel-error oracle.
 - Movement prediction uses observed camera translation/rotation and an exact
   nearest-rank p95 from bounded latency histories. Before a quality publication
   sample exists, generation-batch duration is an explicitly labelled lower-bound
-  fallback. Speculative refinement is bounded and can share one preparation slot after
-  current requested quality passes; it does not establish successful motion by itself.
+  fallback. Speculative refinement is bounded to one genuinely future-only selection slot
+  while current refinement retains the other slots; it does not establish
+  successful motion by itself. Identical-pose requests clear stale forecasts
+  before epoch deduplication, and forecast occlusion is evaluated at its own pose.
 - An optional, disposable disk cache stores fully built geometry with explicit
   versioned source identity, key, checksum and bounded decoding. One process
   owns a cache directory through an OS lock. See [disk cache](DERIVED_DISK_CACHE.md).
@@ -377,9 +379,11 @@ contracts. #70's bounded parallel preparation has measured end-to-end benefit.
 nested within stage timings rather than a complete exclusive-cost breakdown.
 #71's GPU probe remains experimental because transfer/source cost prevents a
 proven whole-game gain; drawing-contention and production integration are absent.
-#72 supports bounded versioned restarts and corruption fallback, but edit identity
-currently invalidates conservatively rather than providing per-dependency local
-persistence reuse. #64 still fails moving quality; #73 still fails wide-view
+#72 supports bounded versioned restarts, corruption fallback and per-tile local
+edit dependency identity, including the native-column halo. CPU tests demonstrate
+unaffected surface-tile reuse across owner edits and current-revision rebinding.
+These format-3 changes have no new hardware timing claim; prior format-2 restart
+measurements remain historical. #64 still fails moving quality; #73 still fails wide-view
 latency/60 FPS and needs extended independent long-range reference crops.
 
 The next substantive work is publication/visibility scheduling and generation
@@ -387,3 +391,87 @@ throughput for changing views, followed by reducing thousands of per-cluster
 draw submissions. A larger GPU may help drawing but cannot be assumed to remove
 these CPU and preparation limits. Do not close failed quality gates based on
 fast fallback frame times.
+
+
+## Follow-up: bounded caches, submission and scheduling
+
+See [follow-up measurements](reference/loading/followup-measurements.json) and
+[reference/cache/compute evidence](reference/loading/remaining-issues-notes.md).
+All new implementations are greenfield (reuse tier G); no legacy engine was ported.
+
+Geometry-cache eviction now uses an intrusive constant-time LRU, with metadata
+charged to the cache allowance. Final-Arc lifetime accounting uses an atomic
+counter instead of scanning all weak references. Source statistics take one
+snapshot of each shard. These remove repeated bookkeeping as the cache fills.
+
+`--adaptive-refinements 1..32` controls coherent refinement selection separately
+from the four-active-builder limit and memory reservations. The interactive
+command defaults to eight; the benchmark scripts retain an explicit default of
+four for historical controls. Sixteen is an optional faster static-loading choice,
+not a claim that larger transactions improve movement latency.
+
+Stable GPU draw sequences use wgpu render bundles by default. Identical camera,
+ownership and resident content reuse prepared visibility/uniform work. Geometry,
+filter, bin or ownership changes invalidate reuse; camera changes rerun view
+preparation. The draw sequence and vertex buffers are unchanged. Disable these
+independently with `FRONTIER_RENDER_BUNDLES=0` and
+`FRONTIER_PREPARED_VIEW_CACHE=0` for A/B tests. This follows wgpu's
+[render-bundle command reuse](https://wgpu.rs/doc/wgpu_core/command/bundle/index.html)
+contract; the shared draw encoder preserves the direct-path commands. Bundle
+execution resets render-pass state, and subsequent volume drawing binds its own
+pipeline/resources. A stable-camera result does not establish moving performance.
+
+`FRONTIER_PROFILE_SOURCE=1` enables fine source lock/lookup/generation timers and
+exclusive caller costs. Clock reads and instrumentation inside locks substantially
+perturb execution; use the bounded `profile_primary_cold_stages` diagnostic for
+attribution, never its timing as uninstrumented game throughput. Inclusive build
+stages remain separately labelled. Upload enqueue, publication checking, view
+preparation and command encoding CPU times are distinct from GPU execution.
+
+`FRONTIER_DEBT_PREDICTION=1` is an experimental bounded backlog-aware forecast.
+It estimates up to 32 transactions of lead time; actual speculative admission
+and retention budgets do not grow. Its turn test did not improve enough to
+justify enabling it. The default keeps measured incremental publication latency.
+Coverage and quality are reported independently: a fast fallback frame is not a
+successful quality-ready frame.
+
+### Experimental visible-part geometric bound
+
+`FRONTIER_VISIBLE_ERROR_BOUND=1` tests a tighter vertical-error bound. A tile's
+full AABB can cross the camera plane even when its visible floor begins metres
+away. The new method clips against side planes expanded by the complete allowed
+vertical displacement, so an offscreen proxy cannot hide a visible canonical
+counterpart. It uses the actual uploaded per-tile f32 camera matrix and exact mesh
+origin, with outward allowances for input reconstruction, matrix products and
+both projected endpoints. Possible near-plane crossings and arithmetic overflow
+remain uncertified. It does not perform occlusion culling or relax the pixel
+budget. The original bound remains the default pending end-to-end evidence.
+
+Arithmetic assumptions follow [WGSL floating-point accuracy](https://gpuweb.github.io/gpuweb/wgsl/#floating-point-accuracy),
+including permitted directed rounding and subnormal flushing. Tests cover
+counterpart-only silhouettes, near crossings, packed-coordinate reconstruction,
+shader-style dot-product evaluation and cancellation at large local offsets.
+The bound concerns projected geometry; it is not a proof of identical raster
+coverage or color. This distinction also applies to the original geometric
+certificate.
+
+### Late capacity regression and material experiment
+
+The wider-distance sweep found a cache-capacity accounting mismatch: the LRU
+charged per-entry metadata, but a proposed full replacement counted payload only.
+Near the limit, an apparently admissible replacement could evict its own required
+tiles and rebuild them repeatedly. Replacement feasibility now includes metadata
+for every target key, including unbuilt owners. Exact committed tiles can also
+satisfy demand after cache eviction. An obsolete oversized transaction is discarded
+before replanning the current camera; only current demand can trigger refusal.
+Tests cover metadata-only overflow, no futile rebuild, retained-Arc reuse and a
+smaller destination after teleport. A genuine insufficient budget retains coherent
+coverage and reports unresolved quality; it does not silently lower the threshold.
+
+An additional exact-material experiment reuses one sampled center column across
+its exposed face spans. It preserves all sampled addresses and float accumulation
+order. However, the same-binary 300 m run measured 11.713 s without it and 12.304 s
+with it (identical RGB); this single pair does not demonstrate a speedup. It stays
+opt-in through `FRONTIER_PROFILE_CENTER_REUSE=1`. Source/appearance work remains
+an important unresolved throughput cost; less code work in one loop alone does
+not establish a faster game.

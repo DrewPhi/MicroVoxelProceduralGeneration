@@ -11,12 +11,13 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    sync::Arc,
     time::Instant,
 };
 
-const MAGIC: &[u8; 8] = b"FVDC0002";
+const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 2;
+const REPRESENTATION_VERSION: u64 = 3;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,21 +42,45 @@ pub(crate) struct DiskCacheStats {
     pub writeback_encode_buffer_reserved_bytes: usize,
     pub writeback_peak_encode_buffer_reserved_bytes: usize,
 }
-/// Camera-independent filename calculation, cloneable without copying the
-/// bounded source/edit identity or touching the IO worker's lock.
-#[derive(Clone, Copy)]
+/// Camera-independent lookup with a bounded, shared immutable dependency snapshot.
+#[derive(Clone)]
 pub(crate) struct DiskCacheKeyer {
     prefix_hash: u64,
+    edits: Arc<[(Cell, u64)]>,
+    world: World,
 }
 impl DiskCacheKeyer {
-    pub(crate) fn name(self, key: TileKey) -> String {
-        format!(
-            "{:016x}.fvdc",
-            checksum_from(self.prefix_hash, &key_suffix(key))
-        )
+    pub(crate) fn supported(&self, key: TileKey) -> bool {
+        crate::adaptive_geometry::disk_cache_key_supported(&self.world, key)
+    }
+    fn dependencies(&self, key: TileKey) -> Vec<u8> {
+        // All geometry/appearance/bounds samplers consume interior columns plus
+        // a one-native-column neighbor halo. Include every y in those columns.
+        // i128 prevents overflow before unsupported coordinates are rejected.
+        let min = key.min.map(|v| v as i128 - 1);
+        let max = key.min.map(|v| v as i128 + key.width_cells as i128);
+        let mut b = Vec::new();
+        put(&mut b, 0);
+        let mut count = 0;
+        for &(c, material) in self.edits.iter() {
+            if (min[0]..=max[0]).contains(&(c.x as i128))
+                && (min[1]..=max[1]).contains(&(c.z as i128))
+            {
+                for v in [c.x as u64, c.y as u64, c.z as u64, material] {
+                    put(&mut b, v);
+                }
+                count += 1;
+            }
+        }
+        b[..8].copy_from_slice(&u64::to_le_bytes(count));
+        b
+    }
+    pub(crate) fn name(&self, key: TileKey) -> String {
+        let hash = checksum_from(self.prefix_hash, &key_suffix(key));
+        format!("{:016x}.fvdc", checksum_from(hash, &self.dependencies(key)))
     }
 }
-fn key_suffix(key: TileKey) -> [u8; 72] {
+fn key_suffix(key: TileKey) -> [u8; 64] {
     let words = [
         key.min[0] as u64,
         key.min[1] as u64,
@@ -65,7 +90,6 @@ fn key_suffix(key: TileKey) -> [u8; 72] {
         key.edge_steps[1] as u64,
         key.edge_steps[2] as u64,
         key.edge_steps[3] as u64,
-        key.source_revision,
     ];
     std::array::from_fn(|i| words[i / 8].to_le_bytes()[i % 8])
 }
@@ -75,7 +99,7 @@ pub(crate) struct DiskCache {
     budget: u64,
     max_entry: usize,
     identity: Vec<u8>,
-    revision: u64,
+    keyer: DiskCacheKeyer,
     files: HashMap<String, (u64, u64)>,
     clock: u64,
     serial: u64,
@@ -96,6 +120,19 @@ impl DiskCache {
             ));
         }
         let identity = source_identity(world)?;
+        let mut edits: Vec<_> = world.edit_cells().take(MAX_EDITS + 1).collect();
+        if edits.len() > MAX_EDITS {
+            return Err(io::Error::other("derived-cache edit identity limit"));
+        }
+        edits.sort_by_key(|c| (c.x, c.y, c.z));
+        let keyer = DiskCacheKeyer {
+            prefix_hash: checksum(&identity),
+            edits: edits
+                .into_iter()
+                .map(|c| (c, world.material(c) as u64))
+                .collect(),
+            world: world.clone(),
+        };
         fs::create_dir_all(&root)?;
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -111,7 +148,7 @@ impl DiskCache {
             budget: budget_bytes,
             max_entry: max_entry_bytes,
             identity,
-            revision: world.revision(),
+            keyer,
             files: HashMap::new(),
             clock: 0,
             serial: 0,
@@ -146,9 +183,7 @@ impl DiskCache {
         self.stats
     }
     pub(crate) fn keyer(&self) -> DiskCacheKeyer {
-        DiskCacheKeyer {
-            prefix_hash: checksum(&self.identity),
-        }
+        self.keyer.clone()
     }
     pub(crate) fn index_names(&self) -> HashSet<String> {
         self.files.keys().cloned().collect()
@@ -168,10 +203,11 @@ impl DiskCache {
     fn key_bytes(&self, key: TileKey) -> Vec<u8> {
         let mut b = self.identity.clone();
         b.extend_from_slice(&key_suffix(key));
+        b.extend_from_slice(&self.keyer.dependencies(key));
         b
     }
     fn name(&self, key: TileKey) -> String {
-        self.keyer().name(key)
+        self.keyer.name(key)
     }
     fn remove(&mut self, name: &str) -> io::Result<()> {
         match fs::remove_file(self.root.join(name)) {
@@ -213,7 +249,7 @@ impl DiskCache {
         result
     }
     fn load_inner(&mut self, key: TileKey) -> Option<GeometryTile> {
-        if key.source_revision != self.revision {
+        if !self.keyer.supported(key) {
             return None;
         }
         let transient_budget = crate::build_memory::reservation(key)?;
@@ -278,12 +314,13 @@ impl DiskCache {
         result.is_ok()
     }
     fn store_inner(&mut self, tile: &GeometryTile) -> io::Result<()> {
-        if tile.key.source_revision != self.revision {
+        if !self.keyer.supported(tile.key) {
             return Err(io::Error::other("snapshot revision"));
         }
         // Each scalar is <=8 encoded bytes; vector element widths are fixed.
+        let identity = self.key_bytes(tile.key);
         let predicted = encoded_size(tile)
-            .and_then(|n| n.checked_add(self.identity.len() + 80 + 16))
+            .and_then(|n| n.checked_add(identity.len() + 16))
             .ok_or_else(|| io::Error::other("size overflow"))?;
         let transient_budget = crate::build_memory::reservation(tile.key)
             .ok_or_else(|| io::Error::other("unsupported cache tile key"))?;
@@ -293,7 +330,7 @@ impl DiskCache {
         let mut b = Vec::with_capacity(predicted);
         b.extend_from_slice(MAGIC);
         put(&mut b, 0);
-        b.extend_from_slice(&self.key_bytes(tile.key));
+        b.extend_from_slice(&identity);
         encode(tile, &mut b);
         if b.len() > self.max_entry {
             return Err(io::Error::other("entry budget"));
@@ -336,7 +373,6 @@ fn source_identity(w: &World) -> io::Result<Vec<u8>> {
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());
     put(&mut b, VOXEL_SIZE.to_bits());
-    put(&mut b, w.revision());
     match w.topology_base_cells() {
         Some(v) => {
             put(&mut b, 1);
@@ -359,18 +395,6 @@ fn source_identity(w: &World) -> io::Result<Vec<u8>> {
         put(&mut b, p.octaves as u64);
     } else {
         put(&mut b, 0);
-    }
-    let mut edits: Vec<_> = w.edit_cells().take(MAX_EDITS + 1).collect();
-    if edits.len() > MAX_EDITS {
-        return Err(io::Error::other("derived-cache edit identity limit"));
-    }
-    edits.sort_by_key(|c| (c.x, c.y, c.z));
-    put(&mut b, edits.len() as u64);
-    for c in edits {
-        for v in [c.x, c.y, c.z] {
-            put(&mut b, v as u64);
-        }
-        put(&mut b, w.material(c) as u64);
     }
     Ok(b)
 }
@@ -712,6 +736,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         face_profile_indices,
         exact,
         bytes,
+        payload_lifetime: None,
     };
     if !r.0.is_empty() || !validate(&t) {
         return None;
@@ -952,18 +977,10 @@ mod tests {
             source_identity(&World::fbm_topology(7, w.fbm_terrain().unwrap().params()).unwrap())
                 .unwrap()
         );
+        // Revision/edit state is a per-tile dependency, not global identity.
         let mut a = w.clone();
-        let mut b = w.clone();
-        let c = Cell { x: 0, y: 500, z: 0 };
-        a.set(c, Material::Stone);
-        b.set(c, Material::Wood);
-        let mut ai = source_identity(&a).unwrap();
-        let mut bi = source_identity(&b).unwrap();
-        // Revision numbers are globally assigned; prove edit content itself
-        // participates even if two persisted snapshots share a revision.
-        ai[32..40].fill(0);
-        bi[32..40].fill(0);
-        assert_ne!(ai, bi);
+        a.set(Cell { x: 0, y: 500, z: 0 }, Material::Stone);
+        assert_eq!(original, source_identity(&a).unwrap());
         let dir = Temp::new();
         let t = build(&w, key(4), || false).unwrap();
         assert!(cache(&dir, &w).store(&t));
@@ -974,6 +991,156 @@ mod tests {
         )
         .load(t.key)
         .is_none());
+    }
+    #[test]
+    fn local_edit_restart_reuses_distant_tiles_and_rebinds_current_revision() {
+        let original = World::fbm_topology(7, world().fbm_terrain().unwrap().params()).unwrap();
+        let dir = Temp::new();
+        let near = TileKey {
+            min: [128, -16],
+            edge_steps: [1; 4],
+            ..key(4)
+        };
+        let far = TileKey {
+            min: [256, -16],
+            ..near
+        };
+        let near_tile = build(&original, near, || false).unwrap();
+        let far_tile = build(&original, far, || false).unwrap();
+        {
+            let mut disk = cache(&dir, &original);
+            assert!(disk.store(&near_tile));
+            assert!(disk.store(&far_tile));
+        }
+        let mut edited = original.clone();
+        // Last volume column is the neighbor halo of the touching surface tile.
+        edited.set(
+            Cell {
+                x: 127,
+                y: 500,
+                z: 0,
+            },
+            Material::Stone,
+        );
+        let current_near = TileKey {
+            source_revision: edited.revision(),
+            ..near
+        };
+        let current_far = TileKey {
+            source_revision: edited.revision(),
+            ..far
+        };
+        {
+            let mut disk = cache(&dir, &edited);
+            assert!(disk.load(near).is_none()); // obsolete caller cannot publish
+            assert!(disk.load(current_near).is_none());
+            let restored = disk.load(current_far).unwrap();
+            assert_eq!(restored.key, current_far);
+            assert_eq!(
+                bytes(&restored),
+                bytes(&build(&edited, current_far, || false).unwrap())
+            );
+            assert_eq!(bytes(&restored), bytes(&far_tile));
+            let regenerated = build(&edited, current_near, || false).unwrap();
+            assert!(disk.store(&regenerated));
+        }
+        let changed = World::fbm_topology(
+            7,
+            FbmParams {
+                amplitude: 17.,
+                ..original.fbm_terrain().unwrap().params()
+            },
+        )
+        .unwrap();
+        assert!(cache(&dir, &changed).load(far).is_none());
+        let mut disk = cache(&dir, &edited);
+        let restored = disk.load(current_near).unwrap();
+        assert_eq!(
+            bytes(&restored),
+            bytes(&build(&edited, current_near, || false).unwrap())
+        );
+        let name = disk.name(current_far);
+        fs::write(dir.0.join(name), b"corrupt local record").unwrap();
+        assert!(disk.load(current_far).is_none());
+        assert!(disk.store(&build(&edited, current_far, || false).unwrap()));
+    }
+    #[test]
+    fn dependency_identity_covers_full_halo_material_and_all_vertical_edits() {
+        let original = World::fbm_topology(7, world().fbm_terrain().unwrap().params()).unwrap();
+        let k = TileKey {
+            min: [128, -16],
+            edge_steps: [1; 4],
+            ..key(4)
+        };
+        let dir = Temp::new();
+        let baseline = cache(&dir, &original).key_bytes(k);
+        for c in [
+            Cell {
+                x: 127,
+                y: -500,
+                z: -17,
+            },
+            Cell {
+                x: 127,
+                y: 500,
+                z: 16,
+            },
+        ] {
+            let mut a = original.clone();
+            a.set(c, Material::Wood);
+            let ai = cache(&dir, &a).key_bytes(k);
+            assert_ne!(baseline, ai);
+            let mut b = original.clone();
+            b.set(c, Material::Stone);
+            assert_ne!(ai, cache(&dir, &b).key_bytes(k));
+        }
+        for c in [
+            Cell {
+                x: 126,
+                y: 500,
+                z: 0,
+            },
+            Cell {
+                x: 127,
+                y: 500,
+                z: -18,
+            },
+        ] {
+            let mut edited = original.clone();
+            edited.set(c, Material::Stone);
+            assert_eq!(baseline, cache(&dir, &edited).key_bytes(k));
+        }
+    }
+    #[test]
+    fn revision_normalization_never_accepts_unsupported_edit_ownership() {
+        let original = World::fbm_topology(7, world().fbm_terrain().unwrap().params()).unwrap();
+        let k = TileKey {
+            min: [256, -16],
+            ..key(4)
+        };
+        let dir = Temp::new();
+        let tile = build(&original, k, || false).unwrap();
+        assert!(cache(&dir, &original).store(&tile));
+        let mut edited = original.clone();
+        edited.set(
+            Cell {
+                x: 1000,
+                y: 500,
+                z: 1000,
+            },
+            Material::Stone,
+        );
+        let current = TileKey {
+            source_revision: edited.revision(),
+            ..k
+        };
+        let mut disk = cache(&dir, &edited);
+        assert_eq!(disk.key_bytes(current), disk.key_bytes(k));
+        assert!(disk.load(current).is_none());
+        let mut bogus = tile;
+        bogus.key = current;
+        assert!(!disk.store(&bogus));
+        assert!(build(&edited, current, || false).is_err());
     }
     #[test]
     fn corruption_oversize_truncation_schema_are_misses_and_regenerate() {
@@ -992,7 +1159,7 @@ mod tests {
                 }
                 1 => b.resize(c.max_entry + 1, 0),
                 2 => b.truncate(17),
-                _ => b[7] = b'1',
+                _ => b[7] = b'2',
             }
             fs::write(&path, b).unwrap();
             assert!(c.load(t.key).is_none());

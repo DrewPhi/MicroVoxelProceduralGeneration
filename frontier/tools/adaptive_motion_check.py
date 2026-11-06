@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--settled', action='store_true', help='Require initial quality before starting benchmark clocks')
     parser.add_argument('--static-only', action='store_true', help='Measure the fixed primary pose instead of routes')
     parser.add_argument('--direct-native', choices=('on', 'off'), default='off')
+    parser.add_argument('--refinements', type=int, choices=range(1,33), default=4)
     parser.add_argument('--workers', type=int, choices=range(1, 17), default=1)
     parser.add_argument('--far', type=float, default=300., help='Only change for explicitly labelled distance-scaling tests')
     parser.add_argument('--disk-cache', type=Path, help='Opt-in persistent cache; use an empty new directory for a cold disk-cache test')
@@ -49,7 +50,7 @@ def main():
                    '--voxel-filter', 'on', '--uncapped', '--warmup', '60', '--benchmark-input-lock',
                    '--route', 'static' if args.static_only else args.route, '--route-clock', 'realtime',
                    '--route-speed', str(speed), '--seconds', str(args.seconds),
-                   '--capture-far', str(args.far), '--adaptive-workers', str(args.workers),
+                   '--capture-far', str(args.far), '--adaptive-workers', str(args.workers), '--adaptive-refinements', str(args.refinements),
                    '--eye', vector(reference['eye']), '--target', vector(reference['target']),
                    '--fov-y', str(reference['fov_y_degrees']),
                    '--capture-on-exit', str(out / f'{name}.png'),

@@ -25,6 +25,8 @@ pub struct StreamSettings {
     pub cpu_cache_bytes: usize,
     pub max_nodes: usize,
     pub jobs_per_update: usize,
+    /// Logical refinements per coherent replacement, independent of active jobs.
+    pub refinements_per_transaction: usize,
     /// Bounded simultaneous canonical builds; one keeps the serial control path.
     pub worker_count: usize,
     /// Separate from retained cache: builders and externally held evicted tiles.
@@ -39,6 +41,7 @@ impl Default for StreamSettings {
             cpu_cache_bytes: 512 * 1024 * 1024,
             max_nodes: 100_000,
             jobs_per_update: 4,
+            refinements_per_transaction: 4,
             worker_count: 1,
             build_budget_bytes: 512 * 1024 * 1024,
             direct_native_urgent: false,
@@ -129,20 +132,26 @@ fn refined_leaf_step(key: TileKey, direct_native: Option<TileKey>) -> u32 {
 /// work, but give one slot to a finite large error so distance alone cannot
 /// starve a coarse owner covering an important distant part of the image.
 fn select_refinements(
-    mut candidates: Vec<RefinementCandidate>,
+    candidates: &[RefinementCandidate],
     pixel_error: f64,
     budget: usize,
 ) -> HashSet<TileKey> {
-    candidates.sort_by(|a, b| {
+    // A handful of slots does not warrant sorting the whole visible cover.
+    // Keep the same deterministic near/unbounded and largest-finite priorities.
+    let nearest = |a: &&RefinementCandidate, b: &&RefinementCandidate| {
         a.distance_squared
             .total_cmp(&b.distance_squared)
             .then_with(|| a.key.cmp(&b.key))
-    });
+    };
     let mut selected = HashSet::new();
     if budget == 0 {
         return selected;
     }
-    if let Some(candidate) = candidates.iter().find(|c| !c.error_px.is_finite()) {
+    if let Some(candidate) = candidates
+        .iter()
+        .filter(|c| !c.error_px.is_finite())
+        .min_by(nearest)
+    {
         selected.insert(candidate.key);
     }
     if selected.len() < budget {
@@ -158,16 +167,36 @@ fn select_refinements(
             selected.insert(candidate.key);
         }
     }
+    if budget > 8 {
+        // Large configured batches retain O(n log n) behavior rather than
+        // degenerating into a scan for every selected owner.
+        let mut ordered: Vec<_> = candidates.iter().collect();
+        ordered.sort_by(nearest);
+        for requested in [true, false] {
+            for candidate in &ordered {
+                if selected.len() >= budget {
+                    return selected;
+                }
+                if (!candidate.error_px.is_finite() || candidate.error_px > pixel_error)
+                    == requested
+                {
+                    selected.insert(candidate.key);
+                }
+            }
+        }
+        return selected;
+    }
     for requested in [true, false] {
-        for candidate in &candidates {
-            if selected.len() >= budget {
-                return selected;
-            }
-            let fails_requested =
-                !candidate.error_px.is_finite() || candidate.error_px > pixel_error;
-            if fails_requested == requested {
-                selected.insert(candidate.key);
-            }
+        while selected.len() < budget {
+            let next = candidates
+                .iter()
+                .filter(|c| {
+                    !selected.contains(&c.key)
+                        && (!c.error_px.is_finite() || c.error_px > pixel_error) == requested
+                })
+                .min_by(nearest);
+            let Some(candidate) = next else { break };
+            selected.insert(candidate.key);
         }
     }
     selected
@@ -187,10 +216,13 @@ fn select_with_prediction(
     let requested_failed = current
         .iter()
         .any(|c| !c.error_px.is_finite() || c.error_px > pixel_error);
-    let may_predict =
-        !requested_failed && !predicted.is_empty() && (current.is_empty() || budget > 1);
+    // Reserve at least three current-view slots under a requested backlog.
+    // Requiring global convergence first starved all prefetch during movement.
+    let may_predict = budget > 0
+        && !predicted.is_empty()
+        && (current.is_empty() || budget >= if requested_failed { 4 } else { 2 });
     let mut selected = select_refinements(
-        current.clone(),
+        &current,
         pixel_error,
         budget.saturating_sub(usize::from(may_predict)),
     );
@@ -209,7 +241,40 @@ fn select_with_prediction(
             return (selected, Some(next.key));
         }
     }
-    (select_refinements(current, pixel_error, budget), None)
+    (select_refinements(&current, pixel_error, budget), None)
+}
+/// Bounded estimate of successive logical replacements needed to repay demand.
+/// This never substitutes for a built certificate or admits extra future jobs.
+fn forecast_transaction_debt(
+    current: &[RefinementCandidate],
+    predicted: &[PredictionCandidate],
+    pixel_error: f64,
+    refinements: usize,
+    finest_cells: u32,
+) -> usize {
+    let requested = current
+        .iter()
+        .filter(|c| !c.error_px.is_finite() || c.error_px > pixel_error)
+        .count();
+    let current_slots = refinements
+        .saturating_sub(usize::from(refinements >= 4 && !predicted.is_empty()))
+        .max(1);
+    let rounds = requested.div_ceil(current_slots).max(predicted.len());
+    let chain = current
+        .iter()
+        .filter(|c| !c.error_px.is_finite() || c.error_px > pixel_error)
+        .map(|c| c.key)
+        .chain(predicted.iter().map(|c| c.key))
+        .map(|key| {
+            if key.width_cells > finest_cells {
+                (key.width_cells / finest_cells).ilog2() + (finest_cells / 8).max(1).ilog2()
+            } else {
+                key.step_cells.ilog2()
+            }
+        })
+        .max()
+        .unwrap_or(1) as usize;
+    rounds.saturating_add(chain.saturating_sub(1)).clamp(1, 32)
 }
 fn footprints_overlap(a: TileKey, b: TileKey) -> bool {
     (0..2).all(|axis| {
@@ -218,9 +283,15 @@ fn footprints_overlap(a: TileKey, b: TileKey) -> bool {
     })
 }
 #[derive(Clone, Copy)]
+struct PredictedRetention {
+    key: TileKey,
+    bounds: [[f64; 3]; 2],
+}
+#[derive(Clone, Copy)]
 struct RejectedCoarsen {
     error_m: f64,
     bounds: [[f64; 3]; 2],
+    origin: DVec3,
 }
 pub struct AdaptiveStream {
     world: World,
@@ -229,6 +300,7 @@ pub struct AdaptiveStream {
     pending: VecDeque<TileKey>,
     /// Retain a bounded coherent replacement across nearby camera epochs.
     transaction: Option<Vec<TileKey>>,
+    /// Known target payload plus cache entry metadata for every target key.
     transaction_known_bytes: usize,
     pending_publication: Option<PublicationTransaction>,
     committed_publication: Option<PublicationTransaction>,
@@ -242,11 +314,16 @@ pub struct AdaptiveStream {
     coarsen_targets: HashSet<([i64; 2], u32)>,
     rejected_coarsen: HashMap<([i64; 2], u32, u32), RejectedCoarsen>,
     committed: Vec<Arc<GeometryTile>>,
+    committed_index: HashMap<([i64; 2], u32), usize>,
+    committed_ancestors: HashSet<([i64; 2], u32)>,
     committed_pose: Option<(Camera, u32, u32)>,
     occlusion: Option<(Camera, OcclusionSet)>,
+    prediction_occlusion: Option<(Camera, OcclusionSet)>,
     /// Measured-latency extrapolation; never changes current-view quality.
     prediction: Option<Camera>,
     predicted_footprint: Option<TileKey>,
+    predicted_retention: VecDeque<PredictedRetention>,
+    forecast_transactions: usize,
     build_memory: BuildMemoryStats,
     build_refused: HashSet<TileKey>,
     #[cfg(test)]
@@ -269,6 +346,7 @@ impl AdaptiveStream {
             || settings.pixel_error < 0.0
             || settings.max_nodes == 0
             || settings.jobs_per_update == 0
+            || !(1..=32).contains(&settings.refinements_per_transaction)
             || !(1..=16).contains(&settings.worker_count)
             || settings.build_budget_bytes == 0
         {
@@ -293,10 +371,15 @@ impl AdaptiveStream {
             coarsen_targets: HashSet::new(),
             rejected_coarsen: HashMap::new(),
             committed: vec![],
+            committed_index: HashMap::new(),
+            committed_ancestors: HashSet::new(),
             committed_pose: None,
             occlusion: None,
+            prediction_occlusion: None,
             prediction: None,
             predicted_footprint: None,
+            predicted_retention: VecDeque::new(),
+            forecast_transactions: 1,
             build_memory: BuildMemoryStats {
                 budget_bytes: settings.build_budget_bytes,
                 ..Default::default()
@@ -396,7 +479,7 @@ impl AdaptiveStream {
                 let mut next = Vec::with_capacity(keys.len());
                 let mut missing = VecDeque::new();
                 for &key in &keys {
-                    if let Some(tile) = self.cache.get(key) {
+                    if let Some(tile) = self.target_tile(key) {
                         next.push(tile);
                     } else {
                         missing.push_back(key);
@@ -408,7 +491,7 @@ impl AdaptiveStream {
                     if self.coarsening_certified(&next, camera, p) {
                         self.planning.retained_calls += 1;
                         self.committed_publication = self.pending_publication.take();
-                        self.committed = next;
+                        self.set_committed(next);
                         self.committed_pose = Some((*camera, width, height));
                         self.pending.clear();
                         self.refresh_occlusion(camera);
@@ -437,6 +520,7 @@ impl AdaptiveStream {
             self.pending_publication = None;
         }
         self.planning.full_calls += 1;
+        self.refresh_prediction_occlusion();
         let same = self
             .committed_pose
             .as_ref()
@@ -476,38 +560,32 @@ impl AdaptiveStream {
                 })
             })
             .collect();
-        let requested_passes = urgent
-            .iter()
-            .all(|c| c.error_px.is_finite() && c.error_px <= self.settings.pixel_error);
-        let predicted = if requested_passes {
-            self.prediction
-                .as_ref()
-                .map(|predicted| {
-                    self.committed
-                        .iter()
-                        .filter_map(|tile| {
-                            if !self.frustum_visible(tile, predicted, p) {
-                                return None;
-                            }
-                            let error_px = self.projected_error(tile, predicted, p);
-                            (error_px > self.settings.pixel_error * REFINEMENT_RESERVE).then(|| {
-                                PredictionCandidate {
-                                    key: tile.key,
-                                    need_fraction: self
-                                        .predicted_need_fraction(tile, camera, predicted, p),
-                                    error_px,
-                                }
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            vec![]
-        };
-        // One time-to-need slot may precede reserve-only work; requested
-        // failures retain every slot. Closure and builder-byte admission still
-        // bound the actual transaction, including necessary neighbor edges.
+        let predicted: Vec<PredictionCandidate> = self
+            .prediction
+            .as_ref()
+            .map(|predicted| {
+                let current_failures: HashSet<_> = urgent
+                    .iter()
+                    .filter(|c| !c.error_px.is_finite() || c.error_px > self.settings.pixel_error)
+                    .map(|c| c.key)
+                    .collect();
+                self.committed
+                    .iter()
+                    .filter_map(|tile| {
+                        self.prediction_candidate(tile, &current_failures, camera, predicted, p)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.forecast_transactions = forecast_transaction_debt(
+            &urgent,
+            &predicted,
+            self.settings.pixel_error,
+            self.settings.refinements_per_transaction,
+            self.finest_cells(),
+        );
+        // One deadline slot is bounded within the existing priority budget.
+        // Edge closure and builder-byte admission remain mandatory.
         let direct_native = direct_native_candidate(
             &urgent,
             self.settings.direct_native_urgent,
@@ -518,11 +596,12 @@ impl AdaptiveStream {
             urgent,
             predicted,
             self.settings.pixel_error,
-            self.settings.jobs_per_update,
+            self.settings.refinements_per_transaction,
         );
         // The experiment never adds work outside the existing priority budget.
         let direct_native = direct_native.filter(|key| refine.contains(key));
         self.predicted_footprint = predicted_footprint;
+        self.retain_predictions(camera, p, predicted_footprint);
         let mut nodes = vec![];
         if same {
             for tile in self.committed.clone() {
@@ -613,25 +692,15 @@ impl AdaptiveStream {
         if !same && !self.committed.is_empty() {
             // Reuse spatial detail after every camera change. Starting over at
             // coarse roots each frame would erase near voxels during movement.
-            let existing: HashMap<_, _> = self
-                .committed
-                .iter()
-                .map(|t| ((t.key.min, t.key.width_cells), t.clone()))
-                .collect();
-            let mut ancestors = HashSet::new();
-            for t in &self.committed {
-                let mut w = t.key.width_cells;
-                while w < (1 << 20) {
-                    w *= 2;
-                    let min = t.key.min.map(|v| v.div_euclid(w as i64) * w as i64);
-                    ancestors.insert((min, w));
-                }
-            }
             let mut stack = nodes;
             nodes = vec![];
             while let Some(n) = stack.pop() {
-                if let Some(t) = existing.get(&(n.min, n.width)) {
-                    if !self.tile_visible(t, camera, p) && !self.prediction_protects(t.key) {
+                if let Some(t) = self
+                    .committed_index
+                    .get(&(n.min, n.width))
+                    .map(|&i| self.committed[i].clone())
+                {
+                    if !self.tile_visible(&t, camera, p) && !self.prediction_protects(t.key) {
                         let key = self
                             .cached_coarse(
                                 t.key.min,
@@ -654,7 +723,7 @@ impl AdaptiveStream {
                         width: n.width,
                         step: coarse.map(|k| k.step_cells).unwrap_or(t.key.step_cells),
                     };
-                    if coarse.is_some() || self.accepts(t, camera, p) || !refine.contains(&t.key) {
+                    if coarse.is_some() || self.accepts(&t, camera, p) || !refine.contains(&t.key) {
                         nodes.push(old)
                     } else if n.width > self.finest_cells() {
                         split(old, &mut nodes)
@@ -664,7 +733,7 @@ impl AdaptiveStream {
                             ..old
                         })
                     }
-                } else if ancestors.contains(&(n.min, n.width)) {
+                } else if self.committed_ancestors.contains(&(n.min, n.width)) {
                     split(n, &mut stack)
                 } else {
                     nodes.push(n)
@@ -825,26 +894,18 @@ impl AdaptiveStream {
             target_keys.push(key);
             #[cfg(test)]
             self.diagnostic_target.push(key);
-            if let Some(tile) = self.cache.get(key) {
+            if let Some(tile) = self.target_tile(key) {
                 next.push(tile)
             } else {
                 wanted.push_back(key);
                 complete = false;
             }
         }
-        let required_bytes = nodes
+        let required_bytes = target_keys
             .iter()
-            .enumerate()
-            .filter_map(|(i, n)| {
-                self.known_bytes.get(&TileKey {
-                    min: n.min,
-                    width_cells: n.width,
-                    step_cells: n.step,
-                    edge_steps: edges[i],
-                    source_revision: self.world.revision(),
-                })
+            .map(|key| {
+                GeometryCache::entry_resident_bytes(self.known_bytes.get(key).copied().unwrap_or(0))
             })
-            .copied()
             .fold(0usize, usize::saturating_add);
         let mesh_budget = self.cache.mesh_budget_bytes();
         if required_bytes > mesh_budget {
@@ -908,7 +969,7 @@ impl AdaptiveStream {
                     started: std::time::Instant::now(),
                 });
             }
-            self.committed = next;
+            self.set_committed(next);
             self.committed_pose = Some((camera.clone(), width, height));
             self.refresh_occlusion(camera);
             frame.coverage_ready = true;
@@ -986,22 +1047,21 @@ impl AdaptiveStream {
         frame.global_bound_clusters = 0;
         frame.local_certified_clusters = 0;
         frame.affine_bound_clusters = 0;
-        frame.occluded_clusters = frame
-            .tiles
-            .iter()
-            .filter(|t| self.frustum_visible(t, camera, p) && self.is_occluded(t, camera))
-            .count();
+        frame.occluded_clusters = 0;
         frame.occluder_boxes = self
             .occlusion
             .as_ref()
             .filter(|(pose, _)| same_pose(pose, camera))
             .map(|(_, s)| s.len())
             .unwrap_or(0);
-        for tile in frame
-            .tiles
-            .iter()
-            .filter(|t| self.tile_visible(t, camera, p))
-        {
+        for tile in &frame.tiles {
+            if !self.frustum_visible(tile, camera, p) {
+                continue;
+            }
+            if self.is_occluded(tile, camera) {
+                frame.occluded_clusters += 1;
+                continue;
+            }
             let error = self.projected_error(tile, camera, p);
             if error.is_finite() {
                 max_error = max_error.max(error)
@@ -1031,31 +1091,15 @@ impl AdaptiveStream {
         camera: &Camera,
         p: Projection,
     ) -> bool {
-        let prior: HashMap<_, _> = self
-            .committed
-            .iter()
-            .map(|t| ((t.key.min, t.key.width_cells), t.key.step_cells))
-            .collect();
-        let mut prior_ancestors = HashSet::new();
-        for tile in &self.committed {
-            let mut width = tile.key.width_cells;
-            while width < (1 << 20) {
-                width *= 2;
-                let min = tile
-                    .key
-                    .min
-                    .map(|v| v.div_euclid(width as i64) * width as i64);
-                prior_ancestors.insert((min, width));
-            }
-        }
         let mut safe = true;
         for tile in next {
             let n = tile.key;
-            let is_coarsening = prior
+            let is_coarsening = self
+                .committed_index
                 .get(&(n.min, n.width_cells))
-                .map(|&step| step < n.step_cells)
+                .map(|&i| self.committed[i].key.step_cells < n.step_cells)
                 .unwrap_or(false)
-                || prior_ancestors.contains(&(n.min, n.width_cells));
+                || self.committed_ancestors.contains(&(n.min, n.width_cells));
             if is_coarsening
                 && self.frustum_visible(tile, camera, p)
                 && self.projected_error(tile, camera, p) > self.settings.pixel_error * 0.65
@@ -1068,6 +1112,7 @@ impl AdaptiveStream {
                     RejectedCoarsen {
                         error_m,
                         bounds: tile.bounds,
+                        origin: tile_origin(tile),
                     },
                 );
                 safe = false;
@@ -1101,8 +1146,13 @@ impl AdaptiveStream {
                     world_bounds_to_view(expanded, camera),
                     p,
                     conservative_clip_depth(camera).unwrap_or(f64::INFINITY),
-                ) && vertical_pixel_bound(rejected.error_m, rejected.bounds, camera, p)
-                    > self.settings.pixel_error * 0.65
+                ) && vertical_pixel_bound(
+                    rejected.error_m,
+                    rejected.bounds,
+                    rejected.origin,
+                    camera,
+                    p,
+                ) > self.settings.pixel_error * 0.65
                 {
                     continue;
                 }
@@ -1140,7 +1190,43 @@ impl AdaptiveStream {
         }
         None
     }
+    fn set_committed(&mut self, tiles: Vec<Arc<GeometryTile>>) {
+        if tiles.len() == self.committed.len()
+            && tiles
+                .iter()
+                .zip(&self.committed)
+                .all(|(a, b)| a.key == b.key)
+        {
+            self.committed = tiles;
+            return;
+        }
+        self.committed_index.clear();
+        self.committed_ancestors.clear();
+        for (i, tile) in tiles.iter().enumerate() {
+            self.committed_index
+                .insert((tile.key.min, tile.key.width_cells), i);
+            let mut width = tile.key.width_cells;
+            while width < (1 << 20) {
+                width *= 2;
+                let min = tile
+                    .key
+                    .min
+                    .map(|v| v.div_euclid(width as i64) * width as i64);
+                self.committed_ancestors.insert((min, width));
+            }
+        }
+        self.committed = tiles;
+        self.occlusion = None;
+        self.prediction_occlusion = None;
+    }
     fn refresh_occlusion(&mut self, camera: &Camera) {
+        if self
+            .occlusion
+            .as_ref()
+            .is_some_and(|(pose, _)| same_pose(pose, camera))
+        {
+            return;
+        }
         let Some(mut set) = OcclusionSet::new(
             camera.position.to_array(),
             camera.direction().as_dvec3().to_array(),
@@ -1156,6 +1242,76 @@ impl AdaptiveStream {
             }
         }
         self.occlusion = Some((camera.clone(), set));
+    }
+    fn refresh_prediction_occlusion(&mut self) {
+        let Some(predicted) = self.prediction.as_ref() else {
+            self.prediction_occlusion = None;
+            return;
+        };
+        if self
+            .prediction_occlusion
+            .as_ref()
+            .is_some_and(|(pose, _)| same_pose(pose, predicted))
+        {
+            return;
+        }
+        self.prediction_occlusion = OcclusionSet::new(
+            predicted.position.to_array(),
+            predicted.direction().as_dvec3().to_array(),
+            0.025,
+            VOXEL_SIZE * 2.0,
+        )
+        .map(|mut set| {
+            for tile in &self.committed {
+                if let Some(solid) = tile.guaranteed_solid_box {
+                    set.insert_solid(solid);
+                }
+            }
+            (*predicted, set)
+        });
+    }
+    fn predicted_bounds_visible(
+        &self,
+        bounds: [[f64; 3]; 2],
+        predicted: &Camera,
+        p: Projection,
+    ) -> bool {
+        !outside_frustum(
+            world_bounds_to_view(bounds, predicted),
+            p,
+            conservative_clip_depth(predicted).unwrap_or(f64::INFINITY),
+        ) && !self
+            .prediction_occlusion
+            .as_ref()
+            .filter(|(pose, _)| same_pose(pose, predicted))
+            .is_some_and(|(_, set)| {
+                set.occludes(Aabb {
+                    min: bounds[0],
+                    max: bounds[1],
+                })
+            })
+    }
+    fn prediction_candidate(
+        &self,
+        tile: &GeometryTile,
+        current_failures: &HashSet<TileKey>,
+        camera: &Camera,
+        predicted: &Camera,
+        p: Projection,
+    ) -> Option<PredictionCandidate> {
+        // Unknown solids never become occluders. Rejection here only changes
+        // speculative priority; current-camera quality still uses its own set.
+        if current_failures.contains(&tile.key)
+            || !self.predicted_bounds_visible(tile.conservative_surface_bounds, predicted, p)
+        {
+            return None;
+        }
+        let error_px = self.projected_error(tile, predicted, p);
+        (error_px > self.settings.pixel_error).then(|| PredictionCandidate {
+            key: tile.key,
+            need_fraction: self.predicted_need_fraction(tile, camera, predicted, p),
+            error_px,
+        })
     }
     fn is_occluded(&self, tile: &GeometryTile, camera: &Camera) -> bool {
         self.occlusion
@@ -1191,6 +1347,69 @@ impl AdaptiveStream {
     fn prediction_protects(&self, key: TileKey) -> bool {
         self.predicted_footprint
             .is_some_and(|footprint| footprints_overlap(key, footprint))
+            || self
+                .predicted_retention
+                .iter()
+                .any(|r| footprints_overlap(key, r.key))
+    }
+    fn retain_predictions(&mut self, camera: &Camera, p: Projection, selected: Option<TileKey>) {
+        self.refresh_prediction_occlusion();
+        let Some(predicted) = self.prediction.as_ref().filter(|c| !same_pose(c, camera)) else {
+            self.predicted_retention.clear();
+            return;
+        };
+        // A completed predicted leaf otherwise coarsens as soon as the next
+        // footprint wins a slot. Retain a small recent working set only while
+        // its actual conservative bounds remain in the forecast view.
+        let prediction_occlusion = &self.prediction_occlusion;
+        self.predicted_retention.retain(|r| {
+            !outside_frustum(
+                world_bounds_to_view(r.bounds, predicted),
+                p,
+                conservative_clip_depth(predicted).unwrap_or(f64::INFINITY),
+            ) && !prediction_occlusion
+                .as_ref()
+                .filter(|(pose, _)| same_pose(pose, predicted))
+                .is_some_and(|(_, set)| {
+                    set.occludes(Aabb {
+                        min: r.bounds[0],
+                        max: r.bounds[1],
+                    })
+                })
+        });
+        if let Some(key) = selected.filter(|k| k.width_cells <= self.finest_cells()) {
+            if let Some(tile) = self.committed.iter().find(|t| t.key == key) {
+                self.predicted_retention
+                    .retain(|r| r.key.min != key.min || r.key.width_cells != key.width_cells);
+                self.predicted_retention.push_back(PredictedRetention {
+                    key,
+                    bounds: tile.conservative_surface_bounds,
+                });
+            }
+        }
+        let count_budget = self.settings.jobs_per_update.saturating_mul(4).min(32);
+        while self.predicted_retention.len() > count_budget {
+            self.predicted_retention.pop_front();
+        }
+        // Account all closed-edge variants/children currently owned inside the
+        // protected regions. Prediction cannot pin the entire mesh allowance.
+        let mut bytes = vec![0usize; self.predicted_retention.len()];
+        for tile in &self.committed {
+            for (i, retention) in self.predicted_retention.iter().enumerate() {
+                if footprints_overlap(tile.key, retention.key) {
+                    bytes[i] = bytes[i].saturating_add(tile.bytes);
+                }
+            }
+        }
+        let byte_budget = self.cache.mesh_budget_bytes() / 8;
+        let mut retained_bytes = 0usize;
+        for i in (0..bytes.len()).rev() {
+            retained_bytes = retained_bytes.saturating_add(bytes[i]);
+            if bytes[i] == 0 || retained_bytes > byte_budget {
+                retained_bytes = retained_bytes.saturating_sub(bytes[i]);
+                self.predicted_retention.remove(i);
+            }
+        }
     }
     fn predicted_need_fraction(
         &self,
@@ -1220,7 +1439,7 @@ impl AdaptiveStream {
     }
     fn projected_error(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> f64 {
         let e = tile.best_certified_vertical_error_m;
-        e.map(|e| vertical_pixel_bound(e, tile.bounds, camera, p))
+        e.map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
             .unwrap_or(f64::INFINITY)
     }
     pub fn prepare(&mut self, cancelled: impl Fn() -> bool + Sync) -> Result<usize, String> {
@@ -1339,6 +1558,15 @@ impl AdaptiveStream {
         }
         Ok(tiles.len())
     }
+    fn target_tile(&mut self, key: TileKey) -> Option<Arc<GeometryTile>> {
+        self.cache.get(key).or_else(|| {
+            self.committed_index
+                .get(&(key.min, key.width_cells))
+                .map(|&i| &self.committed[i])
+                .filter(|tile| tile.key == key)
+                .cloned()
+        })
+    }
     fn record_prepared_tile(&mut self, tile: &GeometryTile) {
         let old_bytes = self.known_bytes.insert(tile.key, tile.bytes).unwrap_or(0);
         if self.transaction.is_some() {
@@ -1454,20 +1682,49 @@ pub(crate) fn cached_bounds_visible(
 pub(crate) fn projected_cached_vertical_error(
     error_m: f64,
     bounds: [[f64; 3]; 2],
+    origin: DVec3,
     camera: &Camera,
     width: u32,
     height: u32,
 ) -> f64 {
     camera_projection(camera, width, height)
-        .map(|p| vertical_pixel_bound(error_m, bounds, camera, p))
+        .map(|p| vertical_pixel_bound(error_m, bounds, origin, camera, p))
         .unwrap_or(f64::INFINITY)
+}
+pub(crate) fn visible_vertical_bound_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FRONTIER_VISIBLE_ERROR_BOUND").as_deref() == Ok("1"))
+}
+fn tile_origin(tile: &GeometryTile) -> DVec3 {
+    DVec3::new(
+        tile.mesh.origin.x as f64,
+        tile.mesh.origin.y as f64,
+        tile.mesh.origin.z as f64,
+    ) * VOXEL_SIZE
 }
 fn vertical_pixel_bound(
     error_m: f64,
     bounds: [[f64; 3]; 2],
+    origin: DVec3,
     camera: &Camera,
     p: Projection,
 ) -> f64 {
+    if visible_vertical_bound_enabled() {
+        // Preserve the exact per-cluster origin used for GPU camera uniforms.
+        // One adjacent f64 value encloses rounding in world-to-local subtraction.
+        let origin = origin.to_array();
+        let local = ViewBounds {
+            min: std::array::from_fn(|i| (bounds[0][i] - origin[i]).next_down()),
+            max: std::array::from_fn(|i| (bounds[1][i] - origin[i]).next_up()),
+        };
+        return p.projected_f32_visible_vertical_error_px(
+            error_m,
+            local,
+            camera
+                .matrix(DVec3::from_array(origin), p.width as f32 / p.height as f32)
+                .to_cols_array_2d(),
+        );
+    }
     let forward = camera.direction().as_dvec3().normalize();
     let right = forward.cross(DVec3::Y).normalize();
     let up = right.cross(forward);
@@ -1766,7 +2023,7 @@ mod tests {
         let mut camera = Camera::fixture();
         camera.position = DVec3::new(4.0, world.height_m(4.0, 4.0) + 1.7, 4.0);
         camera.far = 1.0;
-        stream.committed = vec![tile.clone()];
+        stream.set_committed(vec![tile.clone()]);
         stream.committed_pose = Some((camera, 320, 180));
         let frame = stream.plan(&camera, 320, 180);
         assert!(stream
@@ -1805,7 +2062,7 @@ mod tests {
         let unbounded = candidate(256, 1.0, f64::INFINITY);
         let requested = candidate(384, 10.0, 6.0);
         let reserve = candidate(512, 0.5, 3.5);
-        let selected = select_refinements(vec![reserve, far, requested, unbounded, near], 4.0, 4);
+        let selected = select_refinements(&[reserve, far, requested, unbounded, near], 4.0, 4);
         assert_eq!(selected.len(), 4);
         assert!(
             selected.contains(&near.key) && selected.contains(&far.key),
@@ -1821,14 +2078,14 @@ mod tests {
             "reserve-only work cannot displace a requested-quality failure"
         );
         let tied = candidate(-128, 400.0, 500.0);
-        let selected = select_refinements(vec![far, tied], 4.0, 1);
+        let selected = select_refinements(&[far, tied], 4.0, 1);
         assert_eq!(
             selected,
             HashSet::from([tied.key]),
             "largest-error ties use canonical keys, independent of input order"
         );
         assert_eq!(
-            select_refinements(vec![far, unbounded], 4.0, 1),
+            select_refinements(&[far, unbounded], 4.0, 1),
             HashSet::from([unbounded.key])
         );
     }
@@ -2198,7 +2455,8 @@ mod tests {
         };
         stream.pending.extend([exact, proxy]);
         stream.prepare(|| false).unwrap();
-        stream.committed = vec![stream.cache.get(exact).unwrap()];
+        let tile = stream.cache.get(exact).unwrap();
+        stream.set_committed(vec![tile]);
         stream.committed_pose = Some((camera.clone(), 320, 180));
         let frame = stream.plan(&camera, 320, 180);
         assert!(frame.coverage_ready);
@@ -2235,9 +2493,9 @@ mod tests {
             edge_steps: [1; 4],
             source_revision: 0,
         };
-        stream.committed = vec![Arc::new(
+        stream.set_committed(vec![Arc::new(
             crate::adaptive_geometry::build(&world, exact, || false).unwrap(),
-        )];
+        )]);
         let coarse = TileKey {
             step_cells: 16,
             edge_steps: [16; 4],
@@ -2291,7 +2549,7 @@ mod tests {
             },
         )
         .unwrap();
-        stream.committed = cover.tiles;
+        stream.set_committed(cover.tiles);
         stream.committed_pose = Some((camera, 320, 180));
         for tile in &stream.committed {
             stream.known_bytes.insert(tile.key, tile.bytes);
@@ -2303,6 +2561,143 @@ mod tests {
         let builds = limited.cache.builds;
         assert_eq!(stream.prepare(|| false).unwrap(), 0);
         assert_eq!(stream.cache.stats().builds, builds);
+    }
+    #[test]
+    fn metadata_only_cover_deficit_is_reported_without_rebuilding() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, 10000.0, 0.0);
+        camera.far = 1.0;
+        let mut original = AdaptiveStream::new(world.clone(), StreamSettings::default()).unwrap();
+        original.plan(&camera, 320, 180);
+        original.prepare_demand(|| false).unwrap();
+        let cover = original.plan(&camera, 320, 180);
+        assert!(cover.coverage_ready);
+        let payload: usize = cover.tiles.iter().map(|tile| tile.bytes).sum();
+        let resident: usize = cover
+            .tiles
+            .iter()
+            .map(|tile| GeometryCache::entry_resident_bytes(tile.bytes))
+            .sum();
+        let mut stream = AdaptiveStream::new(
+            world,
+            StreamSettings {
+                cpu_cache_bytes: payload + payload.div_ceil(7),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(payload <= stream.cache.mesh_budget_bytes());
+        assert!(
+            resident > stream.cache.mesh_budget_bytes(),
+            "payload alone fits; metadata makes the cover impossible"
+        );
+        stream.set_committed(cover.tiles);
+        stream.committed_pose = Some((camera, 320, 180));
+        for tile in &stream.committed {
+            stream.known_bytes.insert(tile.key, tile.bytes);
+        }
+        for retained in [true, false] {
+            if retained {
+                stream.transaction = Some(stream.committed.iter().map(|tile| tile.key).collect());
+                stream.transaction_known_bytes = resident;
+            }
+            let limited = stream.plan(&camera, 320, 180);
+            assert!(limited.coverage_ready && limited.limit_reached);
+            assert_eq!(limited.pending, 0);
+            assert_eq!(stream.prepare_demand(|| false).unwrap(), 0);
+            assert_eq!(stream.cache.stats().builds, 0);
+        }
+    }
+    #[test]
+    fn obsolete_oversized_transactions_replan_teleports_and_smaller_far_demand() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, 10000.0, 0.0);
+        camera.far = 6.0;
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        stream.plan(&camera, 320, 180);
+        stream.prepare_demand(|| false).unwrap();
+        let cover = stream.plan(&camera, 320, 180);
+        assert!(cover.coverage_ready);
+        for teleport in [false, true] {
+            // The retained transaction's learned cost may belong to a previous
+            // larger/refined demand. Fresh demand must get its own feasibility
+            // check even if that old complete footprint still covers this view.
+            stream.transaction = Some(cover.tiles.iter().map(|tile| tile.key).collect());
+            stream.transaction_known_bytes = stream.cache.mesh_budget_bytes() + 1;
+            let mut next_camera = camera;
+            next_camera.far = 1.0;
+            if teleport {
+                next_camera.position.x += 10000.0;
+            }
+            let planned = stream.plan(&next_camera, 320, 180);
+            assert!(
+                !planned.limit_reached,
+                "old transaction cost cannot refuse fresh demand"
+            );
+            if teleport {
+                assert!(planned.pending > 0);
+                assert!(!planned.coverage_ready);
+            } else {
+                assert!(planned.coverage_ready);
+            }
+        }
+    }
+    #[test]
+    fn committed_arcs_survive_cache_eviction_without_duplicate_preparation() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, 10000.0, 0.0);
+        camera.far = 1.0;
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        stream.plan(&camera, 320, 180);
+        stream.prepare_demand(|| false).unwrap();
+        let cover = stream.plan(&camera, 320, 180);
+        assert!(cover.coverage_ready);
+        let keys: Vec<_> = cover.tiles.iter().map(|tile| tile.key).collect();
+        stream.cache.clear();
+        let builds_before = stream.cache.stats().builds;
+        assert!(keys.iter().all(|key| !stream.cache.contains(key)));
+        stream.transaction_known_bytes = cover
+            .tiles
+            .iter()
+            .map(|tile| GeometryCache::entry_resident_bytes(tile.bytes))
+            .sum();
+        stream.transaction = Some(keys.clone());
+        stream.pending = keys.into_iter().collect();
+        for _ in 0..2 {
+            let reused = stream.plan(&camera, 320, 180);
+            assert!(reused.coverage_ready && !reused.limit_reached);
+            assert_eq!(reused.pending, 0);
+            for tile in &reused.tiles {
+                let original = cover.tiles.iter().find(|old| old.key == tile.key).unwrap();
+                assert!(Arc::ptr_eq(tile, original));
+            }
+            assert_eq!(stream.prepare_demand(|| false).unwrap(), 0);
+            assert_eq!(stream.cache.stats().builds, builds_before);
+        }
     }
     #[test]
     fn moving_camera_reuses_native_spatial_leaf() {
@@ -2319,7 +2714,7 @@ mod tests {
             source_revision: 0,
         };
         let exact = stream.cache.get_or_build(key, || false).unwrap();
-        stream.committed = vec![exact];
+        stream.set_committed(vec![exact]);
         stream.committed_pose = Some((camera.clone(), 320, 180));
         camera.position.x += 0.01;
         let moving = stream.plan(&camera, 320, 180);
@@ -2417,7 +2812,7 @@ impl DeliveryPolicy {
             }
             let error_m = tile.best_certified_vertical_error_m;
             let error = error_m
-                .map(|e| vertical_pixel_bound(e, tile.bounds, camera, p))
+                .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
                 .unwrap_or(f64::INFINITY);
             if error.is_finite() {
                 maximum = maximum.max(error)
@@ -2455,6 +2850,9 @@ pub(crate) struct PublicationTransaction {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PredictionStats {
     pub horizon_ms: Option<f64>,
+    pub transaction_latency_ms: Option<f64>,
+    pub forecast_transactions: usize,
+    pub debt_prediction_enabled: bool,
     pub horizon_from_publication: bool,
     pub publication_samples: usize,
     pub generation_samples: usize,
@@ -2485,6 +2883,8 @@ struct WorkerState {
     transaction_publication_ms: VecDeque<f64>,
     last_transaction_publication_id: u64,
     generation_ms: VecDeque<f64>,
+    forecast_transactions: usize,
+    debt_prediction_enabled: bool,
 }
 /// Small bounded observation window; no assumed generation speed or fixed
 /// meter collar. A teleport resets velocity rather than predicting through it.
@@ -2509,14 +2909,29 @@ impl MotionPrediction {
             let delta = camera.position - previous.position;
             // A jump outside the previous view's far extent is a destination
             // change. Its coherent root demand supersedes speculative motion.
-            if dt > 0.0 && dt <= 1.0 && delta.length() <= previous.far as f64 {
+            if dt > 0.0
+                && dt <= 1.0
+                && delta.length() <= previous.far as f64
+                && (delta != DVec3::ZERO
+                    || camera.yaw != previous.yaw
+                    || camera.pitch != previous.pitch)
+                && horizon_ms.is_finite()
+                && horizon_ms > 0.0
+                && camera.far.is_finite()
+                && camera.far > 0.0
+            {
                 let ratio = horizon_ms / 1000.0 / dt;
                 let mut predicted = camera.clone();
-                predicted.position += delta * ratio;
+                let lead = delta * ratio;
+                predicted.position += lead.clamp_length_max(camera.far as f64);
                 let yaw_delta = (camera.yaw - previous.yaw + std::f32::consts::PI)
                     .rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
-                predicted.yaw += yaw_delta * ratio as f32;
+                // A future heading never winds around several revolutions and
+                // aliases to the current endpoint. Stay within one half-turn;
+                // the small margin preserves signed shortest-arc interpolation.
+                let half_turn = std::f32::consts::PI - 1e-4;
+                predicted.yaw += (yaw_delta * ratio as f32).clamp(-half_turn, half_turn);
                 predicted.pitch = (camera.pitch + (camera.pitch - previous.pitch) * ratio as f32)
                     .clamp(-1.55, 1.55);
                 if predicted.position.is_finite() && predicted.yaw.is_finite() {
@@ -2561,6 +2976,9 @@ impl Worker {
                 transaction_publication_ms: VecDeque::new(),
                 last_transaction_publication_id: 0,
                 generation_ms: VecDeque::new(),
+                forecast_transactions: 1,
+                debt_prediction_enabled: std::env::var_os("FRONTIER_DEBT_PREDICTION")
+                    .is_some_and(|value| value == "1"),
             }),
             std::sync::Condvar::new(),
         ));
@@ -2600,6 +3018,7 @@ impl Worker {
                         });
                     }
                     frame.preparation = s.active_preparation;
+                    s.forecast_transactions = stream.forecast_transactions;
                     if s.epoch == epoch {
                         s.result = Some(Ok(frame));
                     } else if let Some((latest, camera, width, height)) = s.request.clone() {
@@ -2688,6 +3107,19 @@ impl Worker {
     }
     pub(crate) fn request(&self, camera: Camera, width: u32, height: u32) -> u64 {
         let mut s = self.state.0.lock().unwrap();
+        let now = std::time::Instant::now();
+        // Whole-view cold convergence remains separate: it can take seconds
+        // and does not estimate one incremental replacement's publication time.
+        let horizon = latency_p95(&s.transaction_publication_ms)
+            .or_else(|| latency_p95(&s.generation_ms))
+            .map(|ms| {
+                ms * if s.debt_prediction_enabled {
+                    s.forecast_transactions
+                } else {
+                    1
+                } as f64
+            });
+        s.motion.observe(&camera, now, horizon);
         if let Some((old, w, h)) = &s.last_request {
             if *w == width
                 && *h == height
@@ -2700,12 +3132,6 @@ impl Worker {
                 return s.epoch;
             }
         }
-        let now = std::time::Instant::now();
-        // Whole-view cold convergence remains separate: it can take seconds
-        // and does not estimate one incremental replacement's publication time.
-        let horizon =
-            latency_p95(&s.transaction_publication_ms).or_else(|| latency_p95(&s.generation_ms));
-        s.motion.observe(&camera, now, horizon);
         s.last_request = Some((camera.clone(), width, height));
         s.epoch = s.epoch.wrapping_add(1);
         let epoch = s.epoch;
@@ -2726,8 +3152,18 @@ impl Worker {
     pub(crate) fn prediction_stats(&self) -> PredictionStats {
         let s = self.state.0.lock().unwrap();
         let publication = latency_p95(&s.transaction_publication_ms);
+        let transaction_latency_ms = publication.or_else(|| latency_p95(&s.generation_ms));
         PredictionStats {
-            horizon_ms: publication.or_else(|| latency_p95(&s.generation_ms)),
+            horizon_ms: transaction_latency_ms.map(|ms| {
+                ms * if s.debt_prediction_enabled {
+                    s.forecast_transactions
+                } else {
+                    1
+                } as f64
+            }),
+            transaction_latency_ms,
+            forecast_transactions: s.forecast_transactions,
+            debt_prediction_enabled: s.debt_prediction_enabled,
             horizon_from_publication: publication.is_some(),
             publication_samples: s.transaction_publication_ms.len(),
             generation_samples: s.generation_ms.len(),
@@ -2832,7 +3268,11 @@ mod worker_tests {
         assert_eq!(completed.planning.calls, 2);
         assert_eq!(completed.planning.full_calls, 1);
         assert_eq!(completed.planning.retained_calls, 1);
-        let bytes: usize = completed.tiles.iter().map(|tile| tile.bytes).sum();
+        let bytes: usize = completed
+            .tiles
+            .iter()
+            .map(|tile| GeometryCache::entry_resident_bytes(tile.bytes))
+            .sum();
         assert_eq!(drained.transaction_known_bytes, bytes);
         let mut batched = AdaptiveStream::new(world, settings).unwrap();
         let mut frame = batched.plan(&camera, 320, 180);
@@ -2864,13 +3304,17 @@ mod worker_tests {
         };
         let tile = crate::adaptive_geometry::build(&world, key, || false).unwrap();
         stream.transaction = Some(vec![key]);
+        stream.transaction_known_bytes = GeometryCache::entry_resident_bytes(0);
         stream.record_prepared_tile(&tile);
         stream.record_prepared_tile(&tile);
-        assert_eq!(stream.transaction_known_bytes, tile.bytes);
+        assert_eq!(
+            stream.transaction_known_bytes,
+            GeometryCache::entry_resident_bytes(tile.bytes)
+        );
         assert_eq!(stream.variants[&(key.min, key.width_cells)].len(), 1);
     }
     #[test]
-    fn prediction_gets_one_deadline_slot_ahead_of_reserve_but_never_requested_work() {
+    fn prediction_gets_one_deadline_slot_while_current_backlog_keeps_three() {
         let key = |x| TileKey {
             min: [x, 0],
             width_cells: 16,
@@ -2909,10 +3353,14 @@ mod worker_tests {
         assert!(!selected.contains(&key(48)));
         let mut failing = current;
         failing[0].error_px = f64::INFINITY;
-        let (selected, footprint) = select_with_prediction(failing, predicted, 5.0, 4);
+        let (selected, footprint) =
+            select_with_prediction(failing.clone(), predicted.clone(), 5.0, 4);
         assert_eq!(selected.len(), 4);
+        assert_eq!(footprint, Some(key(144)));
+        assert!(selected.contains(&key(0)));
+        let (single, footprint) = select_with_prediction(failing, predicted, 5.0, 1);
+        assert_eq!(single, HashSet::from([key(0)]));
         assert_eq!(footprint, None);
-        assert!(!selected.contains(&key(144)));
     }
     #[test]
     fn prediction_protection_is_limited_to_the_selected_spatial_footprint() {
@@ -2952,6 +3400,629 @@ mod worker_tests {
                 ..tile
             }
         ));
+    }
+    #[test]
+    fn repeated_stationary_requests_clear_velocity_without_new_camera_epochs() {
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let worker = Worker::new(world, StreamSettings::default()).unwrap();
+        let camera = Camera::fixture();
+        let now = std::time::Instant::now();
+        {
+            let mut state = worker.state.0.lock().unwrap();
+            let mut previous = camera;
+            previous.position.x -= 1.0;
+            state.motion.previous = Some((previous, now - std::time::Duration::from_millis(100)));
+            state.transaction_publication_ms.push_back(200.0);
+        }
+        let epoch = worker.request(camera, 320, 180);
+        assert!(worker.prediction_stats().active);
+        assert_eq!(worker.request(camera, 320, 180), epoch);
+        assert!(
+            !worker.prediction_stats().active,
+            "deduplicated stops still update motion observation"
+        );
+        assert_eq!(worker.request(camera, 320, 180), epoch);
+        let state = worker.state.0.lock().unwrap();
+        assert_eq!(
+            state.motion.previous.as_ref().unwrap().0.position,
+            camera.position
+        );
+    }
+    #[test]
+    fn forecast_debt_counts_chain_and_owner_backlog_with_a_fixed_work_cap() {
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 1024,
+            step_cells: 128,
+            edge_steps: [128; 4],
+            source_revision: 0,
+        };
+        let current: Vec<_> = (0..12)
+            .map(|i| RefinementCandidate {
+                key: TileKey {
+                    min: [i * 1024, 0],
+                    ..key
+                },
+                distance_squared: i as f64,
+                error_px: 10.0,
+            })
+            .collect();
+        let future = vec![PredictionCandidate {
+            key,
+            need_fraction: 0.5,
+            error_px: 20.0,
+        }];
+        // 12 requested owners / 3 current slots + 7-step spatial/native chain - 1.
+        assert_eq!(
+            forecast_transaction_debt(&current, &future, 5.0, 4, 128),
+            10
+        );
+        let many_future = vec![future[0]; 10_000];
+        assert_eq!(
+            forecast_transaction_debt(&current, &many_future, 5.0, 4, 128),
+            32
+        );
+        assert_eq!(forecast_transaction_debt(&[], &[], 5.0, 4, 128), 1);
+        let reserve = RefinementCandidate {
+            error_px: 4.5,
+            ..current[0]
+        };
+        assert_eq!(forecast_transaction_debt(&[reserve], &[], 5.0, 4, 128), 1);
+    }
+    #[test]
+    fn debt_forecast_is_opt_in_and_reports_measured_latency_separately() {
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let worker = Worker::new(world, StreamSettings::default()).unwrap();
+        {
+            let mut state = worker.state.0.lock().unwrap();
+            state.debt_prediction_enabled = false;
+            state.transaction_publication_ms.push_back(200.0);
+            state.forecast_transactions = 12;
+        }
+        let baseline = worker.prediction_stats();
+        assert_eq!(baseline.horizon_ms, Some(200.0));
+        assert_eq!(baseline.transaction_latency_ms, Some(200.0));
+        worker.state.0.lock().unwrap().debt_prediction_enabled = true;
+        let debt = worker.prediction_stats();
+        assert_eq!(debt.horizon_ms, Some(2400.0));
+        assert_eq!(debt.transaction_latency_ms, Some(200.0));
+        assert_eq!(debt.forecast_transactions, 12);
+        let now = std::time::Instant::now();
+        let mut camera = Camera::fixture();
+        let mut motion = MotionPrediction::default();
+        motion.observe(&camera, now, debt.horizon_ms);
+        camera.position.x += 1.0;
+        camera.yaw += 0.1;
+        motion.observe(
+            &camera,
+            now + std::time::Duration::from_millis(100),
+            debt.horizon_ms,
+        );
+        let predicted = motion.predicted.unwrap();
+        assert!((predicted.position.x - camera.position.x - 24.0).abs() < 1e-9);
+        assert!((predicted.yaw - camera.yaw - 2.4).abs() < 1e-5);
+        camera.position.x += 1.0;
+        camera.yaw += 1.0;
+        motion.observe(
+            &camera,
+            now + std::time::Duration::from_millis(200),
+            Some(1e8),
+        );
+        let bounded = motion.predicted.unwrap();
+        assert!((bounded.position - camera.position).length() <= camera.far as f64);
+        assert!((bounded.yaw - camera.yaw).abs() < std::f32::consts::PI);
+    }
+    #[test]
+    fn endpoint_prediction_skips_hidden_work_and_selects_a_newly_revealed_owner() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(world.clone(), StreamSettings::default()).unwrap();
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 16,
+            step_cells: 4,
+            edge_steps: [4; 4],
+            source_revision: 0,
+        };
+        // Synthetic certified-box metadata isolates priority behavior here;
+        // production guaranteed solids come exclusively from source evidence.
+        let mut foreground = crate::adaptive_geometry::build(&world, key, || false).unwrap();
+        foreground.guaranteed_solid_box = Some(Aabb {
+            min: [-3.0, -3.0, 4.0],
+            max: [3.0, 3.0, 6.0],
+        });
+        let mut background = crate::adaptive_geometry::build(
+            &world,
+            TileKey {
+                min: [16, 0],
+                ..key
+            },
+            || false,
+        )
+        .unwrap();
+        background.bounds = [[-0.25, -0.25, 10.0], [0.25, 0.25, 11.0]];
+        background.conservative_surface_bounds = background.bounds;
+        background.best_certified_vertical_error_m = Some(1.0);
+        background.guaranteed_solid_box = None;
+        let background = Arc::new(background);
+        stream.set_committed(vec![Arc::new(foreground), background.clone()]);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::ZERO;
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        camera.far = 100.0;
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        stream.refresh_occlusion(&camera);
+        assert!(stream.is_occluded(&background, &camera));
+        let mut predicted = camera;
+        predicted.position.x = 0.1;
+        stream.prediction = Some(predicted);
+        stream.refresh_prediction_occlusion();
+        assert!(stream.frustum_visible(&background, &predicted, p));
+        assert!(stream
+            .prediction_candidate(&background, &HashSet::new(), &camera, &predicted, p)
+            .is_none());
+        stream.predicted_retention.push_back(PredictedRetention {
+            key: background.key,
+            bounds: background.conservative_surface_bounds,
+        });
+        stream.retain_predictions(&camera, p, None);
+        assert!(
+            stream.predicted_retention.is_empty(),
+            "hidden forecasts must not pin payloads"
+        );
+        predicted.position.x = 10.0;
+        predicted.yaw = -std::f32::consts::FRAC_PI_4;
+        stream.prediction = Some(predicted);
+        stream.refresh_prediction_occlusion();
+        let candidate = stream
+            .prediction_candidate(&background, &HashSet::new(), &camera, &predicted, p)
+            .expect("side motion reveals a previously hidden owner");
+        assert_eq!(candidate.key, background.key);
+        assert!(
+            stream.is_occluded(&background, &camera),
+            "forecast visibility cannot alter current proof"
+        );
+        assert!(
+            stream
+                .prediction_candidate(
+                    &background,
+                    &HashSet::from([background.key]),
+                    &camera,
+                    &predicted,
+                    p
+                )
+                .is_none(),
+            "a requested failure cannot masquerade as forecast-only work"
+        );
+        // A cover change invalidates cached forecast occluders even at the
+        // identical forecast pose. The removed solid cannot keep hiding work.
+        predicted = camera;
+        stream.prediction = Some(predicted);
+        stream.refresh_prediction_occlusion();
+        assert!(!stream.predicted_bounds_visible(
+            background.conservative_surface_bounds,
+            &predicted,
+            p
+        ));
+        stream.set_committed(vec![background.clone()]);
+        stream.refresh_prediction_occlusion();
+        assert!(stream.predicted_bounds_visible(
+            background.conservative_surface_bounds,
+            &predicted,
+            p
+        ));
+    }
+    #[test]
+    fn forecast_occlusion_keeps_unknown_solids_and_near_plane_features_visible() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(world.clone(), StreamSettings::default()).unwrap();
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 16,
+            step_cells: 4,
+            edge_steps: [4; 4],
+            source_revision: 0,
+        };
+        let mut foreground = crate::adaptive_geometry::build(&world, key, || false).unwrap();
+        foreground.conservative_surface_bounds = [[-3.0, -3.0, 4.0], [3.0, 3.0, 6.0]];
+        foreground.guaranteed_solid_box = None;
+        stream.set_committed(vec![Arc::new(foreground)]);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::ZERO;
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        camera.far = 100.0;
+        stream.prediction = Some(camera);
+        stream.refresh_prediction_occlusion();
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        let bounds = [[-0.25, -0.25, 10.0], [0.25, 0.25, 11.0]];
+        assert!(
+            stream.predicted_bounds_visible(bounds, &camera, p),
+            "rendered bounds alone never prove an unknown feature solid"
+        );
+        let mut near = crate::adaptive_geometry::build(
+            &world,
+            TileKey {
+                min: [16, 0],
+                ..key
+            },
+            || false,
+        )
+        .unwrap();
+        near.guaranteed_solid_box = Some(Aabb {
+            min: [-3.0, -3.0, -1.0],
+            max: [3.0, 3.0, 6.0],
+        });
+        stream.set_committed(vec![Arc::new(near)]);
+        stream.refresh_prediction_occlusion();
+        assert!(
+            stream.predicted_bounds_visible(bounds, &camera, p),
+            "a solid crossing the near plane cannot certify occlusion"
+        );
+        assert!(
+            stream.predicted_bounds_visible([[-0.01, -0.01, 0.02], [0.01, 0.01, 0.2]], &camera, p),
+            "a near-plane candidate retains conservative visibility"
+        );
+    }
+    #[test]
+    fn refinement_count_defaults_and_validation_are_independent_of_batch_size() {
+        let settings = StreamSettings::default();
+        assert_eq!(settings.refinements_per_transaction, 4);
+        assert_eq!(settings.jobs_per_update, 4);
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        for refinements in [0, 33] {
+            assert!(AdaptiveStream::new(
+                world.clone(),
+                StreamSettings {
+                    refinements_per_transaction: refinements,
+                    ..settings
+                }
+            )
+            .is_err());
+        }
+        for refinements in [1, 8, 16, 32] {
+            let stream = AdaptiveStream::new(
+                world.clone(),
+                StreamSettings {
+                    refinements_per_transaction: refinements,
+                    ..settings
+                },
+            )
+            .unwrap();
+            assert_eq!(stream.settings.jobs_per_update, 4);
+        }
+    }
+    #[test]
+    fn independent_refinement_count_changes_closed_surface_replacement_not_builder_limit() {
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, world.height_m(0.0, 0.0) + 3.0, 0.0);
+        camera.far = 6.0;
+        camera.pitch = -1.5;
+        let mut refined_counts = vec![];
+        for refinements in [1, 8] {
+            let mut stream = AdaptiveStream::new(
+                world.clone(),
+                StreamSettings {
+                    pixel_error: 0.0,
+                    worker_count: 4,
+                    refinements_per_transaction: refinements,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            stream.set_test_finest_cells(128);
+            let mut cover = vec![];
+            for x in -2..2 {
+                for z in -2..2 {
+                    let key = TileKey {
+                        min: [x * 128, z * 128],
+                        width_cells: 128,
+                        step_cells: 16,
+                        edge_steps: [16; 4],
+                        source_revision: 0,
+                    };
+                    let tile = stream.cache.get_or_build(key, || false).unwrap();
+                    stream.record_prepared_tile(&tile);
+                    cover.push(tile);
+                }
+            }
+            stream.set_committed(cover);
+            stream.committed_pose = Some((camera, 320, 180));
+            assert!(complete_coverage_guard(
+                &stream.committed,
+                &camera,
+                320,
+                180,
+                false
+            ));
+            let frame = stream.plan(&camera, 320, 180);
+            assert!(frame.coverage_ready && !frame.quality_ready);
+            let target = stream.transaction.as_ref().unwrap();
+            assert!(complete_key_guard(
+                target.iter().copied(),
+                &camera,
+                320,
+                180,
+                false
+            ));
+            let refined = target.iter().filter(|key| key.step_cells < 16).count();
+            assert!(refined > 0 && refined <= refinements);
+            refined_counts.push(refined);
+            let selected_target = target.clone();
+            let prepared = stream.prepare_jobs(32, || false).unwrap();
+            assert!(
+                prepared > 0 && prepared <= 4,
+                "logical selection does not widen active builders"
+            );
+            assert!(stream.build_memory.peak_reserved_bytes <= stream.settings.build_budget_bytes);
+            assert_eq!(stream.transaction.as_ref().unwrap(), &selected_target);
+            stream.prepare_demand(|| false).unwrap();
+            let publication = stream.plan(&camera, 320, 180);
+            assert!(publication.coverage_ready);
+            assert!(complete_coverage_guard(
+                &publication.tiles,
+                &camera,
+                320,
+                180,
+                false
+            ));
+        }
+        assert!(refined_counts[1] > refined_counts[0]);
+    }
+    #[test]
+    fn bounded_top_k_preserves_priority_order_for_small_and_large_batches() {
+        let errors = [
+            6.0,
+            4.5,
+            80.0,
+            f64::INFINITY,
+            7.0,
+            10.0,
+            80.0,
+            f64::INFINITY,
+            4.0,
+            4.8,
+            4.2,
+            4.1,
+        ];
+        let candidates: Vec<_> = errors
+            .iter()
+            .enumerate()
+            .map(|(i, &error_px)| RefinementCandidate {
+                key: TileKey {
+                    min: [i as i64 * 128, 0],
+                    width_cells: 128,
+                    step_cells: 16,
+                    edge_steps: [16; 4],
+                    source_revision: 0,
+                },
+                distance_squared: (i % 4) as f64,
+                error_px,
+            })
+            .collect();
+        // Independent explicit order: nearest unbounded, largest finite,
+        // remaining requested by distance/key, then reserve by distance/key.
+        let order = [3, 2, 0, 4, 5, 6, 7, 8, 1, 9, 10, 11];
+        for budget in 0..=16 {
+            let expected: HashSet<_> = order
+                .iter()
+                .take(budget)
+                .map(|&i| candidates[i].key)
+                .collect();
+            assert_eq!(select_refinements(&candidates, 5.0, budget), expected);
+            let reversed: Vec<_> = candidates.iter().rev().copied().collect();
+            assert_eq!(select_refinements(&reversed, 5.0, budget), expected);
+        }
+    }
+    #[test]
+    fn predicted_retention_count_is_bounded_during_a_long_approach() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(
+            world.clone(),
+            StreamSettings {
+                jobs_per_update: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut cover = vec![];
+        for x in 0..40 {
+            cover.push(
+                stream
+                    .cache
+                    .get_or_build(
+                        TileKey {
+                            min: [x * 16, 0],
+                            width_cells: 16,
+                            step_cells: 4,
+                            edge_steps: [4; 4],
+                            source_revision: 0,
+                        },
+                        || false,
+                    )
+                    .unwrap(),
+            );
+        }
+        let keys: Vec<_> = cover.iter().map(|t| t.key).collect();
+        stream.set_committed(cover);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(20.0, 1.7, -100.0);
+        camera.far = 200.0;
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        let mut predicted = camera;
+        predicted.position.z += 1.0;
+        stream.prediction = Some(predicted);
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        for key in keys {
+            stream.retain_predictions(&camera, p, Some(key));
+            assert!(stream.predicted_retention.len() <= 4);
+        }
+        assert_eq!(stream.predicted_retention.len(), 4);
+        assert!(stream
+            .predicted_retention
+            .iter()
+            .all(|r| r.key.min[0] >= 36 * 16));
+    }
+    #[test]
+    fn turn_route_prefetches_unseen_detail_with_current_quality_backlog() {
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let mut stream = AdaptiveStream::new(
+            world.clone(),
+            StreamSettings {
+                pixel_error: 0.1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        stream.set_test_finest_cells(128);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, world.height_m(0.0, 0.0) + 1.7, 0.0);
+        camera.far = 6.0;
+        camera.yaw = -std::f32::consts::FRAC_PI_2;
+        camera.pitch = -0.2;
+        let mut cover = vec![];
+        for x in -2..2 {
+            for z in -2..2 {
+                let key = TileKey {
+                    min: [x * 128, z * 128],
+                    width_cells: 128,
+                    step_cells: 16,
+                    edge_steps: [16; 4],
+                    source_revision: world.revision(),
+                };
+                let tile = stream.cache.get_or_build(key, || false).unwrap();
+                stream.record_prepared_tile(&tile);
+                cover.push(tile);
+            }
+        }
+        stream.set_committed(cover);
+        stream.committed_pose = Some((camera, 320, 180));
+        assert!(complete_coverage_guard(
+            &stream.committed,
+            &camera,
+            320,
+            180,
+            false
+        ));
+        let mut predicted = camera;
+        predicted.yaw = std::f32::consts::FRAC_PI_2;
+        stream.prediction = Some(predicted);
+        let frame = stream.plan(&camera, 320, 180);
+        assert!(frame.coverage_ready && !frame.quality_ready);
+        let selected = stream
+            .predicted_footprint
+            .expect("turn detail must advance during backlog");
+        let original = stream.committed.iter().find(|t| t.key == selected).unwrap();
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        assert!(!stream.tile_visible(original, &camera, p));
+        assert!(stream.frustum_visible(original, &predicted, p));
+        assert!(stream.projected_error(original, &predicted, p) > stream.settings.pixel_error);
+        assert!(
+            stream.transaction.as_ref().unwrap().iter().any(|key| {
+                footprints_overlap(*key, selected) && key.step_cells < selected.step_cells
+            }),
+            "forecast work must enter the actual coherent replacement"
+        );
+        stream.prepare_demand(|| false).unwrap();
+        let published = stream.plan(&predicted, 320, 180);
+        assert!(published.coverage_ready);
+        assert!(complete_coverage_guard(
+            &published.tiles,
+            &predicted,
+            320,
+            180,
+            false
+        ));
+        assert!(published.tiles.iter().any(|tile| {
+            footprints_overlap(tile.key, selected) && tile.key.step_cells < selected.step_cells
+        }));
+        // No prediction after stopping/jumping; completed content stays cached,
+        // but speculative coarsening protection must disappear immediately.
+        stream.prediction = None;
+        stream.retain_predictions(&predicted, p, None);
+        assert!(stream.predicted_retention.is_empty());
+    }
+    #[test]
+    fn predicted_retention_releases_on_turn_stop_and_payload_pressure() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(world.clone(), StreamSettings::default()).unwrap();
+        stream.set_test_finest_cells(128);
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 128,
+            step_cells: 8,
+            edge_steps: [8; 4],
+            source_revision: world.revision(),
+        };
+        let tile = stream.cache.get_or_build(key, || false).unwrap();
+        stream.set_committed(vec![tile.clone()]);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(4.0, 1.7, -20.0);
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        camera.far = 100.0;
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        let mut prediction = camera;
+        prediction.position.z += 1.0;
+        stream.prediction = Some(prediction);
+        stream.retain_predictions(&camera, p, Some(key));
+        assert_eq!(stream.predicted_retention.len(), 1);
+        stream.retain_predictions(&camera, p, None);
+        assert_eq!(
+            stream.predicted_retention.len(),
+            1,
+            "finishing a slot must not erase useful detail"
+        );
+        prediction.yaw = std::f32::consts::PI;
+        stream.prediction = Some(prediction);
+        stream.retain_predictions(&camera, p, None);
+        assert!(stream.predicted_retention.is_empty());
+        stream.prediction = Some(camera);
+        stream.retain_predictions(&camera, p, Some(key));
+        assert!(
+            stream.predicted_retention.is_empty(),
+            "a stationary forecast releases retention"
+        );
+        prediction.yaw = 0.0;
+        stream.prediction = Some(prediction);
+        let mut expensive = crate::adaptive_geometry::build(&world, key, || false).unwrap();
+        expensive.bytes = stream.cache.mesh_budget_bytes() / 8 + 1;
+        stream.set_committed(vec![Arc::new(expensive)]);
+        stream.retain_predictions(&camera, p, Some(key));
+        assert!(
+            stream.predicted_retention.is_empty(),
+            "retention is charged against actual committed payload"
+        );
     }
     #[test]
     fn measured_horizon_uses_exact_nearest_rank_percentile() {
@@ -3072,6 +4143,7 @@ mod worker_tests {
             world,
             StreamSettings {
                 worker_count: 4,
+                refinements_per_transaction: 32,
                 build_budget_bytes: 1,
                 ..Default::default()
             },

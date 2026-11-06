@@ -7,16 +7,31 @@ certificate construction. Source pages remain the canonical CPU acceleration
 layer; disk records are never a save, edit journal or world authority.
 
 Each record explicitly encodes little-endian scalar fields, never Rust memory.
-Format `FVDC0002` / representation 2 includes optional 64-byte lossless proxy
-triangle records; records from older representations are disposable misses.
+Format `FVDC0003` / representation 3 retains optional 64-byte lossless proxy
+triangle records and introduces local edit dependencies; older records are disposable misses.
 The header records format and representation versions. Identity includes canonical
 source version, seed, voxel size, FBM source/appearance versions, recipe and every
-parameter, topology owner, revision and sorted exact edit coordinates/materials.
-Tile identity includes region, interior/edge strides and revision. Full identity
-bytes are checked after lookup; a filename hash collision can only cause a miss.
+parameter and topology owner. Tile identity includes region, interior/edge strides,
+and sorted exact edit coordinates/materials in the tile's column footprint plus
+one native-column halo on all sides (including corners, all vertical coordinates).
+Unrelated edits and globally assigned revision counters do not change persisted
+content identity. Full identity bytes are checked after lookup; a filename hash
+collision can only cause a miss.
 An FNV checksum detects accidental corruption, not malicious forgery. Representation
 version must change with geometry, ownership, appearance or certificate semantics.
-The cache belongs to one immutable world snapshot and must be recreated on edits.
+Each cache instance belongs to one immutable world snapshot and must be recreated
+on edits. The new instance can reuse unaffected records from the same directory.
+Load/store still require the caller's current snapshot revision and the geometry
+builder's source, ownership and key eligibility checks. Only after complete
+identity validation is decoded geometry bound to the requested current revision.
+
+The current renderer supports edits only inside the explicit topology volume
+owner. Outside surface tiles sample the unedited FBM base and remove volume-owner
+boundary faces; the volume owner supplies edited faces. Local halo invalidation
+is conservative for those base-surface tiles. This cache does not enable arbitrary
+heightfield edits or persist volume-owner geometry. Unsupported edited sources,
+footprint intersections and invalid boundary strides cannot be revived by a disk
+hit.
 
 The optional cache uses one dedicated IO worker. Preparation jobs wait only for
 positively indexed reads; absent keys are rejected by a local bounded index
@@ -45,7 +60,10 @@ limited to half of `build_memory::reservation(key)`, so simultaneous encoded and
 decoded payloads fit the admitted builder reservation. Unsupported keys are
 rejected before file reading. Encoding uses the same conservative per-key limit. This is an IO-specific bound, not a whole-renderer
 memory guarantee. Identity creation refuses more than 4,096 edits rather than
-allocating an unbounded per-cache snapshot. Disk directories should be dedicated
+allocating an unbounded per-cache snapshot. The sorted edit snapshot is shared
+between the client keyer and IO worker; per-tile identity construction scans at
+most 4,096 edits and encodes at most 131,080 dependency bytes (plus bounded vector capacity). Filenames and
+full record identity use the same dependency bytes. Disk directories should be dedicated
 to this cache; the entry cap counts unrelated directory entries too.
 
 CPU-only development-profile diagnostic (one pass, other compilation active;
@@ -70,8 +88,9 @@ cargo test -p frontier-renderer derived_disk_cache --lib --locked -- --nocapture
 ```
 
 Tests cover cold/warm restart native/proxy exact encoded-field parity,
-seed/recipe/parameter/topology/edit invalidation (including equal-revision edit
-content), corrupt/oversized/truncated/version-invalid records and regeneration,
+seed/recipe/parameter/topology invalidation, local edit/halo/material identity,
+revision rebinding with direct current-snapshot geometry parity, unaffected-tile
+restart reuse, unsupported edited-owner rejection, corrupt/oversized/truncated/version-invalid records and regeneration,
 malformed vector lengths, indices, nonfinite fields, inverted bounds/ranges, negative certificates and invalid native bin metadata, bounded disk eviction and interrupted-temp
 cleanup, exclusive lock release, per-key memory rejection before allocation/read, stable filename/index/removal events, and the diagnostic above. Camera selections and
 GPU residency are deliberately absent from the persisted payload.
@@ -90,9 +109,10 @@ cache, selected/pending Arc, source-page, driver or whole-process accounting.
 
 Read failures remove stale index entries; per-operation replacement/corruption/LRU
 removal events update the client index without rescanning the directory or
-walking all cached keys after every store. Filename calculation clones a small
-prehashed identity keyer, preserving the complete identity check inside each
-record. Cache entries, queued tiles and IO failures never change canonical source
+walking all cached keys after every store. Filename calculation shares a bounded immutable edit snapshot with a
+prehashed global identity keyer, preserving the complete identity check inside each
+record. Obsolete revisions are rejected before indexed IO and cannot remove the
+current revision's normalized index entry. Cache entries, queued tiles and IO failures never change canonical source
 or edit authority.
 
 First-quality and preparation timing must record pending writes before an
@@ -104,6 +124,7 @@ leave some generated products uncached; successful shutdown does not imply that
 every generated tile was admitted or saved. The cache remains disposable.
 
 Writeback tests check the negative-index fast path, shutdown restart reuse,
+restart reuse across a distant owner edit, obsolete-revision fast rejection,
 explicit flush releasing even the in-flight Arc, recovery after an optional
 write error, and skipping an oversized queued payload without retaining it.
 

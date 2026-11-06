@@ -5,6 +5,7 @@ use std::{
     fs::{self, File},
     io::{BufWriter, Write},
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -12,6 +13,78 @@ fn vector(s: &str) -> Result<Vec<f64>> {
     Ok(s.split(',')
         .map(str::parse)
         .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PixelCrop {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+impl PixelCrop {
+    fn parse(value: &str) -> Result<Self> {
+        let values: Vec<usize> = value
+            .split(',')
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()?;
+        let [x, y, width, height]: [usize; 4] = values
+            .try_into()
+            .map_err(|_| "crop needs X,Y,WIDTH,HEIGHT")?;
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+    fn validate(self, width: usize, height: usize) -> Result<Self> {
+        if self.width == 0
+            || self.height == 0
+            || self.x.checked_add(self.width).is_none_or(|x| x > width)
+            || self.y.checked_add(self.height).is_none_or(|y| y > height)
+        {
+            return Err("pixel crop must be nonempty and inside full viewport".into());
+        }
+        Ok(self)
+    }
+    fn pixel(self, x: usize, y: usize) -> [usize; 2] {
+        [self.x + x, self.y + y]
+    }
+}
+fn sample_position(
+    x: usize,
+    y: usize,
+    width: usize,
+    grid: usize,
+    sx: usize,
+    sy: usize,
+    seed: u64,
+) -> [f64; 2] {
+    let key = seed
+        ^ ((y * width + x) as u64).wrapping_mul(0x9e3779b97f4a7c15)
+        ^ ((sy * grid + sx) as u64).wrapping_mul(0xd1b54a32d192ed03);
+    [
+        x as f64 + (sx as f64 + jitter(key)) / grid as f64,
+        y as f64 + (sy as f64 + jitter(key ^ 0xa0761d6478bd642f)) / grid as f64,
+    ]
+}
+/// Conservative completeness diagnostic only; does not alter native traversal.
+fn ray_within_native_footprint(
+    min: [i64; 2],
+    size: usize,
+    eye: [f64; 3],
+    d: [f64; 3],
+    near: f64,
+    far: f64,
+) -> bool {
+    [near, far].into_iter().all(|t| {
+        [0, 2].into_iter().enumerate().all(|(i, axis)| {
+            let position = eye[axis] + t * d[axis];
+            let lo = min[i] as f64 * VOXEL_SIZE;
+            let hi = (min[i] as f64 + size as f64) * VOXEL_SIZE;
+            position >= lo && position < hi
+        })
+    })
 }
 fn hash(p: [u32; 3]) -> f32 {
     let mut h = p[0].wrapping_mul(1597334677)
@@ -71,6 +144,7 @@ fn git(args: &[&str]) -> String {
 fn main() -> Result<()> {
     let (mut width, mut height, mut spp, mut seed) = (1280usize, 720usize, 16usize, 7u64);
     let mut sample_seed = 19u64;
+    let mut pixel_crop = None;
     let mut recipe = FbmRecipe::Regional;
     let mut center = [-1156., 3469.];
     let mut extent = 1024.;
@@ -89,7 +163,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --output DIR --cache FILE --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--build-only] [--no-tint]");
+            println!("landscape --output DIR --cache FILE --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint]");
             return Ok(());
         }
         if a == "--build-only" {
@@ -112,6 +186,7 @@ fn main() -> Result<()> {
             }
             "--width" => width = v.parse()?,
             "--height" => height = v.parse()?,
+            "--crop" => pixel_crop = Some(PixelCrop::parse(&v)?),
             "--spp" => spp = v.parse()?,
             "--seed" => seed = v.parse()?,
             "--terrain-recipe" => {
@@ -158,6 +233,16 @@ fn main() -> Result<()> {
     {
         return Err("invalid image, extent or camera".into());
     }
+    let crop = pixel_crop
+        .unwrap_or(PixelCrop {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        })
+        .validate(width, height)?;
+    let (viewport_width, viewport_height) = (width, height);
+    let (width, height) = (crop.width, crop.height);
     let min = center.map(|v| (v / VOXEL_SIZE).floor() as i64 - size as i64 / 2);
     let terrain = FbmTerrain::new(
         seed,
@@ -196,29 +281,24 @@ fn main() -> Result<()> {
     let mut pixels = vec![[0f32; 5]; width * height];
     let rows = height.div_ceil(threads.min(height));
     let render = Instant::now();
+    let boundary_misses = AtomicU64::new(0);
     std::thread::scope(|scope| {
         for (part, out) in pixels.chunks_mut(rows * width).enumerate() {
             let scene = &scene;
             let camera = &camera;
+            let boundary_misses = &boundary_misses;
             scope.spawn(move || {
+                let mut incomplete = 0u64;
                 for (i, p) in out.iter_mut().enumerate() {
-                    let x = i % width;
-                    let y = part * rows + i / width;
+                    let [x, y] = crop.pixel(i % width, part * rows + i / width);
                     let mut rgb = [0.; 3];
                     let mut covered = 0.;
                     let mut depth = 0.;
                     for sy in 0..grid {
                         for sx in 0..grid {
-                            let key = sample_seed
-                                ^ ((y * width + x) as u64).wrapping_mul(0x9e3779b97f4a7c15)
-                                ^ ((sy * grid + sx) as u64).wrapping_mul(0xd1b54a32d192ed03);
-                            let (d, n, f) = camera.ray(
-                                x as f64 + (sx as f64 + jitter(key)) / grid as f64,
-                                y as f64
-                                    + (sy as f64 + jitter(key ^ 0xa0761d6478bd642f)) / grid as f64,
-                                width,
-                                height,
-                            );
+                            let [px, py] =
+                                sample_position(x, y, viewport_width, grid, sx, sy, sample_seed);
+                            let (d, n, f) = camera.ray(px, py, viewport_width, viewport_height);
                             let c = if let Some(hit) = scene.ray(camera.eye, d, n, f) {
                                 covered += 1.;
                                 depth += hit.distance;
@@ -226,6 +306,9 @@ fn main() -> Result<()> {
                                 let tint = if paint { tint(hit.cell) } else { [1.; 3] };
                                 std::array::from_fn(|a| c[a] * tint[a])
                             } else {
+                                if !ray_within_native_footprint(min, size, camera.eye, d, n, f) {
+                                    incomplete += 1;
+                                }
                                 SKY
                             };
                             for a in 0..3 {
@@ -243,6 +326,7 @@ fn main() -> Result<()> {
                         f32::NAN
                     };
                 }
+                boundary_misses.fetch_add(incomplete, Ordering::Relaxed);
                 eprintln!(
                     "Rendered rows {}..{}",
                     part * rows,
@@ -291,10 +375,13 @@ fn main() -> Result<()> {
     let cache_identity = scene.cache_identity;
     let ray_count = width as u64 * height as u64 * spp as u64;
     let miss_fraction = 1. - pixels.iter().map(|p| p[3] as f64).sum::<f64>() / pixels.len() as f64;
+    let finite_domain_miss_samples = boundary_misses.load(Ordering::Relaxed);
+    let finite_domain_miss_fraction = finite_domain_miss_samples as f64 / ray_count as f64;
+    let pixel_crop = [crop.x, crop.y, crop.width, crop.height];
     fs::write(
         output.join("manifest.json"),
         format!(
-            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{VOXEL_SIZE},"lod":false,"geometry":"all native columns; conservative exact-max rejection hierarchy","crop_policy":"exposed canonical faces only; no crop caps; unbounded downward solid columns","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":false,"terrain_tint":{paint},"tint":"same renderer 32m/4m coherent paint; fine grain zero","sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction}}}"#,
+            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{VOXEL_SIZE},"lod":false,"geometry":"all native columns; conservative exact-max rejection hierarchy","crop_policy":"exposed canonical faces only; no crop caps; unbounded downward solid columns","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":false,"terrain_tint":{paint},"tint":"same renderer 32m/4m coherent paint; fine grain zero","sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,
@@ -305,4 +392,105 @@ fn main() -> Result<()> {
     )?;
     eprintln!("Wrote {} in {render_seconds:.2}s", output.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cropped_samples_keep_full_viewport_rays_and_sample_indices() {
+        let (width, height, grid, seed) = (1920, 1080, 8, 19);
+        let camera = Camera::default();
+        let full = PixelCrop {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        for crop in [
+            full,
+            PixelCrop {
+                x: 928,
+                y: 508,
+                width: 64,
+                height: 64,
+            },
+        ] {
+            for local in [
+                [0, 0],
+                [crop.width - 1, crop.height - 1],
+                [crop.width / 2, crop.height / 2],
+            ] {
+                let [x, y] = crop.pixel(local[0], local[1]);
+                assert_eq!(full.pixel(x, y), [x, y]);
+                for sy in 0..grid {
+                    for sx in 0..grid {
+                        let pixel_index = y * width + x;
+                        let sample_index = sy * grid + sx;
+                        let key = seed
+                            ^ (pixel_index as u64).wrapping_mul(0x9e3779b97f4a7c15)
+                            ^ (sample_index as u64).wrapping_mul(0xd1b54a32d192ed03);
+                        let expected = [
+                            x as f64 + (sx as f64 + jitter(key)) / grid as f64,
+                            y as f64 + (sy as f64 + jitter(key ^ 0xa0761d6478bd642f)) / grid as f64,
+                        ];
+                        let actual = sample_position(x, y, width, grid, sx, sy, seed);
+                        assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+                        assert_eq!(
+                            camera.ray(actual[0], actual[1], width, height),
+                            camera.ray(expected[0], expected[1], width, height)
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn malformed_or_out_of_viewport_pixel_crops_are_rejected() {
+        for value in ["1,2,3", "1,2,3,4,5", "-1,0,1,1", "x,0,1,1"] {
+            assert!(PixelCrop::parse(value).is_err());
+        }
+        for value in [
+            "0,0,0,1", "0,0,1,0", "8,0,1,1", "0,4,1,1", "7,0,2,1", "0,3,1,2",
+        ] {
+            assert!(PixelCrop::parse(value).unwrap().validate(8, 4).is_err());
+        }
+        assert!(PixelCrop {
+            x: usize::MAX,
+            y: 0,
+            width: 1,
+            height: 1
+        }
+        .validate(8, 4)
+        .is_err());
+        assert!(PixelCrop::parse("0,0,8,4").unwrap().validate(8, 4).is_ok());
+    }
+    #[test]
+    fn finite_domain_misses_are_marked_incomplete_without_changing_traversal() {
+        let inside = [0., 10., 0.];
+        assert!(ray_within_native_footprint(
+            [-16, -16],
+            32,
+            inside,
+            [0., -1., 0.],
+            0.025,
+            20.
+        ));
+        assert!(!ray_within_native_footprint(
+            [-16, -16],
+            32,
+            inside,
+            [0., 0., -1.],
+            0.025,
+            20.
+        ));
+        assert!(!ray_within_native_footprint(
+            [-16, -16],
+            32,
+            [0., 10., 2.],
+            [0., 0., -1.],
+            0.025,
+            2.5
+        ));
+    }
 }

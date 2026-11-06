@@ -27,12 +27,16 @@ pub struct AdaptiveView {
     pub unresolved: bool,
     pub native_clusters: usize,
     pub upload_bytes: u64,
+    upload_cpu_ms: f64,
+    publication_cpu_ms: f64,
+    gpu_prepare_cpu_ms: f64,
     pub max_upload_frame_bytes: u64,
     pub published_epoch: u64,
     pub pixel_error: f64,
     topology_supported: bool,
     native_bins: bool,
     worker_count: usize,
+    refinements_per_transaction: usize,
     direct_native_urgent: bool,
     build_memory: crate::build_memory::BuildMemoryStats,
     planning: crate::adaptive_stream::PlanningStats,
@@ -75,6 +79,7 @@ impl AdaptiveView {
         cpu_cache_budget_bytes: usize,
         native_bins: bool,
         worker_count: usize,
+        refinements_per_transaction: usize,
         direct_native_urgent: bool,
         build_budget_bytes: usize,
         disk_cache: Option<crate::adaptive_stream::DiskCacheConfig>,
@@ -88,6 +93,7 @@ impl AdaptiveView {
                     pixel_error,
                     cpu_cache_bytes: cpu_cache_budget_bytes,
                     worker_count,
+                    refinements_per_transaction,
                     direct_native_urgent,
                     build_budget_bytes,
                     ..Default::default()
@@ -111,6 +117,9 @@ impl AdaptiveView {
             unresolved: false,
             native_clusters: 0,
             upload_bytes: 0,
+            upload_cpu_ms: 0.,
+            publication_cpu_ms: 0.,
+            gpu_prepare_cpu_ms: 0.,
             max_upload_frame_bytes: 0,
             published_epoch: 0,
             pixel_error,
@@ -118,6 +127,7 @@ impl AdaptiveView {
             native_bins,
             worker_count,
             direct_native_urgent,
+            refinements_per_transaction,
             build_memory: crate::build_memory::BuildMemoryStats::default(),
             planning: Default::default(),
             cache_bytes: 0,
@@ -266,7 +276,10 @@ impl AdaptiveView {
                 if uploaded > 0 && uploaded + bytes > UPLOAD_BUDGET {
                     break;
                 }
-                if let Err(error) = adaptive.upload(&gpu.device, &gpu.queue, tile) {
+                let upload_started = Instant::now();
+                let upload_result = adaptive.upload(&gpu.device, &gpu.queue, tile);
+                self.upload_cpu_ms += upload_started.elapsed().as_secs_f64() * 1000.;
+                if let Err(error) = upload_result {
                     if crate::adaptive_gpu::resource_capacity_error(&error) {
                         self.gpu_resource_limited = true;
                         self.unresolved = true;
@@ -279,6 +292,7 @@ impl AdaptiveView {
                     break;
                 }
             }
+            let publication_started = Instant::now();
             if frame
                 .tiles
                 .iter()
@@ -326,6 +340,7 @@ impl AdaptiveView {
                 }
                 self.pending = None;
             }
+            self.publication_cpu_ms += publication_started.elapsed().as_secs_f64() * 1000.;
         }
         if self.pending.is_none() {
             self.pending = self.deferred.take();
@@ -358,7 +373,9 @@ impl AdaptiveView {
             self.coverage_ready =
                 self.coverage_ready && self.published_pose == Some((camera, width, height));
         }
+        let gpu_prepare_started = Instant::now();
         self.stats = adaptive.prepare(
+            &gpu.device,
             &gpu.queue,
             &camera,
             width,
@@ -366,6 +383,7 @@ impl AdaptiveView {
             &self.owners,
             self.pixel_error,
         );
+        self.gpu_prepare_cpu_ms += gpu_prepare_started.elapsed().as_secs_f64() * 1000.;
         self.quality_ready = self.coverage_ready && self.stats.current_quality_ready;
         if self.quality_ready && self.first_quality_ms.is_none() {
             self.first_quality_ms = Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
@@ -547,7 +565,7 @@ impl AdaptiveView {
                 .map_or("null".into(), |v| v.to_string())
         ));
         json.pop();
-        json.push_str(&format!(",\"prediction\":{{\"horizon_ms\":{},\"horizon_from_publication\":{},\"publication_samples\":{},\"generation_samples\":{},\"active\":{}}},\"live_tile_payload_bytes\":{},\"peak_live_tile_payload_bytes\":{}}}", prediction.horizon_ms.map_or("null".into(), |v| v.to_string()), prediction.horizon_from_publication, prediction.publication_samples, prediction.generation_samples, prediction.active, self.latest_cache.live_tile_payload_bytes, self.latest_cache.peak_live_tile_payload_bytes));
+        json.push_str(&format!(",\"prediction\":{{\"horizon_ms\":{},\"horizon_from_publication\":{},\"publication_samples\":{},\"generation_samples\":{},\"active\":{},\"transaction_latency_ms\":{},\"forecast_transactions\":{},\"debt_prediction_enabled\":{}}},\"live_tile_payload_bytes\":{},\"peak_live_tile_payload_bytes\":{}}}", prediction.horizon_ms.map_or("null".into(), |v| v.to_string()), prediction.horizon_from_publication, prediction.publication_samples, prediction.generation_samples, prediction.active, prediction.transaction_latency_ms.map_or("null".into(), |v| v.to_string()), prediction.forecast_transactions, prediction.debt_prediction_enabled, self.latest_cache.live_tile_payload_bytes, self.latest_cache.peak_live_tile_payload_bytes));
         json.pop();
         json.push_str(&format!(
             ",\"affine_cache_hits\":{},\"affine_cache_misses\":{},\"affine_cache_bytes\":{}}}",
@@ -572,8 +590,9 @@ impl AdaptiveView {
         ));
         json.pop();
         json.push_str(&format!(
-            ",\"direct_native_urgent\":{}}}",
-            self.direct_native_urgent
+            ",\"direct_native_urgent\":{},\"visible_vertical_error_bound\":{}}}",
+            self.direct_native_urgent,
+            crate::adaptive_stream::visible_vertical_bound_enabled()
         ));
         json.pop();
         json.push_str(&format!(
@@ -581,6 +600,23 @@ impl AdaptiveView {
             self.latest_cache.appearance_cache_hits,
             self.latest_cache.appearance_cache_misses,
             self.latest_cache.appearance_cache_bytes
+        ));
+        json.pop();
+        json.push_str(&format!(",\"render_bundles\":{{\"enabled\":{},\"active\":{},\"builds\":{},\"reuses\":{},\"build_ms\":{}}}}}", self.stats.bundle_enabled, self.stats.bundle_active, self.stats.bundle_builds, self.stats.bundle_reuses, self.stats.bundle_build_ms));
+        let c = self.latest_cache;
+        json.pop();
+        json.push_str(&format!(",\"exclusive_cpu_profile\":{{\"enabled\":{},\"source_lock_ms\":{},\"source_lookup_ms\":{},\"source_generate_ms\":{},\"appearance_ms\":{},\"certificate_ms\":{},\"native_mesh_ms\":{},\"proxy_ms\":{},\"cache_snapshot_ms\":{},\"cache_admission_ms\":{},\"cache_eviction_ms\":{},\"lru_metadata_bytes\":{}}}}}", c.profile_enabled, c.source_lock_ms, c.source_lookup_ms, c.source_generate_ms, c.appearance_exclusive_ms, c.certificate_exclusive_ms, c.native_mesh_exclusive_ms, c.proxy_exclusive_ms, c.cache_snapshot_ms, c.cache_admission_ms, c.cache_eviction_ms, c.lru_metadata_bytes));
+        json.pop();
+        json.push_str(&format!(",\"presentation_cpu_ms\":{{\"upload_enqueue\":{},\"publication_check\":{},\"gpu_visibility_uniforms_bundles\":{}}}}}", self.upload_cpu_ms, self.publication_cpu_ms, self.gpu_prepare_cpu_ms));
+        json.pop();
+        json.push_str(&format!(
+            ",\"prepared_view_cache\":{{\"hits\":{},\"misses\":{}}}}}",
+            self.stats.prepared_view_hits, self.stats.prepared_view_misses
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"refinements_per_transaction\":{}}}",
+            self.refinements_per_transaction
         ));
         let planning = self.planning;
         json.pop();

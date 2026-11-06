@@ -111,6 +111,13 @@ pub struct VisibleOffender {
 }
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DrawStats {
+    pub prepared_view_hits: u64,
+    pub prepared_view_misses: u64,
+    pub bundle_enabled: bool,
+    pub bundle_active: bool,
+    pub bundle_builds: u64,
+    pub bundle_reuses: u64,
+    pub bundle_build_ms: f64,
     pub resident_clusters: usize,
     pub cluster_capacity: usize,
     pub available_cluster_slots: usize,
@@ -152,11 +159,118 @@ fn record_offender(top: &mut [Option<VisibleOffender>; 8], offender: VisibleOffe
         top[index] = Some(offender);
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DrawItem {
     key: TileKey,
     bin_mask: Option<u8>,
 }
+// Keep direct and cached command encoding identical. Bundles cache commands,
+// never visibility or camera values; each prepare still evaluates current demand.
+macro_rules! encode_cluster_draws {
+    ($renderer:expr, $pass:expr) => {{
+        let renderer = $renderer;
+        let pass = $pass;
+        for (draw_index, item) in renderer.visible.iter().enumerate() {
+            let c = &renderer.clusters[&item.key];
+            if c.native_quads {
+                pass.set_pipeline(&renderer.native_pipeline);
+            } else if c.proxy_triangles {
+                pass.set_pipeline(&renderer.proxy_pipeline);
+            } else if let Some(p) = &c.profile {
+                pass.set_pipeline(&renderer.profile_pipeline);
+                let indices = p.indices.as_ref().unwrap();
+                pass.set_vertex_buffer(
+                    1,
+                    renderer.profiles[indices.page]
+                        .buffer
+                        .slice(indices.range.clone()),
+                );
+            } else {
+                pass.set_pipeline(&renderer.pipeline);
+                pass.set_vertex_buffer(1, renderer.zero_profile.slice(..));
+            }
+            pass.set_bind_group(
+                0,
+                c.profile
+                    .as_ref()
+                    .map_or(&renderer.bind, |p| &renderer.profile_binds[p.table.page]),
+                &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
+            );
+            pass.set_vertex_buffer(
+                0,
+                renderer.vertices[c.vertices.page]
+                    .buffer
+                    .slice(c.vertices.range.clone()),
+            );
+            if c.native_quads {
+                pass.set_index_buffer(renderer.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+                if let Some(mask) = item.bin_mask {
+                    for (index, bin) in c.bins.iter().enumerate() {
+                        if mask & (1u8 << index) != 0 {
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                bin.first_quad..bin.first_quad + bin.quad_count,
+                            );
+                        }
+                    }
+                } else {
+                    pass.draw_indexed(0..6, 0, 0..c.count);
+                }
+            } else if c.proxy_triangles {
+                pass.draw(0..3, 0..c.count);
+            } else {
+                let indices = c.indices.as_ref().unwrap();
+                pass.set_index_buffer(
+                    renderer.indices[indices.page]
+                        .buffer
+                        .slice(indices.range.clone()),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..c.count, 0, 0..1);
+            }
+        }
+    }};
+}
+
+struct PreparedView {
+    camera: Camera,
+    width: u32,
+    height: u32,
+    pixel_error: f64,
+    owners: HashSet<TileKey>,
+    stats: DrawStats,
+}
+impl PreparedView {
+    fn matches(
+        &self,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        pixel_error: f64,
+        owners: &HashSet<TileKey>,
+    ) -> bool {
+        self.camera == *camera
+            && self.width == width
+            && self.height == height
+            && self.pixel_error == pixel_error
+            && self.owners == *owners
+    }
+}
 pub struct AdaptiveGpu {
+    prepared_view: Option<PreparedView>,
+    prepared_view_hits: u64,
+    prepared_view_misses: u64,
+    prepared_view_enabled: bool,
+    bundles_enabled: bool,
+    format: wgpu::TextureFormat,
+    sample_count: u32,
+    bundle: Option<wgpu::RenderBundle>,
+    bundle_signature: Vec<DrawItem>,
+    bundle_stable_frames: u8,
+    bundle_builds: u64,
+    bundle_reuses: u64,
+    bundle_build_ms: f64,
     native_bins_enabled: bool,
     voxel_filter: bool,
     pipeline: wgpu::RenderPipeline,
@@ -326,6 +440,20 @@ impl AdaptiveGpu {
             usage: wgpu::BufferUsages::VERTEX,
         });
         Self {
+            prepared_view: None,
+            prepared_view_hits: 0,
+            prepared_view_misses: 0,
+            prepared_view_enabled: std::env::var_os("FRONTIER_PREPARED_VIEW_CACHE")
+                .is_none_or(|v| v != "0"),
+            bundles_enabled: std::env::var_os("FRONTIER_RENDER_BUNDLES").is_none_or(|v| v != "0"),
+            format,
+            sample_count,
+            bundle: None,
+            bundle_signature: vec![],
+            bundle_stable_frames: 0,
+            bundle_builds: 0,
+            bundle_reuses: 0,
+            bundle_build_ms: 0.,
             native_bins_enabled: true,
             voxel_filter: true,
             pipeline,
@@ -349,9 +477,16 @@ impl AdaptiveGpu {
         }
     }
     pub fn set_native_bins(&mut self, enabled: bool) {
+        if self.native_bins_enabled != enabled {
+            self.prepared_view = None;
+            self.invalidate_bundle();
+        }
         self.native_bins_enabled = enabled;
     }
     pub fn set_voxel_filter(&mut self, enabled: bool) {
+        if self.voxel_filter != enabled {
+            self.prepared_view = None;
+        }
         self.voxel_filter = enabled;
     }
     pub fn contains(&self, key: &TileKey) -> bool {
@@ -412,6 +547,8 @@ impl AdaptiveGpu {
         if self.contains(&tile.key) {
             return Ok(());
         }
+        self.prepared_view = None;
+        self.invalidate_bundle();
         if self.slots.is_empty() {
             return Err(CLUSTER_CAPACITY_ERROR.into());
         }
@@ -557,6 +694,10 @@ impl AdaptiveGpu {
             .filter(|k| !keys.contains(k))
             .copied()
             .collect();
+        if !removed.is_empty() {
+            self.prepared_view = None;
+            self.invalidate_bundle();
+        }
         for key in removed {
             let c = self.clusters.remove(&key).unwrap();
             if let Some(p) = c.profile {
@@ -576,6 +717,7 @@ impl AdaptiveGpu {
     /// Select only published owners. Resident preparation must never become visible.
     pub fn prepare(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
         width: u32,
@@ -583,6 +725,21 @@ impl AdaptiveGpu {
         owners: &HashSet<TileKey>,
         pixel_error: f64,
     ) -> DrawStats {
+        // Reuse only identical current demand and immutable resident content.
+        // Upload/removal/filter changes invalidate this snapshot immediately.
+        if self.prepared_view_enabled
+            && self
+                .prepared_view
+                .as_ref()
+                .is_some_and(|old| old.matches(camera, width, height, pixel_error, owners))
+        {
+            self.prepared_view_hits += 1;
+            self.prepare_bundle(device);
+            let mut stats = self.prepared_view.as_ref().unwrap().stats;
+            self.update_command_stats(&mut stats);
+            return stats;
+        }
+        self.prepared_view_misses += 1;
         self.visible.clear();
         self.camera_upload.clear();
         let mut stats = DrawStats {
@@ -687,6 +844,7 @@ impl AdaptiveGpu {
                 crate::adaptive_stream::projected_cached_vertical_error(
                     e,
                     c.proxy_bounds,
+                    c.origin,
                     camera,
                     width,
                     height,
@@ -775,69 +933,81 @@ impl AdaptiveGpu {
         if !self.camera_upload.is_empty() {
             queue.write_buffer(&self.uniform, 0, &self.camera_upload);
         }
+        self.prepare_bundle(device);
+        self.update_command_stats(&mut stats);
+        if self.prepared_view_enabled {
+            self.prepared_view = Some(PreparedView {
+                camera: *camera,
+                width,
+                height,
+                pixel_error,
+                owners: owners.clone(),
+                stats,
+            });
+        }
         stats
     }
+    fn update_command_stats(&self, stats: &mut DrawStats) {
+        stats.bundle_enabled = self.bundles_enabled;
+        stats.bundle_active = self.bundle.is_some();
+        stats.bundle_builds = self.bundle_builds;
+        stats.bundle_reuses = self.bundle_reuses;
+        stats.bundle_build_ms = self.bundle_build_ms;
+        stats.prepared_view_hits = self.prepared_view_hits;
+        stats.prepared_view_misses = self.prepared_view_misses;
+    }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        for (draw_index, item) in self.visible.iter().enumerate() {
-            let c = &self.clusters[&item.key];
-            if c.native_quads {
-                pass.set_pipeline(&self.native_pipeline);
-            } else if c.proxy_triangles {
-                pass.set_pipeline(&self.proxy_pipeline);
-            } else if let Some(p) = &c.profile {
-                pass.set_pipeline(&self.profile_pipeline);
-                let indices = p.indices.as_ref().unwrap();
-                pass.set_vertex_buffer(
-                    1,
-                    self.profiles[indices.page]
-                        .buffer
-                        .slice(indices.range.clone()),
-                );
-            } else {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(1, self.zero_profile.slice(..));
-            }
-            pass.set_bind_group(
-                0,
-                c.profile
-                    .as_ref()
-                    .map_or(&self.bind, |p| &self.profile_binds[p.table.page]),
-                &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
-            );
-            pass.set_vertex_buffer(
-                0,
-                self.vertices[c.vertices.page]
-                    .buffer
-                    .slice(c.vertices.range.clone()),
-            );
-            if c.native_quads {
-                pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
-                if let Some(mask) = item.bin_mask {
-                    for (index, bin) in c.bins.iter().enumerate() {
-                        if mask & (1u8 << index) != 0 {
-                            pass.draw_indexed(
-                                0..6,
-                                0,
-                                bin.first_quad..bin.first_quad + bin.quad_count,
-                            );
-                        }
-                    }
-                } else {
-                    pass.draw_indexed(0..6, 0, 0..c.count);
-                }
-            } else if c.proxy_triangles {
-                pass.draw(0..3, 0..c.count);
-            } else {
-                let indices = c.indices.as_ref().unwrap();
-                pass.set_index_buffer(
-                    self.indices[indices.page]
-                        .buffer
-                        .slice(indices.range.clone()),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..c.count, 0, 0..1);
-            }
+        if let Some(bundle) = &self.bundle {
+            pass.execute_bundles(std::iter::once(bundle));
+        } else {
+            encode_cluster_draws!(self, pass);
         }
+    }
+    fn invalidate_bundle(&mut self) {
+        self.bundle = None;
+        self.bundle_signature.clear();
+        self.bundle_stable_frames = 0;
+    }
+    fn prepare_bundle(&mut self, device: &wgpu::Device) {
+        if !self.bundles_enabled || self.visible.is_empty() {
+            self.invalidate_bundle();
+            return;
+        }
+        if self.visible != self.bundle_signature {
+            self.bundle = None;
+            self.bundle_signature.clone_from(&self.visible);
+            self.bundle_stable_frames = 0;
+            return;
+        }
+        if self.bundle.is_some() {
+            self.bundle_reuses += 1;
+            return;
+        }
+        self.bundle_stable_frames += 1;
+        // Avoid encoding a second command stream for transient view selections.
+        if self.bundle_stable_frames < 2 {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let mut encoder =
+            device.create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                label: Some("adaptive stable draw commands"),
+                color_formats: &[Some(self.format)],
+                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: self.sample_count,
+                multiview: None,
+            });
+        encode_cluster_draws!(&*self, &mut encoder);
+        let bundle = encoder.finish(&wgpu::RenderBundleDescriptor {
+            label: Some("adaptive stable draw commands"),
+        });
+        self.bundle = Some(bundle);
+        self.bundle_builds += 1;
+        self.bundle_build_ms += started.elapsed().as_secs_f64() * 1000.;
     }
     fn upload_native(
         &mut self,
@@ -1352,5 +1522,50 @@ mod tests {
             100,
             100
         ));
+    }
+    #[test]
+    fn prepared_view_requires_identical_projection_pose_and_ownership() {
+        use super::{Camera, DrawStats, HashSet, PreparedView, TileKey};
+        let camera = Camera::fixture();
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 128,
+            step_cells: 8,
+            edge_steps: [8; 4],
+            source_revision: 0,
+        };
+        let owners = HashSet::from([key]);
+        let cached = PreparedView {
+            camera,
+            width: 1920,
+            height: 1080,
+            pixel_error: 5.,
+            owners: owners.clone(),
+            stats: DrawStats::default(),
+        };
+        assert!(cached.matches(&camera, 1920, 1080, 5., &owners));
+        for field in 0..5 {
+            let mut moved = camera;
+            match field {
+                0 => moved.position.x += 0.0625,
+                1 => moved.yaw += 0.01,
+                2 => moved.pitch += 0.01,
+                3 => moved.far += 100.,
+                _ => moved.fov_y += 1.,
+            }
+            assert!(!cached.matches(&moved, 1920, 1080, 5., &owners));
+        }
+        assert!(!cached.matches(&camera, 1280, 1080, 5., &owners));
+        assert!(!cached.matches(&camera, 1920, 720, 5., &owners));
+        assert!(!cached.matches(&camera, 1920, 1080, 4., &owners));
+        assert!(!cached.matches(&camera, 1920, 1080, 5., &HashSet::new()));
+        let edited = HashSet::from([TileKey {
+            source_revision: 1,
+            ..key
+        }]);
+        assert!(!cached.matches(&camera, 1920, 1080, 5., &edited));
+        let mut invalid = camera;
+        invalid.position.x = f64::NAN;
+        assert!(!cached.matches(&invalid, 1920, 1080, 5., &owners));
     }
 }
