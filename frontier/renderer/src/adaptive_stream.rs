@@ -56,6 +56,8 @@ pub(crate) struct PlanningStats {
     pub total_ms: f64,
     pub max_ms: f64,
     pub prepared_batches_without_plan: u64,
+    pub obsolete_transaction_preemptions: u64,
+    pub obsolete_transaction_pending_jobs: u64,
 }
 pub struct SelectionFrame {
     pub epoch: u64,
@@ -293,6 +295,82 @@ struct RejectedCoarsen {
     bounds: [[f64; 3]; 2],
     origin: DVec3,
 }
+/// Priority-only cancellation: never infer missing geometry from sampled data.
+/// Every selected parent's conservative surface bounds must miss both views;
+/// an uncertain projection, missing provenance or mixed revision retains work.
+fn obsolete_refinement_demand(
+    refinements: &[Arc<GeometryTile>],
+    committed: &[Arc<GeometryTile>],
+    camera: &Camera,
+    predicted: Option<&Camera>,
+    width: u32,
+    height: u32,
+    pixel_error: f64,
+) -> bool {
+    let Some(first) = committed.first() else {
+        return false;
+    };
+    if refinements.is_empty()
+        || refinements
+            .iter()
+            .chain(committed)
+            .any(|tile| tile.key.source_revision != first.key.source_revision)
+    {
+        return false;
+    }
+    let Some(projection) = camera_projection(camera, width, height) else {
+        return false;
+    };
+    let outside = |tile: &GeometryTile, pose: &Camera, projection| {
+        outside_frustum(
+            world_bounds_to_view(tile.conservative_surface_bounds, pose),
+            projection,
+            conservative_clip_depth(pose).unwrap_or(f64::INFINITY),
+        )
+    };
+    if refinements
+        .iter()
+        .any(|tile| !outside(tile, camera, projection))
+    {
+        return false;
+    }
+    if let Some(predicted) = predicted {
+        let Some(projection) = camera_projection(predicted, width, height) else {
+            return false;
+        };
+        if refinements
+            .iter()
+            .any(|tile| !outside(tile, predicted, projection))
+        {
+            return false;
+        }
+    }
+    let Some(mut occlusion) = OcclusionSet::new(
+        camera.position.to_array(),
+        camera.direction().as_dvec3().to_array(),
+        0.025,
+        VOXEL_SIZE * 2.0,
+    ) else {
+        return false;
+    };
+    for tile in committed {
+        if let Some(solid) = tile.guaranteed_solid_box {
+            occlusion.insert_solid(solid);
+        }
+    }
+    committed.iter().any(|tile| {
+        !outside(tile, camera, projection)
+            && !occlusion.occludes(Aabb {
+                min: tile.conservative_surface_bounds[0],
+                max: tile.conservative_surface_bounds[1],
+            })
+            && tile.best_certified_vertical_error_m.map_or(true, |error| {
+                let projected =
+                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection);
+                !projected.is_finite() || projected > pixel_error
+            })
+    })
+}
 pub struct AdaptiveStream {
     world: World,
     cache: GeometryCache,
@@ -300,6 +378,10 @@ pub struct AdaptiveStream {
     pending: VecDeque<TileKey>,
     /// Retain a bounded coherent replacement across nearby camera epochs.
     transaction: Option<Vec<TileKey>>,
+    /// Original selected parents, before child splitting and edge closure.
+    /// Empty/unknown provenance never qualifies for priority preemption.
+    transaction_refinements: Vec<Arc<GeometryTile>>,
+    obsolete_transaction_preempt: bool,
     /// Known target payload plus cache entry metadata for every target key.
     transaction_known_bytes: usize,
     pending_publication: Option<PublicationTransaction>,
@@ -358,6 +440,9 @@ impl AdaptiveStream {
             settings,
             pending: VecDeque::new(),
             transaction: None,
+            transaction_refinements: Vec::new(),
+            obsolete_transaction_preempt: std::env::var_os("FRONTIER_OBSOLETE_TRANSACTION_PREEMPT")
+                .is_some_and(|value| value == "1"),
             transaction_known_bytes: 0,
             pending_publication: None,
             committed_publication: None,
@@ -463,6 +548,28 @@ impl AdaptiveStream {
             return frame;
         };
         self.refresh_occlusion(camera);
+        if self.obsolete_transaction_preempt
+            && self.transaction.is_some()
+            && obsolete_refinement_demand(
+                &self.transaction_refinements,
+                &self.committed,
+                camera,
+                self.prediction.as_ref(),
+                width,
+                height,
+                self.settings.pixel_error,
+            )
+        {
+            // Drop demand only. Immutable completed products remain reusable;
+            // the old coherent committed partition stays authoritative until
+            // a fresh closed-edge replacement passes normal publication gates.
+            self.planning.obsolete_transaction_preemptions += 1;
+            self.planning.obsolete_transaction_pending_jobs += self.pending.len() as u64;
+            self.transaction = None;
+            self.transaction_refinements.clear();
+            self.pending.clear();
+            self.pending_publication = None;
+        }
         // Content is camera-independent. Finish the small replacement already
         // in flight while its complete footprint still covers the current view.
         // Replanning every moving epoch discarded nearly finished transactions.
@@ -491,6 +598,7 @@ impl AdaptiveStream {
                     if self.coarsening_certified(&next, camera, p) {
                         self.planning.retained_calls += 1;
                         self.committed_publication = self.pending_publication.take();
+                        self.transaction_refinements.clear();
                         self.set_committed(next);
                         self.committed_pose = Some((*camera, width, height));
                         self.pending.clear();
@@ -518,6 +626,7 @@ impl AdaptiveStream {
             // demand, never the immutable completed geometry in the cache.
             self.pending.clear();
             self.pending_publication = None;
+            self.transaction_refinements.clear();
         }
         self.planning.full_calls += 1;
         self.refresh_prediction_occlusion();
@@ -953,6 +1062,12 @@ impl AdaptiveStream {
                 started: std::time::Instant::now(),
             });
             self.transaction_known_bytes = required_bytes;
+            self.transaction_refinements = self
+                .committed
+                .iter()
+                .filter(|tile| refine.contains(&tile.key))
+                .cloned()
+                .collect();
             self.transaction = Some(target_keys);
         } else {
             // Repeated planning can run before the render side polls. Preserve
@@ -1965,6 +2080,88 @@ fn diagnostic_boxes_disjoint(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn obsolete_priority_requires_all_parents_outside_both_views_and_current_failure() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Small canonical products with explicit synthetic projection metadata
+        // isolate priority decisions from terrain-generation cost. No result
+        // of this fixture is used as a coverage or source certificate.
+        let tile = |z, error, revision| {
+            let key = TileKey {
+                min: [0, z],
+                width_cells: 16,
+                step_cells: 4,
+                edge_steps: [4; 4],
+                source_revision: 0,
+            };
+            let mut tile = crate::adaptive_geometry::build(&world, key, || false).unwrap();
+            tile.bounds = [
+                [0.0, 0.0, z as f64 * VOXEL_SIZE],
+                [1.0, 1.0, (z + 16) as f64 * VOXEL_SIZE],
+            ];
+            tile.conservative_surface_bounds = tile.bounds;
+            tile.guaranteed_solid_box = None;
+            tile.best_certified_vertical_error_m = error;
+            tile.key.source_revision = revision;
+            Arc::new(tile)
+        };
+        let front = tile(64, None, 0);
+        let back = tile(-80, None, 0);
+        let mut forward = Camera::fixture();
+        forward.position = DVec3::new(0.5, 0.5, 0.0);
+        forward.yaw = 0.0;
+        forward.pitch = 0.0;
+        forward.far = 10.0;
+        let mut reverse = forward;
+        reverse.yaw = std::f32::consts::PI;
+        let committed = vec![front.clone(), back.clone()];
+        let obsolete = |parents: &[Arc<GeometryTile>],
+                        current: &[Arc<GeometryTile>],
+                        pose: &Camera,
+                        forecast: Option<&Camera>| {
+            obsolete_refinement_demand(parents, current, pose, forecast, 320, 180, 5.0)
+        };
+        assert!(obsolete(&[front.clone()], &committed, &reverse, None));
+        assert!(
+            !obsolete(&[front.clone()], &committed, &forward, None),
+            "smooth covered motion must finish useful work"
+        );
+        let mut slight_turn = forward;
+        slight_turn.yaw += 0.001;
+        assert!(!obsolete(&[front.clone()], &committed, &slight_turn, None));
+        assert!(
+            !obsolete(&[front.clone()], &committed, &reverse, Some(&forward)),
+            "a forecast-needed footprint must finish"
+        );
+        assert!(
+            !obsolete(&[front.clone(), back.clone()], &committed, &reverse, None),
+            "every selected parent, not just one, must be obsolete"
+        );
+        assert!(!obsolete(&[], &committed, &reverse, None));
+        assert!(
+            !obsolete(
+                &[front.clone()],
+                &[front.clone(), tile(-80, Some(0.0), 0)],
+                &reverse,
+                None
+            ),
+            "reserve or speculative work cannot preempt without requested failure"
+        );
+        assert!(
+            !obsolete(&[tile(64, None, 1)], &committed, &reverse, None),
+            "mixed source revisions never authorize relabeling or cancellation"
+        );
+        let mut invalid = forward;
+        invalid.fov_y = f32::NAN;
+        assert!(!obsolete(&[front], &committed, &reverse, Some(&invalid)));
+    }
+    #[test]
     fn direct_native_experiment_selects_only_one_nearest_requested_native_leaf() {
         let candidate = |x, width, step, distance, error| RefinementCandidate {
             key: TileKey {
@@ -2256,6 +2453,7 @@ mod tests {
             },
         )
         .unwrap();
+        stream.obsolete_transaction_preempt = true;
         let mut distinct = HashSet::new();
         let mut retained = None;
         for _ in 0..160 {
@@ -3044,6 +3242,18 @@ impl Worker {
                 // view outside this transaction's complete footprint cancels
                 // CPU work at the builder's cancellation checkpoints.
                 let keys = stream.transaction.clone().unwrap_or_default();
+                let priority_preemption = stream.obsolete_transaction_preempt;
+                let preempt_refinements = if priority_preemption {
+                    stream.transaction_refinements.clone()
+                } else {
+                    Vec::new()
+                };
+                let preempt_committed = if priority_preemption {
+                    stream.committed.clone()
+                } else {
+                    Vec::new()
+                };
+                let pixel_error = stream.settings.pixel_error;
                 let checked_epoch = std::sync::atomic::AtomicU64::new(epoch);
                 let obsolete = std::sync::atomic::AtomicBool::new(false);
                 let cancel = || {
@@ -3065,6 +3275,16 @@ impl Worker {
                                     *height,
                                     volume_owner,
                                 )
+                                || (priority_preemption
+                                    && obsolete_refinement_demand(
+                                        &preempt_refinements,
+                                        &preempt_committed,
+                                        camera,
+                                        s.motion.predicted.as_ref(),
+                                        *width,
+                                        *height,
+                                        pixel_error,
+                                    ))
                             {
                                 obsolete.store(true, Ordering::Relaxed);
                                 return true;

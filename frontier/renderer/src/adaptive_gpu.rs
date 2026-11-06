@@ -78,6 +78,40 @@ struct Allocation {
     page: usize,
     range: Range<u64>,
 }
+/// Reserve padding as part of the allocation so release and pool accounting
+/// include it. All vertex allocations share this alignment in the experiment.
+fn vertex_reservation_bytes(bytes: u64, enabled: bool) -> Option<u64> {
+    if enabled {
+        bytes.checked_add(63).map(|n| n & !63)
+    } else {
+        Some(bytes)
+    }
+}
+/// An entire-page instance binding addresses the same records as an allocation
+/// slice. Generic per-vertex meshes deliberately retain their slice binding.
+fn packed_first_instance(
+    enabled: bool,
+    native: bool,
+    proxy: bool,
+    allocation: &Range<u64>,
+    page_bytes: u64,
+    count: u32,
+) -> Option<u32> {
+    if !enabled || native == proxy {
+        return None;
+    }
+    let stride = if native { 32 } else { 64 };
+    if allocation.start % stride != 0
+        || allocation.end > page_bytes
+        || allocation.end < allocation.start
+        || u64::from(count) * stride > allocation.end - allocation.start
+    {
+        return None;
+    }
+    let first = u32::try_from(allocation.start / stride).ok()?;
+    first.checked_add(count)?;
+    Some(first)
+}
 struct ProfileAllocation {
     indices: Option<Allocation>,
     table: Allocation,
@@ -118,6 +152,9 @@ pub struct DrawStats {
     pub bundle_builds: u64,
     pub bundle_reuses: u64,
     pub bundle_build_ms: f64,
+    pub vertex_pages_coalescing_enabled: bool,
+    pub vertex_page_binds_avoided: u64,
+    pub vertex_page_binds_eligible: u64,
     pub resident_clusters: usize,
     pub cluster_capacity: usize,
     pub available_cluster_slots: usize,
@@ -170,6 +207,7 @@ macro_rules! encode_cluster_draws {
     ($renderer:expr, $pass:expr) => {{
         let renderer = $renderer;
         let pass = $pass;
+        let mut bound_vertex_page = None;
         for (draw_index, item) in renderer.visible.iter().enumerate() {
             let c = &renderer.clusters[&item.key];
             if c.native_quads {
@@ -196,12 +234,26 @@ macro_rules! encode_cluster_draws {
                     .map_or(&renderer.bind, |p| &renderer.profile_binds[p.table.page]),
                 &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
             );
-            pass.set_vertex_buffer(
-                0,
-                renderer.vertices[c.vertices.page]
-                    .buffer
-                    .slice(c.vertices.range.clone()),
+            let page = &renderer.vertices[c.vertices.page];
+            let packed_first = packed_first_instance(
+                renderer.coalesce_vertex_pages,
+                c.native_quads,
+                c.proxy_triangles,
+                &c.vertices.range,
+                page.size,
+                c.count,
             );
+            let first_instance = if let Some(first) = packed_first {
+                if bound_vertex_page != Some(c.vertices.page) {
+                    pass.set_vertex_buffer(0, page.buffer.slice(..));
+                    bound_vertex_page = Some(c.vertices.page);
+                }
+                first
+            } else {
+                pass.set_vertex_buffer(0, page.buffer.slice(c.vertices.range.clone()));
+                bound_vertex_page = None;
+                0
+            };
             if c.native_quads {
                 pass.set_index_buffer(renderer.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
                 if let Some(mask) = item.bin_mask {
@@ -210,15 +262,16 @@ macro_rules! encode_cluster_draws {
                             pass.draw_indexed(
                                 0..6,
                                 0,
-                                bin.first_quad..bin.first_quad + bin.quad_count,
+                                first_instance + bin.first_quad
+                                    ..first_instance + bin.first_quad + bin.quad_count,
                             );
                         }
                     }
                 } else {
-                    pass.draw_indexed(0..6, 0, 0..c.count);
+                    pass.draw_indexed(0..6, 0, first_instance..first_instance + c.count);
                 }
             } else if c.proxy_triangles {
-                pass.draw(0..3, 0..c.count);
+                pass.draw(0..3, first_instance..first_instance + c.count);
             } else {
                 let indices = c.indices.as_ref().unwrap();
                 pass.set_index_buffer(
@@ -264,6 +317,7 @@ pub struct AdaptiveGpu {
     prepared_view_misses: u64,
     prepared_view_enabled: bool,
     bundles_enabled: bool,
+    coalesce_vertex_pages: bool,
     format: wgpu::TextureFormat,
     sample_count: u32,
     bundle: Option<wgpu::RenderBundle>,
@@ -448,6 +502,8 @@ impl AdaptiveGpu {
             prepared_view_enabled: std::env::var_os("FRONTIER_PREPARED_VIEW_CACHE")
                 .is_none_or(|v| v != "0"),
             bundles_enabled: std::env::var_os("FRONTIER_RENDER_BUNDLES").is_none_or(|v| v != "0"),
+            coalesce_vertex_pages: std::env::var_os("FRONTIER_COALESCE_VERTEX_PAGES")
+                .is_none_or(|v| v != "0"),
             format,
             sample_count,
             bundle: None,
@@ -535,6 +591,8 @@ impl AdaptiveGpu {
         bytes: u64,
         kind: u8,
     ) -> Result<Allocation, String> {
+        let bytes = vertex_reservation_bytes(bytes, kind == 0 && self.coalesce_vertex_pages)
+            .ok_or(POOL_CAPACITY_ERROR)?;
         let total = self.allocated_bytes();
         let pages = match kind {
             0 => &mut self.vertices,
@@ -783,6 +841,7 @@ impl AdaptiveGpu {
             ..Default::default()
         };
         let forward = camera.direction().as_dvec3();
+        let mut bound_vertex_page = None;
         // Rebuild from CURRENT pose and published resident geometry every frame.
         // Pending CPU visibility and old-camera hidden keys never suppress draws.
         let mut occlusion = OcclusionSet::new(
@@ -945,6 +1004,24 @@ impl AdaptiveGpu {
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
             self.camera_upload[offset..offset + 144].copy_from_slice(&bytes);
             self.visible.push(DrawItem { key, bin_mask });
+            if packed_first_instance(
+                self.coalesce_vertex_pages,
+                c.native_quads,
+                c.proxy_triangles,
+                &c.vertices.range,
+                self.vertices[c.vertices.page].size,
+                c.count,
+            )
+            .is_some()
+            {
+                stats.vertex_page_binds_eligible += 1;
+                if bound_vertex_page == Some(c.vertices.page) {
+                    stats.vertex_page_binds_avoided += 1;
+                }
+                bound_vertex_page = Some(c.vertices.page);
+            } else {
+                bound_vertex_page = None;
+            }
             stats.visible_clusters += 1;
             stats.draw_calls += bin_mask.map_or(1, |m| m.count_ones() as u64);
             if c.native_quads {
@@ -978,6 +1055,7 @@ impl AdaptiveGpu {
     }
     fn update_command_stats(&self, stats: &mut DrawStats) {
         stats.bundle_enabled = self.bundles_enabled;
+        stats.vertex_pages_coalescing_enabled = self.coalesce_vertex_pages;
         stats.bundle_active = self.bundle.is_some();
         stats.bundle_builds = self.bundle_builds;
         stats.bundle_reuses = self.bundle_reuses;
@@ -1300,6 +1378,101 @@ fn profile_bind(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn experimental_vertex_padding_preserves_default_and_releases_full_reservations() {
+        use super::*;
+        let payloads = [108, 7 * 32, 3 * 64, 36, 32];
+        let mut free = vec![0..4096];
+        let mut ranges = vec![];
+        let mut reserved = 0;
+        for bytes in payloads {
+            assert_eq!(vertex_reservation_bytes(bytes, false), Some(bytes));
+            let padded = vertex_reservation_bytes(bytes, true).unwrap();
+            assert!(padded >= bytes && padded - bytes <= 63);
+            let range = allocate_range(&mut free, padded).unwrap();
+            assert_eq!(range.start % 64, 0);
+            assert_eq!(range.end - range.start, padded);
+            reserved += padded;
+            ranges.push(range);
+        }
+        assert_eq!(
+            free.iter().map(|r| r.end - r.start).sum::<u64>() + reserved,
+            4096
+        );
+        for range in ranges.into_iter().rev() {
+            release_range(&mut free, range);
+        }
+        assert_eq!(free, vec![0..4096]);
+        assert!(vertex_reservation_bytes(u64::MAX, true).is_none());
+        assert_eq!(vertex_reservation_bytes(PAGE_BYTES, true), Some(PAGE_BYTES));
+        assert!(63 * (MAX_CLUSTERS as u64) < 1024 * 1024);
+    }
+
+    #[test]
+    fn packed_page_instance_addresses_match_slices_and_native_bin_ranges() {
+        use super::*;
+        for (native, proxy, stride, allocation, count) in [
+            (true, false, 32u64, 320..576, 7),
+            (false, true, 64u64, 128..320, 3),
+        ] {
+            let base =
+                packed_first_instance(true, native, proxy, &allocation, 4096, count).unwrap();
+            // Fetch every byte of every record, not just the first vertex.
+            for instance in 0..count {
+                for byte in 0..stride {
+                    assert_eq!(
+                        u64::from(base + instance) * stride + byte,
+                        allocation.start + u64::from(instance) * stride + byte,
+                    );
+                }
+            }
+            if native {
+                for bin in [0..2, 2..5, 5..7] {
+                    let old: Vec<_> = bin
+                        .clone()
+                        .map(|i| allocation.start + u64::from(i) * stride)
+                        .collect();
+                    let new: Vec<_> = (base + bin.start..base + bin.end)
+                        .map(|i| u64::from(i) * stride)
+                        .collect();
+                    assert_eq!(old, new);
+                }
+            }
+            assert!(
+                packed_first_instance(false, native, proxy, &allocation, 4096, count).is_none()
+            );
+        }
+        // Per-vertex generic geometry keeps its local index/base-vertex meaning.
+        assert!(packed_first_instance(true, false, false, &(128..256), 4096, 3).is_none());
+        assert!(packed_first_instance(true, true, true, &(128..256), 4096, 3).is_none());
+    }
+
+    #[test]
+    fn packed_page_addressing_falls_back_on_misalignment_bounds_or_integer_overflow() {
+        use super::*;
+        for (range, page, count) in [
+            (4..68, 4096, 2),   // native record alignment
+            (64..96, 4096, 2),  // reservation shorter than payload
+            (64..128, 127, 2),  // allocation leaves its page
+            (128..64, 4096, 1), // malformed reservation
+            (
+                (u64::from(u32::MAX) * 32)..(u64::from(u32::MAX) * 32 + 32),
+                u64::MAX,
+                1,
+            ),
+        ] {
+            assert!(packed_first_instance(true, true, false, &range, page, count).is_none());
+        }
+        assert!(packed_first_instance(true, false, true, &(32..160), 4096, 2).is_none());
+        assert_eq!(
+            packed_first_instance(true, true, false, &(64..128), 128, 2),
+            Some(2)
+        );
+        assert_eq!(
+            packed_first_instance(true, false, true, &(64..192), 192, 2),
+            Some(1)
+        );
+    }
     #[test]
     fn only_explicit_capacity_refusals_allow_coherent_cover_fallback() {
         assert!(super::resource_capacity_error(

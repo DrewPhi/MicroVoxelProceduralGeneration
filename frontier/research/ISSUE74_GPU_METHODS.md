@@ -182,5 +182,6 @@ order, at least three warm repeats, and separately report cold runs, GPU/driver,
 CPU/GPU p50/p95/p99, resident/transient memory and edits/invalidations. Proposed
 10% screens above must exceed observed run variation; otherwise record
 inconclusive. Reject missing topology/material, stale publication or changed
-canonical occupancy regardless of timing. Benchmarks and improvements remain
-unproven until executed; no experiment in this document has been run.
+canonical occupancy regardless of timing. These were research proposals at initial publication. Follow the measured
+[issue74 evidence](../reference/issue74/README.md) for executed experiments and
+keep/reject decisions; untested proposals remain unproven.

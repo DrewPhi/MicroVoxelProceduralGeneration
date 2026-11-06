@@ -503,8 +503,8 @@ impl AdaptiveView {
         json.push_str(&format!(",\"total_build_ms\":{},\"max_build_ms\":{},\"surface_source_revision\":{},\"displayed_world_revision\":{},\"base_source_reused_outside_edited_owner\":{}}}",self.total_build_ms,self.max_build_ms,self.surface_source_revision,self.displayed_world_revision,self.topology_supported));
         json.pop();
         json.push_str(&format!(
-            ",\"generated_columns\":{},\"source_cache_hits\":{},\"source_cache_bytes\":{}}}",
-            self.generated_columns, self.source_cache_hits, self.source_cache_bytes
+            ",\"generated_columns\":{},\"source_cache_hits\":{},\"source_cache_bytes\":{},\"source_budget_bytes\":{}}}",
+            self.generated_columns, self.source_cache_hits, self.source_cache_bytes, self.latest_cache.source_budget_bytes
         ));
         json.pop();
         json.push_str(&format!(",\"cpu_cache_budget_bytes\":{},\"pending_selection_arc_bytes\":{},\"cpu_selection_bytes_overlap_cache\":true,\"gpu_pool_budget_bytes\":536870912}}",self.cpu_cache_budget_bytes,self.pending_arc_bytes));
@@ -559,6 +559,8 @@ impl AdaptiveView {
         json.push_str(&format!(",\"current_gpu_offenders\":[{}]}}", offenders));
         json.pop();
         json.push_str(&format!(",\"native_bins_enabled\":{},\"native_bin_tests\":{},\"native_bin_skipped_quads\":{},\"draw_calls\":{}}}",self.native_bins,self.stats.native_bin_tests,self.stats.native_bin_skipped_quads,self.stats.draw_calls));
+        json.pop();
+        json.push_str(&format!(",\"vertex_pages_coalescing_enabled\":{},\"vertex_page_binds_eligible\":{},\"vertex_page_binds_avoided\":{}}}", self.stats.vertex_pages_coalescing_enabled, self.stats.vertex_page_binds_eligible, self.stats.vertex_page_binds_avoided));
         json.pop();
         json.push_str(&format!(",\"source_cache_peak_bytes\":{},\"source_cache_pages\":{},\"source_cache_columns\":{},\"source_cache_promotions\":{},\"source_cache_page_evictions\":{},\"affine_quad_bounds\":{},\"affine_noise_cells\":{},\"affine_full_range_fallbacks\":{},\"affine_unavailable_quads\":{},\"affine_ms\":{}}}",self.latest_cache.source_cache_peak_bytes,self.latest_cache.source_cache_pages,self.latest_cache.source_cache_columns,self.latest_cache.source_cache_promotions,self.latest_cache.source_cache_page_evictions,self.latest_cache.affine_quad_bounds,self.latest_cache.affine_noise_cells,self.latest_cache.affine_full_range_fallbacks,self.latest_cache.affine_unavailable_quads,self.latest_cache.affine_ms));
         json.pop();
@@ -635,7 +637,7 @@ impl AdaptiveView {
         ));
         let planning = self.planning;
         json.pop();
-        json.push_str(&format!(",\"planning\":{{\"calls\":{},\"full_calls\":{},\"retained_calls\":{},\"total_ms\":{},\"max_ms\":{},\"prepared_batches_without_plan\":{}}}}}", planning.calls, planning.full_calls, planning.retained_calls, planning.total_ms, planning.max_ms, planning.prepared_batches_without_plan));
+        json.push_str(&format!(",\"planning\":{{\"calls\":{},\"full_calls\":{},\"retained_calls\":{},\"total_ms\":{},\"max_ms\":{},\"prepared_batches_without_plan\":{},\"obsolete_transaction_preemptions\":{},\"obsolete_transaction_pending_jobs\":{}}}}}", planning.calls, planning.full_calls, planning.retained_calls, planning.total_ms, planning.max_ms, planning.prepared_batches_without_plan, planning.obsolete_transaction_preemptions, planning.obsolete_transaction_pending_jobs));
         let memory = self.build_memory;
         json.pop();
         json.push_str(&format!(",\"build_memory_model\":{{\"budget_bytes\":{},\"reserved_bytes\":{},\"peak_reserved_bytes\":{},\"evicted_arc_bytes\":{},\"refused_jobs\":{},\"last_batch_jobs\":{}}}}}", memory.budget_bytes, memory.reserved_bytes, memory.peak_reserved_bytes, memory.evicted_arc_bytes, memory.refused_jobs, memory.last_batch_jobs));

@@ -1,5 +1,8 @@
 # Issue 74 — research and first measured checkpoint
 
+Follow-up: [measured limits and experiment decisions](FOLLOWUP.md), including cache,
+motion, distance, backend and Regional oracle checks. The epic remains open.
+
 2026-11-06. This checkpoint does **not** complete #74. See the
 [ordered plan](../../ISSUE74_PLAN.md), [GPU research](../../research/ISSUE74_GPU_METHODS.md)
 and [voxel research](../../research/ISSUE74_VOXEL_METHODS.md).

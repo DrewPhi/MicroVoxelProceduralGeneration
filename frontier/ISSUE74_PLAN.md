@@ -15,6 +15,14 @@ whole-view speedup; M1's broader latency gate remains open. M0 instrumentation
 is improved, but exclusive low-overhead source profiling and full route/distance
 coverage are still incomplete.
 
+The [follow-up investigation](reference/issue74/FOLLOWUP.md) now reproduces the
+4 km cache-capacity refusal and strict motion-quality failures. Minor cache and
+cancellation candidates do not establish a sufficient improvement. Stop the
+20 km sweep at this refusal; do not mark M3/M4 or the epic complete.
+The [vertex-page experiment](reference/issue74/submission-experiment.md) passes
+the bounded M2 keep screen and is enabled by default with an explicit off switch.
+Its measured 1 km p95 remains above the overall 60-FPS target.
+
 ## Reference first, then real time
 
 For every feasible visual feature, produce a non-real-time exact/reference image
@@ -92,9 +100,12 @@ timestamps from whole-frame cost.
 | 5 | Long-range bound looseness/residency creates disproportionate work | Owner/error/memory counts by distance and silhouette importance | False geometry/feature loss from weakened bounds |
 | 6 | Hierarchical brick traversal specializes better for volume-heavy scenes | Small exact meshing versus traversal/skip-cache A/B | New update/streaming machinery exceeds any render saving |
 
-Exact native-painting reuse and affine-allocation probes are in progress. They
-are candidates, not retained wins. Keep their independent changes and controls
-separable so a combined result does not obscure a neutral or regressing component.
+Exact native-painting reuse and affine-allocation probes completed in the first
+checkpoint: canonical parity passed, but neither established a whole-view speedup.
+The follow-up [cache experiments](reference/issue74/cache-experiments.md) and
+[bounded backend comparison](reference/issue74/volume-backend.md) likewise do not
+justify default promotion. Keep experiment controls separable; isolated kernels
+and single faster runs do not establish an end-to-end benefit.
 
 ## Ordered milestones
 

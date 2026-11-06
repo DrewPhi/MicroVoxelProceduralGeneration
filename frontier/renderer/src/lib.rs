@@ -49,11 +49,55 @@ const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// CPU command encoding only; GPU execution is measured separately.
-struct EncodeTimer<'a>(&'a std::cell::Cell<f64>, Instant);
+struct EncodeTimer<'a>(&'a std::cell::Cell<f64>, &'a std::cell::Cell<f64>, Instant);
 impl Drop for EncodeTimer<'_> {
     fn drop(&mut self) {
-        self.0
-            .set(self.0.get() + self.1.elapsed().as_secs_f64() * 1000.);
+        let ms = self.2.elapsed().as_secs_f64() * 1000.;
+        self.0.set(self.0.get() + ms);
+        self.1.set(ms);
+    }
+}
+
+/// Pair the preceding presented frame's CPU draw work with its frame interval.
+/// Captures can invoke Gpu::draw independently, so retain a value in the viewer
+/// rather than reading the GPU's last duration when the next interval arrives.
+struct DrawEncodeFrames {
+    pending_ms: Option<f64>,
+    encode: frontier_runtime::FrameStats,
+    frame: frontier_runtime::FrameStats,
+}
+impl DrawEncodeFrames {
+    fn new() -> Self {
+        Self {
+            pending_ms: None,
+            encode: frontier_runtime::FrameStats::new(10000),
+            frame: frontier_runtime::FrameStats::new(10000),
+        }
+    }
+    fn record_interval(&mut self, measured: bool, frame_ms: f64) {
+        if let Some(encode_ms) = self.pending_ms.take() {
+            if measured
+                && frame_ms.is_finite()
+                && frame_ms >= 0.
+                && encode_ms.is_finite()
+                && encode_ms >= 0.
+            {
+                self.encode.record(encode_ms);
+                self.frame.record(frame_ms);
+            }
+        }
+    }
+    fn json(&self) -> String {
+        let encode = self.encode.summary();
+        let frame = self.frame.summary();
+        let number = |x: Option<f64>| x.map_or("null".into(), |v| v.to_string());
+        format!(
+            "{{\"samples\":{},\"accepted_frames\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"includes_warmup_capture\":false,\"scope\":\"Gpu::draw wall time: queue writes, optional summary dispatch encoding, render pass begin/end, bundle replay or direct draw encoding; excludes adaptive.prepare, command finish/submit, present, atmosphere and UI\",\"sample_policy\":\"preceding presented draw paired with the next accepted frame interval after route start and warmup; bounded rolling 10000 samples\",\"matched_frame_interval\":{{\"samples\":{},\"accepted_frames\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{}}},\"gpu_samples_paired\":false,\"gpu_scope\":\"gpu_render_pass is a separately counted asynchronous terrain-pass subset; not whole-frame GPU time\"}}",
+            encode.sample_count, encode.accepted_frames,
+            number(encode.p50_ms), number(encode.p95_ms), number(encode.p99_ms),
+            frame.sample_count, frame.accepted_frames,
+            number(frame.p50_ms), number(frame.p95_ms), number(frame.p99_ms),
+        )
     }
 }
 
@@ -114,6 +158,7 @@ struct Gpu {
     summary_contention: Option<gpu_summary_probe::GpuSummaryProbe>,
     summary_contention_startup_ms: f64,
     draw_encode_cpu_ms: std::cell::Cell<f64>,
+    last_draw_encode_cpu_ms: std::cell::Cell<f64>,
     draw_encode_calls: std::cell::Cell<u64>,
     summary_contention_dispatches: std::cell::Cell<u64>,
     volume_owner: bool,
@@ -328,6 +373,7 @@ impl Gpu {
             summary_contention: None,
             summary_contention_startup_ms: 0.,
             draw_encode_cpu_ms: std::cell::Cell::new(0.),
+            last_draw_encode_cpu_ms: std::cell::Cell::new(0.),
             draw_encode_calls: std::cell::Cell::new(0),
             summary_contention_dispatches: std::cell::Cell::new(0),
             volume_owner: false,
@@ -499,7 +545,11 @@ impl Gpu {
         height: u32,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
-        let _encode_timer = EncodeTimer(&self.draw_encode_cpu_ms, Instant::now());
+        let _encode_timer = EncodeTimer(
+            &self.draw_encode_cpu_ms,
+            &self.last_draw_encode_cpu_ms,
+            Instant::now(),
+        );
         self.draw_encode_calls.set(self.draw_encode_calls.get() + 1);
         self.queue.write_buffer(
             &self.uniform,
@@ -1082,6 +1132,7 @@ struct Viewer {
     seconds: Option<f64>,
     total_frames: u64,
     stats: frontier_runtime::FrameStats,
+    draw_encode_frames: DrawEncodeFrames,
     world: World,
     pending_edit: Option<PendingEdit>,
     terrain_data: Option<terrain::TerrainUpdate>,
@@ -1417,6 +1468,8 @@ impl Viewer {
         let interval = now.duration_since(self.last_frame);
         let measure_interval = self.adaptive_route_started
             && self.total_frames > self.warmup + self.route_frame_origin;
+        self.draw_encode_frames
+            .record_interval(measure_interval, interval.as_secs_f64() * 1000.);
         if measure_interval {
             self.stats.record(interval.as_secs_f64() * 1000.);
         }
@@ -1518,6 +1571,7 @@ impl Viewer {
             self.route_started = Instant::now();
             self.route_frame_origin = self.total_frames;
             self.stats = frontier_runtime::FrameStats::new(10000);
+            self.draw_encode_frames = DrawEncodeFrames::new();
             if let Some(probe) = &mut self.gpu_probe {
                 probe.stats = frontier_runtime::FrameStats::new(10000);
             }
@@ -1659,6 +1713,7 @@ impl Viewer {
             probe.submitted(slot);
         }
         frame.present();
+        self.draw_encode_frames.pending_ms = Some(gpu.last_draw_encode_cpu_ms.get());
         if let Some(ui) = &mut self.settings_ui {
             ui.finish_frame();
         }
@@ -2536,6 +2591,7 @@ pub fn run() -> Result<()> {
         seconds,
         total_frames: 0,
         stats: frontier_runtime::FrameStats::new(10000),
+        draw_encode_frames: DrawEncodeFrames::new(),
         world,
         pending_edit: None,
     };
@@ -2648,8 +2704,9 @@ pub fn run() -> Result<()> {
         // Terrain pass timestamps exclude atmosphere/UI; frame intervals include them.
         json.pop();
         json.push_str(&format!(
-            ",\"experiments\":{{\"native_profile_reuse\":{}}}}}",
-            adaptive_geometry::native_profile_reuse_enabled()
+            ",\"experiments\":{{\"native_profile_reuse\":{},\"native_summary_reuse\":{}}}}}",
+            adaptive_geometry::native_profile_reuse_enabled(),
+            adaptive_geometry::native_summary_reuse_enabled()
         ));
         let visual = &viewer.visual_settings;
         json.pop();
@@ -2681,6 +2738,11 @@ pub fn run() -> Result<()> {
             json.pop();
             json.push_str(&format!(",\"draw_encode_cpu\":{{\"total_ms\":{},\"calls\":{},\"includes_warmup_capture\":true}}}}", gpu.draw_encode_cpu_ms.get(), gpu.draw_encode_calls.get()));
         }
+        json.pop();
+        json.push_str(&format!(
+            ",\"draw_encode_cpu_measured\":{}}}",
+            viewer.draw_encode_frames.json()
+        ));
         json.pop();
         let gpu_stats = viewer.gpu_probe.as_ref().map(|p| p.stats.summary());
         let number = |x: Option<f64>| x.map_or("null".into(), |v| v.to_string());
@@ -2716,6 +2778,56 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn measured_encode_excludes_warmup_missing_draws_and_reset_history() {
+        let mut stats = super::DrawEncodeFrames::new();
+        stats.pending_ms = Some(99.);
+        stats.record_interval(false, 100.); // settling or warmup
+        stats.record_interval(true, 100.); // no presented draw to pair
+        assert_eq!(stats.encode.summary().sample_count, 0);
+        stats.pending_ms = Some(0.5);
+        stats.record_interval(true, 10.);
+        assert_eq!(stats.encode.summary().p50_ms, Some(0.5));
+        assert_eq!(stats.frame.summary().p50_ms, Some(10.));
+        stats.pending_ms = Some(3.);
+        stats = super::DrawEncodeFrames::new(); // route publication reset
+        stats.record_interval(true, 100.);
+        assert_eq!(stats.encode.summary().sample_count, 0);
+        assert_eq!(stats.frame.summary().sample_count, 0);
+    }
+
+    #[test]
+    fn measured_encode_keeps_presented_value_when_capture_overwrites_gpu_timer() {
+        let last_gpu_draw = std::cell::Cell::new(0.5);
+        let mut stats = super::DrawEncodeFrames::new();
+        stats.pending_ms = Some(last_gpu_draw.get());
+        last_gpu_draw.set(100.); // an independent capture calls Gpu::draw
+        stats.record_interval(true, 10.);
+        assert_eq!(stats.encode.summary().p95_ms, Some(0.5));
+        assert_eq!(stats.frame.summary().p95_ms, Some(10.));
+        assert!(stats.json().contains("\"gpu_samples_paired\":false"));
+        assert!(stats.json().contains("\"includes_warmup_capture\":false"));
+    }
+
+    #[test]
+    fn measured_encode_invalid_intervals_do_not_desynchronize_paired_samples() {
+        let mut stats = super::DrawEncodeFrames::new();
+        for (encode, frame) in [(1., f64::NAN), (f64::INFINITY, 2.), (-1., 2.)] {
+            stats.pending_ms = Some(encode);
+            stats.record_interval(true, frame);
+        }
+        for i in 0..10001 {
+            stats.pending_ms = Some(i as f64 / 1000.);
+            stats.record_interval(true, i as f64);
+        }
+        let encode = stats.encode.summary();
+        let frame = stats.frame.summary();
+        assert_eq!(encode.sample_count, 10000);
+        assert_eq!(frame.sample_count, encode.sample_count);
+        assert_eq!(encode.accepted_frames, 10001);
+        assert_eq!(frame.accepted_frames, encode.accepted_frames);
+        assert_eq!(encode.p95_ms, frame.p95_ms.map(|v| v / 1000.));
+    }
     #[test]
     fn scripted_cube_snapshot_restores_original_materials_including_existing_edits() {
         use super::*;

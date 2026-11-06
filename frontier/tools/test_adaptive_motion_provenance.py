@@ -19,12 +19,18 @@ class ProvenanceTests(unittest.TestCase):
                                    subprocess.CompletedProcess([], 0, ' M source.rs\n', '')]
                 result = capture_provenance(binary, root=directory, environ={
                     'FRONTIER_NATIVE_PROFILE_REUSE': '1', 'SECRET_TOKEN': 'secret',
+                    'FRONTIER_NATIVE_SUMMARY_REUSE': '0',
+                    'FRONTIER_SOURCE_CACHE_MIB': '64',
+                    'FRONTIER_OBSOLETE_TRANSACTION_PREEMPT': '1',
                     'FRONTIER_UNKNOWN_SECRET': 'secret'})
             self.assertEqual(result['binary_sha256'], hashlib.sha256(binary.read_bytes()).hexdigest())
             self.assertEqual(result['observed_checkout_commit'], 'abc123')
             self.assertTrue(result['observed_checkout_dirty'])
             self.assertIn('not a guaranteed binary build revision', result['checkout_identity_note'])
             self.assertEqual(result['experiments']['FRONTIER_NATIVE_PROFILE_REUSE'], '1')
+            self.assertEqual(result['experiments']['FRONTIER_NATIVE_SUMMARY_REUSE'], '0')
+            self.assertEqual(result['experiments']['FRONTIER_SOURCE_CACHE_MIB'], '64')
+            self.assertEqual(result['experiments']['FRONTIER_OBSOLETE_TRANSACTION_PREEMPT'], '1')
             self.assertNotIn('secret', str(result))
             self.assertTrue(result['timestamp_utc'].endswith('+00:00'))
 
@@ -35,6 +41,9 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIsNone(result['observed_checkout_commit'])
         self.assertIsNone(result['observed_checkout_dirty'])
         self.assertIsNone(result['experiments']['FRONTIER_NATIVE_PROFILE_REUSE'])
+        self.assertIsNone(result['experiments']['FRONTIER_NATIVE_SUMMARY_REUSE'])
+        self.assertIsNone(result['experiments']['FRONTIER_SOURCE_CACHE_MIB'])
+        self.assertIsNone(result['experiments']['FRONTIER_OBSOLETE_TRANSACTION_PREEMPT'])
 
 
 if __name__ == '__main__':

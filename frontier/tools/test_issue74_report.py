@@ -40,6 +40,7 @@ class ReportTests(unittest.TestCase):
             'adaptive': {'pixel_error': 5, 'refinement_reserve': .8,
                          'preparation_workers': 4, 'refinements_per_transaction': 8,
                          'cpu_cache_budget_bytes': 512, 'gpu_pool_budget_bytes': 512,
+                         'source_budget_bytes': 32,
                          'build_memory_model': {'budget_bytes': 512},
                          'coverage_ready': True, 'quality_ready': True,
                          'upload_budget_bytes_per_frame': 1000,
@@ -149,13 +150,64 @@ class ReportTests(unittest.TestCase):
         for path, data, value in ((a, da, '0'), (b, db, '1')):
             data['capture_provenance'] = {'binary_sha256': 'actual-' + value,
                 'observed_checkout_commit': 'observed-only',
-                'experiments': {'FRONTIER_NATIVE_PROFILE_REUSE': value}}
+                'experiments': {'FRONTIER_NATIVE_PROFILE_REUSE': value,
+                                'FRONTIER_NATIVE_SUMMARY_REUSE': value,
+                                'FRONTIER_SOURCE_CACHE_MIB': value,
+                                'FRONTIER_OBSOLETE_TRANSACTION_PREEMPT': value}}
             self.write(path, data)
         result = aggregate([self.root])
         self.assertEqual(len(result['groups']), 1)
         self.assertEqual(result['runs'][0]['identity']['binary_sha256'], 'actual-0')
         self.assertIsNone(result['runs'][0]['identity']['git_commit'])
         self.assertEqual(result['runs'][1]['experiments']['FRONTIER_NATIVE_PROFILE_REUSE'], '1')
+        self.assertEqual(result['runs'][1]['experiments']['FRONTIER_NATIVE_SUMMARY_REUSE'], '1')
+        self.assertEqual(result['runs'][1]['experiments']['FRONTIER_SOURCE_CACHE_MIB'], '1')
+        self.assertEqual(result['runs'][0]['experiments']['FRONTIER_OBSOLETE_TRANSACTION_PREEMPT'], '0')
+
+    def test_actual_source_budget_splits_presets_independently_of_experiment_env(self):
+        a, da = self.run_fixture('a')
+        b, db = self.run_fixture('b')
+        self.sweep([a, b])
+        for path, data, budget in ((a, da, 32), (b, db, 64)):
+            data['adaptive']['source_budget_bytes'] = budget
+            # Equal request strings cannot establish equal actual partitions.
+            data['capture_provenance']['experiments']['FRONTIER_SOURCE_CACHE_MIB'] = '64'
+            self.write(path, data)
+        result = aggregate([self.root])
+        self.assertEqual(len(result['groups']), 2)
+        self.assertTrue(all(group['matched_preset'] for group in result['groups']))
+        self.assertEqual([r['preset']['source_budget_bytes'] for r in result['runs']], [32, 64])
+        self.assertEqual(result['runs'][1]['cache_memory']['source_budget_bytes'], 64)
+
+    def test_missing_actual_source_budget_stays_unknown_despite_env_request(self):
+        a, data = self.run_fixture()
+        data['adaptive'].pop('source_budget_bytes')
+        data['capture_provenance']['experiments']['FRONTIER_SOURCE_CACHE_MIB'] = '64'
+        self.write(a, data)
+        result = aggregate([a])
+        self.assertFalse(result['groups'][0]['matched_preset'])
+        self.assertIn('source_budget_bytes', result['runs'][0]['missing_preset_fields'])
+        self.assertIsNone(result['runs'][0]['preset']['source_budget_bytes'])
+
+    def test_matched_encode_and_pending_preemption_telemetry_preserved_verbatim(self):
+        a, data = self.run_fixture()
+        measured = {
+            'samples': 10, 'p50_ms': .2, 'p95_ms': .4, 'p99_ms': .7,
+            'includes_warmup_capture': False, 'gpu_samples_paired': False,
+            'scope': 'draw encoding only; excludes adaptive.prepare',
+            'matched_frame_interval': {'samples': 10, 'p95_ms': 3},
+        }
+        data['draw_encode_cpu_measured'] = measured
+        data['draw_encode_cpu'] = {'total_ms': 99, 'calls': 42, 'includes_warmup_capture': True}
+        planning = {'calls': 4, 'obsolete_transaction_preemptions': 2,
+                    'obsolete_transaction_pending_jobs': 7}
+        data['adaptive']['planning'] = planning
+        self.write(a, data)
+        run = aggregate([a])['runs'][0]
+        self.assertEqual(run['cpu']['draw_encode_measured'], measured)
+        self.assertEqual(run['cpu']['draw_encode'], data['draw_encode_cpu'])
+        self.assertEqual(run['cpu']['planning'], planning)
+        self.assertEqual(run['raw_relevant']['draw_encode_cpu_measured'], measured)
 
     def test_command_proves_disabled_disk_cache_but_not_enabled_initial_state(self):
         a, _ = self.run_fixture('a')

@@ -131,6 +131,8 @@ def collect_run(path, data=None):
         'workers': adaptive.get('preparation_workers'),
         'refinements': adaptive.get('refinements_per_transaction'),
         'cpu_cache_budget_bytes': adaptive.get('cpu_cache_budget_bytes'),
+        # Compare the actual source-cache partition, not the requested env value.
+        'source_budget_bytes': adaptive.get('source_budget_bytes'),
         'gpu_pool_budget_bytes': adaptive.get('gpu_pool_budget_bytes'),
         'build_budget_bytes': adaptive.get('build_memory_model', {}).get('budget_bytes'),
         'upload_budget_bytes_per_frame': adaptive.get('upload_budget_bytes_per_frame'),
@@ -147,7 +149,8 @@ def collect_run(path, data=None):
     required = ['scene', 'seed', 'source', 'terrain_recipe', 'camera_start', 'fov_y_degrees',
                 'near', 'far', 'output', 'msaa_samples', 'render_scale', 'atmosphere',
                 'postprocessed', 'visual_settings', 'voxel_filter', 'pixel_error', 'refinement_reserve',
-                'workers', 'refinements', 'cpu_cache_budget_bytes', 'gpu_pool_budget_bytes',
+                'workers', 'refinements', 'cpu_cache_budget_bytes', 'source_budget_bytes',
+                'gpu_pool_budget_bytes',
                 'build_budget_bytes', 'upload_budget_bytes_per_frame', 'route', 'route_clock', 'route_speed_mps', 'warmup',
                 'wait_quality', 'adapter', 'vsync', 'disk_cache_initial_state']
     missing = [key for key in required if preset[key] is None]
@@ -203,7 +206,8 @@ def collect_run(path, data=None):
                 'total_build_ms': adaptive.get('total_build_ms'),
                 'affine_ms': adaptive.get('affine_ms'), 'planning': adaptive.get('planning'),
                 'presentation': adaptive.get('presentation_cpu_ms'),
-                'draw_encode': data.get('draw_encode_cpu')},
+                'draw_encode': data.get('draw_encode_cpu'),
+                'draw_encode_measured': data.get('draw_encode_cpu_measured')},
         'cache_memory': {k: v for k, v in adaptive.items() if any(s in k for s in
                          ('bytes', 'cache', 'memory', 'upload', 'generated', 'builds'))},
         'process_memory': pick(data, ('used_memory_bytes', 'committed_memory_bytes')),

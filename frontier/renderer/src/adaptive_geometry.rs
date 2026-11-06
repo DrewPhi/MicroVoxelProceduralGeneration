@@ -832,8 +832,14 @@ fn build_surface(
         }
         let appearance_started = std::time::Instant::now();
         let appearance = native_appearance(&out.mesh);
-        let (mesh, profiles, profile_indices) =
-            native_profiles(world, key, out.mesh, &out.heights, &mut cancelled)?;
+        let (mesh, profiles, profile_indices) = native_profiles(
+            world,
+            key,
+            out.mesh,
+            &out.heights,
+            &mut cancelled,
+            &samples.pages,
+        )?;
         samples.stages.appearance_ms += appearance_started.elapsed().as_secs_f64() * 1000.;
         let mut tile = finish(key, mesh, out.heights.sampled_columns(), 0., true);
         tile.face_profiles = profiles;
@@ -1019,22 +1025,30 @@ pub(super) fn native_profile_reuse_enabled() -> bool {
     *REUSE_TOP
         .get_or_init(|| std::env::var_os("FRONTIER_NATIVE_PROFILE_REUSE").is_none_or(|v| v != "0"))
 }
+pub(super) fn native_summary_reuse_enabled() -> bool {
+    static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REUSE
+        .get_or_init(|| std::env::var_os("FRONTIER_NATIVE_SUMMARY_REUSE").is_some_and(|v| v == "1"))
+}
 fn native_profiles(
     world: &World,
     key: TileKey,
     mesh: Mesh,
     heights: &column_mesh::ColumnHeights,
     cancelled: &mut impl FnMut() -> bool,
+    pages: &SharedSourcePages,
 ) -> Result<(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>), String> {
-    native_profiles_with_top_reuse(
+    native_profiles_with_summary_reuse(
         world,
         key,
         mesh,
         heights,
         cancelled,
         native_profile_reuse_enabled(),
+        native_summary_reuse_enabled().then_some(pages),
     )
 }
+#[cfg(test)]
 fn native_profiles_with_top_reuse(
     world: &World,
     key: TileKey,
@@ -1042,6 +1056,17 @@ fn native_profiles_with_top_reuse(
     heights: &column_mesh::ColumnHeights,
     cancelled: &mut impl FnMut() -> bool,
     reuse_top: bool,
+) -> Result<(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>), String> {
+    native_profiles_with_summary_reuse(world, key, mesh, heights, cancelled, reuse_top, None)
+}
+fn native_profiles_with_summary_reuse(
+    world: &World,
+    key: TileKey,
+    mesh: Mesh,
+    heights: &column_mesh::ColumnHeights,
+    cancelled: &mut impl FnMut() -> bool,
+    reuse_top: bool,
+    pages: Option<&SharedSourcePages>,
 ) -> Result<(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>), String> {
     const BLOCK: i64 = 16;
     let end = [
@@ -1060,50 +1085,35 @@ fn native_profiles_with_top_reuse(
         }
         let mut bx = key.min[0].div_euclid(BLOCK) * BLOCK;
         while bx < end[0] {
-            let mut profile = [[0.; 4]; 5];
-            for z in bz.max(key.min[1])..(bz + BLOCK).min(end[1]) {
-                for x in bx.max(key.min[0])..(bx + BLOCK).min(end[0]) {
-                    let h = heights
-                        .height(x, z)
-                        .ok_or("missing native profile column")?;
-                    let top = if reuse_top {
-                        heights
-                            .top_material(x, z)
-                            .ok_or("missing native profile material")?
-                    } else {
-                        terrain.surface_material(
-                            (x as f64 + 0.5) * VOXEL_SIZE,
-                            (z as f64 + 0.5) * VOXEL_SIZE,
-                            h as f64 * VOXEL_SIZE,
-                        )
-                    };
-                    let add = |profile: &mut [[f32; 4]; 5], a: usize, n: i64, m: Material| {
-                        for (c, v) in m.color().into_iter().enumerate() {
-                            profile[a][c] += n as f32 * v;
-                        }
-                        profile[a][3] += n as f32;
-                    };
-                    add(&mut profile, 0, 1, top);
-                    for (a, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
-                        let mut lo = heights
-                            .height(x + dx, z + dz)
-                            .ok_or("missing native profile halo")?;
-                        for hi in [h - 12, h - 1, h] {
-                            if hi > lo {
-                                let material = if lo == h - 1 {
-                                    top
-                                } else if lo >= h - 12 {
-                                    Material::Soil
-                                } else {
-                                    Material::Stone
-                                };
-                                add(&mut profile, a, hi - lo, material);
-                                lo = hi;
-                            }
-                        }
-                    }
+            // Only a complete canonical block matches the proxy footprint.
+            // Never merge child float sums or cache clipped native boundaries.
+            let min = [bx.max(key.min[0]), bz.max(key.min[1])];
+            let max = [(bx + BLOCK).min(end[0]), (bz + BLOCK).min(end[1])];
+            let profile_key = ProfileKey {
+                min,
+                size: BLOCK,
+                stride: 1,
+            };
+            let shared = pages.filter(|_| {
+                min == [bx, bz]
+                    && max == [bx + BLOCK, bz + BLOCK]
+                    && world.revision() == 0
+                    && key.source_revision == 0
+                    && world.topology_base_cells().is_none()
+            });
+            let profile = if let Some(entry) = shared.and_then(|p| p.profile(profile_key)) {
+                entry.value
+            } else {
+                let entry = if shared.is_some() {
+                    native_profile_entry::<true>(terrain, heights, profile_key, max, reuse_top)?
+                } else {
+                    native_profile_entry::<false>(terrain, heights, profile_key, max, reuse_top)?
+                };
+                if let Some(pages) = shared {
+                    pages.store_profile(entry);
                 }
-            }
+                entry.value
+            };
             ids.insert([bx, bz], profiles.len() as u32);
             profiles.push(profile);
             bx += BLOCK;
@@ -1190,6 +1200,84 @@ fn native_profiles_with_top_reuse(
         }
     }
     Ok((out, profiles, addresses))
+}
+
+/// Accumulate in the same z/x/axis order as the exact proxy painter, including
+/// first-attaining extrema from centers and the four axial halo samples.
+fn native_profile_entry<const TRACK_EXTREMA: bool>(
+    terrain: &frontier_world::FbmTerrain,
+    heights: &column_mesh::ColumnHeights,
+    key: ProfileKey,
+    max: [i64; 2],
+    reuse_top: bool,
+) -> Result<ProfileEntry, String> {
+    let mut extreme_heights = [i64::MAX, i64::MIN];
+    let mut extrema = [key.min; 2];
+    let mut note = |point: [i64; 2], height: i64| {
+        if height < extreme_heights[0] {
+            extreme_heights[0] = height;
+            extrema[0] = point;
+        }
+        if height > extreme_heights[1] {
+            extreme_heights[1] = height;
+            extrema[1] = point;
+        }
+    };
+    let mut profile = [[0.; 4]; 5];
+    for z in key.min[1]..max[1] {
+        for x in key.min[0]..max[0] {
+            let h = heights
+                .height(x, z)
+                .ok_or("missing native profile column")?;
+            if TRACK_EXTREMA {
+                note([x, z], h);
+            }
+            let top = if reuse_top {
+                heights
+                    .top_material(x, z)
+                    .ok_or("missing native profile material")?
+            } else {
+                terrain.surface_material(
+                    (x as f64 + 0.5) * VOXEL_SIZE,
+                    (z as f64 + 0.5) * VOXEL_SIZE,
+                    h as f64 * VOXEL_SIZE,
+                )
+            };
+            let add = |profile: &mut [[f32; 4]; 5], a: usize, n: i64, m: Material| {
+                for (c, v) in m.color().into_iter().enumerate() {
+                    profile[a][c] += n as f32 * v;
+                }
+                profile[a][3] += n as f32;
+            };
+            add(&mut profile, 0, 1, top);
+            for (a, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
+                let mut lo = heights
+                    .height(x + dx, z + dz)
+                    .ok_or("missing native profile halo")?;
+                if TRACK_EXTREMA {
+                    note([x + dx, z + dz], lo);
+                }
+                for hi in [h - 12, h - 1, h] {
+                    if hi > lo {
+                        let material = if lo == h - 1 {
+                            top
+                        } else if lo >= h - 12 {
+                            Material::Soil
+                        } else {
+                            Material::Stone
+                        };
+                        add(&mut profile, a, hi - lo, material);
+                        lo = hi;
+                    }
+                }
+            }
+        }
+    }
+    Ok(ProfileEntry {
+        key,
+        value: profile,
+        extrema,
+    })
 }
 
 /// Exact immutable source payload shared with native extraction.
@@ -2171,6 +2259,8 @@ pub struct CacheStats {
     pub max_build_ms: f64,
     pub source_cache_hits: u64,
     pub generated_columns: u64,
+    /// Reserved source-cache capacity, carved from the total cache budget.
+    pub source_budget_bytes: usize,
     pub source_cache_bytes: usize,
     pub source_cache_peak_bytes: usize,
     pub source_cache_pages: usize,
@@ -2243,9 +2333,19 @@ pub struct GeometryCache {
     disk: Option<crate::derived_disk_writeback::AsyncDiskCache>,
     live_payload_bytes: Arc<AtomicUsize>,
 }
+/// Optional MiB reservation changes the source/mesh split, never the total.
+/// Invalid input retains the baseline; saturation prevents multiplication overflow.
+fn source_budget_for(total: usize, override_mib: Option<&str>) -> usize {
+    let baseline = (total / 8).min(32 * 1024 * 1024);
+    override_mib
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|mib| mib.saturating_mul(1024 * 1024).min(total / 2))
+        .unwrap_or(baseline)
+}
 impl GeometryCache {
     pub fn new(world: World, budget_bytes: usize) -> Self {
-        let source_budget = (budget_bytes / 8).min(32 * 1024 * 1024);
+        let override_mib = std::env::var("FRONTIER_SOURCE_CACHE_MIB").ok();
+        let source_budget = source_budget_for(budget_bytes, override_mib.as_deref());
         Self {
             world,
             budget: budget_bytes,
@@ -2558,6 +2658,7 @@ impl GeometryCache {
             - timing.certificate_ms
             - timing.native_mesh_ms;
         CacheStats {
+            source_budget_bytes: self.source_budget,
             profile_enabled: self.samples.profile_enabled,
             source_lock_ms: timing.lock_ms,
             source_lookup_ms: timing.lookup_ms,
@@ -4106,6 +4207,174 @@ mod tests {
         );
     }
     #[test]
+    fn native_summary_reuse_matches_proxy_bits_extrema_and_both_cache_directions() {
+        use frontier_world::FbmRecipe;
+        for recipe in [
+            FbmRecipe::Legacy,
+            FbmRecipe::Regional,
+            FbmRecipe::RegionalUnwarped,
+        ] {
+            for seed in [7, 11] {
+                let world = World::fbm(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        horizontal_scale: 16.,
+                        amplitude: 40.,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let k = TileKey {
+                    min: [-32, -64],
+                    width_cells: 16,
+                    step_cells: 1,
+                    edge_steps: [1; 4],
+                    source_revision: 0,
+                };
+                let original = column_mesh::build(
+                    &world,
+                    Cell {
+                        x: k.min[0],
+                        y: 0,
+                        z: k.min[1],
+                    },
+                    [16; 2],
+                )
+                .unwrap();
+                let profile_key = ProfileKey {
+                    min: k.min,
+                    size: 16,
+                    stride: 1,
+                };
+                let mut samples = SourceSamples::new(8 * 1024 * 1024);
+                let run = |pages: Option<&SharedSourcePages>| {
+                    native_profiles_with_summary_reuse(
+                        &world,
+                        k,
+                        Mesh {
+                            vertices: original.mesh.vertices.clone(),
+                            indices: original.mesh.indices.clone(),
+                            origin: original.mesh.origin,
+                            exposed_native_faces: original.mesh.exposed_native_faces,
+                        },
+                        &original.heights,
+                        &mut || false,
+                        true,
+                        pages,
+                    )
+                    .unwrap()
+                };
+                let assert_native =
+                    |a: &(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>),
+                     b: &(Mesh, Vec<[[f32; 4]; 5]>, Vec<u32>)| {
+                        assert_eq!(
+                            bytemuck::cast_slice::<Vertex, u8>(&a.0.vertices),
+                            bytemuck::cast_slice::<Vertex, u8>(&b.0.vertices)
+                        );
+                        assert_eq!(a.0.indices, b.0.indices);
+                        assert_eq!(a.0.exposed_native_faces, b.0.exposed_native_faces);
+                        assert_eq!(
+                            a.1.iter()
+                                .map(|p| p.map(|a| a.map(f32::to_bits)))
+                                .collect::<Vec<_>>(),
+                            b.1.iter()
+                                .map(|p| p.map(|a| a.map(f32::to_bits)))
+                                .collect::<Vec<_>>()
+                        );
+                        assert_eq!(a.2, b.2);
+                    };
+                let direct_native = run(None);
+                assert_native(&direct_native, &run(Some(&samples.pages)));
+                let native_entry = samples.pages.profile(profile_key).unwrap();
+                let proxy_key = TileKey {
+                    step_cells: 16,
+                    edge_steps: [16; 4],
+                    ..k
+                };
+                let before = samples.pages.snapshot();
+                let reused_proxy =
+                    build_surface(&world, proxy_key, || false, &mut samples).unwrap();
+                assert!(
+                    samples.pages.snapshot().appearance_cache_hits > before.appearance_cache_hits
+                );
+                let mut direct_samples = SourceSamples::new(8 * 1024 * 1024);
+                let direct_proxy =
+                    build_surface(&world, proxy_key, || false, &mut direct_samples).unwrap();
+                assert_appearance_tile_bits(&reused_proxy, &direct_proxy);
+                let proxy_entry = direct_samples.pages.profile(profile_key).unwrap();
+                assert_eq!(
+                    native_entry.value.map(|a| a.map(f32::to_bits)),
+                    proxy_entry.value.map(|a| a.map(f32::to_bits))
+                );
+                assert_eq!(native_entry.extrema, proxy_entry.extrema);
+                let before = direct_samples.pages.snapshot();
+                assert_native(&direct_native, &run(Some(&direct_samples.pages)));
+                assert_eq!(
+                    direct_samples.pages.snapshot().appearance_cache_hits,
+                    before.appearance_cache_hits + 1
+                );
+                // A sampled profile is never a substitute for this exact footprint.
+                assert!(samples
+                    .pages
+                    .profile(ProfileKey {
+                        stride: 4,
+                        ..profile_key
+                    })
+                    .is_none());
+                let bytes = samples.pages.snapshot().appearance_cache_bytes;
+                samples.pages.clear();
+                assert!(samples.pages.profile(profile_key).is_none());
+                assert_eq!(samples.pages.snapshot().appearance_cache_bytes, bytes);
+                assert!(samples.pages.snapshot().source_cache_bytes <= 8 * 1024 * 1024);
+                // Storage and immutable source scope stay independent of another world.
+                let fresh = SharedSourcePages::new(8 * 1024 * 1024);
+                assert!(fresh.profile(profile_key).is_none());
+                assert_native(&direct_native, &run(Some(&samples.pages)));
+            }
+        }
+    }
+    #[test]
+    fn native_summary_reuse_never_admits_clipped_blocks() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let k = TileKey {
+            min: [-15, -15],
+            width_cells: 16,
+            ..key(1)
+        };
+        let original = column_mesh::build(
+            &world,
+            Cell {
+                x: -15,
+                y: 0,
+                z: -15,
+            },
+            [16; 2],
+        )
+        .unwrap();
+        let pages = SharedSourcePages::new(8 * 1024 * 1024);
+        let out = native_profiles_with_summary_reuse(
+            &world,
+            k,
+            original.mesh,
+            &original.heights,
+            &mut || false,
+            true,
+            Some(&pages),
+        )
+        .unwrap();
+        assert_eq!(out.1.len(), 5);
+        let stats = pages.snapshot();
+        assert_eq!(stats.appearance_cache_hits, 0);
+        assert_eq!(stats.appearance_cache_misses, 0);
+        assert!(pages.shards.iter().all(|s| s
+            .lock()
+            .unwrap()
+            .profiles
+            .iter()
+            .all(Option::is_none)));
+    }
+    #[test]
     fn native_profile_top_reuse_matches_direct_paint_bits_and_quads() {
         use frontier_world::FbmRecipe;
         for recipe in [
@@ -4767,6 +5036,42 @@ mod tests {
         assert_eq!(native.native_bins, direct.native_bins);
         assert_eq!(native.best_certified_vertical_error_m, Some(0.));
         assert_eq!(native.bounds, direct.bounds);
+    }
+    #[test]
+    fn source_budget_override_is_bounded_and_preserves_total_reservation() {
+        let mib = 1024 * 1024;
+        for total in [0, 1, 31, 256 * 1024, 128 * mib, 512 * mib, usize::MAX] {
+            let default = (total / 8).min(32 * mib);
+            for invalid in [None, Some(""), Some("oops"), Some("-1"), Some("1.5")] {
+                assert_eq!(source_budget_for(total, invalid), default);
+            }
+            for input in ["0", "1", "64", "128", "512"] {
+                let source = source_budget_for(total, Some(input));
+                assert!(source <= total / 2);
+                assert_eq!(source + (total - source), total);
+                assert_eq!(
+                    source,
+                    input
+                        .parse::<usize>()
+                        .unwrap()
+                        .saturating_mul(mib)
+                        .min(total / 2)
+                );
+            }
+            assert_eq!(
+                source_budget_for(total, Some(&usize::MAX.to_string())),
+                total / 2
+            );
+            assert_eq!(source_budget_for(total, Some("0")), 0);
+        }
+        assert_eq!(source_budget_for(512 * mib, None), 32 * mib);
+        assert_eq!(source_budget_for(512 * mib, Some("64")), 64 * mib);
+        assert_eq!(source_budget_for(512 * mib, Some("128")), 128 * mib);
+        // Decimal values outside usize are invalid, rather than wrapping.
+        assert_eq!(
+            source_budget_for(512 * mib, Some("999999999999999999999999999999999999")),
+            32 * mib
+        );
     }
     #[test]
     fn full_source_reservation_bounds_combined_cache_peak_during_later_growth() {
