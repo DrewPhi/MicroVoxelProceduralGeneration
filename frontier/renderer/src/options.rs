@@ -39,6 +39,11 @@ pub struct Options {
     pub capture_unresolved: bool,
     pub adaptive_wait_quality: bool,
     pub adaptive_cache_mib: usize,
+    pub adaptive_workers: usize,
+    pub adaptive_direct_native: bool,
+    pub adaptive_build_mib: usize,
+    pub adaptive_disk_cache: Option<std::path::PathBuf>,
+    pub adaptive_disk_mib: usize,
     pub benchmark_input_lock: bool,
     pub native_bins: bool,
 }
@@ -84,11 +89,60 @@ pub fn parse() -> Result<Option<Options>> {
     let mut capture_unresolved = false;
     let mut adaptive_wait_quality = false;
     let mut adaptive_cache_mib = 512usize;
+    let mut adaptive_workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let mut adaptive_build_mib = 512usize;
+    let mut adaptive_direct_native = false;
+    let mut adaptive_disk_cache = None;
+    let mut adaptive_disk_mib = 2048usize;
     let mut benchmark_input_lock = false;
     let mut native_bins = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--adaptive-build-mib" => {
+                adaptive_build_mib = args
+                    .next()
+                    .ok_or("--adaptive-build-mib requires positive MiB")?
+                    .parse::<usize>()?;
+                if adaptive_build_mib == 0 || adaptive_build_mib.checked_mul(1024 * 1024).is_none()
+                {
+                    return Err("--adaptive-build-mib requires positive representable MiB".into());
+                }
+            }
+            "--adaptive-direct-native" => {
+                adaptive_direct_native = match args.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("--adaptive-direct-native requires on|off".into()),
+                };
+            }
+            "--adaptive-workers" => {
+                adaptive_workers = args
+                    .next()
+                    .ok_or("--adaptive-workers requires 1..16")?
+                    .parse()?;
+                if !(1..=16).contains(&adaptive_workers) {
+                    return Err("--adaptive-workers requires 1..16".into());
+                }
+            }
+            "--adaptive-disk-cache" => {
+                let path = args
+                    .next()
+                    .ok_or("--adaptive-disk-cache requires a directory")?;
+                if path.is_empty() {
+                    return Err("disk cache directory cannot be empty".into());
+                }
+                adaptive_disk_cache = Some(std::path::PathBuf::from(path));
+            }
+            "--adaptive-disk-mib" => {
+                adaptive_disk_mib = args
+                    .next()
+                    .ok_or("--adaptive-disk-mib requires positive MiB")?
+                    .parse::<usize>()?;
+                if adaptive_disk_mib == 0 || adaptive_disk_mib.checked_mul(1024 * 1024).is_none() {
+                    return Err("--adaptive-disk-mib requires positive representable MiB".into());
+                }
+            }
             "--native-bins" => {
                 native_bins = match args.next().as_deref() {
                     Some("on") => true,
@@ -284,7 +338,7 @@ pub fn parse() -> Result<Option<Options>> {
                 )
             }
             "--help" | "-h" => {
-                println!("Adaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("Adaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
@@ -436,6 +490,11 @@ pub fn parse() -> Result<Option<Options>> {
         capture_unresolved,
         adaptive_wait_quality,
         adaptive_cache_mib,
+        adaptive_workers,
+        adaptive_direct_native,
+        adaptive_build_mib,
+        adaptive_disk_cache,
+        adaptive_disk_mib,
         benchmark_input_lock,
         native_bins,
     }))

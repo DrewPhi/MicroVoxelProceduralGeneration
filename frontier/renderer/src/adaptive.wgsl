@@ -56,6 +56,13 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     out.profile_index=profile_index;
     return out;
 }
+// Lossless triangle records retain the original indexed vertex sequence.
+@vertex fn vs_proxy(@builtin(vertex_index) vertex:u32,
+    @location(0) p0:vec3<f32>,@location(1) p1:vec3<f32>,@location(2) p2:vec3<f32>,
+    @location(3) normal:vec3<f32>,@location(4) color:vec3<f32>,@location(5) profile_index:u32)->VertexOut {
+    let positions=array<vec3<f32>,3>(p0,p1,p2);
+    return vertex_out(positions[vertex],color,normal,profile_index);
+}
 const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     vec3<f32>(0.,0.,0.),vec3<f32>(0.18,0.34,0.10),vec3<f32>(0.32,0.22,0.13),
     vec3<f32>(0.35,0.37,0.39),vec3<f32>(0.41,0.25,0.13));

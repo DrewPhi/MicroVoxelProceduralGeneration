@@ -14,8 +14,16 @@ use wgpu::util::DeviceExt;
 
 const PAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_CLUSTERS: usize = 8192;
+pub(crate) const MAX_CLUSTERS: usize = 16384;
 const UNIFORM_STRIDE: u64 = 256;
+pub(crate) const CAMERA_UNIFORM_BYTES: u64 = UNIFORM_STRIDE * MAX_CLUSTERS as u64;
+const CLUSTER_CAPACITY_ERROR: &str = "adaptive cluster count budget exhausted";
+const POOL_CAPACITY_ERROR: &str = "adaptive GPU pool budget exhausted";
+/// Only resource refusal may preserve the old coherent cover. Invalid geometry
+/// and other upload failures must remain visible to the caller.
+pub(crate) fn resource_capacity_error(error: &str) -> bool {
+    matches!(error, CLUSTER_CAPACITY_ERROR | POOL_CAPACITY_ERROR)
+}
 
 /// A coalescing byte allocator. Released clusters reuse the existing GPU pages.
 struct Arena {
@@ -76,6 +84,7 @@ struct ProfileAllocation {
 }
 struct Cluster {
     native_quads: bool,
+    proxy_triangles: bool,
     bins: Vec<NativeBin>,
     exact: bool,
     profile: Option<ProfileAllocation>,
@@ -103,11 +112,14 @@ pub struct VisibleOffender {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DrawStats {
     pub resident_clusters: usize,
+    pub cluster_capacity: usize,
+    pub available_cluster_slots: usize,
     pub visible_clusters: usize,
     pub triangles: u64,
     pub resident_bytes: u64,
     pub allocated_bytes: u64,
     pub resident_native_quad_bytes: u64,
+    pub resident_proxy_triangle_bytes: u64,
     pub resident_profile_bytes: u64,
     pub visible_native_quads: u64,
     pub occluded_clusters: usize,
@@ -150,6 +162,7 @@ pub struct AdaptiveGpu {
     pipeline: wgpu::RenderPipeline,
     profile_pipeline: wgpu::RenderPipeline,
     native_pipeline: wgpu::RenderPipeline,
+    proxy_pipeline: wgpu::RenderPipeline,
     quad_indices: wgpu::Buffer,
     zero_profile: wgpu::Buffer,
     profiles: Vec<Arena>,
@@ -167,6 +180,10 @@ pub struct AdaptiveGpu {
 }
 impl AdaptiveGpu {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
+        assert!(
+            CAMERA_UNIFORM_BYTES <= device.limits().max_buffer_size,
+            "adaptive camera uniforms exceed device buffer limit"
+        );
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("adaptive cluster camera"),
             entries: &[
@@ -194,7 +211,7 @@ impl AdaptiveGpu {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("adaptive pooled camera uniforms"),
-            size: UNIFORM_STRIDE * MAX_CLUSTERS as u64,
+            size: CAMERA_UNIFORM_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -217,7 +234,15 @@ impl AdaptiveGpu {
         let profile_attributes = wgpu::vertex_attr_array![3=>Uint32];
         let native_attributes =
             wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Uint32,4=>Uint32];
-        let make_pipeline = |step_mode, native| {
+        let proxy_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,3=>Float32x3,4=>Float32x3,5=>Uint32];
+        let make_pipeline = |step_mode, kind| {
+            let native = kind == 1;
+            let proxy = kind == 2;
+            let proxy_buffers = [wgpu::VertexBufferLayout {
+                array_stride: 64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &proxy_attributes,
+            }];
             let native_buffers = [wgpu::VertexBufferLayout {
                 array_stride: 32,
                 step_mode: wgpu::VertexStepMode::Instance,
@@ -241,9 +266,17 @@ impl AdaptiveGpu {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some(if native { "vs_native" } else { "vs_main" }),
+                    entry_point: Some(if native {
+                        "vs_native"
+                    } else if proxy {
+                        "vs_proxy"
+                    } else {
+                        "vs_main"
+                    }),
                     compilation_options: Default::default(),
-                    buffers: if native {
+                    buffers: if proxy {
+                        &proxy_buffers
+                    } else if native {
                         &native_buffers
                     } else {
                         &mesh_buffers
@@ -278,9 +311,10 @@ impl AdaptiveGpu {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, false);
-        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, false);
-        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, true);
+        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0);
+        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0);
+        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1);
+        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2);
         let quad_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shared exact native quad topology"),
             contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
@@ -297,6 +331,7 @@ impl AdaptiveGpu {
             pipeline,
             profile_pipeline,
             native_pipeline,
+            proxy_pipeline,
             quad_indices,
             zero_profile,
             profiles: vec![],
@@ -351,7 +386,7 @@ impl AdaptiveGpu {
         }
         let size = bytes.max(PAGE_BYTES).next_multiple_of(4);
         if total + size > MAX_BYTES || size > device.limits().max_buffer_size {
-            return Err("adaptive GPU pool budget exhausted".into());
+            return Err(POOL_CAPACITY_ERROR.into());
         }
         let mut arena = Arena::new(
             device,
@@ -378,13 +413,23 @@ impl AdaptiveGpu {
             return Ok(());
         }
         if self.slots.is_empty() {
-            return Err("adaptive cluster count budget exhausted".into());
+            return Err(CLUSTER_CAPACITY_ERROR.into());
         }
         if !tile.native_quads.is_empty() {
-            if !tile.exact || !tile.mesh.indices.is_empty() {
+            if !tile.exact || !tile.mesh.indices.is_empty() || !tile.proxy_triangles.is_empty() {
                 return Err("native quad tile must have exclusive exact ownership".into());
             }
             return self.upload_native(device, queue, tile);
+        }
+        if !tile.proxy_triangles.is_empty() {
+            if tile.exact
+                || !tile.mesh.vertices.is_empty()
+                || !tile.mesh.indices.is_empty()
+                || !tile.face_profile_indices.is_empty()
+            {
+                return Err("packed proxy must have exclusive triangle ownership".into());
+            }
+            return self.upload_proxy(device, queue, tile);
         }
         let mesh = &tile.mesh;
         let vb: &[u8] = bytemuck::cast_slice(&mesh.vertices);
@@ -476,6 +521,7 @@ impl AdaptiveGpu {
             tile.key,
             Cluster {
                 native_quads: false,
+                proxy_triangles: false,
                 bins: vec![],
                 exact: tile.exact,
                 profile,
@@ -541,6 +587,8 @@ impl AdaptiveGpu {
         self.camera_upload.clear();
         let mut stats = DrawStats {
             resident_clusters: self.clusters.len(),
+            cluster_capacity: MAX_CLUSTERS,
+            available_cluster_slots: self.slots.len(),
             allocated_bytes: self.allocated_bytes(),
             current_max_error_px: Some(0.),
             current_quality_ready: width > 0
@@ -592,6 +640,10 @@ impl AdaptiveGpu {
             });
             stats.resident_profile_bytes += profile_bytes;
             stats.resident_bytes += profile_bytes;
+            if c.proxy_triangles {
+                stats.resident_proxy_triangle_bytes +=
+                    c.vertices.range.end - c.vertices.range.start;
+            }
             if c.native_quads {
                 stats.resident_native_quad_bytes += c.vertices.range.end - c.vertices.range.start;
             }
@@ -618,6 +670,8 @@ impl AdaptiveGpu {
                 stats.occluded_clusters += 1;
                 stats.occluded_triangles += if c.native_quads {
                     c.count as u64 * 2
+                } else if c.proxy_triangles {
+                    c.count as u64
                 } else {
                     c.count as u64 / 3
                 };
@@ -711,6 +765,8 @@ impl AdaptiveGpu {
             }
             stats.triangles += if c.native_quads {
                 native_count as u64 * 2
+            } else if c.proxy_triangles {
+                c.count as u64
             } else {
                 c.count as u64 / 3
             };
@@ -726,6 +782,8 @@ impl AdaptiveGpu {
             let c = &self.clusters[&item.key];
             if c.native_quads {
                 pass.set_pipeline(&self.native_pipeline);
+            } else if c.proxy_triangles {
+                pass.set_pipeline(&self.proxy_pipeline);
             } else if let Some(p) = &c.profile {
                 pass.set_pipeline(&self.profile_pipeline);
                 let indices = p.indices.as_ref().unwrap();
@@ -767,6 +825,8 @@ impl AdaptiveGpu {
                 } else {
                     pass.draw_indexed(0..6, 0, 0..c.count);
                 }
+            } else if c.proxy_triangles {
+                pass.draw(0..3, 0..c.count);
             } else {
                 let indices = c.indices.as_ref().unwrap();
                 pass.set_index_buffer(
@@ -836,6 +896,7 @@ impl AdaptiveGpu {
             tile.key,
             Cluster {
                 native_quads: true,
+                proxy_triangles: false,
                 bins: validated_bins(&tile.native_bins, tile.native_quads.len() as u32),
                 exact: true,
                 profile: Some(ProfileAllocation {
@@ -845,6 +906,95 @@ impl AdaptiveGpu {
                 vertices,
                 indices: None,
                 count: quads.len() as u32,
+                origin,
+                bounds,
+                canonical_bounds: Aabb {
+                    min: tile.conservative_surface_bounds[0],
+                    max: tile.conservative_surface_bounds[1],
+                },
+                guaranteed_solid: tile.guaranteed_solid_box,
+                proxy_bounds: tile.bounds,
+                certificate_kind: certificate_kind(tile),
+                best_error_m: tile
+                    .best_certified_vertical_error_m
+                    .filter(|e| e.is_finite() && *e >= 0.),
+                slot: self.slots.pop().unwrap(),
+            },
+        );
+        Ok(())
+    }
+    fn upload_proxy(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tile: &GeometryTile,
+    ) -> Result<(), String> {
+        if tile
+            .proxy_triangles
+            .iter()
+            .any(|q| q.profile_index as usize >= tile.face_profiles.len())
+        {
+            return Err("proxy triangle profile index outside table".into());
+        }
+        let vertices = self.allocate(device, (tile.proxy_triangles.len() * 64) as u64, 0)?;
+        let table_bytes = bytemuck::cast_slice(&tile.face_profiles);
+        let table = match self.allocate(device, table_bytes.len() as u64, 3) {
+            Ok(table) => table,
+            Err(e) => {
+                self.vertices[vertices.page].release(vertices.range);
+                return Err(e);
+            }
+        };
+        while self.profile_binds.len() < self.profile_tables.len() {
+            let page = self.profile_binds.len();
+            self.profile_binds.push(profile_bind(
+                device,
+                &self.layout,
+                &self.uniform,
+                &self.profile_tables[page].buffer,
+            ));
+        }
+        let mut triangles = tile.proxy_triangles.clone();
+        for triangle in &mut triangles {
+            triangle.profile_index += (table.range.start / 80) as u32;
+        }
+        queue.write_buffer(
+            &self.vertices[vertices.page].buffer,
+            vertices.range.start,
+            bytemuck::cast_slice(&triangles),
+        );
+        queue.write_buffer(
+            &self.profile_tables[table.page].buffer,
+            table.range.start,
+            table_bytes,
+        );
+        let origin = DVec3::new(
+            tile.mesh.origin.x as f64,
+            tile.mesh.origin.y as f64,
+            tile.mesh.origin.z as f64,
+        ) * frontier_world::VOXEL_SIZE;
+        let mut bounds = [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)];
+        for triangle in &tile.proxy_triangles {
+            for p in triangle.positions {
+                let p = Vec3::from_array(p);
+                bounds[0] = bounds[0].min(p);
+                bounds[1] = bounds[1].max(p);
+            }
+        }
+        self.clusters.insert(
+            tile.key,
+            Cluster {
+                native_quads: false,
+                proxy_triangles: true,
+                bins: vec![],
+                exact: false,
+                profile: Some(ProfileAllocation {
+                    indices: None,
+                    table,
+                }),
+                vertices,
+                indices: None,
+                count: triangles.len() as u32,
                 origin,
                 bounds,
                 canonical_bounds: Aabb {
@@ -951,6 +1101,72 @@ fn profile_bind(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_explicit_capacity_refusals_allow_coherent_cover_fallback() {
+        assert!(super::resource_capacity_error(
+            super::CLUSTER_CAPACITY_ERROR
+        ));
+        assert!(super::resource_capacity_error(super::POOL_CAPACITY_ERROR));
+        for message in [
+            "proxy triangle profile index outside table",
+            "native quad tile must have exclusive exact ownership",
+            "adaptive GPU pool budget exhausted: invalid record",
+            "cancelled",
+            "",
+        ] {
+            assert!(!super::resource_capacity_error(message));
+        }
+    }
+    #[test]
+    fn proxy_instance_layout_and_shader_inputs_match_exact_fields() {
+        use crate::adaptive_geometry::ProxyTriangle;
+        assert_eq!(std::mem::size_of::<ProxyTriangle>(), 64);
+        assert_eq!(std::mem::offset_of!(ProxyTriangle, positions), 0);
+        assert_eq!(std::mem::offset_of!(ProxyTriangle, normal), 36);
+        assert_eq!(std::mem::offset_of!(ProxyTriangle, color), 48);
+        assert_eq!(std::mem::offset_of!(ProxyTriangle, profile_index), 60);
+        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "vs_proxy")
+            .unwrap();
+        let locations: Vec<_> = entry
+            .function
+            .arguments
+            .iter()
+            .filter_map(|a| match a.binding {
+                Some(naga::Binding::Location { location, .. }) => {
+                    Some((a.name.as_deref().unwrap(), location))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            vec![
+                ("p0", 0),
+                ("p1", 1),
+                ("p2", 2),
+                ("normal", 3),
+                ("color", 4),
+                ("profile_index", 5)
+            ]
+        );
+    }
+    #[test]
+    fn fixed_cluster_uniform_slots_stay_in_bounds_without_changing_arena_budget() {
+        assert_eq!(super::MAX_CLUSTERS, 16384);
+        assert_eq!(super::CAMERA_UNIFORM_BYTES, 4 * 1024 * 1024);
+        assert!(super::CAMERA_UNIFORM_BYTES <= wgpu::Limits::downlevel_defaults().max_buffer_size);
+        for i in [0, super::MAX_CLUSTERS - 1] {
+            let offset = i as u64 * super::UNIFORM_STRIDE;
+            assert_eq!(offset % 256, 0);
+            assert!(offset + 96 <= super::CAMERA_UNIFORM_BYTES);
+            assert!(offset <= u32::MAX as u64);
+        }
+        assert_eq!(super::MAX_BYTES, 512 * 1024 * 1024);
+    }
     #[test]
     fn offender_diagnostics_are_bounded_deterministic_and_prioritize_unbounded() {
         let make = |x, error| super::VisibleOffender {

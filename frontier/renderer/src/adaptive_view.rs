@@ -14,6 +14,7 @@ pub struct AdaptiveView {
     deferred: Option<SelectionFrame>,
     epoch: u64,
     published_pose: Option<(Camera, u32, u32)>,
+    candidate_preparation: Option<crate::adaptive_stream::PreparationCycle>,
     pub owners: HashSet<TileKey>,
     pub stats: DrawStats,
     pub quality_ready: bool,
@@ -31,6 +32,10 @@ pub struct AdaptiveView {
     pub pixel_error: f64,
     topology_supported: bool,
     native_bins: bool,
+    worker_count: usize,
+    direct_native_urgent: bool,
+    build_memory: crate::build_memory::BuildMemoryStats,
+    planning: crate::adaptive_stream::PlanningStats,
     pub cache_bytes: usize,
     pub cache_hits: u64,
     pub builds: u64,
@@ -54,6 +59,7 @@ pub struct AdaptiveView {
     pending_arc_bytes: usize,
     deferred_arc_bytes: usize,
     gpu_pending_clusters: usize,
+    gpu_resource_limited: bool,
     max_visible_error_px: Option<f64>,
     visible_unresolved_count: usize,
     visible_uncertified_count: usize,
@@ -68,22 +74,31 @@ impl AdaptiveView {
         pixel_error: f64,
         cpu_cache_budget_bytes: usize,
         native_bins: bool,
+        worker_count: usize,
+        direct_native_urgent: bool,
+        build_budget_bytes: usize,
+        disk_cache: Option<crate::adaptive_stream::DiskCacheConfig>,
     ) -> Result<Self, String> {
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
         Ok(Self {
-            worker: Worker::new(
+            worker: Worker::new_with_cache(
                 world,
                 StreamSettings {
                     pixel_error,
                     cpu_cache_bytes: cpu_cache_budget_bytes,
+                    worker_count,
+                    direct_native_urgent,
+                    build_budget_bytes,
                     ..Default::default()
                 },
+                disk_cache,
             )?,
             pending: None,
             deferred: None,
             epoch: 0,
             published_pose: None,
+            candidate_preparation: None,
             owners: HashSet::new(),
             stats: DrawStats::default(),
             quality_ready: false,
@@ -101,6 +116,10 @@ impl AdaptiveView {
             pixel_error,
             topology_supported,
             native_bins,
+            worker_count,
+            direct_native_urgent,
+            build_memory: crate::build_memory::BuildMemoryStats::default(),
+            planning: Default::default(),
             cache_bytes: 0,
             cache_hits: 0,
             builds: 0,
@@ -124,6 +143,7 @@ impl AdaptiveView {
             pending_arc_bytes: 0,
             deferred_arc_bytes: 0,
             gpu_pending_clusters: 0,
+            gpu_resource_limited: false,
             max_visible_error_px: None,
             visible_unresolved_count: 0,
             visible_uncertified_count: 0,
@@ -186,6 +206,8 @@ impl AdaptiveView {
                 self.total_build_ms = frame.cache.total_build_ms;
                 self.max_build_ms = frame.cache.max_build_ms;
                 self.generated_columns = frame.cache.generated_columns;
+                self.build_memory = frame.build_memory;
+                self.planning = frame.planning;
                 self.source_cache_hits = frame.cache.source_cache_hits;
                 self.source_cache_bytes = frame.cache.source_cache_bytes;
                 if frame.coverage_ready {
@@ -227,6 +249,7 @@ impl AdaptiveView {
         }
         adaptive.retain(&keep);
         let mut uploaded = 0;
+        self.gpu_resource_limited = false;
         if let Some(frame) = &self.pending {
             for tile in &frame.tiles {
                 if adaptive.contains(&tile.key) {
@@ -236,13 +259,21 @@ impl AdaptiveView {
                     + tile.mesh.indices.len() * 4
                     + tile.face_profiles.len() * 80
                     + tile.face_profile_indices.len() * 4
-                    + tile.native_quads.len() * 32) as u64;
+                    + tile.native_quads.len() * 32
+                    + tile.proxy_triangles.len() * 64) as u64;
                 // One bounded cluster is the upload quantum. A cluster larger
                 // than the frame budget is disclosed by max_upload_frame_bytes.
                 if uploaded > 0 && uploaded + bytes > UPLOAD_BUDGET {
                     break;
                 }
-                adaptive.upload(&gpu.device, &gpu.queue, tile)?;
+                if let Err(error) = adaptive.upload(&gpu.device, &gpu.queue, tile) {
+                    if crate::adaptive_gpu::resource_capacity_error(&error) {
+                        self.gpu_resource_limited = true;
+                        self.unresolved = true;
+                        break;
+                    }
+                    return Err(error);
+                }
                 uploaded += bytes;
                 if uploaded >= UPLOAD_BUDGET {
                     break;
@@ -262,6 +293,9 @@ impl AdaptiveView {
                     height,
                 ) {
                     self.owners = keys;
+                    if let Some(transaction) = frame.publication_transaction {
+                        self.worker.record_transaction_publication(transaction);
+                    }
                     if self.first_coverage_ms.is_none() {
                         self.first_coverage_ms =
                             Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
@@ -286,6 +320,7 @@ impl AdaptiveView {
                     self.visible_uncertified_count = frame.visible_uncertified_count;
                     self.global_bound_clusters = frame.global_bound_clusters;
                     self.local_certified_clusters = frame.local_certified_clusters;
+                    self.candidate_preparation = frame.preparation;
                     self.published_epoch = epoch;
                     self.published_pose = Some((camera, width, height));
                 }
@@ -341,6 +376,11 @@ impl AdaptiveView {
             && self.stats.current_max_error_px.is_some_and(|error| {
                 error <= self.pixel_error * crate::adaptive_stream::REFINEMENT_RESERVE
             });
+        if self.refinement_ready {
+            if let Some(cycle) = self.candidate_preparation.take() {
+                self.worker.record_preparation(cycle);
+            }
+        }
         if self.refinement_ready && self.first_refinement_ms.is_none() {
             self.first_refinement_ms =
                 Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
@@ -436,7 +476,7 @@ impl AdaptiveView {
         json.pop();
         json.push_str(&format!(",\"cpu_cache_budget_bytes\":{},\"pending_selection_arc_bytes\":{},\"cpu_selection_bytes_overlap_cache\":true,\"gpu_pool_budget_bytes\":536870912}}",self.cpu_cache_budget_bytes,self.pending_arc_bytes));
         json.pop();
-        json.push_str(&format!(",\"max_visible_error_px\":{},\"visible_unresolved_count\":{},\"visible_global_bound_clusters\":{},\"visible_local_certified_clusters\":{},\"gpu_pool_allocated_bytes\":{},\"gpu_camera_uniform_bytes\":2097152,\"frame_attachment_logical_bytes\":{}}}",self.max_visible_error_px.map_or("null".into(),|v|v.to_string()),self.visible_unresolved_count,self.global_bound_clusters,self.local_certified_clusters,self.stats.allocated_bytes,self.frame_attachment_bytes));
+        json.push_str(&format!(",\"max_visible_error_px\":{},\"visible_unresolved_count\":{},\"visible_global_bound_clusters\":{},\"visible_local_certified_clusters\":{},\"gpu_pool_allocated_bytes\":{},\"gpu_camera_uniform_bytes\":{},\"frame_attachment_logical_bytes\":{}}}",self.max_visible_error_px.map_or("null".into(),|v|v.to_string()),self.visible_unresolved_count,self.global_bound_clusters,self.local_certified_clusters,self.stats.allocated_bytes,crate::adaptive_gpu::CAMERA_UNIFORM_BYTES,self.frame_attachment_bytes));
         json.pop();
         json.push_str(&format!(",\"visible_uncertified_count\":{},\"native_quad_record_bytes\":32,\"resident_native_quad_bytes\":{},\"resident_profile_bytes\":{},\"visible_native_quads\":{}}}",self.visible_uncertified_count,self.stats.resident_native_quad_bytes,self.stats.resident_profile_bytes,self.stats.visible_native_quads));
         json.pop();
@@ -488,6 +528,66 @@ impl AdaptiveView {
         json.push_str(&format!(",\"native_bins_enabled\":{},\"native_bin_tests\":{},\"native_bin_skipped_quads\":{},\"draw_calls\":{}}}",self.native_bins,self.stats.native_bin_tests,self.stats.native_bin_skipped_quads,self.stats.draw_calls));
         json.pop();
         json.push_str(&format!(",\"source_cache_peak_bytes\":{},\"source_cache_pages\":{},\"source_cache_columns\":{},\"source_cache_promotions\":{},\"source_cache_page_evictions\":{},\"affine_quad_bounds\":{},\"affine_noise_cells\":{},\"affine_full_range_fallbacks\":{},\"affine_unavailable_quads\":{},\"affine_ms\":{}}}",self.latest_cache.source_cache_peak_bytes,self.latest_cache.source_cache_pages,self.latest_cache.source_cache_columns,self.latest_cache.source_cache_promotions,self.latest_cache.source_cache_page_evictions,self.latest_cache.affine_quad_bounds,self.latest_cache.affine_noise_cells,self.latest_cache.affine_full_range_fallbacks,self.latest_cache.affine_unavailable_quads,self.latest_cache.affine_ms));
+        json.pop();
+        json.push_str(&format!(",\"preparation_cpu_stage_ms\":{{\"appearance\":{},\"certificate\":{},\"native_mesh\":{},\"finalize\":{}}},\"preparation_stage_note\":\"CPU stage sums; canonical source query costs are included in caller stages, not exclusive source timings\"}}", self.latest_cache.appearance_ms, self.latest_cache.certificate_ms, self.latest_cache.native_mesh_ms, self.latest_cache.finalize_ms));
+        json.pop();
+        json.push_str(&format!(",\"preparation_workers\":{}}}", self.worker_count));
+        json.pop();
+        let disk = self.latest_cache.disk;
+        json.push_str(&format!(",\"disk_cache\":{{\"hits\":{},\"misses\":{},\"invalid\":{},\"writes\":{},\"errors\":{},\"evictions\":{},\"read_bytes\":{},\"written_bytes\":{},\"read_ms\":{},\"write_ms\":{},\"resident_bytes\":{}}}}}", disk.hits, disk.misses, disk.invalid, disk.writes, disk.errors, disk.evictions, disk.read_bytes, disk.written_bytes, disk.read_ms, disk.write_ms, disk.resident_bytes));
+        json.pop();
+        json.push_str(&format!(",\"disk_writeback\":{{\"queued_entries\":{},\"peak_queued_entries\":{},\"queued_payload_bytes\":{},\"peak_queued_payload_bytes\":{},\"skipped_writes\":{},\"encode_buffer_cap_bytes\":{},\"encode_buffer_reserved_bytes\":{},\"peak_encode_buffer_reserved_bytes\":{}}}}}", disk.writeback_queued_entries, disk.writeback_peak_queued_entries, disk.writeback_queued_payload_bytes, disk.writeback_peak_queued_payload_bytes, disk.writeback_skipped_writes, disk.writeback_encode_buffer_cap_bytes, disk.writeback_encode_buffer_reserved_bytes, disk.writeback_peak_encode_buffer_reserved_bytes));
+        let prediction = self.worker.prediction_stats();
+        json.pop();
+        json.push_str(&format!(
+            ",\"quality_cycle_latency\":{{\"samples\":{},\"p95_ms\":{}}}}}",
+            prediction.quality_cycle_samples,
+            prediction
+                .quality_cycle_p95_ms
+                .map_or("null".into(), |v| v.to_string())
+        ));
+        json.pop();
+        json.push_str(&format!(",\"prediction\":{{\"horizon_ms\":{},\"horizon_from_publication\":{},\"publication_samples\":{},\"generation_samples\":{},\"active\":{}}},\"live_tile_payload_bytes\":{},\"peak_live_tile_payload_bytes\":{}}}", prediction.horizon_ms.map_or("null".into(), |v| v.to_string()), prediction.horizon_from_publication, prediction.publication_samples, prediction.generation_samples, prediction.active, self.latest_cache.live_tile_payload_bytes, self.latest_cache.peak_live_tile_payload_bytes));
+        json.pop();
+        json.push_str(&format!(
+            ",\"affine_cache_hits\":{},\"affine_cache_misses\":{},\"affine_cache_bytes\":{}}}",
+            self.latest_cache.affine_cache_hits,
+            self.latest_cache.affine_cache_misses,
+            self.latest_cache.affine_cache_bytes
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"resident_proxy_triangle_bytes\":{}}}",
+            self.stats.resident_proxy_triangle_bytes
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"gpu_resource_limited\":{}}}",
+            self.gpu_resource_limited
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"gpu_cluster_capacity\":{},\"gpu_available_cluster_slots\":{}}}",
+            self.stats.cluster_capacity, self.stats.available_cluster_slots
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"direct_native_urgent\":{}}}",
+            self.direct_native_urgent
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"appearance_cache\":{{\"hits\":{},\"misses\":{},\"bytes\":{}}}}}",
+            self.latest_cache.appearance_cache_hits,
+            self.latest_cache.appearance_cache_misses,
+            self.latest_cache.appearance_cache_bytes
+        ));
+        let planning = self.planning;
+        json.pop();
+        json.push_str(&format!(",\"planning\":{{\"calls\":{},\"full_calls\":{},\"retained_calls\":{},\"total_ms\":{},\"max_ms\":{},\"prepared_batches_without_plan\":{}}}}}", planning.calls, planning.full_calls, planning.retained_calls, planning.total_ms, planning.max_ms, planning.prepared_batches_without_plan));
+        let memory = self.build_memory;
+        json.pop();
+        json.push_str(&format!(",\"build_memory_model\":{{\"budget_bytes\":{},\"reserved_bytes\":{},\"peak_reserved_bytes\":{},\"evicted_arc_bytes\":{},\"refused_jobs\":{},\"last_batch_jobs\":{}}}}}", memory.budget_bytes, memory.reserved_bytes, memory.peak_reserved_bytes, memory.evicted_arc_bytes, memory.refused_jobs, memory.last_batch_jobs));
         json
     }
 }

@@ -6,6 +6,7 @@ Quality/readiness in each report are acceptance conditions, not implied by FPS.
 """
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import time
@@ -18,13 +19,23 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'output/adaptive-motion')
     parser.add_argument('--seconds', type=float, default=10.)
     parser.add_argument('--speeds', default='3,15,80')
+    parser.add_argument('--route', choices=('turn-return', 'stop-resume', 'fly'), default='turn-return')
     parser.add_argument('--pixel-error', type=float, default=2.)
     parser.add_argument('--cache-mib', type=int, default=512)
     parser.add_argument('--msaa', type=int, choices=(1, 4), default=1)
     parser.add_argument('--native-bins', choices=('on', 'off'))
     parser.add_argument('--settled', action='store_true', help='Require initial quality before starting benchmark clocks')
     parser.add_argument('--static-only', action='store_true', help='Measure the fixed primary pose instead of routes')
+    parser.add_argument('--direct-native', choices=('on', 'off'), default='off')
+    parser.add_argument('--workers', type=int, choices=range(1, 17), default=1)
+    parser.add_argument('--far', type=float, default=300., help='Only change for explicitly labelled distance-scaling tests')
+    parser.add_argument('--disk-cache', type=Path, help='Opt-in persistent cache; use an empty new directory for a cold disk-cache test')
+    parser.add_argument('--disk-mib', type=int, default=2048)
     args = parser.parse_args()
+    if not math.isfinite(args.far) or args.far <= 0.025:
+        parser.error('--far must be finite and greater than 0.025')
+    if args.disk_mib <= 0:
+        parser.error('--disk-mib must be positive')
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     reference = json.loads((ROOT / 'reference/gallery/player-spiky.json').read_text())['reference']
@@ -36,18 +47,25 @@ def main():
                    '--pixel-error', str(args.pixel_error), '--adaptive-cache-mib', str(args.cache_mib), '--terrain-recipe', 'legacy', '--seed', '7',
                    '--width', '1920', '--height', '1080', '--msaa', str(args.msaa),
                    '--voxel-filter', 'on', '--uncapped', '--warmup', '60', '--benchmark-input-lock',
-                   '--route', 'static' if args.static_only else 'turn-return', '--route-clock', 'realtime',
+                   '--route', 'static' if args.static_only else args.route, '--route-clock', 'realtime',
                    '--route-speed', str(speed), '--seconds', str(args.seconds),
-                   '--capture-far', str(reference['far']),
+                   '--capture-far', str(args.far), '--adaptive-workers', str(args.workers),
                    '--eye', vector(reference['eye']), '--target', vector(reference['target']),
                    '--fov-y', str(reference['fov_y_degrees']),
                    '--capture-on-exit', str(out / f'{name}.png'),
                    '--report', str(out / f'{name}.json')]
+        if args.direct_native == 'on':
+            command += ['--adaptive-direct-native', 'on']
+        if args.disk_cache is not None:
+            command += ['--adaptive-disk-cache', str(args.disk_cache.resolve()), '--adaptive-disk-mib', str(args.disk_mib)]
         if args.settled:
             command.append('--adaptive-wait-quality')
         if args.native_bins is not None:
             command += ['--native-bins', args.native_bins]
         print('+', ' '.join(command), flush=True)
+        # Never attach a stale successful report to a failed new run.
+        for suffix in ('.json', '.png'):
+            (out / f'{name}{suffix}').unlink(missing_ok=True)
         started = time.monotonic()
         with (out / f'{name}.log').open('w') as log:
             result = subprocess.run(['/usr/bin/time', '-v', '-o', str(out / f'{name}.time.txt')]

@@ -4,8 +4,12 @@ mod adaptive_gpu;
 mod adaptive_stream;
 mod adaptive_view;
 pub mod brick_ray;
+mod build_memory;
 pub mod column_mesh;
+mod derived_disk_cache;
+mod derived_disk_writeback;
 mod gpu_probe;
+pub mod gpu_summary_probe;
 mod hybrid;
 mod hybrid_gpu;
 pub mod mesh;
@@ -1780,6 +1784,11 @@ pub fn run() -> Result<()> {
         capture_unresolved,
         adaptive_wait_quality,
         adaptive_cache_mib,
+        adaptive_workers,
+        adaptive_direct_native,
+        adaptive_build_mib,
+        adaptive_disk_cache,
+        adaptive_disk_mib,
         benchmark_input_lock,
         native_bins,
     }) = options::parse()?
@@ -1856,6 +1865,14 @@ pub fn run() -> Result<()> {
             pixel_error,
             adaptive_cache_mib * 1024 * 1024,
             native_bins,
+            adaptive_workers,
+            adaptive_direct_native,
+            adaptive_build_mib * 1024 * 1024,
+            adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
+                path,
+                budget_bytes: (adaptive_disk_mib * 1024 * 1024) as u64,
+                max_entry_bytes: 64 * 1024 * 1024,
+            }),
         )?);
         if scene == "adaptive-topology" {
             volume::build(&world)?

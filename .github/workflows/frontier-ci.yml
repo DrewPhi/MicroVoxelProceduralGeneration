@@ -32,8 +32,8 @@ jobs:
           python-version: '3.12'
       - name: Install comparison test dependencies
         run: python -m pip install numpy==1.26.4 Pillow==10.3.0
-      - name: Test reference comparison classification
-        run: python -m unittest discover -s tools -p test_reference_compare.py -v
+      - name: Test reference comparison and adaptive acceptance classification
+        run: python -m unittest discover -s tools -p "test_*.py" -v
       - name: Install the workspace's pinned Rust toolchain
         # Running inside frontier makes rustup read rust-toolchain.toml and
         # install its exact channel, profile, and components (including rustfmt).
@@ -55,8 +55,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Test workspace (including CPU WGSL validation)
-        # Existing naga tests parse and validate all four renderer WGSL files:
-        # voxel, terrain, surface_compare, and brick_ray. No GPU is required.
+        # Naga tests validate renderer and experimental compute WGSL.
+        # Manual hardware experiments are explicitly ignored in CPU CI.
         # This gate does not establish GPU execution parity or visual quality.
         run: cargo test --locked --workspace
       - name: Build release workspace

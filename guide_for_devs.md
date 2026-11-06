@@ -39,6 +39,21 @@ implementation. Use `--msaa 1` for mesh/ray image comparisons. The quadtree prob
 uses hard LOD selection and remains a static experiment, not a production CDLOD
 implementation or a declared winner. No scene provides player collision or
 persistent edits.
+## Adaptive loading controls
+
+See [loading optimization and measurements](frontier/LOADING_OPTIMIZATION.md).
+The adaptive renderer defaults to up to four CPU preparation workers, bounded by
+available logical CPUs and the separate 512 MiB builder reservation. Override
+with `--adaptive-workers 1..16` (at most four jobs run concurrently) and
+`--adaptive-build-mib`. The geometry/source cache remains separately controlled
+by `--adaptive-cache-mib`.
+
+Persistent derived geometry is opt-in: add
+`--adaptive-disk-cache output/terrain-cache --adaptive-disk-mib 2048`.
+It is disposable, versioned render data, not a save. A restart can reuse it;
+changed source identity or corrupt entries fall back to generation. First-time
+exploration still requires generation. See [cache details](frontier/DERIVED_DISK_CACHE.md).
+
 ## Build and run
 
 The `frontier/reference` crate is an independent CPU exact-voxel image oracle.
