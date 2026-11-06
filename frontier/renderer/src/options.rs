@@ -24,6 +24,7 @@ pub struct Options {
     pub route_realtime: bool,
     pub terrain_static: bool,
     pub view_levels: u32,
+    pub page_spacing: u32,
     pub msaa: u32,
     pub capture_route_time: Option<f64>,
     pub capture_coverage_shift: f64,
@@ -51,6 +52,9 @@ pub struct Options {
     pub native_bins: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
+    parse_args(std::env::args().skip(1))
+}
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     let mut atmosphere = None;
     let mut render_scale = 1.0f32;
     let mut capture = None;
@@ -76,6 +80,7 @@ pub fn parse() -> Result<Option<Options>> {
     let mut route_realtime = false;
     let mut terrain_static = false;
     let mut view_levels = 7;
+    let mut page_spacing = 1u32;
     let mut msaa = 4;
     let mut capture_route_time: Option<f64> = None;
     let mut capture_coverage_shift: f64 = 0.;
@@ -102,7 +107,6 @@ pub fn parse() -> Result<Option<Options>> {
     let mut adaptive_disk_mib = 2048usize;
     let mut benchmark_input_lock = false;
     let mut native_bins = true;
-    let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--atmosphere" => {
@@ -231,6 +235,12 @@ pub fn parse() -> Result<Option<Options>> {
             "--fov" | "--fov-y" => {
                 fov_y = args.next().ok_or("--fov-y requires degrees")?.parse()?
             }
+            "--page-spacing" => {
+                page_spacing = args
+                    .next()
+                    .ok_or("--page-spacing requires 1|2|4|8|16 meters")?
+                    .parse()?;
+            }
             "--scene" => {
                 scene = args
                     .next()
@@ -281,7 +291,7 @@ pub fn parse() -> Result<Option<Options>> {
             "--renderer" => {
                 renderer = args
                     .next()
-                    .ok_or("--renderer requires mesh|brick|brick-skip")?
+                    .ok_or("--renderer requires mesh|brick|brick-skip|brick-directional")?
             }
             "--teleport-test" => teleport_test = true,
             "--edit-test" => edit_test = true,
@@ -371,7 +381,7 @@ pub fn parse() -> Result<Option<Options>> {
             }
             "--help" | "-h" => {
                 println!("Visual preview: Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -396,7 +406,11 @@ pub fn parse() -> Result<Option<Options>> {
         return Err("--capture-coverage-shift requires finite x meters within ±24".into());
     }
     if capture_coverage_shift != 0.
-        && (capture.is_none() || !matches!(scene.as_str(), "hybrid" | "hybrid-topology"))
+        && (capture.is_none()
+            || !matches!(
+                scene.as_str(),
+                "hybrid" | "hybrid-topology" | "pages" | "pages-topology"
+            ))
     {
         return Err(
             "--capture-coverage-shift is only for hybrid headless publication comparisons".into(),
@@ -405,16 +419,27 @@ pub fn parse() -> Result<Option<Options>> {
     if capture_route_time.is_some_and(|t| !t.is_finite() || t < 0.) {
         return Err("--capture-route-time requires finite nonnegative seconds".into());
     }
+    if ![1, 2, 4, 8, 16].contains(&page_spacing) {
+        return Err("--page-spacing requires 1|2|4|8|16 meters".into());
+    }
     if msaa != 1 && msaa != 4 {
         return Err("--msaa requires 1|4".into());
     }
-    if !["mesh", "brick", "brick-skip"].contains(&renderer.as_str()) {
-        return Err("--renderer requires mesh|brick|brick-skip".into());
+    if !["mesh", "brick", "brick-skip", "brick-directional"].contains(&renderer.as_str()) {
+        return Err("--renderer requires mesh|brick|brick-skip|brick-directional".into());
     }
     if renderer != "mesh" && scene != "fixture" {
         return Err("brick comparison currently supports --scene fixture".into());
     }
-    if edit_test && !["fixture", "hybrid-topology", "adaptive-topology"].contains(&scene.as_str()) {
+    if edit_test
+        && ![
+            "fixture",
+            "hybrid-topology",
+            "adaptive-topology",
+            "pages-topology",
+        ]
+        .contains(&scene.as_str())
+    {
         return Err("--edit-test requires fixture or hybrid-topology scene".into());
     }
     if edit_test && capture.is_some() {
@@ -422,7 +447,9 @@ pub fn parse() -> Result<Option<Options>> {
             "--edit-test requires a window run; use --capture-on-exit with --seconds".into(),
         );
     }
-    if teleport_test && !["hybrid", "hybrid-topology"].contains(&scene.as_str()) {
+    if teleport_test
+        && !["hybrid", "hybrid-topology", "pages", "pages-topology"].contains(&scene.as_str())
+    {
         return Err("--teleport-test requires moving hybrid scene".into());
     }
     if !["clipmap", "quadtree"].contains(&surface_layout.as_str()) {
@@ -440,7 +467,7 @@ pub fn parse() -> Result<Option<Options>> {
     if start_xz != [0., 0.]
         && !matches!(
             scene.as_str(),
-            "fbm" | "hybrid" | "adaptive" | "adaptive-topology"
+            "fbm" | "hybrid" | "adaptive" | "adaptive-topology" | "pages" | "pages-topology"
         )
     {
         return Err("--start-xz supports fbm and hybrid scenes only".into());
@@ -461,13 +488,31 @@ pub fn parse() -> Result<Option<Options>> {
     if !fov_y.is_finite() || !(1.0..179.0).contains(&fov_y) {
         return Err("--fov-y must be in 1..179 degrees".into());
     }
-    if eye.is_some() && scene != "fixture" && capture.is_none() && !scene.starts_with("adaptive") {
-        return Err("explicit terrain camera requires --capture".into());
+    // Finite, input-locked comparisons need the same explicit camera/clip as
+    // the headless reference. Ordinary interactive terrain launches retain their
+    // preset-camera validation.
+    let fixed_terrain_benchmark = benchmark_input_lock
+        && seconds.is_some()
+        && capture_on_exit.is_some()
+        && matches!(
+            scene.as_str(),
+            "pages" | "pages-topology" | "hybrid" | "hybrid-topology" | "fbm" | "fixture"
+        );
+    if eye.is_some()
+        && scene != "fixture"
+        && capture.is_none()
+        && !scene.starts_with("adaptive")
+        && !fixed_terrain_benchmark
+    {
+        return Err("explicit terrain camera requires --capture, or a finite --benchmark-input-lock --seconds --capture-on-exit comparison".into());
     }
     if capture_far.is_some_and(|v| !v.is_finite() || v <= 0.025)
-        || (capture_far.is_some() && capture.is_none() && !scene.starts_with("adaptive"))
+        || (capture_far.is_some()
+            && capture.is_none()
+            && !scene.starts_with("adaptive")
+            && !fixed_terrain_benchmark)
     {
-        return Err("--capture-far requires a headless capture and finite distance >0.025m".into());
+        return Err("--capture-far requires finite distance >0.025m and a headless capture or finite input-locked benchmark".into());
     }
     if capture_linear && (capture.is_none() || msaa != 1) {
         return Err("--capture-linear requires --capture and --msaa 1".into());
@@ -507,6 +552,7 @@ pub fn parse() -> Result<Option<Options>> {
         route_realtime,
         terrain_static,
         view_levels,
+        page_spacing,
         msaa,
         capture_route_time,
         capture_coverage_shift,
@@ -533,4 +579,79 @@ pub fn parse() -> Result<Option<Options>> {
         benchmark_input_lock,
         native_bins,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn timed(scene: &str) -> Vec<String> {
+        [
+            "--scene",
+            scene,
+            "--eye",
+            "0,2,-3",
+            "--target",
+            "0,2,0",
+            "--capture-far",
+            "300",
+            "--benchmark-input-lock",
+            "--seconds",
+            "1",
+            "--capture-on-exit",
+            "/tmp/phasea-option-test.png",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+    #[test]
+    fn finite_locked_benchmarks_accept_the_reference_pose_and_far() {
+        for scene in [
+            "pages",
+            "pages-topology",
+            "hybrid",
+            "hybrid-topology",
+            "fbm",
+            "fixture",
+        ] {
+            let parsed = parse_args(timed(scene).into_iter()).unwrap().unwrap();
+            assert_eq!(parsed.eye, Some([0., 2., -3.]));
+            assert_eq!(parsed.capture_far, Some(300.));
+        }
+    }
+    #[test]
+    fn ordinary_terrain_launches_keep_camera_guards_and_linear_requires_float_target() {
+        for flag in ["--benchmark-input-lock", "--seconds", "--capture-on-exit"] {
+            let mut args = timed("pages");
+            let i = args.iter().position(|v| v == flag).unwrap();
+            args.remove(i);
+            if flag != "--benchmark-input-lock" {
+                args.remove(i);
+            }
+            assert!(parse_args(args.into_iter()).is_err());
+        }
+        let mut args = timed("fixture");
+        args.push("--capture-linear".into());
+        assert!(parse_args(args.into_iter()).is_err());
+        let args = [
+            "--scene",
+            "pages",
+            "--capture",
+            "/tmp/phasea-option-test.png",
+            "--capture-linear",
+            "--msaa",
+            "1",
+            "--eye",
+            "0,2,-3",
+            "--target",
+            "0,2,0",
+            "--capture-far",
+            "300",
+        ];
+        assert!(parse_args(args.into_iter().map(str::to_string)).is_ok());
+        let mut args = timed("pages");
+        let i = args.iter().position(|v| v == "300").unwrap();
+        args[i] = "NaN".into();
+        assert!(parse_args(args.into_iter()).is_err());
+    }
 }

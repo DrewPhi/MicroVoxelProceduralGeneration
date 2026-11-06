@@ -5,11 +5,14 @@
 //! Thus traversal never invents a face at a cropped solid boundary. Optional
 //! Chebyshev occupancy distances skip only proven-empty brick cubes; this is a
 //! small conservative cache experiment, NOT the published NAADF implementation.
+//! Optional octant empty boxes use exact brick occupancy and rebuild atomically
+//! with a snapshot; they are a single-layer directional comparison only.
 use bytemuck::{Pod, Zeroable};
 use frontier_world::{Cell, Material};
 use glam::{Mat4, Vec3};
 use std::collections::VecDeque;
 use wgpu::util::DeviceExt;
+mod directional;
 
 const BRICK: usize = 8;
 const DENSE: u32 = 1 << 31;
@@ -25,6 +28,11 @@ pub struct BrickSnapshot {
     pub dense: Vec<u32>,
     pub dense_bricks: usize,
     pub empty_bricks: usize,
+    /// Eight packed xyz octant box lengths per brick; absent means fallback.
+    pub directional_bounds: Vec<u32>,
+    pub directional_build_ms: f64,
+    /// Peak temporary summed-occupancy buffer bytes (not GPU residency).
+    pub directional_scratch_bytes: usize,
 }
 fn material_id(m: Material) -> u16 {
     match m {
@@ -67,6 +75,9 @@ impl BrickSnapshot {
             dense: vec![],
             dense_bricks: 0,
             empty_bricks: 0,
+            directional_bounds: vec![],
+            directional_build_ms: 0.,
+            directional_scratch_bytes: 0,
         };
         for bz in 0..dims[2] {
             for by in 0..dims[1] {
@@ -161,7 +172,7 @@ impl BrickSnapshot {
         out
     }
     pub fn gpu_bytes(&self) -> usize {
-        (self.headers.len() + self.dense.len().max(1)) * 4
+        (self.headers.len() + self.dense.len().max(1) + self.directional_bounds.len().max(1)) * 4
     }
     #[cfg(test)]
     fn word(&self, p: [usize; 3]) -> u32 {
@@ -191,6 +202,7 @@ pub struct BrickRayGpu {
     camera: wgpu::Buffer,
     size: [usize; 3],
     bricks: [usize; 3],
+    directional_available: bool,
     pub resident_bytes: usize,
 }
 impl BrickRayGpu {
@@ -201,11 +213,15 @@ impl BrickRayGpu {
         sample_count: u32,
     ) -> Result<Self, String> {
         let limit = device.limits().max_storage_buffer_binding_size as usize;
-        if snapshot.headers.len() * 4 > limit || snapshot.dense.len() * 4 > limit {
+        if snapshot.headers.len() * 4 > limit
+            || snapshot.dense.len() * 4 > limit
+            || snapshot.directional_bytes() > limit
+        {
             return Err(format!(
-                "ray snapshot exceeds storage binding limit {limit}: headers={} dense={}",
+                "ray snapshot exceeds storage binding limit {limit}: headers={} dense={} directional={}",
                 snapshot.headers.len() * 4,
-                snapshot.dense.len() * 4
+                snapshot.dense.len() * 4,
+                snapshot.directional_bytes()
             ));
         }
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
@@ -228,7 +244,16 @@ impl BrickRayGpu {
             }),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let entries = (0..3)
+        let directional = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("conservative octant empty boxes"),
+            contents: bytemuck::cast_slice(if snapshot.directional_bounds.is_empty() {
+                &[0]
+            } else {
+                &snapshot.directional_bounds
+            }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let entries = (0..4)
             .map(|i| wgpu::BindGroupLayoutEntry {
                 binding: i,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -263,6 +288,10 @@ impl BrickRayGpu {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: dense.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: directional.as_entire_binding(),
                 },
             ],
         });
@@ -315,6 +344,7 @@ impl BrickRayGpu {
             camera,
             size: snapshot.size,
             bricks: snapshot.brick_size,
+            directional_available: snapshot.directional_bounds.len() == snapshot.headers.len() * 4,
             resident_bytes: snapshot.gpu_bytes() + std::mem::size_of::<RayCamera>(),
         })
     }
@@ -329,6 +359,31 @@ impl BrickRayGpu {
         height: u32,
         distance_skip: bool,
     ) {
+        self.update_camera_mode(
+            queue,
+            matrix,
+            eye_local,
+            width,
+            height,
+            u32::from(distance_skip),
+        );
+    }
+    /// 0: ordinary brick DDA, 1: empty cubes, 2: directional empty boxes.
+    /// Missing acceleration data always falls back to ordinary traversal.
+    pub fn update_camera_mode(
+        &self,
+        queue: &wgpu::Queue,
+        matrix: Mat4,
+        eye_local: Vec3,
+        width: u32,
+        height: u32,
+        skip_mode: u32,
+    ) {
+        let mode = if skip_mode == 2 && !self.directional_available {
+            0
+        } else {
+            skip_mode.min(2)
+        };
         let data = RayCamera {
             matrix: matrix.to_cols_array_2d(),
             inverse: matrix.inverse().to_cols_array_2d(),
@@ -337,7 +392,7 @@ impl BrickRayGpu {
                 self.size[0] as u32,
                 self.size[1] as u32,
                 self.size[2] as u32,
-                u32::from(distance_skip),
+                mode,
             ],
             bricks: [
                 self.bricks[0] as u32,

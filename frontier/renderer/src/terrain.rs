@@ -452,6 +452,10 @@ impl TerrainGpu {
     pub fn set_view_position(&self, position: [f64; 3]) {
         self.camera_position.set(position);
     }
+    /// Exact logical GPU buffer allocation, including retained topology.
+    pub fn resident_buffer_bytes(&self) -> u64 {
+        self.uniform.size() + self.samples.size() + self.vertices.size() + self.indices.size()
+    }
     pub fn appearance_bind(&self) -> &wgpu::BindGroup {
         &self.bind
     }
@@ -477,12 +481,9 @@ impl TerrainGpu {
         self.ranges = update.data.ranges.clone();
         bytes
     }
-    pub fn draw<'a>(
-        &'a self,
-        queue: &wgpu::Queue,
-        pass: &mut wgpu::RenderPass<'a>,
-        matrix: glam::Mat4,
-    ) {
+    /// Update the shared appearance uniforms without drawing the clipmap. The
+    /// optional source-page experiment reuses these exact native/collar bindings.
+    pub fn prepare(&self, queue: &wgpu::Queue, matrix: glam::Mat4) {
         queue.write_buffer(
             &self.uniform,
             0,
@@ -582,6 +583,14 @@ impl TerrainGpu {
             64 + 32 * MAX_LEVELS as u64 + 48,
             bytemuck::cast_slice(&paint_origin),
         );
+    }
+    pub fn draw<'a>(
+        &'a self,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'a>,
+        matrix: glam::Mat4,
+    ) {
+        self.prepare(queue, matrix);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));

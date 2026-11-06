@@ -70,6 +70,8 @@ def main():
     draw.text((20, 20), f"Exact 6.25 cm voxels | offline {reference['spp']} samples/pixel", font=font, fill='white')
     label = ('Adaptive terrain | projected error + voxel-derived appearance'
              if gpu.get('scene', '').startswith('adaptive')
+             else 'Experimental uniform GPU pages | proxy + exact native region'
+             if gpu.get('scene', '').startswith('pages')
              else 'Current real-time terrain | LOD + voxel appearance filter')
     if 'adaptive' in gpu:
         label += f" | {gpu['adaptive']['pixel_error']:g}px, MSAA{gpu.get('samples', 1)}"

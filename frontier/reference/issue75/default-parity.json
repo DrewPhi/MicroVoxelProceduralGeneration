@@ -1,0 +1,22 @@
+[
+  {
+    "before": "adaptive-msaa1",
+    "after": "adaptive-after",
+    "exact_bytes": {
+      ".png": true,
+      ".linear_rgb.f32": true,
+      ".depth.f32": true,
+      ".coverage.f32": true
+    }
+  },
+  {
+    "before": "clipmap",
+    "after": "clipmap-after",
+    "exact_bytes": {
+      ".png": true,
+      ".linear_rgb.f32": true,
+      ".depth.f32": true,
+      ".coverage.f32": true
+    }
+  }
+]

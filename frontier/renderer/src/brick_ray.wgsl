@@ -18,6 +18,7 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera:Camera;
 @group(0) @binding(1) var<storage,read> headers:array<u32>;
 @group(0) @binding(2) var<storage,read> dense:array<u32>;
+@group(0) @binding(3) var<storage,read> directional:array<u32>;
 @vertex fn vs_main(@builtin(vertex_index) index:u32)->@builtin(position) vec4<f32> {
     let p=vec2<f32>(f32((index<<1u)&2u),f32(index&2u));
     return vec4<f32>(p*2.-1.,0.,1.);
@@ -104,9 +105,21 @@ fn forward_cell(p:vec3<f32>,d:vec3<f32>)->vec3<i32> {
         // testing the entry face, their interior cannot introduce a new surface.
         if !is_dense {
             var radius=0i;
-            if header==0u && camera.extent.w!=0u {radius=i32(headers[bi*2u+1u]);}
+            if header==0u && camera.extent.w==1u {radius=i32(headers[bi*2u+1u]);}
             lo=max((vec3<i32>(b)-vec3<i32>(radius))*8,vec3<i32>(0));
             hi=min((vec3<i32>(b)+vec3<i32>(radius+1))*8,vec3<i32>(camera.extent.xyz));
+            if header==0u && camera.extent.w==2u {
+                let positive=d>=vec3<f32>(0.);
+                let octant=select(0u,1u,positive.x)+select(0u,2u,positive.y)+select(0u,4u,positive.z);
+                let packed=directional[bi*8u+octant];
+                let length=vec3<i32>(i32(packed&1023u),i32((packed>>10u)&1023u),i32((packed>>20u)&1023u));
+                // Zero is invalid/unavailable: retain ordinary brick DDA.
+                if all(length>vec3<i32>(0)) {
+                    let base=vec3<i32>(b);
+                    lo=max(select(base-length+vec3<i32>(1),base,positive)*8,vec3<i32>(0));
+                    hi=min(select(base+vec3<i32>(1),base+length,positive)*8,vec3<i32>(camera.extent.xyz));
+                }
+            }
         }
         var next=vec3<f32>(1e30);
         for(var a=0u;a<3u;a++) {if d[a]!=0. {next[a]=(f32(select(lo[a],hi[a],d[a]>0.))-o[a])/d[a];}}

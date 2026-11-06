@@ -17,6 +17,7 @@ pub mod mesh;
 mod native_fbm;
 mod native_stream;
 mod options;
+mod page_terrain;
 mod settings;
 mod settings_ui;
 mod source_page_cache;
@@ -144,6 +145,25 @@ impl Camera {
     }
 }
 
+fn brick_skip_mode(renderer: &str) -> u32 {
+    match renderer {
+        "brick-skip" => 1,
+        "brick-directional" => 2,
+        _ => 0,
+    }
+}
+
+#[derive(Default)]
+struct BrickCacheMetrics {
+    builds: u64,
+    latest_build_ms: f64,
+    total_build_ms: f64,
+    latest_gpu_bytes: usize,
+    uploaded_bytes: u64,
+    latest_scratch_bytes: usize,
+    peak_scratch_bytes: usize,
+}
+
 struct Gpu {
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
@@ -154,6 +174,7 @@ struct Gpu {
     native_layout: wgpu::BindGroupLayout,
     hybrid_pipeline: wgpu::RenderPipeline,
     hybrid: Option<hybrid_gpu::HybridGpu>,
+    pages: Option<page_terrain::PageGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
     summary_contention: Option<gpu_summary_probe::GpuSummaryProbe>,
     summary_contention_startup_ms: f64,
@@ -163,7 +184,8 @@ struct Gpu {
     summary_contention_dispatches: std::cell::Cell<u64>,
     volume_owner: bool,
     brick: Option<brick_ray::BrickRayGpu>,
-    brick_skip: bool,
+    brick_skip_mode: u32,
+    brick_cache_metrics: BrickCacheMetrics,
     surface_probe: Option<surface_compare::SurfaceCompareGpu>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -369,6 +391,7 @@ impl Gpu {
             native_layout: layout,
             hybrid_pipeline,
             hybrid: None,
+            pages: None,
             adaptive: None,
             summary_contention: None,
             summary_contention_startup_ms: 0.,
@@ -378,7 +401,8 @@ impl Gpu {
             summary_contention_dispatches: std::cell::Cell::new(0),
             volume_owner: false,
             brick: None,
-            brick_skip: false,
+            brick_skip_mode: 0,
+            brick_cache_metrics: Default::default(),
             surface_probe: None,
             uniform,
             bind_group,
@@ -397,14 +421,30 @@ impl Gpu {
             adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
-    fn install_bricks(&mut self, snapshot: &brick_ray::BrickSnapshot, skip: bool) -> Result<()> {
+    fn install_bricks(
+        &mut self,
+        snapshot: &brick_ray::BrickSnapshot,
+        skip_mode: u32,
+    ) -> Result<()> {
         self.brick = Some(brick_ray::BrickRayGpu::new(
             &self.device,
             snapshot,
             self.format,
             self.sample_count,
         )?);
-        self.brick_skip = skip;
+        self.brick_skip_mode = skip_mode;
+        let metrics = &mut self.brick_cache_metrics;
+        metrics.latest_build_ms = snapshot.directional_build_ms;
+        metrics.latest_gpu_bytes = snapshot.directional_bytes();
+        metrics.latest_scratch_bytes = snapshot.directional_scratch_bytes;
+        metrics.peak_scratch_bytes = metrics
+            .peak_scratch_bytes
+            .max(snapshot.directional_scratch_bytes);
+        if !snapshot.directional_bounds.is_empty() {
+            metrics.builds += 1;
+            metrics.total_build_ms += snapshot.directional_build_ms;
+            metrics.uploaded_bytes += snapshot.directional_bytes() as u64;
+        }
         self.origin = DVec3::new(
             snapshot.origin.x as f64,
             snapshot.origin.y as f64,
@@ -467,6 +507,11 @@ impl Gpu {
         }
         self.hybrid = Some(hybrid);
         Ok(())
+    }
+    fn init_pages(&mut self, cover: &page_terrain::Cover) {
+        let mut pages = page_terrain::PageGpu::new(&self.device, self.format, self.sample_count);
+        pages.upload(&self.queue, cover);
+        self.pages = Some(pages);
     }
     fn replace_mesh(&mut self, mesh: &mesh::Mesh) {
         self.vertices = self
@@ -579,13 +624,13 @@ impl Gpu {
         self.queue
             .write_buffer(&self.uniform, 80, bytemuck::cast_slice(&paint_origin));
         if let Some(brick) = &self.brick {
-            brick.update_camera(
+            brick.update_camera_mode(
                 &self.queue,
                 camera.matrix(self.origin, width as f32 / height as f32),
                 (camera.position - self.origin).as_vec3(),
                 width,
                 height,
-                self.brick_skip,
+                self.brick_skip_mode,
             );
         }
         if let Some(probe) = &self.summary_contention {
@@ -594,6 +639,16 @@ impl Gpu {
                 .expect("initialized bounded summary diagnostic");
             self.summary_contention_dispatches
                 .set(self.summary_contention_dispatches.get() + 1);
+        }
+        if let (Some(pages), Some(hybrid)) = (&self.pages, &self.hybrid) {
+            pages.prepare(
+                &self.queue,
+                camera,
+                width as f32 / height as f32,
+                hybrid.center(),
+                self.volume_owner,
+                self.voxel_filter,
+            );
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
@@ -646,14 +701,25 @@ impl Gpu {
         }
         if let Some(terrain) = &self.terrain {
             terrain.set_view_position(camera.position.to_array());
-            terrain.draw(
-                &self.queue,
-                &mut pass,
-                camera.matrix(
-                    DVec3::new(terrain.center()[0], 0., terrain.center()[1]),
-                    width as f32 / height as f32,
-                ),
-            );
+            if let Some(pages) = &self.pages {
+                terrain.prepare(
+                    &self.queue,
+                    camera.matrix(
+                        DVec3::new(terrain.center()[0], 0., terrain.center()[1]),
+                        width as f32 / height as f32,
+                    ),
+                );
+                pages.draw(&mut pass);
+            } else {
+                terrain.draw(
+                    &self.queue,
+                    &mut pass,
+                    camera.matrix(
+                        DVec3::new(terrain.center()[0], 0., terrain.center()[1]),
+                        width as f32 / height as f32,
+                    ),
+                );
+            }
             if let Some(hybrid) = &self.hybrid {
                 pass.set_bind_group(1, terrain.appearance_bind(), &[]);
                 hybrid.draw(
@@ -1013,17 +1079,29 @@ impl PendingEdit {
     }
     #[cfg(test)]
     fn start(snapshot: World, min: Cell, size: [usize; 3]) -> Self {
-        Self::start_backend(snapshot, min, size, false)
+        Self::start_backend(snapshot, min, size, false, false)
     }
-    fn start_backend(snapshot: World, min: Cell, size: [usize; 3], ray: bool) -> Self {
+    fn start_backend(
+        snapshot: World,
+        min: Cell,
+        size: [usize; 3],
+        ray: bool,
+        directional: bool,
+    ) -> Self {
         let revision = snapshot.revision();
         let (sender, receiver) = std::sync::mpsc::channel();
         let started = Instant::now();
         let staged_world = Some(snapshot.clone());
         std::thread::spawn(move || {
             let mesh = mesh::extract(|p| snapshot.material(p), min, size);
-            let bricks =
-                ray.then(|| brick_ray::BrickSnapshot::build(|p| snapshot.material(p), min, size));
+            let bricks = ray.then(|| {
+                let mut bricks =
+                    brick_ray::BrickSnapshot::build(|p| snapshot.material(p), min, size);
+                if directional {
+                    bricks.build_directional_bounds();
+                }
+                bricks
+            });
             let _ = sender.send((mesh, revision, started.elapsed(), bricks));
         });
         Self {
@@ -1137,6 +1215,10 @@ struct Viewer {
     pending_edit: Option<PendingEdit>,
     terrain_data: Option<terrain::TerrainUpdate>,
     hybrid_initial: Option<hybrid_gpu::Prepared>,
+    page_initial: Option<page_terrain::Cover>,
+    page_stream: Option<page_terrain::Stream>,
+    page_pending: Option<page_terrain::Cover>,
+    page_spacing: u32,
     fbm: bool,
     hybrid: bool,
     hybrid_stream: Option<hybrid_gpu::Stream>,
@@ -1204,6 +1286,33 @@ impl Viewer {
                 self.error = Some(error);
                 return;
             }
+            let desired = stream.native.desired_center();
+            // Native desired_revision is a camera/cover transaction epoch, not
+            // a change to canonical source content.
+            let native_epoch = stream.native.desired_revision();
+            let source_revision = self.world.revision();
+            let mut pages_ready = true;
+            if let Some(pages) = &mut self.page_stream {
+                pages.request(desired, source_revision, native_epoch);
+                if self.page_pending.as_ref().is_some_and(|c| {
+                    !c.matches(desired, source_revision, native_epoch, self.page_spacing)
+                }) {
+                    self.page_pending = None;
+                }
+                if let Some(cover) = pages.poll() {
+                    self.page_pending = Some(cover);
+                }
+                pages_ready = self.page_pending.as_ref().is_some_and(|c| {
+                    c.matches(desired, source_revision, native_epoch, self.page_spacing)
+                }) || self
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| g.pages.as_ref())
+                    .is_some_and(|p| {
+                        p.center == page_terrain::snapped_center(desired, self.page_spacing)
+                            && p.source_revision == source_revision
+                    });
+            }
             if let Some(gpu) = &mut self.gpu {
                 if let (Some(hybrid), Some(terrain)) = (&mut gpu.hybrid, &mut gpu.terrain) {
                     if !hybrid.has_pending() {
@@ -1218,15 +1327,39 @@ impl Viewer {
                             }
                         }
                     }
-                    if hybrid.upload(
-                        &gpu.device,
-                        &gpu.queue,
-                        &gpu.native_layout,
-                        terrain,
-                        stream.native.desired_center(),
-                        stream.native.desired_revision(),
-                    ) {
+                    if pages_ready
+                        && hybrid.upload(
+                            &gpu.device,
+                            &gpu.queue,
+                            &gpu.native_layout,
+                            terrain,
+                            stream.native.desired_center(),
+                            stream.native.desired_revision(),
+                        )
+                    {
+                        if let Some(cover) = self.page_pending.take() {
+                            if let Some(pages) = &mut gpu.pages {
+                                pages.upload(&gpu.queue, &cover);
+                            }
+                        }
                         stream.published(hybrid.center());
+                    }
+                    // Edits can invalidate derived pages without creating a new
+                    // native camera transaction. Do not strand that refresh:
+                    // its existing native owner is already coherent and current.
+                    if self.page_pending.as_ref().is_some_and(|cover| {
+                        cover.can_publish(
+                            source_revision,
+                            self.page_spacing,
+                            (hybrid.center(), hybrid.revision()),
+                            (desired, native_epoch),
+                        )
+                    }) {
+                        if let (Some(cover), Some(pages)) =
+                            (self.page_pending.take(), &mut gpu.pages)
+                        {
+                            pages.upload(&gpu.queue, &cover);
+                        }
                     }
                 }
             }
@@ -1316,7 +1449,13 @@ impl Viewer {
         let mut pending = if self.world.topology_base_cells().is_some() {
             PendingEdit::start_volume(snapshot)
         } else {
-            PendingEdit::start_backend(snapshot, ARENA_MIN, ARENA_SIZE, self.renderer != "mesh")
+            PendingEdit::start_backend(
+                snapshot,
+                ARENA_MIN,
+                ARENA_SIZE,
+                self.renderer != "mesh",
+                self.renderer == "brick-directional",
+            )
         };
         pending.started = input;
         self.pending_edit = Some(pending);
@@ -1366,7 +1505,7 @@ impl Viewer {
                     if let Some(gpu) = &mut self.gpu {
                         if let Some(bricks) = &bricks {
                             if let Err(error) =
-                                gpu.install_bricks(bricks, self.renderer == "brick-skip")
+                                gpu.install_bricks(bricks, brick_skip_mode(&self.renderer))
                             {
                                 self.error = Some(error.to_string());
                                 return;
@@ -1541,6 +1680,11 @@ impl Viewer {
             self.camera.pitch = pose.pitch as f32;
         }
         self.poll_terrain();
+        if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
+            if !pages.contains(self.camera.position, self.camera.far) {
+                return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
+            }
+        }
         if measure_interval {
             if let Some(view) = &self.adaptive_view {
                 self.adaptive_route_quality.record(view);
@@ -1776,7 +1920,7 @@ impl ApplicationHandler for Viewer {
             ))?;
             gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
-                gpu.install_bricks(&snapshot, self.renderer == "brick-skip")?;
+                gpu.install_bricks(&snapshot, brick_skip_mode(&self.renderer))?;
             }
             gpu.configure_visuals(&self.world, &self.visual_settings);
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
@@ -1812,6 +1956,9 @@ impl ApplicationHandler for Viewer {
                 if let Some(stream) = &mut self.hybrid_stream {
                     stream.published(gpu.hybrid.as_ref().unwrap().center());
                 }
+            }
+            if let Some(cover) = self.page_initial.take() {
+                gpu.init_pages(&cover);
             }
             let size = window.inner_size();
             let config = wgpu::SurfaceConfiguration {
@@ -2037,6 +2184,7 @@ pub fn run() -> Result<()> {
         route_realtime,
         terrain_static,
         view_levels,
+        page_spacing,
         msaa,
         capture_route_time,
         capture_coverage_shift,
@@ -2090,7 +2238,10 @@ pub fn run() -> Result<()> {
         visual_settings.atmosphere = false;
         visual_settings.render_scale = 1.;
     }
-    let world = if scene == "hybrid-topology" || scene == "adaptive-topology" {
+    let world = if scene == "hybrid-topology"
+        || scene == "adaptive-topology"
+        || scene == "pages-topology"
+    {
         World::fbm_topology(seed, params)?
     } else if scene == "fixture" {
         World::new(seed)
@@ -2100,7 +2251,7 @@ pub fn run() -> Result<()> {
     let fbm = match scene.as_str() {
         "fbm" => true,
         "fixture" | "fbm-native" | "hybrid" | "hybrid-static" | "hybrid-topology" | "adaptive"
-        | "adaptive-topology" => false,
+        | "adaptive-topology" | "pages" | "pages-topology" => false,
         _ => return Err("--scene requires fixture|fbm|fbm-native|hybrid|hybrid-static".into()),
     };
     let mut adaptive_view = None;
@@ -2248,18 +2399,18 @@ pub fn run() -> Result<()> {
             origin: Cell { x: 0, y: 0, z: 0 },
             exposed_native_faces: 0,
         }
-    } else if scene.starts_with("hybrid") {
+    } else if scene.starts_with("hybrid") || scene.starts_with("pages") {
         let base = world.topology_base_cells().unwrap_or(0) as f64 * VOXEL_SIZE;
         let (position, target) = match camera_preset.as_str() {
-            "cave" if scene == "hybrid-topology" => (
+            "cave" if scene == "hybrid-topology" || scene == "pages-topology" => (
                 DVec3::new(-3., base - 2., -6.8),
                 DVec3::new(-3., base - 2., 1.),
             ),
-            "bridge" if scene == "hybrid-topology" => (
+            "bridge" if scene == "hybrid-topology" || scene == "pages-topology" => (
                 DVec3::new(4., base - 2., -2.8),
                 DVec3::new(4., base + 1., -1.5),
             ),
-            "topology" if scene == "hybrid-topology" => (
+            "topology" if scene == "hybrid-topology" || scene == "pages-topology" => (
                 DVec3::new(12., base + 10., -15.),
                 DVec3::new(0., base - 1., -1.),
             ),
@@ -2404,8 +2555,14 @@ pub fn run() -> Result<()> {
             camera.pitch = direction.y.asin() as f32;
         }
     }
-    let brick_initial = (renderer != "mesh")
-        .then(|| brick_ray::BrickSnapshot::build(|p| world.material(p), ARENA_MIN, ARENA_SIZE));
+    let brick_initial = (renderer != "mesh").then(|| {
+        let mut snapshot =
+            brick_ray::BrickSnapshot::build(|p| world.material(p), ARENA_MIN, ARENA_SIZE);
+        if renderer == "brick-directional" {
+            snapshot.build_directional_bounds();
+        }
+        snapshot
+    });
     let mesh = if brick_initial.is_some() {
         mesh::Mesh {
             vertices: Vec::new(),
@@ -2422,6 +2579,43 @@ pub fn run() -> Result<()> {
         camera.far = far;
     }
     camera.set_explicit_pose(eye, explicit_target);
+    let mut page_stream = None;
+    let mut page_initial = None;
+    if scene.starts_with("pages") {
+        camera.far = capture_far.unwrap_or(300. * page_spacing as f32);
+        if camera.far as f64 > page_terrain::guaranteed_radius(page_spacing) {
+            return Err(format!("page experiment far {}m exceeds guaranteed finite coverage {}m; increase --page-spacing",camera.far,page_terrain::guaranteed_radius(page_spacing)).into());
+        }
+        let prepared = hybrid_initial
+            .as_ref()
+            .expect("pages require hybrid native ownership");
+        let mut pages =
+            page_terrain::Stream::new(world.fbm_terrain().unwrap().clone(), page_spacing);
+        pages.request(
+            prepared.native.center,
+            world.revision(),
+            prepared.native.revision,
+        );
+        let started = Instant::now();
+        loop {
+            if let Some(cover) = pages.poll() {
+                page_initial = Some(cover);
+                break;
+            }
+            if started.elapsed().as_secs() > 120 {
+                return Err("initial source pages timed out".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        eprintln!(
+            "initial source pages ready in {:.1}ms; spacing={}m, finite guaranteed radius={}m",
+            started.elapsed().as_secs_f64() * 1000.,
+            page_spacing,
+            page_terrain::guaranteed_radius(page_spacing)
+        );
+        terrain_prepare_ms += started.elapsed().as_secs_f64() * 1000.;
+        page_stream = Some(pages);
+    }
     if let Some(path) = capture {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let mut gpu = pollster::block_on(Gpu::new(
@@ -2435,7 +2629,7 @@ pub fn run() -> Result<()> {
         gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();
         if let Some(snapshot) = &brick_initial {
-            gpu.install_bricks(snapshot, renderer == "brick-skip")?;
+            gpu.install_bricks(snapshot, brick_skip_mode(&renderer))?;
         }
         if let Some(data) = &terrain_data {
             if surface_layout == "quadtree" {
@@ -2463,9 +2657,21 @@ pub fn run() -> Result<()> {
         if let Some(prepared) = hybrid_initial.take() {
             gpu.init_hybrid(prepared)?;
         }
+        if let Some(cover) = page_initial.take() {
+            gpu.init_pages(&cover);
+        }
         gpu.configure_visuals(&world, &visual_settings);
         if let Some(view) = &mut adaptive_view {
             view.settle(&mut gpu, camera, width, height, capture_unresolved)?;
+        }
+        if gpu
+            .pages
+            .as_ref()
+            .is_some_and(|p| !p.contains(camera.position, camera.far))
+        {
+            return Err(
+                "initial page experiment finite cover cannot cover requested camera/far".into(),
+            );
         }
         gpu.capture(&camera, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
@@ -2482,6 +2688,20 @@ pub fn run() -> Result<()> {
                 source.source_version()
             });
         metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"native_voxel_m\":{VOXEL_SIZE},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
+        if let Some(pages) = &gpu.pages {
+            metadata.pop();
+            metadata.push_str(&format!(
+                ",\"page_experiment\":{}}}",
+                pages.json(
+                    page_stream
+                        .as_ref()
+                        .map_or(Default::default(), |s| s.stats()),
+                    gpu.terrain
+                        .as_ref()
+                        .map_or(0, |t| t.resident_buffer_bytes())
+                )
+            ));
+        }
         if let Some(view) = &adaptive_view {
             metadata.pop();
             metadata.push_str(&format!(",\"adaptive\":{}}}", view.json()));
@@ -2554,16 +2774,26 @@ pub fn run() -> Result<()> {
         camera,
         terrain_data,
         hybrid_initial,
+        page_initial,
+        page_stream,
+        page_pending: None,
+        page_spacing,
         hybrid_stream,
         fbm,
-        hybrid: scene == "hybrid" || scene == "hybrid-topology" || scene.starts_with("adaptive"),
+        hybrid: scene == "hybrid"
+            || scene == "hybrid-topology"
+            || scene.starts_with("adaptive")
+            || scene.starts_with("pages"),
         route,
         uncapped,
         warmup,
         route_step,
         route_speed: route_speed.unwrap_or(if fbm {
             80.
-        } else if scene.starts_with("hybrid") || scene.starts_with("adaptive") {
+        } else if scene.starts_with("hybrid")
+            || scene.starts_with("adaptive")
+            || scene.starts_with("pages")
+        {
             3.
         } else {
             2.
@@ -2674,7 +2904,7 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if scene == "hybrid" || scene == "hybrid-topology" {
             json.pop();
             json.push_str(&format!(",\"hybrid_scope\":{{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":{},\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}}}",scene=="hybrid-topology"));
@@ -2718,6 +2948,23 @@ pub fn run() -> Result<()> {
             visual.overcast, viewer.visual_menu_enabled, viewer.visual_menu_enabled,
             viewer.camera.fov_y, viewer.camera.far
         ));
+        if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
+            json.pop();
+            json.push_str(&format!(
+                ",\"page_experiment\":{}}}",
+                pages.json(
+                    viewer
+                        .page_stream
+                        .as_ref()
+                        .map_or(Default::default(), |s| s.stats()),
+                    viewer
+                        .gpu
+                        .as_ref()
+                        .and_then(|g| g.terrain.as_ref())
+                        .map_or(0, |t| t.resident_buffer_bytes())
+                )
+            ));
+        }
         if let (Some(stream), Some(hybrid)) = (
             &viewer.hybrid_stream,
             viewer.gpu.as_ref().and_then(|g| g.hybrid.as_ref()),
@@ -2749,6 +2996,11 @@ pub fn run() -> Result<()> {
         json.push_str(&format!(",\"renderer_backend\":\"{}\",\"gpu_render_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{}}},\"teleports\":{{\"completed\":{},\"last_readiness_ms\":{}}},\"prediction_horizon_seconds\":{},\"brick_gpu_bytes\":{}}}",
             viewer.renderer, gpu_stats.as_ref().map_or(0,|s| s.sample_count), number(gpu_stats.as_ref().and_then(|s|s.p50_ms)), number(gpu_stats.as_ref().and_then(|s|s.p95_ms)), number(gpu_stats.as_ref().and_then(|s|s.p99_ms)), viewer.teleport_count, viewer.teleport_last_ms,
             number(viewer.hybrid_stream.as_ref().map(|s|s.prediction_horizon_seconds())), viewer.gpu.as_ref().and_then(|g|g.brick.as_ref()).map_or(0,|b|b.resident_bytes)));
+        if let Some(gpu) = &viewer.gpu {
+            let m = &gpu.brick_cache_metrics;
+            json.pop();
+            json.push_str(&format!(",\"brick_directional_cache\":{{\"builds\":{},\"latest_build_ms\":{},\"total_build_ms\":{},\"gpu_bytes\":{},\"uploaded_bytes\":{},\"latest_scratch_bytes\":{},\"peak_scratch_bytes\":{},\"immutable_revision_publication\":true}}}}", m.builds, m.latest_build_ms, m.total_build_ms, m.latest_gpu_bytes, m.uploaded_bytes, m.latest_scratch_bytes, m.peak_scratch_bytes));
+        }
         json.pop();
         json.push_str(&format!(",\"topology_owner\":{{\"enabled\":{},\"world_revision\":{},\"exact_at_all_distances\":{},\"full_G3_passed\":false}}}}",viewer.world.topology_base_cells().is_some(),viewer.world.revision(),viewer.world.topology_base_cells().is_some()));
         if let Some(probe) = viewer.gpu.as_ref().and_then(|g| g.surface_probe.as_ref()) {
@@ -2873,6 +3125,47 @@ mod tests {
             assert_eq!(restored.material(b), Material::Soil);
             let outside = Cell { x: 63, ..a };
             assert_eq!(restored.material(outside), added.material(outside));
+        }
+    }
+    #[test]
+    fn directional_edit_worker_rebuilds_cache_for_immutable_added_and_removed_revisions() {
+        use super::*;
+        let mut world = World::new(SEED);
+        let min = Cell {
+            x: 0,
+            y: 1600,
+            z: 0,
+        };
+        let target = Cell {
+            x: 8,
+            y: 1608,
+            z: 8,
+        };
+        for material in [Material::Wood, Material::Air] {
+            world.set(target, material);
+            let revision = world.revision();
+            let pending = PendingEdit::start_backend(world.clone(), min, [17; 3], true, true);
+            // Further edits cannot mutate either the canonical worker input or
+            // the cache derived from that same revision.
+            world.set(target, Material::Stone);
+            let (_, got_revision, _, bricks) = pending
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            assert_eq!(got_revision, revision);
+            let bricks = bricks.unwrap();
+            assert_eq!(bricks.directional_bounds.len(), bricks.headers.len() * 4);
+            let target_brick = (1 * 3 + 1) * 3 + 1;
+            assert_eq!(
+                bricks.headers[target_brick * 2] == 0,
+                material == Material::Air
+            );
+            for octant in 0..8 {
+                assert_eq!(
+                    bricks.directional_bounds[target_brick * 8 + octant] == 0,
+                    material != Material::Air
+                );
+            }
         }
     }
     #[test]

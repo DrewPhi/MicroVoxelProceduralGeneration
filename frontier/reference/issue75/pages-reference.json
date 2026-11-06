@@ -1,0 +1,266 @@
+{
+  "reference": {
+    "schema": "frontier-landscape-reference-v1",
+    "source": "FbmTerrain CPU f64",
+    "seed": 7,
+    "params": {
+      "horizontal_scale": 1800,
+      "amplitude": 1000,
+      "octaves": 8,
+      "roughness": 0.5
+    },
+    "terrain_recipe": "Legacy",
+    "source_version": 1,
+    "appearance_version": 0,
+    "voxel_size_m": 0.0625,
+    "lod": false,
+    "geometry": "all native columns; conservative exact-max rejection hierarchy",
+    "crop_policy": "exposed canonical faces only; no crop caps; unbounded downward solid columns",
+    "native_min_xz": [
+      -8192,
+      -8192
+    ],
+    "native_size_xz": 16384,
+    "width": 1920,
+    "height": 1080,
+    "spp": 256,
+    "eye": [
+      0.0,
+      94.8875,
+      0.0
+    ],
+    "target": [
+      -8.731370115810932e-08,
+      94.83756238296628,
+      -0.9987523555755615
+    ],
+    "fov_y_degrees": 60,
+    "near": 0.025,
+    "far": 300,
+    "fog": false,
+    "shadows": false,
+    "terrain_tint": true,
+    "tint": "same renderer 32m/4m coherent paint; fine grain zero",
+    "sampling": "deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation",
+    "sample_seed": 83,
+    "ray_count": 530841600,
+    "git_revision": "5909948a4059e604119d600baf4f13e1e270c0ee",
+    "git_dirty": true,
+    "source_fnv1a64": "15f641c6712febcf",
+    "cache_identity_fnv1a64": "c0d4d43f793859eb",
+    "raw_format": "little endian f32 top-left row-major",
+    "depth": "mean hit distance in meters; NaN on miss",
+    "build_seconds": 15.303278733,
+    "render_seconds": 153.192022298,
+    "snapshot_bytes": 1079334228,
+    "threads": 8,
+    "miss_fraction": 0.5333567075376158
+  },
+  "gpu": {
+    "width": 1920,
+    "height": 1080,
+    "eye": [
+      0.0,
+      94.8875,
+      0.0
+    ],
+    "target": [
+      -1.508074092271272e-07,
+      94.83756238296628,
+      -0.9987523555755615
+    ],
+    "fov_y_degrees": 60,
+    "near": 0.025,
+    "far": 300,
+    "samples": 1,
+    "depth_encoding": "ndc_0_1",
+    "color_encoding": "linear_rgb_float32_render_target",
+    "voxel_filter": true,
+    "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+    "capture_render_texture_bytes": 41472000,
+    "capture_readback_bytes": 41472000,
+    "atmosphere": false,
+    "render_scale": 1,
+    "postprocessed": false,
+    "depth_available": true,
+    "seed": 7,
+    "scene": "pages",
+    "renderer": "mesh",
+    "source_version": 1,
+    "edit_revision": 0,
+    "native_voxel_m": 0.0625,
+    "terrain_recipe": "Legacy",
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5,
+    "appearance_version": 0,
+    "surface_layout": "clipmap",
+    "view_levels": 11,
+    "page_experiment": {
+      "layout": "bounded_uniform_worldaligned_pages",
+      "full_CDLOD": false,
+      "proxy_error_certified": false,
+      "source_revision": 0,
+      "camera_epoch_in_content_key": false,
+      "source_voxel_m": 0.0625,
+      "display_spacing_m": 1,
+      "side_pages": 24,
+      "active_pages": 576,
+      "half_extent_m": 384,
+      "guaranteed_radius_m": 344,
+      "grid_topologies": 1,
+      "triangles": 1179648,
+      "draw_calls": 1,
+      "gpu_bytes": 30142608,
+      "gpu_bytes_scope": "page_buffers_only",
+      "retained_clipmap_gpu_bytes": 30942720,
+      "page_and_retained_clipmap_gpu_bytes": 61085328,
+      "native_and_volume_bytes_counted": false,
+      "retained_clipmap_generation": true,
+      "upload_budget_per_frame_enforced": false,
+      "cpu_cache_pages": 576,
+      "cpu_cache_payload_bytes": 30108672,
+      "cpu_payload_hard_bound_bytes": 120434688,
+      "staging_payload_hard_bound_bytes": 30108672,
+      "generated_pages": 576,
+      "reused_pages": 0,
+      "cancelled_jobs": 0,
+      "last_generation_ms": 584.840699,
+      "publications": 1,
+      "uploaded_pages": 576,
+      "uploaded_bytes": 30108672,
+      "upload_cpu_ms": 118.645107,
+      "max_frame_upload_bytes": 30108672,
+      "legacy_shared_lighting": true,
+      "collar_sample_spacing_matched": true,
+      "heightfield_safe_source_only": true,
+      "exact_volume_owner_preserved": true
+    }
+  },
+  "linear_rgb_rmse": 0.036064705054394165,
+  "linear_rgb_mae": 0.012702501739481049,
+  "interpretation": "Appearance comparison, not a geometry error bound: exact sampled microfaces versus filtered LOD geometry/shading.",
+  "geometry_diagnostics": {
+    "available": true,
+    "false_coverage_pixels": 42,
+    "missing_coverage_pixels": 4070,
+    "partial_reference_pixels": 3323,
+    "coverage_absolute_error": {
+      "samples": 2073600,
+      "mae": 0.002642475646219136,
+      "rmse": 0.0491823280304983,
+      "p95_absolute": 0.0,
+      "max_absolute": 1.0
+    },
+    "center_vs_subpixel_mean_depth_difference_m": {
+      "samples": 961883,
+      "mae": 0.24535215376768288,
+      "rmse": 2.9765313912709996,
+      "p95_absolute": 0.31704169711081376,
+      "max_absolute": 267.0839461069076
+    },
+    "limitations": "Finite sampled coverage cannot prove thin-feature absence. Depth is candidate pixel-center versus reference subpixel mean, not a strict geometry-error test."
+  },
+  "reference_full_terrain_linear_rgb_error": {
+    "samples": 2897859,
+    "mae": 0.02657956229832885,
+    "rmse": 0.0502987296990196,
+    "p95_absolute": 0.08179855868220337,
+    "max_absolute": 0.7758910935372114
+  },
+  "fully_covered_terrain_mask": "reference_full_and_candidate_hit",
+  "fully_covered_terrain_linear_rgb_error": {
+    "samples": 2885649,
+    "mae": 0.024670900191512583,
+    "rmse": 0.037224885640546455,
+    "p95_absolute": 0.07954609021544456,
+    "max_absolute": 0.27287507802248
+  },
+  "appearance_by_reference_distance_m": [
+    {
+      "range": [
+        0,
+        10
+      ],
+      "pixels": 693,
+      "linear_rgb_error": {
+        "samples": 2079,
+        "mae": 0.007962791338749319,
+        "rmse": 0.02057467515296825,
+        "p95_absolute": 0.04614538550376891,
+        "max_absolute": 0.138229101896286
+      }
+    },
+    {
+      "range": [
+        10,
+        25
+      ],
+      "pixels": 139939,
+      "linear_rgb_error": {
+        "samples": 419817,
+        "mae": 0.017363019447910074,
+        "rmse": 0.03258362000993769,
+        "p95_absolute": 0.08055853247642511,
+        "max_absolute": 0.2291412055492401
+      }
+    },
+    {
+      "range": [
+        25,
+        50
+      ],
+      "pixels": 466929,
+      "linear_rgb_error": {
+        "samples": 1400787,
+        "mae": 0.020290026237932555,
+        "rmse": 0.03464345736176928,
+        "p95_absolute": 0.07718234062194823,
+        "max_absolute": 0.27287507802248
+      }
+    },
+    {
+      "range": [
+        50,
+        100
+      ],
+      "pixels": 229378,
+      "linear_rgb_error": {
+        "samples": 688134,
+        "mae": 0.033377930511126974,
+        "rmse": 0.04283321668590503,
+        "p95_absolute": 0.08524071369320155,
+        "max_absolute": 0.22699730098247528
+      }
+    },
+    {
+      "range": [
+        100,
+        200
+      ],
+      "pixels": 106031,
+      "linear_rgb_error": {
+        "samples": 318093,
+        "mae": 0.0317822177373889,
+        "rmse": 0.03858444772731196,
+        "p95_absolute": 0.07090539783239364,
+        "max_absolute": 0.19253143668174744
+      }
+    },
+    {
+      "range": [
+        200,
+        500
+      ],
+      "pixels": 18913,
+      "linear_rgb_error": {
+        "samples": 56739,
+        "mae": 0.04204371390302331,
+        "rmse": 0.04873673701206045,
+        "p95_absolute": 0.08612144738435745,
+        "max_absolute": 0.1828547641634941
+      }
+    }
+  ]
+}
