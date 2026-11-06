@@ -6,6 +6,11 @@ and [parallel GPU appearance preparation](reference/issue75/GPU_PROFILES.md).
 These preserve useful architectural ideas for further integration instead of
 rejecting their families based on the first uniform-grid or serial-kernel test.
 They remain opt-in experiments, not completion of #75 or promotion under #74.
+The [integrated appearance experiment](reference/issue75/INTEGRATION.md) now
+consumes GPU-computed profiles in real draws. Lossless source packing reduced
+transfer/storage costs, but repeated loading and motion runs did not establish
+an end-to-end win. Keep this path optional while investigating shared source
+reuse and batched preparation; do not promote it on kernel timings alone.
 The uniform-page candidate fails the primary visual gate; no replacement is
 promoted and the broader architecture decision remains open. Reuse tier G for
 the experiment tools. Existing adaptive,

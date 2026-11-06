@@ -1,9 +1,15 @@
 // One workgroup/profile. Integer face/material counts are order independent;
 // palette-weighted final sums intentionally differ from ordered CPU rounding.
+// Lossless 20-bit CPU ABI: 11-bit height and three 3-bit materials.
 struct Column { height:i32, deep:u32, soil:u32, top:u32 }
+fn unpack_column(bits:u32) -> Column {
+    return Column(i32(bits & 2047u), (bits >> 11u) & 7u,
+        (bits >> 14u) & 7u, (bits >> 17u) & 7u);
+}
+fn column_height(bits:u32) -> i32 { return i32(bits & 2047u); }
 struct Job { page:u32, x:u32, z:u32, width:u32, depth:u32, stride:u32, pad0:u32, pad1:u32 }
 struct Profile { faces:array<vec4<f32>,5> }
-@group(0) @binding(0) var<storage,read> columns:array<Column>;
+@group(0) @binding(0) var<storage,read> columns:array<u32>;
 @group(0) @binding(1) var<storage,read> jobs:array<Job>;
 @group(0) @binding(2) var<storage,read_write> profiles:array<Profile>;
 const COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(vec3(0.),vec3(.18,.34,.10),vec3(.32,.22,.13),vec3(.35,.37,.39),vec3(.41,.25,.13));
@@ -23,9 +29,9 @@ fn main(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) 
         let x=j.x+(sample%sample_width)*j.stride;
         let z=j.z+(sample/sample_width)*j.stride;
         let i=j.page*16900u+(z+1u)*130u+x+1u;
-        let c=columns[i];
+        let c=unpack_column(columns[i]);
         add(0u,c.top,1u,weight);
-        let neighbors=array<i32,4>(columns[i+1u].height,columns[i-1u].height,columns[i+130u].height,columns[i-130u].height);
+        let neighbors=array<i32,4>(column_height(columns[i+1u]),column_height(columns[i-1u]),column_height(columns[i+130u]),column_height(columns[i-130u]));
         for(var axis=0u;axis<4u;axis++) {
             let lo=neighbors[axis];
             add(axis+1u,c.deep,u32(max(0,c.height-12-lo)),weight);

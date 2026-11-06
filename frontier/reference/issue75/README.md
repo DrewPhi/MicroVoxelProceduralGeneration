@@ -3,6 +3,8 @@
 Follow-up: [iteration 2](ITERATION_2.md) measures two smaller adaptive GPU
 representations; [GPU appearance probes](GPU_PROFILES.md) compare serial and
 parallel preparation. These are further Phase A evidence, with defaults unchanged.
+The next [integrated experiment](INTEGRATION.md) connects parallel profiles to
+actual draws, tests lossless source packing, and records loading/motion costs.
 
 The uniform page experiment fails the small Legacy visual gate. Directional
 brick skipping preserves the tested ray result but is slower than the existing

@@ -1,5 +1,10 @@
 # GPU appearance-profile construction experiment
 
+Historical standalone measurements below precede the
+[integrated, packed-source follow-up](INTEGRATION.md). Current source has a
+4-byte packed column and an optional runtime consumer; the older binary's
+16-byte column sizes and timings below are preserved as recorded evidence.
+
 The parallel integer-count kernel is worth an integrated test. In this standalone
 probe, its resident GPU work took **0.018/0.069/0.122 ms** for 64/256/512 primary
 profiles. This is evidence for the computation strategy, **not a terrain-loading

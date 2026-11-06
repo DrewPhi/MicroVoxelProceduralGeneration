@@ -74,7 +74,20 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
     };
     // Fixed temporary vectors, clipping/affine workspace, small allocations;
     // factor two is deliberately retained pending measured allocation auditing.
-    usize::try_from((modeled + 1024 * 1024) * 2).ok()
+    let deferred_profiles = if crate::integrated_profiles::enabled()
+        && w == 128
+        && step >= 8
+        && key.source_revision == 0
+    {
+        // A bounded canonical page conversion can hold the sampled columns
+        // and packed GPU columns together. Jobs and the retained payload also
+        // remain live until publication; use the existing conservative factor.
+        130 * 130 * (std::mem::size_of::<crate::column_mesh::SampledColumn>() as u128 + 4)
+            + 512 * 32
+    } else {
+        0
+    };
+    usize::try_from((modeled + deferred_profiles + 1024 * 1024) * 2).ok()
 }
 
 #[cfg(test)]

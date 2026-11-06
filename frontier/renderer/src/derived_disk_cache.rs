@@ -314,6 +314,11 @@ impl DiskCache {
         result.is_ok()
     }
     fn store_inner(&mut self, tile: &GeometryTile) -> io::Result<()> {
+        if tile.gpu_profiles.is_some() || !tile.appearance.available {
+            return Err(io::Error::other(
+                "deferred GPU profiles cannot be persisted as CPU colors",
+            ));
+        }
         if !self.keyer.supported(tile.key) {
             return Err(io::Error::other("snapshot revision"));
         }
@@ -655,6 +660,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         *a = r.arr()?;
     }
     let appearance = FaceAppearance {
+        available: true,
         area_m2,
         color_area,
         exhaustive: r.flag()?,
@@ -733,6 +739,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         affine_stats,
         appearance,
         face_profiles,
+        gpu_profiles: None,
         face_profile_indices,
         exact,
         bytes,

@@ -25,7 +25,7 @@ from adaptive_motion_check import EXPERIMENT_ENV_KEYS, capture_provenance
 from phasea_pages_check import CAMERA_MANIFEST, ROOT, commands, cpu_model
 from phasea_report import report as compare_report
 
-ITERATION_ENV_KEYS = (*EXPERIMENT_ENV_KEYS, "FRONTIER_INDEXED_PROXY")
+ITERATION_ENV_KEYS = (*EXPERIMENT_ENV_KEYS, "FRONTIER_INDEXED_PROXY", "FRONTIER_GPU_PROFILES")
 
 
 def environment(entries):
@@ -64,6 +64,32 @@ def match_metadata(side, benchmark, headless=False):
                 route=dict(name='static', clock='headless_still' if headless else 'realtime',
                            start='frozen-primary', warmup_frames=0 if headless else 60,
                            readiness='headless_capture' if headless else 'adaptive-wait-quality'))
+
+
+def float32_rgb_diagnostics(root, width, height):
+    """Compare actual linear RGB capture buffers, independently of PNG encoding."""
+    paths = [root / (name + '.linear_rgb.f32') for name in ('baseline', 'candidate')]
+    arrays = []
+    missing = []
+    for path in paths:
+        if not path.exists():
+            missing.append(path.name)
+            continue
+        if path.stat().st_size != width * height * 3 * 4:
+            raise ValueError(path.name + ': unexpected float32 RGB size')
+        values = np.fromfile(path, dtype='<f4').reshape(height, width, 3)
+        if not np.isfinite(values).all():
+            raise ValueError(path.name + ': float32 RGB must be finite')
+        arrays.append(values)
+    if missing:
+        return dict(available=False, unavailable='Missing actual float32 RGB capture: ' + ', '.join(missing),
+                    comparison=None)
+    left, right = arrays
+    delta = np.abs(left.astype(np.float64) - right.astype(np.float64))
+    return dict(available=True, encoding='little-endian float32 linear RGB capture; no PNG decoding',
+                comparison=dict(max_abs_error=float(delta.max()), rmse=float(np.sqrt(np.mean(delta ** 2))),
+                                mae=float(delta.mean()), differing_pixels=int(np.count_nonzero(np.any(left != right, axis=2))),
+                                byte_equal=bool(np.array_equal(left.view(np.uint32), right.view(np.uint32)))))
 
 
 
@@ -127,6 +153,8 @@ def artifact_diagnostics(root, reference, motion=False):
     result = compare_bytes(root / 'baseline.png', root / 'candidate.png', tolerance=0,
                            mesh_depth=root / 'baseline.depth.f32', ray_depth=root / 'candidate.depth.f32')
     result['linear_rgb'] = compare_linear(linear_rgb(root / 'baseline.png'), linear_rgb(root / 'candidate.png'))
+    result['linear_rgb_encoding'] = 'sRGB PNG decoded to linear RGB; not the float32 capture buffer'
+    result['actual_float32_rgb'] = float32_rgb_diagnostics(root, expected['width'], expected['height'])
     if result['depth']['common_hit_pixels'] == 0:
         result['depth']['max_normalized_error'] = None
         result['depth']['p99_normalized_error'] = None
@@ -227,7 +255,9 @@ def main():
             row['measurements'] = dict(cpu_model=cpu_model(), gpu_model=benchmark.get('adapter'),
                 binary_sha256=provenance['binary_sha256'], command=command,
                 p50_ms=frames.get('p50_ms'), p95_ms=frames.get('p95_ms'), p99_ms=frames.get('p99_ms'),
-                cold_ready_ms=adaptive.get('elapsed_preparation_ms'), resident_bytes=None,
+                # Report-time stream elapsed includes warmup and measured frames.
+                # Only the recorded first-quality event measures cold readiness.
+                cold_ready_ms=adaptive.get('first_quality_ms'), resident_bytes=None,
                 pending_bytes=None, page_or_mesh_count=adaptive.get('resident_clusters'))
             row['scoped_counters'] = {key: benchmark.get(key) for key in
                                       ('adaptive', 'adaptive_route_quality', 'streaming', 'native_streaming', 'pages', 'page_experiment', 'route')}

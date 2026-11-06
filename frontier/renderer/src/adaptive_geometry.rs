@@ -6,6 +6,7 @@
 //! Edited 3D content remains under the separate explicit volume owner.
 use crate::{
     column_mesh,
+    integrated_profiles::{self, DeferredProfiles, GpuProfilePreparationStats},
     mesh::{Mesh, Vertex},
     source_page_cache::PageCache,
 };
@@ -136,6 +137,8 @@ pub struct GeometryTile {
     pub appearance: FaceAppearance,
     /// Unique patch profiles: +Y,+X,-X,+Z,-Z; entry zero is the exact-face fallback.
     pub face_profiles: Vec<[[f32; 4]; 5]>,
+    /// When present, face_profiles contains addresses only, not computed colors.
+    pub gpu_profiles: Option<DeferredProfiles>,
     /// Per-vertex profile table address; index zero preserves exact face shading.
     pub face_profile_indices: Vec<u32>,
     pub exact: bool,
@@ -172,6 +175,8 @@ pub struct AffineStats {
 /// establish visibility or an appearance error bound under occlusion.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FaceAppearance {
+    /// False when integration is GPU-only; area/color totals are unavailable.
+    pub available: bool,
     pub area_m2: [f64; 5],
     pub color_area: [[f64; 3]; 5],
     pub exhaustive: bool,
@@ -201,6 +206,7 @@ fn build_cached(
 ) -> Result<GeometryTile, String> {
     samples.source_stage = SourceStage::Proxy;
     samples.begin_job();
+    samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
         let mut tile = build_surface(world, key, cancelled, samples)?;
         let finalize_started = std::time::Instant::now();
@@ -459,7 +465,11 @@ fn compact_vertices(tile: &mut GeometryTile) {
     tile.bytes = tile.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
         + tile.mesh.indices.capacity() * 4
         + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
-        + tile.face_profile_indices.capacity() * 4;
+        + tile.face_profile_indices.capacity() * 4
+        + tile
+            .gpu_profiles
+            .as_ref()
+            .map_or(0, DeferredProfiles::payload_bytes);
 }
 
 /// Pack only beneficial flat primitives after every source certificate and
@@ -538,7 +548,11 @@ pub(crate) fn pack_proxy_triangles(tile: &mut GeometryTile) -> Result<(), String
     tile.mesh.indices = vec![];
     tile.face_profile_indices = vec![];
     tile.bytes = tile.proxy_triangles.capacity() * std::mem::size_of::<ProxyTriangle>()
-        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>();
+        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
+        + tile
+            .gpu_profiles
+            .as_ref()
+            .map_or(0, DeferredProfiles::payload_bytes);
     Ok(())
 }
 
@@ -603,7 +617,11 @@ fn pack_native_quads(tile: &mut GeometryTile) -> Result<(), String> {
     tile.face_profile_indices = vec![];
     tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
         + tile.native_bins.capacity() * std::mem::size_of::<NativeBin>()
-        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>();
+        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
+        + tile
+            .gpu_profiles
+            .as_ref()
+            .map_or(0, DeferredProfiles::payload_bytes);
     Ok(())
 }
 /// The base-heightfield halo does not describe carved/edited volume faces.
@@ -749,7 +767,11 @@ fn remove_volume_boundary_faces(tile: &mut GeometryTile) {
     tile.bytes = tile.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
         + tile.mesh.indices.capacity() * 4
         + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
-        + tile.face_profile_indices.capacity() * 4;
+        + tile.face_profile_indices.capacity() * 4
+        + tile
+            .gpu_profiles
+            .as_ref()
+            .map_or(0, DeferredProfiles::payload_bytes);
 }
 
 fn build_surface(
@@ -845,13 +867,22 @@ fn build_surface(
         tile.face_profiles = profiles;
         tile.face_profile_indices = profile_indices;
         tile.bytes += tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
-            + tile.face_profile_indices.capacity() * 4;
+            + tile.face_profile_indices.capacity() * 4
+            + tile
+                .gpu_profiles
+                .as_ref()
+                .map_or(0, DeferredProfiles::payload_bytes);
         tile.certified_error_m = Some(0.);
         tile.exact_height_range_m = Some(height_range);
         tile.appearance = appearance;
         return Ok(tile);
     }
+    let defer_profiles = samples.gpu_profiles.enabled && samples.gpu_job_allowed;
+    if defer_profiles {
+        samples.gpu_profiles.eligible_tiles += 1;
+    }
     let mut generator = Generator {
+        defer_profiles,
         #[cfg(test)]
         experiment: None,
         world,
@@ -876,6 +907,7 @@ fn build_surface(
         face_profiles: vec![[[0.; 4]; 5]],
         face_profile_indices: vec![],
         appearance: FaceAppearance {
+            available: true,
             exhaustive: key.width_cells <= MAX_NATIVE_WIDTH,
             ..Default::default()
         },
@@ -948,6 +980,81 @@ fn build_surface(
     } else {
         None
     };
+    let gpu_profiles = if defer_profiles {
+        let started = std::time::Instant::now();
+        let generated_before = generator.samples.generated;
+        // Geometry/certification already populated the local canonical cache.
+        // Only missing halo/corner inputs query the shared revision-owned cache;
+        // any misses are canonical source work, counted independently below.
+        let mut snapshot_cancelled = false;
+        let mut visited = 0;
+        let page = crate::gpu_ordered_profiles::CachedPage::from_cache(world, key.min, |x, z| {
+            visited += 1;
+            if visited % 130 == 0 && cancelled() {
+                snapshot_cancelled = true;
+                return None;
+            }
+            let local = [x - key.min[0], z - key.min[1]];
+            Some(
+                generator
+                    .heights
+                    .get(&local)
+                    .copied()
+                    .unwrap_or_else(|| generator.samples.column(world, [x, z])),
+            )
+        });
+        generator.samples.gpu_profiles.snapshot_generated_columns +=
+            generator.samples.generated - generated_before;
+        generator.samples.gpu_profiles.snapshot_ms += started.elapsed().as_secs_f64() * 1000.;
+        if snapshot_cancelled {
+            return Err("adaptive geometry cancelled".into());
+        }
+        match page {
+            Ok(page) => {
+                let mut jobs = Vec::with_capacity((width / step * (width / step)) as usize);
+                for z in (0..width).step_by(step as usize) {
+                    for x in (0..width).step_by(step as usize) {
+                        jobs.push(crate::gpu_ordered_profiles::ProfileJob::new(
+                            0,
+                            [x as u32, z as u32],
+                            [step as u32; 2],
+                            1,
+                        )?);
+                    }
+                }
+                generator.samples.gpu_profiles.deferred_tiles += 1;
+                generator.samples.gpu_profiles.deferred_jobs += jobs.len() as u64;
+                generator.appearance = FaceAppearance::default();
+                Some(DeferredProfiles {
+                    page,
+                    jobs,
+                    source_revision: key.source_revision,
+                })
+            }
+            Err(_) => {
+                // Unsupported relief keeps the baseline painter and arithmetic.
+                generator.samples.gpu_profiles.fallback_tiles += 1;
+                generator.defer_profiles = false;
+                let started = std::time::Instant::now();
+                generator.samples.source_stage = SourceStage::Appearance;
+                let mut id = 1;
+                for z in (0..width).step_by(step as usize) {
+                    if cancelled() {
+                        return Err("adaptive geometry cancelled".into());
+                    }
+                    for x in (0..width).step_by(step as usize) {
+                        generator.face_profiles[id] = generator.patch_profile(x, z, step)?;
+                        id += 1;
+                    }
+                }
+                generator.samples.source_stage = SourceStage::Proxy;
+                generator.samples.stages.appearance_ms += started.elapsed().as_secs_f64() * 1000.;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let affine_stats = generator.affine_stats;
     let appearance = generator.appearance;
     let mut tile = finish(
@@ -958,9 +1065,14 @@ fn build_surface(
         false,
     );
     tile.face_profiles = generator.face_profiles;
+    tile.gpu_profiles = gpu_profiles;
     tile.face_profile_indices = generator.face_profile_indices;
     tile.bytes += tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
-        + tile.face_profile_indices.capacity() * 4;
+        + tile.face_profile_indices.capacity() * 4
+        + tile
+            .gpu_profiles
+            .as_ref()
+            .map_or(0, DeferredProfiles::payload_bytes);
     tile.certified_error_m = certificate;
     tile.affine_error_m = affine_error;
     tile.affine_height_range_m = affine_range;
@@ -1009,6 +1121,7 @@ fn finish(
         affine_stats: AffineStats::default(),
         appearance: FaceAppearance::default(),
         face_profiles: vec![],
+        gpu_profiles: None,
         face_profile_indices: vec![],
         exact,
         bytes,
@@ -1520,6 +1633,8 @@ impl SourceTimings {
     }
 }
 struct SourceSamples {
+    gpu_job_allowed: bool,
+    gpu_profiles: GpuProfilePreparationStats,
     profile_enabled: bool,
     source_stage: SourceStage,
     timings: SourceTimings,
@@ -1531,6 +1646,11 @@ struct SourceSamples {
 impl SourceSamples {
     fn new(bytes: usize) -> Self {
         Self {
+            gpu_job_allowed: false,
+            gpu_profiles: GpuProfilePreparationStats {
+                enabled: integrated_profiles::enabled(),
+                ..Default::default()
+            },
             profile_enabled: std::env::var_os("FRONTIER_PROFILE_SOURCE").is_some_and(|v| v == "1"),
             source_stage: SourceStage::default(),
             timings: SourceTimings::default(),
@@ -1542,6 +1662,11 @@ impl SourceSamples {
     }
     fn fork(&self) -> Self {
         Self {
+            gpu_job_allowed: false,
+            gpu_profiles: GpuProfilePreparationStats {
+                enabled: self.gpu_profiles.enabled,
+                ..Default::default()
+            },
             profile_enabled: self.profile_enabled,
             source_stage: SourceStage::default(),
             timings: SourceTimings::default(),
@@ -1682,6 +1807,7 @@ impl std::ops::Index<&[i64; 2]> for LocalColumns {
     }
 }
 struct Generator<'a> {
+    defer_profiles: bool,
     #[cfg(test)]
     experiment: Option<SmallTileExperiment>,
     world: &'a World,
@@ -1838,7 +1964,11 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        let profile = self.patch_profile(x, z, s)?;
+        let profile = if self.defer_profiles {
+            [[0.; 4]; 5]
+        } else {
+            self.patch_profile(x, z, s)?
+        };
         self.samples.source_stage = SourceStage::Proxy;
         self.samples.stages.appearance_ms += started.elapsed().as_secs_f64() * 1000.;
         let index = self.face_profiles.len() as u32;
@@ -2216,6 +2346,7 @@ fn clip_axis(
 
 fn native_appearance(mesh: &Mesh) -> FaceAppearance {
     let mut out = FaceAppearance {
+        available: true,
         exhaustive: true,
         ..Default::default()
     };
@@ -2248,6 +2379,7 @@ fn native_appearance(mesh: &Mesh) -> FaceAppearance {
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct CacheStats {
+    pub gpu_profiles: GpuProfilePreparationStats,
     pub hits: u64,
     pub builds: u64,
     pub evictions: u64,
@@ -2437,7 +2569,12 @@ impl GeometryCache {
         if let Some(tile) = self.get(key) {
             return Ok(tile);
         }
-        if let Some(tile) = self.disk.as_mut().and_then(|disk| disk.load(key)) {
+        if let Some(tile) = self
+            .disk
+            .as_mut()
+            .filter(|_| !self.samples.gpu_profiles.enabled)
+            .and_then(|disk| disk.load(key))
+        {
             return self.admit_built(key, Ok(tile), 0.);
         }
         debug_assert!(self.mesh_bytes <= self.mesh_budget);
@@ -2470,7 +2607,12 @@ impl GeometryCache {
             keys.iter().map(|&key| self.get(key)).collect();
         for (i, &key) in keys.iter().enumerate() {
             if results[i].is_none() {
-                if let Some(tile) = self.disk.as_mut().and_then(|disk| disk.load(key)) {
+                if let Some(tile) = self
+                    .disk
+                    .as_mut()
+                    .filter(|_| !self.samples.gpu_profiles.enabled)
+                    .and_then(|disk| disk.load(key))
+                {
                     results[i] = Some(self.admit_built(key, Ok(tile), 0.)?);
                 }
             }
@@ -2508,6 +2650,7 @@ impl GeometryCache {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         for (_, _, _, _, samples) in &built {
+            self.samples.gpu_profiles.merge(samples.gpu_profiles);
             self.samples.hits += samples.hits;
             self.samples.generated += samples.generated;
             self.samples.timings.merge(samples.timings);
@@ -2640,7 +2783,7 @@ impl GeometryCache {
         self.link_newest(key);
         self.stats.cache_admission_ms +=
             (admission_started.elapsed().as_secs_f64() * 1000. - eviction_ms).max(0.);
-        if elapsed > 0. {
+        if elapsed > 0. && tile.gpu_profiles.is_none() {
             if let Some(disk) = &mut self.disk {
                 disk.queue_store(tile.clone());
             }
@@ -2658,6 +2801,7 @@ impl GeometryCache {
             - timing.certificate_ms
             - timing.native_mesh_ms;
         CacheStats {
+            gpu_profiles: self.samples.gpu_profiles,
             source_budget_bytes: self.source_budget,
             profile_enabled: self.samples.profile_enabled,
             source_lock_ms: timing.lock_ms,
@@ -3613,6 +3757,7 @@ mod tests {
                         source_revision: 0,
                     };
                     let mut generator = Generator {
+                        defer_profiles: false,
                         experiment: None,
                         world: &world,
                         key,
@@ -4885,6 +5030,7 @@ mod tests {
                 source_revision: 0,
             };
             let mut g = Generator {
+                defer_profiles: false,
                 experiment: None,
                 world: &world,
                 key,
@@ -5141,6 +5287,7 @@ mod tests {
         let mut samples = SourceSamples::new(32 * 1024 * 1024);
         samples.begin_job();
         let mut g = Generator {
+            defer_profiles: false,
             experiment: mode,
             world,
             key,
@@ -5164,6 +5311,7 @@ mod tests {
             face_profiles: vec![[[0.; 4]; 5]],
             face_profile_indices: vec![],
             appearance: FaceAppearance {
+                available: true,
                 exhaustive: mode != Some(SmallTileExperiment::AffineSampledAppearance),
                 ..Default::default()
             },
@@ -5418,5 +5566,149 @@ mod tests {
         assert!(tile.mesh.vertices.len() < 10_000);
         assert!(tile.certified_error_m.is_none());
         assert!(!tile.appearance.exhaustive);
+    }
+    #[test]
+    fn integrated_gpu_profiles_preserve_geometry_and_skip_cpu_painter() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let key = TileKey {
+            min: [-512, -512],
+            width_cells: 128,
+            step_cells: 16,
+            edge_steps: [1; 4],
+            source_revision: 0,
+        };
+        let mut baseline_samples = SourceSamples::new(8 * 1024 * 1024);
+        baseline_samples.gpu_profiles.enabled = false;
+        let baseline = build_cached(&world, key, || false, &mut baseline_samples).unwrap();
+        let mut candidate_samples = SourceSamples::new(8 * 1024 * 1024);
+        candidate_samples.gpu_profiles.enabled = true;
+        let mut candidate = build_cached(&world, key, || false, &mut candidate_samples).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&candidate.mesh.vertices),
+            bytemuck::cast_slice::<_, u8>(&baseline.mesh.vertices)
+        );
+        assert_eq!(candidate.mesh.indices, baseline.mesh.indices);
+        assert_eq!(
+            candidate.face_profile_indices,
+            baseline.face_profile_indices
+        );
+        assert_eq!(candidate.certified_error_m, baseline.certified_error_m);
+        assert_eq!(
+            candidate.exact_height_range_m,
+            baseline.exact_height_range_m
+        );
+        assert_eq!(candidate.bounds, baseline.bounds);
+        assert_eq!(
+            candidate.conservative_surface_bounds,
+            baseline.conservative_surface_bounds
+        );
+        assert_eq!(candidate.sampled_columns, baseline.sampled_columns);
+        assert!(baseline.appearance.available && baseline.appearance.exhaustive);
+        assert!(!candidate.appearance.available && !candidate.appearance.exhaustive);
+        assert!(candidate
+            .face_profiles
+            .iter()
+            .flatten()
+            .flatten()
+            .all(|&v| v == 0.));
+        let payload = candidate
+            .gpu_profiles
+            .as_ref()
+            .expect("eligible profile dispatch");
+        assert_eq!(payload.profile_count(), baseline.face_profiles.len());
+        let oracle = crate::gpu_ordered_profiles::cpu_profiles(
+            std::slice::from_ref(&payload.page),
+            &payload.jobs,
+        )
+        .unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&oracle),
+            bytemuck::cast_slice::<_, u8>(&baseline.face_profiles[1..])
+        );
+        assert_eq!(
+            candidate_samples.pages.snapshot().appearance_cache_misses,
+            0
+        );
+        assert!(baseline_samples.pages.snapshot().appearance_cache_misses > 0);
+        assert_eq!(candidate_samples.gpu_profiles.deferred_tiles, 1);
+        assert_eq!(candidate_samples.gpu_profiles.deferred_jobs, 64);
+        assert_eq!(candidate_samples.gpu_profiles.fallback_tiles, 0);
+        let original_bytes = candidate.bytes;
+        let payload_bytes = payload.payload_bytes();
+        pack_proxy_triangles(&mut candidate).unwrap();
+        assert!(candidate.bytes <= original_bytes);
+        assert!(candidate.bytes >= payload_bytes);
+        assert!(candidate
+            .proxy_triangles
+            .iter()
+            .any(|q| q.profile_index == 0));
+    }
+
+    #[test]
+    fn integrated_gpu_profiles_keep_ineligible_ownership_on_cpu() {
+        let world = World::fbm_topology(7, FbmParams::default()).unwrap();
+        let mut samples = SourceSamples::new(8 * 1024 * 1024);
+        samples.gpu_profiles.enabled = true;
+        let tile = build_cached(
+            &world,
+            TileKey {
+                min: [256, 256],
+                width_cells: 128,
+                step_cells: 16,
+                edge_steps: [1; 4],
+                source_revision: 0,
+            },
+            || false,
+            &mut samples,
+        )
+        .unwrap();
+        assert!(tile.gpu_profiles.is_none());
+        assert!(tile.appearance.available);
+        assert_eq!(samples.gpu_profiles.eligible_tiles, 0);
+        let plain = World::fbm(7, FbmParams::default()).unwrap();
+        for (width_cells, step_cells) in [(32, 8), (128, 4), (128, 1), (256, 16)] {
+            assert!(!integrated_profiles::eligible(
+                &plain,
+                TileKey {
+                    width_cells,
+                    step_cells,
+                    ..key(8)
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn integrated_gpu_profile_relief_falls_back_to_cpu() {
+        let world = World::fbm(
+            7,
+            FbmParams {
+                amplitude: 100_000.,
+                ..FbmParams::default()
+            },
+        )
+        .unwrap();
+        let key = TileKey {
+            min: [-512, -512],
+            width_cells: 128,
+            step_cells: 16,
+            edge_steps: [16; 4],
+            source_revision: 0,
+        };
+        let mut samples = SourceSamples::new(8 * 1024 * 1024);
+        samples.gpu_profiles.enabled = true;
+        let tile = build_cached(&world, key, || false, &mut samples).unwrap();
+        assert!(tile.gpu_profiles.is_none());
+        assert!(tile.appearance.available && tile.appearance.exhaustive);
+        assert_eq!(samples.gpu_profiles.eligible_tiles, 1);
+        assert_eq!(samples.gpu_profiles.fallback_tiles, 1);
+        assert!(samples.pages.snapshot().appearance_cache_misses > 0);
+        let mut baseline_samples = SourceSamples::new(8 * 1024 * 1024);
+        baseline_samples.gpu_profiles.enabled = false;
+        let baseline = build_cached(&world, key, || false, &mut baseline_samples).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&tile.face_profiles),
+            bytemuck::cast_slice::<_, u8>(&baseline.face_profiles)
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! Ordered retains baseline float operation order; ParallelCounts reduces exact
 //! integer face/material histograms then forms palette-weighted sums. GPU float
 //! arithmetic and changed accumulation need measured parity; neither is promoted.
-//! No production renderer calls this module. No source noise is evaluated here.
+//! The opt-in adaptive path consumes resident results without readback. No source noise is evaluated here.
 use crate::column_mesh::SampledColumn;
 use frontier_world::{FbmParams, World};
 use std::{sync::mpsc, time::Instant};
@@ -14,16 +14,37 @@ const HALO_SIDE: usize = WIDTH + 2;
 pub const MAX_PAGES: usize = 8;
 pub const MAX_JOBS: usize = 512;
 pub type FaceProfile = [[f32; 4]; 5];
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Column {
-    height: i32,
-    deep: u32,
-    soil: u32,
-    top: u32,
+/// Lossless bounded canonical column: height in bits 0..10, then three
+/// 3-bit material IDs (deep, soil, top). Upper twelve bits remain zero.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct Column(u32);
+impl Column {
+    fn new(height: i32, deep: u32, soil: u32, top: u32) -> Self {
+        assert!((0..=1024).contains(&height));
+        assert!([deep, soil, top].iter().all(|m| (1..=4).contains(m)));
+        Self(height as u32 | (deep << 11) | (soil << 14) | (top << 17))
+    }
+    fn height(self) -> i32 {
+        (self.0 & 0x7ff) as i32
+    }
+    fn deep(self) -> u32 {
+        (self.0 >> 11) & 7
+    }
+    fn soil(self) -> u32 {
+        (self.0 >> 14) & 7
+    }
+    fn top(self) -> u32 {
+        (self.0 >> 17) & 7
+    }
 }
+const PAGE_COLUMN_BYTES: usize = HALO_SIDE * HALO_SIDE * std::mem::size_of::<Column>();
+/// Runtime scratch only, with no diagnostic readbacks or timestamps.
+pub const RESIDENT_BYTES: u64 =
+    (MAX_PAGES * PAGE_COLUMN_BYTES + MAX_JOBS * 32 + (MAX_JOBS + 1) * 80) as u64;
 /// Every page includes one canonical axial halo and belongs to one immutable
 /// source snapshot. Missing cache entries fail instead of generating terrain.
+#[derive(Clone, Debug)]
 pub struct CachedPage {
     columns: Vec<Column>,
     pub min: [i64; 2],
@@ -71,15 +92,17 @@ impl CachedPage {
         if high as i128 - low as i128 > 1024 {
             return Err("ordered profile relief exceeds exact-area experiment bound".into());
         }
-        let columns = samples
-            .into_iter()
-            .map(|c| Column {
-                height: (c.height as i128 - low as i128) as i32,
-                deep: c.bands[2] as u32,
-                soil: c.bands[1] as u32,
-                top: c.bands[0] as u32,
-            })
-            .collect();
+        // Allocate the packed storage explicitly: a collecting iterator must
+        // not retain the larger sampled-column allocation after conversion.
+        let mut columns = Vec::with_capacity(HALO_SIDE * HALO_SIDE);
+        for c in samples {
+            columns.push(Column::new(
+                (c.height as i128 - low as i128) as i32,
+                c.bands[2] as u32,
+                c.bands[1] as u32,
+                c.bands[0] as u32,
+            ));
+        }
         Ok(Self {
             columns,
             min,
@@ -87,6 +110,19 @@ impl CachedPage {
             params,
             revision: world.revision(),
         })
+    }
+    fn same_source(&self, other: &Self) -> bool {
+        self.min == other.min
+            && self.seed == other.seed
+            && self.params == other.params
+            && self.revision == other.revision
+            && self.columns == other.columns
+    }
+    pub fn matches_tile(&self, min: [i64; 2], revision: u64) -> bool {
+        self.min == min && self.revision == revision && revision == 0
+    }
+    pub fn validate_jobs(&self, jobs: &[ProfileJob]) -> Result<(), String> {
+        validate(std::slice::from_ref(self), jobs)
     }
     pub fn payload_bytes(&self) -> usize {
         self.columns.len() * std::mem::size_of::<Column>()
@@ -170,20 +206,20 @@ pub fn cpu_profiles(pages: &[CachedPage], jobs: &[ProfileJob]) -> Result<Vec<Fac
                 for x in (j.x..j.x + j.width).step_by(j.stride as usize) {
                     let i = (z as usize + 1) * HALO_SIDE + x as usize + 1;
                     let c = page.columns[i];
-                    add(0, c.top, 1);
+                    add(0, c.top(), 1);
                     for (axis, k) in [i + 1, i - 1, i + HALO_SIDE, i - HALO_SIDE]
                         .into_iter()
                         .enumerate()
                     {
-                        let mut lo = page.columns[k].height;
-                        for hi in [c.height - 12, c.height - 1, c.height] {
+                        let mut lo = page.columns[k].height();
+                        for hi in [c.height() - 12, c.height() - 1, c.height()] {
                             if hi > lo {
-                                let m = if lo == c.height - 1 {
-                                    c.top
-                                } else if lo >= c.height - 12 {
-                                    c.soil
+                                let m = if lo == c.height() - 1 {
+                                    c.top()
+                                } else if lo >= c.height() - 12 {
+                                    c.soil()
                                 } else {
-                                    c.deep
+                                    c.deep()
                                 };
                                 add(axis + 1, m, hi - lo);
                                 lo = hi;
@@ -221,16 +257,16 @@ pub fn f64_count_profiles(
                 for x in (j.x..j.x + j.width).step_by(j.stride as usize) {
                     let i = (z as usize + 1) * HALO_SIDE + x as usize + 1;
                     let c = page.columns[i];
-                    counts[0][c.top as usize] += weight;
+                    counts[0][c.top() as usize] += weight;
                     for (axis, k) in [i + 1, i - 1, i + HALO_SIDE, i - HALO_SIDE]
                         .into_iter()
                         .enumerate()
                     {
-                        let lo = page.columns[k].height;
+                        let lo = page.columns[k].height();
                         for (lower, upper, material) in [
-                            (lo, c.height - 12, c.deep),
-                            (lo.max(c.height - 12), c.height - 1, c.soil),
-                            (lo.max(c.height - 1), c.height, c.top),
+                            (lo, c.height() - 12, c.deep()),
+                            (lo.max(c.height() - 12), c.height() - 1, c.soil()),
+                            (lo.max(c.height() - 1), c.height(), c.top()),
                         ] {
                             counts[axis + 1][material as usize] +=
                                 (upper - lower).max(0) as u64 * weight;
@@ -285,7 +321,9 @@ pub struct GpuOrderedProfiles {
     columns: wgpu::Buffer,
     jobs: wgpu::Buffer,
     profiles: wgpu::Buffer,
-    readback: wgpu::Buffer,
+    readback: Option<wgpu::Buffer>,
+    source_pages: Vec<CachedPage>,
+    next_source_slot: usize,
     pipeline: wgpu::ComputePipeline,
     kernel: ProfileKernel,
     bind: Option<wgpu::BindGroup>,
@@ -297,6 +335,13 @@ impl GpuOrderedProfiles {
         Self::new_with_kernel(device, ProfileKernel::Ordered)
     }
     pub fn new_with_kernel(device: &wgpu::Device, kernel: ProfileKernel) -> Self {
+        Self::create(device, kernel, true)
+    }
+    /// Runtime scratch excludes all diagnostic readbacks and timestamp buffers.
+    pub fn new_resident(device: &wgpu::Device) -> Self {
+        Self::create(device, ProfileKernel::ParallelCounts, false)
+    }
+    fn create(device: &wgpu::Device, kernel: ProfileKernel, diagnostic: bool) -> Self {
         let buffer = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -307,7 +352,7 @@ impl GpuOrderedProfiles {
         };
         let columns = buffer(
             "ordered cached columns",
-            (MAX_PAGES * HALO_SIDE * HALO_SIDE * 16) as u64,
+            (MAX_PAGES * PAGE_COLUMN_BYTES) as u64,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let jobs = buffer(
@@ -322,11 +367,13 @@ impl GpuOrderedProfiles {
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
         );
-        let readback = buffer(
-            "optional ordered profile oracle readback",
-            ((MAX_JOBS + 1) * 80) as u64,
-            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        );
+        let readback = diagnostic.then(|| {
+            buffer(
+                "optional ordered profile oracle readback",
+                ((MAX_JOBS + 1) * 80) as u64,
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            )
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ordered canonical profile construction"),
             source: wgpu::ShaderSource::Wgsl(kernel.shader().into()),
@@ -339,33 +386,34 @@ impl GpuOrderedProfiles {
             compilation_options: Default::default(),
             cache: None,
         });
-        let timestamps = device
-            .features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY)
-            .then(|| {
-                (
-                    device.create_query_set(&wgpu::QuerySetDescriptor {
-                        label: Some("ordered profile timestamps"),
-                        ty: wgpu::QueryType::Timestamp,
-                        count: 2,
-                    }),
-                    buffer(
-                        "ordered profile resolve",
-                        16,
-                        wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                    ),
-                    buffer(
-                        "ordered profile timestamp readback",
-                        16,
-                        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    ),
-                )
-            });
+        let timestamps = (diagnostic
+            && device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
+        .then(|| {
+            (
+                device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("ordered profile timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                }),
+                buffer(
+                    "ordered profile resolve",
+                    16,
+                    wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                ),
+                buffer(
+                    "ordered profile timestamp readback",
+                    16,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                ),
+            )
+        });
         Self {
             columns,
             jobs,
             profiles,
             readback,
+            source_pages: Vec::new(),
+            next_source_slot: 0,
             pipeline,
             kernel,
             bind: None,
@@ -381,16 +429,22 @@ impl GpuOrderedProfiles {
         jobs: &[ProfileJob],
     ) -> Result<f64, String> {
         validate(pages, jobs)?;
+        self.source_pages.clear();
+        self.next_source_slot = 0;
         let started = Instant::now();
         for (i, page) in pages.iter().enumerate() {
             queue.write_buffer(
                 &self.columns,
-                (i * HALO_SIDE * HALO_SIDE * 16) as u64,
+                (i * PAGE_COLUMN_BYTES) as u64,
                 bytemuck::cast_slice(&page.columns),
             );
         }
         queue.write_buffer(&self.jobs, 0, bytemuck::cast_slice(jobs));
         queue.write_buffer(&self.profiles, 0, &[0; 80]);
+        self.bind_jobs(device, jobs.len());
+        Ok(started.elapsed().as_secs_f64() * 1000.)
+    }
+    fn bind_jobs(&mut self, device: &wgpu::Device, count: usize) {
         // Limit jobs binding length: padded lanes cannot observe stale descriptors.
         self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ordered profile batch"),
@@ -405,7 +459,7 @@ impl GpuOrderedProfiles {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.jobs,
                         offset: 0,
-                        size: wgpu::BufferSize::new((jobs.len() * 32) as u64),
+                        size: wgpu::BufferSize::new((count * 32) as u64),
                     }),
                 },
                 wgpu::BindGroupEntry {
@@ -414,8 +468,60 @@ impl GpuOrderedProfiles {
                 },
             ],
         }));
-        self.loaded_jobs = jobs.len();
-        Ok(started.elapsed().as_secs_f64() * 1000.)
+        self.loaded_jobs = count;
+    }
+    /// Exact source identity and payload equality prevent reuse across source
+    /// changes. Eight retained slots bound both GPU and CPU source residency.
+    /// Caller must submit compute/copy before the next upload to this scratch.
+    pub fn upload_cached_page(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        page: &CachedPage,
+        jobs: &[ProfileJob],
+    ) -> Result<bool, String> {
+        validate(std::slice::from_ref(page), jobs)?;
+        let hit = self
+            .source_pages
+            .iter()
+            .position(|old| old.same_source(page));
+        let reused = hit.is_some();
+        let slot = if let Some(slot) = hit {
+            slot
+        } else {
+            let slot = if self.source_pages.len() < MAX_PAGES {
+                self.source_pages.push(page.clone());
+                self.source_pages.len() - 1
+            } else {
+                let slot = self.next_source_slot;
+                self.next_source_slot = (slot + 1) % MAX_PAGES;
+                self.source_pages[slot] = page.clone();
+                slot
+            };
+            queue.write_buffer(
+                &self.columns,
+                (slot * PAGE_COLUMN_BYTES) as u64,
+                bytemuck::cast_slice(&page.columns),
+            );
+            slot
+        };
+        let descriptors: Vec<_> = jobs
+            .iter()
+            .map(|job| ProfileJob {
+                page: slot as u32,
+                ..*job
+            })
+            .collect();
+        queue.write_buffer(&self.jobs, 0, bytemuck::cast_slice(&descriptors));
+        queue.write_buffer(&self.profiles, 0, &[0; 80]);
+        self.bind_jobs(device, jobs.len());
+        Ok(reused)
+    }
+    pub fn source_cache_cpu_bytes(&self) -> u64 {
+        self.source_pages
+            .iter()
+            .map(|page| page.payload_bytes() as u64)
+            .sum()
     }
     pub fn profile_buffer(&self) -> &wgpu::Buffer {
         &self.profiles
@@ -426,7 +532,9 @@ impl GpuOrderedProfiles {
     /// Logical fixed GPU allocation, including diagnostic readbacks, excluding
     /// driver allocations, pipeline state and queue-upload staging.
     pub fn resident_bytes(&self) -> u64 {
-        (MAX_PAGES * HALO_SIDE * HALO_SIDE * 16 + MAX_JOBS * 32 + 2 * (MAX_JOBS + 1) * 80) as u64
+        (MAX_PAGES * PAGE_COLUMN_BYTES
+            + MAX_JOBS * 32
+            + (MAX_JOBS + 1) * 80 * if self.readback.is_some() { 2 } else { 1 }) as u64
             + if self.timestamps.is_some() { 32 } else { 0 }
     }
     pub fn encode_resident(&self, encoder: &mut wgpu::CommandEncoder) -> Result<(), String> {
@@ -462,13 +570,17 @@ impl GpuOrderedProfiles {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(Vec<FaceProfile>, Timings), String> {
+        let readback = self
+            .readback
+            .as_ref()
+            .ok_or("runtime profile scratch has no diagnostic readback")?;
         let started = Instant::now();
         let bytes = ((self.loaded_jobs + 1) * 80) as u64;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ordered profile diagnostic"),
         });
         self.encode(&mut encoder, true)?;
-        encoder.copy_buffer_to_buffer(&self.profiles, 0, &self.readback, 0, bytes);
+        encoder.copy_buffer_to_buffer(&self.profiles, 0, readback, 0, bytes);
         if let Some((q, resolve, readback)) = &self.timestamps {
             encoder.resolve_query_set(q, 0..2, resolve, 0);
             encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, 16);
@@ -483,13 +595,13 @@ impl GpuOrderedProfiles {
             });
             rx
         };
-        let rx = map(&self.readback);
+        let rx = map(readback);
         let timing_rx = self.timestamps.as_ref().map(|(_, _, b)| map(b));
         device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let data = self.readback.slice(..).get_mapped_range();
+        let data = readback.slice(..).get_mapped_range();
         if data[..80].iter().any(|b| *b != 0) {
             return Err("ordered profile exact-face fallback changed".into());
         }
@@ -502,7 +614,7 @@ impl GpuOrderedProfiles {
             result.push(p);
         }
         drop(data);
-        self.readback.unmap();
+        readback.unmap();
         let gpu_ms = if let Some(rx) = timing_rx {
             rx.recv()
                 .map_err(|e| e.to_string())?
@@ -556,8 +668,58 @@ mod tests {
         (world, page)
     }
     #[test]
+    fn packed_columns_roundtrip_all_accepted_heights_and_materials() {
+        for height in 0..=1024 {
+            for deep in 1..=4 {
+                for soil in 1..=4 {
+                    for top in 1..=4 {
+                        let column = Column::new(height, deep, soil, top);
+                        assert_eq!(
+                            (column.height(), column.deep(), column.soil(), column.top()),
+                            (height, deep, soil, top)
+                        );
+                        assert_eq!(column.0 >> 20, 0);
+                        // Fixed bit layout is also the shader decode contract.
+                        let word =
+                            u32::from_le_bytes(bytemuck::bytes_of(&column).try_into().unwrap());
+                        assert_eq!(word & 0x7ff, height as u32);
+                        assert_eq!((word >> 11) & 7, deep);
+                        assert_eq!((word >> 14) & 7, soil);
+                        assert_eq!((word >> 17) & 7, top);
+                    }
+                }
+            }
+        }
+        assert_eq!(PAGE_COLUMN_BYTES, 67_600);
+        assert_eq!(RESIDENT_BYTES, 598_224);
+    }
+    #[test]
+    fn resident_source_reuse_requires_exact_snapshot_and_payload() {
+        let (_, page) = synthetic(true);
+        assert!(page.same_source(&page.clone()));
+        assert!(page.matches_tile(page.min, 0));
+        assert!(!page.matches_tile(page.min, 1));
+        for changed in 0..5 {
+            let mut other = page.clone();
+            match changed {
+                0 => other.min[0] += 128,
+                1 => other.seed += 1,
+                2 => other.revision += 1,
+                3 => other.params.amplitude += 1.,
+                _ => {
+                    let c = other.columns[0];
+                    other.columns[0] =
+                        Column::new(c.height(), c.deep(), c.soil(), Material::Wood as u32);
+                }
+            }
+            assert!(!page.same_source(&other));
+        }
+        let job = ProfileJob::new(1, [0, 0], [16, 16], 1).unwrap();
+        assert!(page.validate_jobs(&[job]).is_err());
+    }
+    #[test]
     fn shader_and_draw_profile_abi_validate() {
-        assert_eq!(std::mem::size_of::<Column>(), 16);
+        assert_eq!(std::mem::size_of::<Column>(), 4);
         assert_eq!(std::mem::size_of::<ProfileJob>(), 32);
         assert_eq!(std::mem::size_of::<FaceProfile>(), 80);
         for kernel in [ProfileKernel::Ordered, ProfileKernel::ParallelCounts] {
@@ -615,7 +777,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(reads, HALO_SIDE * HALO_SIDE);
-        assert_eq!(p.payload_bytes(), 270400);
+        assert_eq!(p.payload_bytes(), 67600);
+        assert_eq!(p.columns.capacity(), HALO_SIDE * HALO_SIDE);
         for stride in [1, 2, 4, 8, 16] {
             let j = ProfileJob::new(0, [0, 0], [16, 16], stride).unwrap();
             let p = cpu_profiles(std::slice::from_ref(&p), &[j]).unwrap()[0];

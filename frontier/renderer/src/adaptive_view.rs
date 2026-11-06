@@ -280,7 +280,12 @@ impl AdaptiveView {
                     + tile.face_profiles.len() * 80
                     + tile.face_profile_indices.len() * 4
                     + tile.native_quads.len() * 32
-                    + tile.proxy_triangles.len() * 64) as u64;
+                    + tile.proxy_triangles.len() * 64
+                    + tile
+                        .gpu_profiles
+                        .as_ref()
+                        .map_or(0, |profiles| profiles.payload_bytes()))
+                    as u64;
                 // One bounded cluster is the upload quantum. A cluster larger
                 // than the frame budget is disclosed by max_upload_frame_bytes.
                 if uploaded > 0 && uploaded + bytes > self.upload_budget {
@@ -610,6 +615,20 @@ impl AdaptiveView {
             self.stats.indexed_proxy_pack_accepted,
             self.stats.indexed_proxy_peak_staging_estimate_bytes,
             self.stats.resident_derived_proxy_clusters > 0,
+        ));
+        json.pop();
+        let preparation = self.latest_cache.gpu_profiles;
+        let profiles = self.stats.gpu_profiles;
+        json.push_str(&format!(
+            ",\"gpu_profile_preparation\":{{\"enabled\":{},\"eligible_tiles\":{},\"deferred_tiles\":{},\"deferred_jobs\":{},\"fallback_tiles\":{},\"snapshot_generated_columns\":{},\"snapshot_ms\":{}}},\"gpu_profiles\":{{\"enabled\":{},\"source_cache_hits\":{},\"source_uploads\":{},\"source_upload_bytes\":{},\"job_upload_bytes\":{},\"result_copy_bytes\":{},\"cpu_profile_upload_bytes_avoided\":{},\"dispatches\":{},\"profiles\":{},\"submits\":{},\"enqueue_ms\":{},\"initialization_ms\":{},\"resident_gpu_bytes\":{},\"source_cache_cpu_bytes\":{},\"gpu_ms\":null,\"readback_bytes\":0}}}}",
+            preparation.enabled, preparation.eligible_tiles, preparation.deferred_tiles,
+            preparation.deferred_jobs, preparation.fallback_tiles,
+            preparation.snapshot_generated_columns, preparation.snapshot_ms,
+            profiles.enabled, profiles.source_cache_hits, profiles.source_uploads,
+            profiles.source_upload_bytes, profiles.job_upload_bytes, profiles.result_copy_bytes,
+            profiles.cpu_profile_upload_bytes_avoided, profiles.dispatches, profiles.profiles,
+            profiles.submits, profiles.enqueue_ms, profiles.initialization_ms, profiles.resident_gpu_bytes,
+            profiles.source_cache_cpu_bytes,
         ));
         json.pop();
         json.push_str(&format!(

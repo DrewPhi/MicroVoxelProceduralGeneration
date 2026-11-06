@@ -2,6 +2,7 @@
 //! this path never adds a normal-derived coverage approximation or screen blur.
 use crate::{
     adaptive_geometry::{GeometryTile, NativeBin, TileKey},
+    gpu_ordered_profiles::GpuOrderedProfiles,
     mesh, Camera,
 };
 use frontier_runtime::occlusion::{Aabb, OcclusionSet};
@@ -181,7 +182,26 @@ pub struct VisibleOffender {
     pub projected_error_px: Option<f64>,
 }
 #[derive(Default, Clone, Copy, Debug)]
+pub struct GpuProfileStats {
+    pub enabled: bool,
+    pub source_cache_hits: u64,
+    pub source_uploads: u64,
+    pub source_upload_bytes: u64,
+    pub job_upload_bytes: u64,
+    pub result_copy_bytes: u64,
+    pub cpu_profile_upload_bytes_avoided: u64,
+    pub dispatches: u64,
+    pub profiles: u64,
+    pub submits: u64,
+    /// CPU upload/encode/submit duration; never reported as GPU duration.
+    pub enqueue_ms: f64,
+    pub initialization_ms: f64,
+    pub resident_gpu_bytes: u64,
+    pub source_cache_cpu_bytes: u64,
+}
+#[derive(Default, Clone, Copy, Debug)]
 pub struct DrawStats {
+    pub gpu_profiles: GpuProfileStats,
     pub prepared_view_hits: u64,
     pub prepared_view_misses: u64,
     pub bundle_enabled: bool,
@@ -374,6 +394,8 @@ impl PreparedView {
     }
 }
 pub struct AdaptiveGpu {
+    gpu_profiles: Option<GpuOrderedProfiles>,
+    gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
     prepared_view: Option<PreparedView>,
     prepared_view_hits: u64,
@@ -606,6 +628,11 @@ impl AdaptiveGpu {
             usage: wgpu::BufferUsages::VERTEX,
         });
         Self {
+            gpu_profiles: None,
+            gpu_profile_stats: GpuProfileStats {
+                enabled: std::env::var("FRONTIER_GPU_PROFILES").as_deref() == Ok("1"),
+                ..Default::default()
+            },
             lighting: [0.; 12],
             prepared_view: None,
             prepared_view_hits: 0,
@@ -696,13 +723,17 @@ impl AdaptiveGpu {
         self.clusters.contains_key(key)
     }
     fn allocated_bytes(&self) -> u64 {
-        self.vertices
-            .iter()
-            .chain(self.indices.iter())
-            .chain(self.profiles.iter())
-            .chain(self.profile_tables.iter())
-            .map(|p| p.size)
-            .sum()
+        self.gpu_profiles
+            .as_ref()
+            .map_or(0, |builder| builder.resident_bytes())
+            + self
+                .vertices
+                .iter()
+                .chain(self.indices.iter())
+                .chain(self.profiles.iter())
+                .chain(self.profile_tables.iter())
+                .map(|p| p.size)
+                .sum::<u64>()
     }
     fn allocate(
         &mut self,
@@ -767,6 +798,11 @@ impl AdaptiveGpu {
         self.invalidate_bundle();
         if self.slots.is_empty() {
             return Err(CLUSTER_CAPACITY_ERROR.into());
+        }
+        if tile.gpu_profiles.is_some()
+            && (tile.proxy_triangles.is_empty() || !self.gpu_profile_stats.enabled)
+        {
+            return Err("deferred GPU profiles require enabled proxy consumer".into());
         }
         if !tile.native_quads.is_empty() {
             if !tile.exact || !tile.mesh.indices.is_empty() || !tile.proxy_triangles.is_empty() {
@@ -1206,6 +1242,7 @@ impl AdaptiveGpu {
         stats
     }
     fn update_command_stats(&self, stats: &mut DrawStats) {
+        stats.gpu_profiles = self.gpu_profile_stats;
         stats.indexed_proxy_enabled = self.indexed_proxy_enabled;
         stats.indexed_proxy_mode = self.indexed_proxy_mode;
         stats.indexed_proxy_pack_ms = self.indexed_proxy_pack_ms;
@@ -1376,6 +1413,35 @@ impl AdaptiveGpu {
         {
             return Err("proxy triangle profile index outside table".into());
         }
+        if let Some(deferred) = &tile.gpu_profiles {
+            if tile.key.width_cells != 128
+                || tile.key.step_cells < 8
+                || deferred.source_revision != tile.key.source_revision
+                || !deferred
+                    .page
+                    .matches_tile(tile.key.min, tile.key.source_revision)
+                || tile.face_profiles.len() != deferred.jobs.len() + 1
+                || tile
+                    .face_profiles
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .any(|v| *v != 0.)
+            {
+                return Err("deferred GPU profile source/table contract mismatch".into());
+            }
+            deferred.page.validate_jobs(&deferred.jobs)?;
+            // Reserve fixed scratch under the same hard GPU budget as arenas.
+            if self.gpu_profiles.is_none() {
+                const SCRATCH_BYTES: u64 = crate::gpu_ordered_profiles::RESIDENT_BYTES;
+                if self.allocated_bytes() + SCRATCH_BYTES > MAX_BYTES {
+                    return Err(POOL_CAPACITY_ERROR.into());
+                }
+                let started = std::time::Instant::now();
+                self.gpu_profiles = Some(GpuOrderedProfiles::new_resident(device));
+                self.gpu_profile_stats.initialization_ms += started.elapsed().as_secs_f64() * 1000.;
+            }
+        }
         let started = std::time::Instant::now();
         let mut indexed = if self.indexed_proxy_enabled {
             self.indexed_proxy_pack_attempts += 1;
@@ -1463,11 +1529,54 @@ impl AdaptiveGpu {
                 bytemuck::cast_slice(&triangles),
             );
         }
-        queue.write_buffer(
-            &self.profile_tables[table.page].buffer,
-            table.range.start,
-            table_bytes,
-        );
+        if let Some(deferred) = &tile.gpu_profiles {
+            let started = std::time::Instant::now();
+            let builder = self.gpu_profiles.as_mut().unwrap();
+            // All fallible descriptor checks ran before allocations. Submit each
+            // scratch batch immediately: queue writes precede this submission,
+            // and later tiles cannot overwrite inputs before this dispatch.
+            let reused = builder
+                .upload_cached_page(device, queue, &deferred.page, &deferred.jobs)
+                .expect("validated deferred profile descriptors");
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("adaptive deferred appearance publication"),
+            });
+            builder
+                .encode_resident(&mut encoder)
+                .expect("uploaded profile batch");
+            // Copy only profiles, preserving indexed position data after table.
+            encoder.copy_buffer_to_buffer(
+                builder.profile_buffer(),
+                0,
+                &self.profile_tables[table.page].buffer,
+                table.range.start,
+                table_bytes.len() as u64,
+            );
+            queue.submit(Some(encoder.finish()));
+            let stats = &mut self.gpu_profile_stats;
+            stats.source_cache_hits += u64::from(reused);
+            stats.source_uploads += u64::from(!reused);
+            stats.source_upload_bytes += if reused {
+                0
+            } else {
+                deferred.page.payload_bytes() as u64
+            };
+            stats.job_upload_bytes += (deferred.jobs.len() * 32 + 80) as u64;
+            stats.result_copy_bytes += table_bytes.len() as u64;
+            stats.cpu_profile_upload_bytes_avoided += table_bytes.len() as u64;
+            stats.dispatches += 1;
+            stats.profiles += deferred.jobs.len() as u64;
+            stats.submits += 1;
+            stats.enqueue_ms += started.elapsed().as_secs_f64() * 1000.;
+            stats.resident_gpu_bytes = builder.resident_bytes();
+            stats.source_cache_cpu_bytes = builder.source_cache_cpu_bytes();
+        } else {
+            queue.write_buffer(
+                &self.profile_tables[table.page].buffer,
+                table.range.start,
+                table_bytes,
+            );
+        }
         let origin = DVec3::new(
             tile.mesh.origin.x as f64,
             tile.mesh.origin.y as f64,

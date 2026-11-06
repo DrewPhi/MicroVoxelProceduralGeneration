@@ -8,16 +8,47 @@ import tempfile
 import unittest
 
 from adaptive_motion_check import EXPERIMENT_ENV_KEYS
-from phasea_iteration_check import environment, match_metadata, artifact_diagnostics
+from phasea_iteration_check import (ITERATION_ENV_KEYS, environment, match_metadata,
+                                    artifact_diagnostics, float32_rgb_diagnostics)
 
 
 class IterationCheckTests(unittest.TestCase):
+    def test_actual_float32_rgb_buffers_and_unavailable_or_invalid_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertFalse(float32_rgb_diagnostics(root, 2, 1)['available'])
+            left = np.array([0, 0, 0, 1, 1, 1], dtype='<f4')
+            left.tofile(root / 'baseline.linear_rgb.f32')
+            right = left.copy()
+            right[3] = .5
+            path = root / 'candidate.linear_rgb.f32'
+            right.tofile(path)
+            compared = float32_rgb_diagnostics(root, 2, 1)['comparison']
+            self.assertEqual(compared['max_abs_error'], .5)
+            self.assertAlmostEqual(compared['mae'], .5 / 6)
+            self.assertAlmostEqual(compared['rmse'], (.25 / 6) ** .5)
+            self.assertEqual(compared['differing_pixels'], 1)
+            self.assertFalse(compared['byte_equal'])
+            left.tofile(path)
+            self.assertTrue(float32_rgb_diagnostics(root, 2, 1)['comparison']['byte_equal'])
+            path.write_bytes(b'bad')
+            with self.assertRaisesRegex(ValueError, 'unexpected float32 RGB size'):
+                float32_rgb_diagnostics(root, 2, 1)
+            right[0] = float('nan')
+            right.tofile(path)
+            with self.assertRaisesRegex(ValueError, 'must be finite'):
+                float32_rgb_diagnostics(root, 2, 1)
+
     def test_environment_rejects_untracked_and_duplicate_values(self):
         key = EXPERIMENT_ENV_KEYS[0]
         self.assertEqual(environment([key + '=0']), {key: '0'})
         for entries in (['SECRET_TOKEN=hidden'], [key + '=0', key + '=1'], [key]):
             with self.assertRaises(ValueError):
                 environment(entries)
+
+    def test_gpu_profiles_is_an_explicit_tracked_arm_setting(self):
+        self.assertIn('FRONTIER_GPU_PROFILES', ITERATION_ENV_KEYS)
+        self.assertEqual(environment(['FRONTIER_GPU_PROFILES=1']), {'FRONTIER_GPU_PROFILES': '1'})
 
     def test_dry_run_does_not_create_output_or_need_binary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -35,10 +66,12 @@ class IterationCheckTests(unittest.TestCase):
             headless = subprocess.run([sys.executable, str(Path(__file__).with_name('phasea_iteration_check.py')),
                                        '--dry-run', '--headless', '--output', str(output),
                                        '--baseline-env', 'FRONTIER_INDEXED_PROXY=0',
-                                       '--candidate-env', 'FRONTIER_INDEXED_PROXY=1'], capture_output=True, text=True)
+                                       '--candidate-env', 'FRONTIER_INDEXED_PROXY=1',
+                                       '--candidate-env', 'FRONTIER_GPU_PROFILES=1'], capture_output=True, text=True)
             self.assertEqual(headless.returncode, 0, headless.stderr)
             self.assertNotIn('--adaptive-wait-quality', headless.stdout)
             self.assertEqual(headless.stdout.count('--capture-linear'), 2)
+            self.assertEqual(headless.stdout.count('FRONTIER_GPU_PROFILES=1'), 1)
             self.assertFalse(output.exists())
             invalid = subprocess.run([sys.executable, str(Path(__file__).with_name('phasea_iteration_check.py')),
                                       '--dry-run', '--headless', '--route', 'fly', '--output', str(output)],

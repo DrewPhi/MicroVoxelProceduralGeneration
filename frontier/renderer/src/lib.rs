@@ -14,6 +14,7 @@ mod gpu_probe;
 pub mod gpu_summary_probe;
 mod hybrid;
 mod hybrid_gpu;
+mod integrated_profiles;
 pub mod mesh;
 mod native_fbm;
 mod native_stream;
