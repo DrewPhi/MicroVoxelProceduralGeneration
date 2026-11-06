@@ -74,6 +74,28 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     let positions=array<vec3<f32>,3>(p0,p1,p2);
     return vertex_out(positions[vertex],color,normal,profile_index);
 }
+// Same pooled storage page as face_profiles; scalar addressing preserves the
+// original 12-byte f32 position triples without vec3 storage padding.
+@group(0) @binding(2) var<storage,read> proxy_positions:array<f32>;
+@vertex fn vs_proxy_indexed(@builtin(vertex_index) vertex:u32,
+    @location(0) addresses:vec3<u32>, @location(1) normal:vec3<f32>,
+    @location(2) color:vec3<f32>, @location(3) profile_index:u32)->VertexOut {
+    let address=addresses[vertex];
+    let position=vec3<f32>(proxy_positions[address],proxy_positions[address+1u],proxy_positions[address+2u]);
+    return vertex_out(position,color,normal,profile_index);
+}
+// Mode2 derives only flat normals. Canonical positions/material colors and
+// ordered geometry remain exact; CPU/GPU normalize rounding may differ.
+fn proxy_position(address:u32)->vec3<f32> {
+    return vec3<f32>(proxy_positions[address],proxy_positions[address+1u],proxy_positions[address+2u]);
+}
+@vertex fn vs_proxy_derived(@builtin(vertex_index) vertex:u32,
+    @location(0) addresses:vec3<u32>, @location(1) material:u32,
+    @location(2) profile_index:u32)->VertexOut {
+    let a=proxy_position(addresses.x); let b=proxy_position(addresses.y); let c=proxy_position(addresses.z);
+    let positions=array<vec3<f32>,3>(a,b,c);
+    return vertex_out(positions[vertex],MATERIAL_COLORS[material],normalize(cross(b-a,c-a)),profile_index);
+}
 const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     vec3<f32>(0.,0.,0.),vec3<f32>(0.18,0.34,0.10),vec3<f32>(0.32,0.22,0.13),
     vec3<f32>(0.35,0.37,0.39),vec3<f32>(0.41,0.25,0.13));

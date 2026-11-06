@@ -1,6 +1,11 @@
 # Issue 75: Phase A experiment contract
 
 Status: bounded GPU experiments measured; see [results](reference/issue75/README.md).
+The second iteration tests [indexed adaptive GPU records](reference/issue75/ITERATION_2.md)
+and [parallel GPU appearance preparation](reference/issue75/GPU_PROFILES.md).
+These preserve useful architectural ideas for further integration instead of
+rejecting their families based on the first uniform-grid or serial-kernel test.
+They remain opt-in experiments, not completion of #75 or promotion under #74.
 The uniform-page candidate fails the primary visual gate; no replacement is
 promoted and the broader architecture decision remains open. Reuse tier G for
 the experiment tools. Existing adaptive,

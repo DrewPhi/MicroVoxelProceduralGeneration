@@ -9,6 +9,7 @@ mod build_memory;
 pub mod column_mesh;
 mod derived_disk_cache;
 mod derived_disk_writeback;
+pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
 mod hybrid;

@@ -1,5 +1,9 @@
 # Issue 75: bounded Phase A checkpoint
 
+Follow-up: [iteration 2](ITERATION_2.md) measures two smaller adaptive GPU
+representations; [GPU appearance probes](GPU_PROFILES.md) compare serial and
+parallel preparation. These are further Phase A evidence, with defaults unchanged.
+
 The uniform page experiment fails the small Legacy visual gate. Directional
 brick skipping preserves the tested ray result but is slower than the existing
 Chebyshev skip and mesh on this fixture. This is bounded negative evidence,

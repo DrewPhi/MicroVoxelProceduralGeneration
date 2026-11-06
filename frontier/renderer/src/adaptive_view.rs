@@ -597,6 +597,22 @@ impl AdaptiveView {
         ));
         json.pop();
         json.push_str(&format!(
+            ",\"indexed_proxy\":{{\"mode\":{},\"enabled\":{},\"derived_clusters\":{},\"resident_clusters\":{},\"position_bytes\":{},\"position_reserved_bytes\":{},\"record_padding_bytes\":{},\"pack_ms\":{},\"pack_attempts\":{},\"pack_accepted\":{},\"peak_staging_estimate_bytes\":{},\"normal_roundoff_possible\":{},\"extra_bind_group_binds\":0,\"source_generation_savings_claimed\":false,\"cpu_tile_payload_unchanged\":true}}}}",
+            self.stats.indexed_proxy_mode,
+            self.stats.indexed_proxy_enabled,
+            self.stats.resident_derived_proxy_clusters,
+            self.stats.resident_indexed_proxy_clusters,
+            self.stats.resident_proxy_position_bytes,
+            self.stats.resident_proxy_position_reserved_bytes,
+            self.stats.resident_indexed_proxy_record_padding_bytes,
+            self.stats.indexed_proxy_pack_ms,
+            self.stats.indexed_proxy_pack_attempts,
+            self.stats.indexed_proxy_pack_accepted,
+            self.stats.indexed_proxy_peak_staging_estimate_bytes,
+            self.stats.resident_derived_proxy_clusters > 0,
+        ));
+        json.pop();
+        json.push_str(&format!(
             ",\"gpu_resource_limited\":{}}}",
             self.gpu_resource_limited
         ));

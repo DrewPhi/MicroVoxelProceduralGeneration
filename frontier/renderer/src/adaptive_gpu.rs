@@ -11,6 +11,8 @@ use std::{
     ops::Range,
 };
 use wgpu::util::DeviceExt;
+#[path = "proxy_indexed.rs"]
+mod proxy_indexed;
 
 const PAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -44,19 +46,31 @@ impl Arena {
             size,
         }
     }
-    fn allocate(&mut self, bytes: u64) -> Option<Range<u64>> {
-        allocate_range(&mut self.free, bytes)
-    }
     fn release(&mut self, range: Range<u64>) {
         release_range(&mut self.free, range)
     }
 }
+#[cfg(test)]
 fn allocate_range(free: &mut Vec<Range<u64>>, bytes: u64) -> Option<Range<u64>> {
-    let i = free.iter().position(|r| r.end - r.start >= bytes)?;
-    let range = free[i].start..free[i].start + bytes;
-    free[i].start += bytes;
-    if free[i].is_empty() {
-        free.remove(i);
+    allocate_aligned_range(free, bytes, 1)
+}
+fn allocate_aligned_range(
+    free: &mut Vec<Range<u64>>,
+    bytes: u64,
+    alignment: u64,
+) -> Option<Range<u64>> {
+    let (i, start) = free.iter().enumerate().find_map(|(i, range)| {
+        let start = range.start.checked_add(alignment - 1)? / alignment * alignment;
+        (start.checked_add(bytes)? <= range.end).then_some((i, start))
+    })?;
+    let old = free.remove(i);
+    let range = start..start + bytes;
+    if old.start < start {
+        free.insert(i, old.start..start);
+    }
+    let next = i + usize::from(old.start < start);
+    if range.end < old.end {
+        free.insert(next, range.end..old.end);
     }
     Some(range)
 }
@@ -89,6 +103,7 @@ fn vertex_reservation_bytes(bytes: u64, enabled: bool) -> Option<u64> {
 }
 /// An entire-page instance binding addresses the same records as an allocation
 /// slice. Generic per-vertex meshes deliberately retain their slice binding.
+#[cfg(test)]
 fn packed_first_instance(
     enabled: bool,
     native: bool,
@@ -97,10 +112,28 @@ fn packed_first_instance(
     page_bytes: u64,
     count: u32,
 ) -> Option<u32> {
+    packed_first_instance_stride(
+        enabled,
+        native,
+        proxy,
+        allocation,
+        page_bytes,
+        count,
+        if native { 32 } else { 64 },
+    )
+}
+fn packed_first_instance_stride(
+    enabled: bool,
+    native: bool,
+    proxy: bool,
+    allocation: &Range<u64>,
+    page_bytes: u64,
+    count: u32,
+    stride: u64,
+) -> Option<u32> {
     if !enabled || native == proxy {
         return None;
     }
-    let stride = if native { 32 } else { 64 };
     if allocation.start % stride != 0
         || allocation.end > page_bytes
         || allocation.end < allocation.start
@@ -119,6 +152,10 @@ struct ProfileAllocation {
 struct Cluster {
     native_quads: bool,
     proxy_triangles: bool,
+    indexed_proxy: bool,
+    derived_proxy: bool,
+    position_bytes: u64,
+    position_reserved_bytes: u64,
     bins: Vec<NativeBin>,
     exact: bool,
     profile: Option<ProfileAllocation>,
@@ -165,6 +202,17 @@ pub struct DrawStats {
     pub resident_native_quad_bytes: u64,
     pub resident_proxy_triangle_bytes: u64,
     pub resident_profile_bytes: u64,
+    pub indexed_proxy_enabled: bool,
+    pub indexed_proxy_mode: u32,
+    pub resident_derived_proxy_clusters: u64,
+    pub resident_indexed_proxy_clusters: u64,
+    pub resident_proxy_position_bytes: u64,
+    pub resident_proxy_position_reserved_bytes: u64,
+    pub resident_indexed_proxy_record_padding_bytes: u64,
+    pub indexed_proxy_pack_ms: f64,
+    pub indexed_proxy_pack_attempts: u64,
+    pub indexed_proxy_pack_accepted: u64,
+    pub indexed_proxy_peak_staging_estimate_bytes: u64,
     pub visible_native_quads: u64,
     pub occluded_clusters: usize,
     pub occluded_triangles: u64,
@@ -213,7 +261,13 @@ macro_rules! encode_cluster_draws {
             if c.native_quads {
                 pass.set_pipeline(&renderer.native_pipeline);
             } else if c.proxy_triangles {
-                pass.set_pipeline(&renderer.proxy_pipeline);
+                pass.set_pipeline(if c.derived_proxy {
+                    &renderer.derived_proxy_pipeline
+                } else if c.indexed_proxy {
+                    &renderer.indexed_proxy_pipeline
+                } else {
+                    &renderer.proxy_pipeline
+                });
             } else if let Some(p) = &c.profile {
                 pass.set_pipeline(&renderer.profile_pipeline);
                 let indices = p.indices.as_ref().unwrap();
@@ -235,13 +289,22 @@ macro_rules! encode_cluster_draws {
                 &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
             );
             let page = &renderer.vertices[c.vertices.page];
-            let packed_first = packed_first_instance(
+            let packed_first = packed_first_instance_stride(
                 renderer.coalesce_vertex_pages,
                 c.native_quads,
                 c.proxy_triangles,
                 &c.vertices.range,
                 page.size,
                 c.count,
+                if c.derived_proxy {
+                    20
+                } else if c.indexed_proxy {
+                    40
+                } else if c.native_quads {
+                    32
+                } else {
+                    64
+                },
             );
             let first_instance = if let Some(first) = packed_first {
                 if bound_vertex_page != Some(c.vertices.page) {
@@ -332,6 +395,14 @@ pub struct AdaptiveGpu {
     profile_pipeline: wgpu::RenderPipeline,
     native_pipeline: wgpu::RenderPipeline,
     proxy_pipeline: wgpu::RenderPipeline,
+    indexed_proxy_pipeline: wgpu::RenderPipeline,
+    derived_proxy_pipeline: wgpu::RenderPipeline,
+    indexed_proxy_mode: u32,
+    indexed_proxy_enabled: bool,
+    indexed_proxy_pack_ms: f64,
+    indexed_proxy_pack_attempts: u64,
+    indexed_proxy_pack_accepted: u64,
+    indexed_proxy_peak_staging_estimate_bytes: u64,
     quad_indices: wgpu::Buffer,
     zero_profile: wgpu::Buffer,
     profiles: Vec<Arena>,
@@ -376,6 +447,16 @@ impl AdaptiveGpu {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(4),
+                    },
+                    count: None,
+                },
             ],
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -404,9 +485,24 @@ impl AdaptiveGpu {
         let native_attributes =
             wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Uint32,4=>Uint32];
         let proxy_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,3=>Float32x3,4=>Float32x3,5=>Uint32];
+        let indexed_proxy_attributes =
+            wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
+        let derived_proxy_attributes = wgpu::vertex_attr_array![0=>Uint32x3,1=>Uint32,2=>Uint32];
         let make_pipeline = |step_mode, kind| {
             let native = kind == 1;
             let proxy = kind == 2;
+            let indexed_proxy = kind == 3;
+            let derived_proxy = kind == 4;
+            let derived_proxy_buffers = [wgpu::VertexBufferLayout {
+                array_stride: 20,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &derived_proxy_attributes,
+            }];
+            let indexed_proxy_buffers = [wgpu::VertexBufferLayout {
+                array_stride: 40,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &indexed_proxy_attributes,
+            }];
             let proxy_buffers = [wgpu::VertexBufferLayout {
                 array_stride: 64,
                 step_mode: wgpu::VertexStepMode::Instance,
@@ -437,13 +533,21 @@ impl AdaptiveGpu {
                     module: &shader,
                     entry_point: Some(if native {
                         "vs_native"
+                    } else if derived_proxy {
+                        "vs_proxy_derived"
+                    } else if indexed_proxy {
+                        "vs_proxy_indexed"
                     } else if proxy {
                         "vs_proxy"
                     } else {
                         "vs_main"
                     }),
                     compilation_options: Default::default(),
-                    buffers: if proxy {
+                    buffers: if derived_proxy {
+                        &derived_proxy_buffers
+                    } else if indexed_proxy {
+                        &indexed_proxy_buffers
+                    } else if proxy {
                         &proxy_buffers
                     } else if native {
                         &native_buffers
@@ -484,6 +588,13 @@ impl AdaptiveGpu {
         let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0);
         let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1);
         let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2);
+        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3);
+        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4);
+        let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
+            Ok("1") => 1,
+            Ok("2") => 2,
+            _ => 0,
+        };
         let quad_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shared exact native quad topology"),
             contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
@@ -518,6 +629,14 @@ impl AdaptiveGpu {
             profile_pipeline,
             native_pipeline,
             proxy_pipeline,
+            indexed_proxy_pipeline,
+            derived_proxy_pipeline,
+            indexed_proxy_mode,
+            indexed_proxy_enabled: indexed_proxy_mode > 0,
+            indexed_proxy_pack_ms: 0.,
+            indexed_proxy_pack_attempts: 0,
+            indexed_proxy_pack_accepted: 0,
+            indexed_proxy_peak_staging_estimate_bytes: 0,
             quad_indices,
             zero_profile,
             profiles: vec![],
@@ -591,17 +710,28 @@ impl AdaptiveGpu {
         bytes: u64,
         kind: u8,
     ) -> Result<Allocation, String> {
-        let bytes = vertex_reservation_bytes(bytes, kind == 0 && self.coalesce_vertex_pages)
-            .ok_or(POOL_CAPACITY_ERROR)?;
+        // Indexed records are 40B, so use lcm(40,64)=320B only for this
+        // allocation. Prefix gaps remain free for other allocations.
+        let alignment = if kind == 4 && self.coalesce_vertex_pages {
+            320
+        } else {
+            1
+        };
+        let bytes = if alignment == 320 {
+            bytes.checked_add(319).map(|n| n / 320 * 320)
+        } else {
+            vertex_reservation_bytes(bytes, kind == 0 && self.coalesce_vertex_pages)
+        }
+        .ok_or(POOL_CAPACITY_ERROR)?;
         let total = self.allocated_bytes();
         let pages = match kind {
-            0 => &mut self.vertices,
+            0 | 4 => &mut self.vertices,
             1 => &mut self.indices,
             2 => &mut self.profiles,
             _ => &mut self.profile_tables,
         };
         for (page, arena) in pages.iter_mut().enumerate() {
-            if let Some(range) = arena.allocate(bytes) {
+            if let Some(range) = allocate_aligned_range(&mut arena.free, bytes, alignment) {
                 return Ok(Allocation { page, range });
             }
         }
@@ -618,7 +748,7 @@ impl AdaptiveGpu {
                 _ => wgpu::BufferUsages::VERTEX,
             },
         );
-        let range = arena.allocate(bytes).unwrap();
+        let range = allocate_aligned_range(&mut arena.free, bytes, alignment).unwrap();
         let page = pages.len();
         pages.push(arena);
         Ok(Allocation { page, range })
@@ -745,6 +875,10 @@ impl AdaptiveGpu {
             Cluster {
                 native_quads: false,
                 proxy_triangles: false,
+                indexed_proxy: false,
+                derived_proxy: false,
+                position_bytes: 0,
+                position_reserved_bytes: 0,
                 bins: vec![],
                 exact: tile.exact,
                 profile,
@@ -882,7 +1016,16 @@ impl AdaptiveGpu {
                     + p.table.range.end
                     - p.table.range.start
             });
-            stats.resident_profile_bytes += profile_bytes;
+            stats.resident_profile_bytes += profile_bytes - c.position_reserved_bytes;
+            stats.resident_proxy_position_bytes += c.position_bytes;
+            stats.resident_proxy_position_reserved_bytes += c.position_reserved_bytes;
+            stats.resident_indexed_proxy_clusters += u64::from(c.indexed_proxy);
+            stats.resident_derived_proxy_clusters += u64::from(c.derived_proxy);
+            if c.indexed_proxy {
+                stats.resident_indexed_proxy_record_padding_bytes += c.vertices.range.end
+                    - c.vertices.range.start
+                    - c.count as u64 * if c.derived_proxy { 20 } else { 40 };
+            }
             stats.resident_bytes += profile_bytes;
             if c.proxy_triangles {
                 stats.resident_proxy_triangle_bytes +=
@@ -1004,13 +1147,22 @@ impl AdaptiveGpu {
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
             self.camera_upload[offset..offset + 144].copy_from_slice(&bytes);
             self.visible.push(DrawItem { key, bin_mask });
-            if packed_first_instance(
+            if packed_first_instance_stride(
                 self.coalesce_vertex_pages,
                 c.native_quads,
                 c.proxy_triangles,
                 &c.vertices.range,
                 self.vertices[c.vertices.page].size,
                 c.count,
+                if c.derived_proxy {
+                    20
+                } else if c.indexed_proxy {
+                    40
+                } else if c.native_quads {
+                    32
+                } else {
+                    64
+                },
             )
             .is_some()
             {
@@ -1054,6 +1206,13 @@ impl AdaptiveGpu {
         stats
     }
     fn update_command_stats(&self, stats: &mut DrawStats) {
+        stats.indexed_proxy_enabled = self.indexed_proxy_enabled;
+        stats.indexed_proxy_mode = self.indexed_proxy_mode;
+        stats.indexed_proxy_pack_ms = self.indexed_proxy_pack_ms;
+        stats.indexed_proxy_pack_attempts = self.indexed_proxy_pack_attempts;
+        stats.indexed_proxy_pack_accepted = self.indexed_proxy_pack_accepted;
+        stats.indexed_proxy_peak_staging_estimate_bytes =
+            self.indexed_proxy_peak_staging_estimate_bytes;
         stats.bundle_enabled = self.bundles_enabled;
         stats.vertex_pages_coalescing_enabled = self.coalesce_vertex_pages;
         stats.bundle_active = self.bundle.is_some();
@@ -1174,6 +1333,10 @@ impl AdaptiveGpu {
             Cluster {
                 native_quads: true,
                 proxy_triangles: false,
+                indexed_proxy: false,
+                derived_proxy: false,
+                position_bytes: 0,
+                position_reserved_bytes: 0,
                 bins: validated_bins(&tile.native_bins, tile.native_quads.len() as u32),
                 exact: true,
                 profile: Some(ProfileAllocation {
@@ -1213,9 +1376,50 @@ impl AdaptiveGpu {
         {
             return Err("proxy triangle profile index outside table".into());
         }
-        let vertices = self.allocate(device, (tile.proxy_triangles.len() * 64) as u64, 0)?;
+        let started = std::time::Instant::now();
+        let mut indexed = if self.indexed_proxy_enabled {
+            self.indexed_proxy_pack_attempts += 1;
+            let mut staging = 0;
+            let mut packed = proxy_indexed::pack(&tile.proxy_triangles, &mut staging);
+            if self.indexed_proxy_mode == 2 {
+                if let Some(packed) = &mut packed {
+                    packed.derive_attributes(&mut staging);
+                }
+            }
+            self.indexed_proxy_peak_staging_estimate_bytes = self
+                .indexed_proxy_peak_staging_estimate_bytes
+                .max(staging as u64);
+            packed
+        } else {
+            None
+        };
+        if self.indexed_proxy_enabled {
+            self.indexed_proxy_pack_ms += started.elapsed().as_secs_f64() * 1000.;
+        }
+        if indexed.is_some() {
+            self.indexed_proxy_pack_accepted += 1;
+        }
+        let derived = indexed.as_ref().is_some_and(|p| p.derived.is_some());
+        let stride = if derived {
+            20
+        } else if indexed.is_some() {
+            40
+        } else {
+            64
+        };
+        let vertices = self.allocate(
+            device,
+            (tile.proxy_triangles.len() * stride) as u64,
+            if indexed.is_some() { 4 } else { 0 },
+        )?;
         let table_bytes = bytemuck::cast_slice(&tile.face_profiles);
-        let table = match self.allocate(device, table_bytes.len() as u64, 3) {
+        let position_bytes = indexed
+            .as_ref()
+            .map_or(0, |p| p.positions.len() as u64 * 12);
+        // Every profile allocation must start at a multiple of its 80B stride.
+        let table_size = (table_bytes.len() as u64 + position_bytes).next_multiple_of(80);
+        let table_extra = table_size - table_bytes.len() as u64;
+        let table = match self.allocate(device, table_size, 3) {
             Ok(table) => table,
             Err(e) => {
                 self.vertices[vertices.page].release(vertices.range);
@@ -1231,15 +1435,34 @@ impl AdaptiveGpu {
                 &self.profile_tables[page].buffer,
             ));
         }
-        let mut triangles = tile.proxy_triangles.clone();
-        for triangle in &mut triangles {
-            triangle.profile_index += (table.range.start / 80) as u32;
+        if let Some(packed) = &mut indexed {
+            let base = ((table.range.start + table_bytes.len() as u64) / 4) as u32;
+            packed.relocate(base, (table.range.start / 80) as u32);
+            queue.write_buffer(
+                &self.vertices[vertices.page].buffer,
+                vertices.range.start,
+                if let Some(derived) = &packed.derived {
+                    bytemuck::cast_slice(derived)
+                } else {
+                    bytemuck::cast_slice(&packed.triangles)
+                },
+            );
+            queue.write_buffer(
+                &self.profile_tables[table.page].buffer,
+                table.range.start + table_bytes.len() as u64,
+                bytemuck::cast_slice(&packed.positions),
+            );
+        } else {
+            let mut triangles = tile.proxy_triangles.clone();
+            for triangle in &mut triangles {
+                triangle.profile_index += (table.range.start / 80) as u32;
+            }
+            queue.write_buffer(
+                &self.vertices[vertices.page].buffer,
+                vertices.range.start,
+                bytemuck::cast_slice(&triangles),
+            );
         }
-        queue.write_buffer(
-            &self.vertices[vertices.page].buffer,
-            vertices.range.start,
-            bytemuck::cast_slice(&triangles),
-        );
         queue.write_buffer(
             &self.profile_tables[table.page].buffer,
             table.range.start,
@@ -1263,6 +1486,12 @@ impl AdaptiveGpu {
             Cluster {
                 native_quads: false,
                 proxy_triangles: true,
+                indexed_proxy: indexed.is_some(),
+                derived_proxy: derived,
+                position_bytes: indexed
+                    .as_ref()
+                    .map_or(0, |p| p.positions.len() as u64 * 12),
+                position_reserved_bytes: table_extra,
                 bins: vec![],
                 exact: false,
                 profile: Some(ProfileAllocation {
@@ -1271,7 +1500,7 @@ impl AdaptiveGpu {
                 }),
                 vertices,
                 indices: None,
-                count: triangles.len() as u32,
+                count: tile.proxy_triangles.len() as u32,
                 origin,
                 bounds,
                 canonical_bounds: Aabb {
@@ -1370,6 +1599,10 @@ fn profile_bind(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
+                resource: table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
                 resource: table.as_entire_binding(),
             },
         ],
@@ -1686,6 +1919,93 @@ mod tests {
         .is_empty());
         assert!(super::validated_bins(&[a, b], 16).is_empty());
         assert!(super::validated_bins(&[], 15).is_empty());
+    }
+    #[test]
+    fn indexed_proxy_alignment_reuses_prefix_and_releases_complete_reservation() {
+        use super::*;
+        let mut free = vec![64..2048];
+        let indexed = allocate_aligned_range(&mut free, 640, 320).unwrap();
+        assert_eq!(indexed, 320..960);
+        assert_eq!(allocate_range(&mut free, 64), Some(64..128));
+        assert_eq!(
+            packed_first_instance_stride(true, false, true, &indexed, 2048, 16, 40),
+            Some(8)
+        );
+        assert_eq!(
+            packed_first_instance_stride(true, false, true, &(64..704), 2048, 16, 40),
+            None
+        );
+        release_range(&mut free, 64..128);
+        release_range(&mut free, indexed);
+        assert_eq!(free, vec![64..2048]);
+    }
+    #[test]
+    fn indexed_proxy_instance_attributes_match_shader_entry() {
+        use super::proxy_indexed::Triangle;
+        assert_eq!(std::mem::size_of::<Triangle>(), 40);
+        assert_eq!(std::mem::offset_of!(Triangle, positions), 0);
+        assert_eq!(std::mem::offset_of!(Triangle, normal), 12);
+        assert_eq!(std::mem::offset_of!(Triangle, color), 24);
+        assert_eq!(std::mem::offset_of!(Triangle, profile_index), 36);
+        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "vs_proxy_indexed")
+            .unwrap();
+        let locations: Vec<_> = entry
+            .function
+            .arguments
+            .iter()
+            .filter_map(|a| match a.binding {
+                Some(naga::Binding::Location { location, .. }) => {
+                    Some((a.name.as_deref().unwrap(), location))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            vec![
+                ("addresses", 0),
+                ("normal", 1),
+                ("color", 2),
+                ("profile_index", 3)
+            ]
+        );
+    }
+    #[test]
+    fn derived_proxy_instance_attributes_match_shader_entry() {
+        use super::proxy_indexed::DerivedTriangle;
+        assert_eq!(std::mem::size_of::<DerivedTriangle>(), 20);
+        assert_eq!(std::mem::offset_of!(DerivedTriangle, positions), 0);
+        assert_eq!(std::mem::offset_of!(DerivedTriangle, material), 12);
+        assert_eq!(std::mem::offset_of!(DerivedTriangle, profile_index), 16);
+        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "vs_proxy_derived")
+            .unwrap();
+        let locations: Vec<_> = entry
+            .function
+            .arguments
+            .iter()
+            .filter_map(|a| match a.binding {
+                Some(naga::Binding::Location { location, .. }) => {
+                    Some((a.name.as_deref().unwrap(), location))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            vec![("addresses", 0), ("material", 1), ("profile_index", 2)]
+        );
+        assert_eq!(
+            super::packed_first_instance_stride(true, false, true, &(320..960), 2048, 32, 20),
+            Some(16)
+        );
     }
     #[test]
     fn canonical_shader_validates() {
