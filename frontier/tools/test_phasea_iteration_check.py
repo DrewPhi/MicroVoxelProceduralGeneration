@@ -50,6 +50,11 @@ class IterationCheckTests(unittest.TestCase):
         self.assertIn('FRONTIER_GPU_PROFILES', ITERATION_ENV_KEYS)
         self.assertEqual(environment(['FRONTIER_GPU_PROFILES=1']), {'FRONTIER_GPU_PROFILES': '1'})
 
+    def test_cold_source_codec_is_an_explicit_tracked_arm_setting(self):
+        self.assertIn('FRONTIER_SOURCE_COLD_CODEC', EXPERIMENT_ENV_KEYS)
+        self.assertEqual(environment(['FRONTIER_SOURCE_COLD_CODEC=lz4']),
+                         {'FRONTIER_SOURCE_COLD_CODEC': 'lz4'})
+
     def test_dry_run_does_not_create_output_or_need_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'untouched'

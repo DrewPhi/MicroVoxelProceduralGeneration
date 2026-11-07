@@ -151,6 +151,35 @@ impl FbmTerrain {
         }
         self.params.amplitude * (0.85 * sum / norm + 0.4 * broad - 0.12)
     }
+    /// B1 experiment only. Keep the warp, broad band and full-source denominator;
+    /// dropping octaves must never renormalize the retained terrain into a new world.
+    pub(crate) fn visual_legacy_height(&self, cell: [i64; 2], retained: u32) -> f64 {
+        if retained == self.params.octaves {
+            return self.height_cells(cell[0], cell[1]) as f64 * VOXEL_SIZE;
+        }
+        let x = (cell[0] as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
+        let z = (cell[1] as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
+        let wx = x + 0.32 * noise(x * 0.55 + 17.3, z * 0.55 - 8.7, self.seed ^ 0x1234);
+        let wz = z + 0.32 * noise(x * 0.55 - 31.9, z * 0.55 + 4.2, self.seed ^ 0x5678);
+        let broad = noise(wx * 0.42 + 3.1, wz * 0.42 - 7.8, self.seed ^ 0x9abc);
+        let (mut sum, mut norm, mut weight, mut freq) = (0.0, 0.0, 1.0, 1.0);
+        for octave in 0..self.params.octaves {
+            if octave < retained {
+                let n = noise(
+                    wx * freq + 12.7,
+                    wz * freq - 29.1,
+                    self.seed.wrapping_add(octave as u64 * 0x9e3779b9),
+                );
+                let ridge = 1.0 - (n * 1.7).abs().min(1.0);
+                sum += weight * (0.75 * ridge * ridge + 0.25 * n);
+            }
+            norm += weight;
+            weight *= self.params.roughness;
+            freq *= 2.0;
+        }
+        let h = self.params.amplitude * (0.85 * sum / norm + 0.4 * broad - 0.12);
+        (h / VOXEL_SIZE).floor() * VOXEL_SIZE
+    }
     fn regional_elevation(&self, x: f64, z: f64) -> f64 {
         // x/z are canonical meters / horizontal_scale. Constants below correspond
         // to physical wavelengths at the default 1800m scale, never display LOD.

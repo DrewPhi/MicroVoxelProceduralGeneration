@@ -18,6 +18,17 @@ const PROMOTE_AT: usize = 128;
 const ALLOCATION_OVERHEAD: usize = 64;
 const CONTROL_PADDING: usize = 16;
 type PageKey = [i64; 2];
+#[derive(Clone, Copy)]
+pub(crate) struct ValueCodec<T> {
+    pub bytes: usize,
+    pub encode: fn(T, &mut [u8]),
+    pub decode: fn(&[u8]) -> Option<T>,
+}
+struct Cold<T> {
+    cache: crate::cold_source_cache::ColdCache,
+    codec: ValueCodec<T>,
+    reservation: usize,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
@@ -112,6 +123,7 @@ struct Page<T: Copy> {
 /// are copies, so page eviction never invalidates a caller's native data.
 pub struct PageCache<T: Copy + Default> {
     budget: usize,
+    cold: Option<Cold<T>>,
     pages: HashMap<PageKey, Page<T>>,
     table_buckets: usize,
     oldest: Option<PageKey>,
@@ -125,6 +137,7 @@ impl<T: Copy + Default> PageCache<T> {
     pub fn new(budget: usize) -> Self {
         Self {
             budget,
+            cold: None,
             pages: HashMap::new(),
             table_buckets: 0,
             oldest: None,
@@ -134,6 +147,29 @@ impl<T: Copy + Default> PageCache<T> {
             payload_bytes: 0,
             stats: Stats::default(),
         }
+    }
+    /// Opt-in cold tier. Scratch and metadata share the existing total budget.
+    /// If too small for bounded codec scratch, retain the baseline hot cache.
+    pub(crate) fn with_cold(budget: usize, codec: ValueCodec<T>) -> Self {
+        let mut out = Self::new(budget);
+        let reservation = budget / 2;
+        if let Some(cache) =
+            crate::cold_source_cache::ColdCache::new(reservation, PAGE_CELLS * (2 + codec.bytes))
+        {
+            out.cold = Some(Cold {
+                cache,
+                codec,
+                reservation,
+            });
+            out.note_peak(0);
+        }
+        out
+    }
+    pub(crate) fn cold_stats(&self) -> crate::cold_source_cache::ColdStats {
+        self.cold
+            .as_ref()
+            .map(|c| c.cache.stats())
+            .unwrap_or_default()
     }
     /// Touch a page at most once per geometry job, not once per source column.
     pub fn begin_job(&mut self) {
@@ -156,6 +192,28 @@ impl<T: Copy + Default> PageCache<T> {
         if needs_touch {
             self.touch(key);
         }
+        let value = value.or_else(|| {
+            let cold = self.cold.as_mut()?;
+            let stride = cold.codec.bytes + 2;
+            cold.cache
+                .get(key, |bytes| {
+                    let (mut lo, mut hi) = (0, bytes.len() / stride);
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let offset = mid * stride;
+                        let found = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+                        if found < index {
+                            lo = mid + 1;
+                        } else if found > index {
+                            hi = mid;
+                        } else {
+                            return (cold.codec.decode)(&bytes[offset + 2..offset + stride]);
+                        }
+                    }
+                    None
+                })
+                .flatten()
+        });
         if value.is_some() {
             self.stats.hits += 1;
         } else {
@@ -166,6 +224,10 @@ impl<T: Copy + Default> PageCache<T> {
     /// Best-effort cache admission. Failure never changes the caller's freshly
     /// generated canonical value; it only means that value remains uncached.
     pub fn insert(&mut self, address: [i64; 2], value: T) -> bool {
+        // An updated hot value must never leave an older cold page reachable.
+        if let Some(cold) = &mut self.cold {
+            cold.cache.remove(address_parts(address).0);
+        }
         let accepted = self.insert_inner(address, value);
         if accepted {
             self.stats.insertions += 1;
@@ -177,7 +239,9 @@ impl<T: Copy + Default> PageCache<T> {
         accepted
     }
     pub fn allocated_bytes(&self) -> usize {
-        self.table_bytes().saturating_add(self.payload_bytes)
+        self.table_bytes()
+            .saturating_add(self.payload_bytes)
+            .saturating_add(self.cold.as_ref().map_or(0, |c| c.reservation))
     }
     pub fn len(&self) -> usize {
         self.columns
@@ -191,6 +255,9 @@ impl<T: Copy + Default> PageCache<T> {
     /// Release all data and backing tables when the source/revision changes.
     /// Lifetime counters remain available for diagnostics.
     pub fn clear(&mut self) {
+        if let Some(cold) = &mut self.cold {
+            cold.cache.clear();
+        }
         self.pages = HashMap::new();
         self.table_buckets = 0;
         self.oldest = None;
@@ -379,6 +446,19 @@ impl<T: Copy + Default> PageCache<T> {
     fn evict(&mut self, key: PageKey) {
         let page = self.pages.remove(&key).unwrap();
         self.unlink(page.previous, page.next);
+        if let Some(cold) = &mut self.cold {
+            let stride = cold.codec.bytes + 2;
+            cold.cache.insert(key, page.data.len() * stride, |bytes| {
+                let mut offset = 0;
+                for index in 0..PAGE_CELLS as u16 {
+                    if let Some(value) = page.data.get(index) {
+                        bytes[offset..offset + 2].copy_from_slice(&index.to_le_bytes());
+                        (cold.codec.encode)(value, &mut bytes[offset + 2..offset + stride]);
+                        offset += stride;
+                    }
+                }
+            });
+        }
         self.payload_bytes -= page.data.bytes();
         self.columns -= page.data.len();
         self.stats.page_evictions += 1;
@@ -573,6 +653,112 @@ mod tests {
         }
         assert_eq!(visited.len(), cache.pages.len());
         assert_eq!(previous, cache.newest);
+    }
+    #[test]
+    fn same_budget_unique_source_history_capacity() {
+        let codec = ValueCodec {
+            bytes: 11,
+            encode: |v: Column, b: &mut [u8]| {
+                b[..8].copy_from_slice(&v.height.to_le_bytes());
+                b[8..].copy_from_slice(&v.bands);
+            },
+            decode: |b: &[u8]| {
+                Some(Column {
+                    height: i64::from_le_bytes(b[..8].try_into().ok()?),
+                    bands: b[8..].try_into().ok()?,
+                })
+            },
+        };
+        const BUDGET: usize = 256 * 1024;
+        // Count each address once, not compressed/raw byte ratios or repeated
+        // hits to a single decoded page. Both caches receive identical history.
+        // Neither synthetic fixture certifies actual terrain revisit readiness.
+        for flat in [true, false] {
+            let mut baseline = PageCache::new(BUDGET);
+            let mut cold = PageCache::with_cold(BUDGET, codec);
+            assert!(cold.cold.is_some());
+            for page in -12..12 {
+                baseline.begin_job();
+                cold.begin_job();
+                for i in 0..PAGE_CELLS {
+                    let p = [page * 32 + (i % 32) as i64, (i / 32) as i64];
+                    let value = if flat { Column::default() } else { column(p) };
+                    assert!(baseline.insert(p, value));
+                    assert!(cold.insert(p, value));
+                }
+                valid(&baseline);
+                valid(&cold);
+            }
+            let mut recovered = [0usize; 2];
+            for page in -12..12 {
+                for i in 0..PAGE_CELLS {
+                    let p = [page * 32 + (i % 32) as i64, (i / 32) as i64];
+                    let expected = if flat { Column::default() } else { column(p) };
+                    for (count, cache) in recovered.iter_mut().zip([&mut baseline, &mut cold]) {
+                        if let Some(value) = cache.get(p) {
+                            assert_eq!(value, expected);
+                            *count += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(recovered[0], baseline.len());
+            assert!(
+                recovered[1] > cold.len(),
+                "must recover unique cold columns"
+            );
+            assert!(recovered.iter().all(|&n| n <= 24 * PAGE_CELLS));
+            eprintln!("same-budget history flat={flat} budget={BUDGET} baseline_columns={} cold_columns={} ratio={:.3}",
+                recovered[0], recovered[1], recovered[1] as f64 / recovered[0] as f64);
+            // A measured ratio below 2x is a failed B2 gate, not a cache
+            // correctness failure. Preserve that distinction in the report.
+            valid(&baseline);
+            valid(&cold);
+        }
+    }
+    #[test]
+    fn cold_tier_preserves_evicted_values_and_revision_clear() {
+        let codec = ValueCodec {
+            bytes: 11,
+            encode: |v: Column, b: &mut [u8]| {
+                b[..8].copy_from_slice(&v.height.to_le_bytes());
+                b[8..].copy_from_slice(&v.bands);
+            },
+            decode: |b: &[u8]| {
+                Some(Column {
+                    height: i64::from_le_bytes(b[..8].try_into().ok()?),
+                    bands: b[8..].try_into().ok()?,
+                })
+            },
+        };
+        let mut c = PageCache::with_cold(256 * 1024, codec);
+        for page in 0..24 {
+            c.begin_job();
+            for i in 0..PAGE_CELLS {
+                let p = [page * 32 + (i % 32) as i64, (i / 32) as i64];
+                c.insert(p, column(p));
+            }
+            valid(&c);
+        }
+        let mut recovered = 0;
+        for page in 0..24 {
+            for i in 0..PAGE_CELLS {
+                let p = [page * 32 + (i % 32) as i64, (i / 32) as i64];
+                if let Some(value) = c.get(p) {
+                    assert_eq!(value, column(p));
+                    recovered += 1;
+                }
+            }
+        }
+        assert!(recovered > 0);
+        assert!(c.cold_stats().hits > 0);
+        // Missing sparse entries are never fabricated; writes drop the old cold
+        // page conservatively rather than merging independently mutable truth.
+        c.clear();
+        assert_eq!(c.get([0, 0]), None);
+        assert!(c.insert([0, 0], Column::default()));
+        assert_eq!(c.get([0, 0]), Some(Column::default()));
+        valid(&c);
     }
     #[test]
     fn exact_values_and_negative_page_boundaries() {

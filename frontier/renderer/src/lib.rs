@@ -6,6 +6,7 @@ mod adaptive_view;
 mod atmosphere;
 pub mod brick_ray;
 mod build_memory;
+mod cold_source_cache;
 pub mod column_mesh;
 mod derived_disk_cache;
 mod derived_disk_writeback;
@@ -22,6 +23,8 @@ mod options;
 mod page_terrain;
 mod settings;
 mod settings_ui;
+#[cfg(test)]
+mod source_cache_probe;
 mod source_page_cache;
 mod surface_compare;
 mod terrain;

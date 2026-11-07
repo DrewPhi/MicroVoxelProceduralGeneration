@@ -1,5 +1,20 @@
 # Issue 75: Phase A experiment contract
 
+Latest checkpoint: [B1–B3 measured decisions](research/B123_CHECKPOINT.md).
+The source truncation candidate fails fidelity; the opt-in compressed cache
+preserves static images but regresses readiness; GPU meshing remains gated by
+critical-path evidence. No runtime default changed. Scene dressing can begin as
+a bounded reference-first task while #74 motion/detail acceptance remains open.
+
+Updated issue order (2026-11-07): first the
+[MishMash source-first research dossier](research/MISHMASH_SOURCE_FIRST_REVIEW.md),
+then Step 0.5 user review of the existing uniform-page visual comparison, then
+B1 direct coarse source generation, B2 compressed source caching, and conditional
+B3 GPU meshing. The dossier records missing YouTube-comment/export evidence;
+that portion of Step 0 remains unverified. The user completed that review, preferred the adaptive image, and explicitly
+authorized B1/B2/conditional B3 on 2026-11-07. Preserve adaptive as the baseline. The older experiment gates below
+remain validation requirements, not authorization to bypass that review.
+
 Status: bounded GPU experiments measured; see [results](reference/issue75/README.md).
 The second iteration tests [indexed adaptive GPU records](reference/issue75/ITERATION_2.md)
 and [parallel GPU appearance preparation](reference/issue75/GPU_PROFILES.md).
@@ -11,8 +26,9 @@ consumes GPU-computed profiles in real draws. Lossless source packing reduced
 transfer/storage costs, but repeated loading and motion runs did not establish
 an end-to-end win. Keep this path optional while investigating shared source
 reuse and batched preparation; do not promote it on kernel timings alone.
-The uniform-page candidate fails the primary visual gate; no replacement is
-promoted and the broader architecture decision remains open. Reuse tier G for
+The uniform-page candidate fails the strict primary numeric gate; the user also preferred the adaptive appearance in the
+[matched comparison](reference/issue75/adaptive-vs-pages.png). Step 0.5 is complete. No
+replacement is promoted and the broader architecture decision remains open. Reuse tier G for
 the experiment tools. Existing adaptive,
 clipmap/hybrid and native-reference implementations remain comparisons. Reusable
 GPU terrain grids already exist in this repository; the page experiment must

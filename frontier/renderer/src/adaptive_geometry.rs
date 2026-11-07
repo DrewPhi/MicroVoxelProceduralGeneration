@@ -1468,7 +1468,43 @@ impl SharedSourcePages {
                     profiles.capacity() * std::mem::size_of::<Option<ProfileEntry>>() + 64
                 };
                 Arc::new(Mutex::new(SourceShard {
-                    pages: PageCache::new(budget - bound_bytes - profile_bytes),
+                    pages: {
+                        let bytes = budget - bound_bytes - profile_bytes;
+                        if std::env::var("FRONTIER_SOURCE_COLD_CODEC").as_deref() == Ok("lz4") {
+                            PageCache::with_cold(
+                                bytes,
+                                crate::source_page_cache::ValueCodec {
+                                    bytes: 11,
+                                    encode: |v: NativeColumn, b| {
+                                        b[..8].copy_from_slice(&v.height.to_le_bytes());
+                                        for i in 0..3 {
+                                            b[8 + i] = v.bands[i] as u8;
+                                        }
+                                    },
+                                    decode: |b| {
+                                        let material = |v| match v {
+                                            0 => Some(Material::Air),
+                                            1 => Some(Material::Grass),
+                                            2 => Some(Material::Soil),
+                                            3 => Some(Material::Stone),
+                                            4 => Some(Material::Wood),
+                                            _ => None,
+                                        };
+                                        Some(NativeColumn {
+                                            height: i64::from_le_bytes(b[..8].try_into().ok()?),
+                                            bands: [
+                                                material(b[8])?,
+                                                material(b[9])?,
+                                                material(b[10])?,
+                                            ],
+                                        })
+                                    },
+                                },
+                            )
+                        } else {
+                            PageCache::new(bytes)
+                        }
+                    },
                     bounds,
                     bound_bytes,
                     bound_hits: 0,
@@ -1500,6 +1536,17 @@ impl SharedSourcePages {
         for shard in &self.shards {
             let shard = shard.lock().unwrap();
             let stats = shard.pages.stats();
+            let cold = shard.pages.cold_stats();
+            out.source_cold_enabled_shards += cold.enabled_shards;
+            out.source_cold_budget_bytes += cold.budget_bytes;
+            out.source_cold_resident_bytes += cold.resident_bytes;
+            out.source_cold_entries += cold.entries;
+            out.source_cold_retained_raw_bytes += cold.retained_raw_bytes;
+            out.source_cold_hits += cold.hits;
+            out.source_cold_encoded_bytes += cold.encoded_bytes;
+            out.source_cold_raw_bytes += cold.raw_bytes;
+            out.source_cold_encode_ms += cold.encode_ns as f64 / 1e6;
+            out.source_cold_decode_ms += cold.decode_ns as f64 / 1e6;
             out.source_cache_bytes +=
                 shard.pages.allocated_bytes() + shard.bound_bytes + shard.profile_bytes;
             out.source_cache_peak_bytes +=
@@ -2390,6 +2437,16 @@ pub struct CacheStats {
     pub total_build_ms: f64,
     pub max_build_ms: f64,
     pub source_cache_hits: u64,
+    pub source_cold_enabled_shards: usize,
+    pub source_cold_budget_bytes: usize,
+    pub source_cold_resident_bytes: usize,
+    pub source_cold_entries: usize,
+    pub source_cold_retained_raw_bytes: usize,
+    pub source_cold_hits: u64,
+    pub source_cold_encoded_bytes: u64,
+    pub source_cold_raw_bytes: u64,
+    pub source_cold_encode_ms: f64,
+    pub source_cold_decode_ms: f64,
     pub generated_columns: u64,
     /// Reserved source-cache capacity, carved from the total cache budget.
     pub source_budget_bytes: usize,
@@ -2696,6 +2753,16 @@ impl GeometryCache {
         self.stats.native_mesh_ms = self.samples.stages.native_mesh_ms;
         self.stats.finalize_ms = self.samples.stages.finalize_ms;
         self.stats.source_cache_hits = self.samples.hits;
+        self.stats.source_cold_enabled_shards = source_stats.source_cold_enabled_shards;
+        self.stats.source_cold_budget_bytes = source_stats.source_cold_budget_bytes;
+        self.stats.source_cold_resident_bytes = source_stats.source_cold_resident_bytes;
+        self.stats.source_cold_entries = source_stats.source_cold_entries;
+        self.stats.source_cold_retained_raw_bytes = source_stats.source_cold_retained_raw_bytes;
+        self.stats.source_cold_hits = source_stats.source_cold_hits;
+        self.stats.source_cold_encoded_bytes = source_stats.source_cold_encoded_bytes;
+        self.stats.source_cold_raw_bytes = source_stats.source_cold_raw_bytes;
+        self.stats.source_cold_encode_ms = source_stats.source_cold_encode_ms;
+        self.stats.source_cold_decode_ms = source_stats.source_cold_decode_ms;
         self.stats.generated_columns = self.samples.generated;
         self.stats.source_cache_bytes = source_bytes;
         self.stats.source_cache_peak_bytes = source_stats.source_cache_peak_bytes;
@@ -2818,6 +2885,16 @@ impl GeometryCache {
                 - self.stats.affine_ms
                 - proxy_source_ms)
                 .max(0.),
+            source_cold_enabled_shards: source.source_cold_enabled_shards,
+            source_cold_budget_bytes: source.source_cold_budget_bytes,
+            source_cold_resident_bytes: source.source_cold_resident_bytes,
+            source_cold_entries: source.source_cold_entries,
+            source_cold_retained_raw_bytes: source.source_cold_retained_raw_bytes,
+            source_cold_hits: source.source_cold_hits,
+            source_cold_encoded_bytes: source.source_cold_encoded_bytes,
+            source_cold_raw_bytes: source.source_cold_raw_bytes,
+            source_cold_encode_ms: source.source_cold_encode_ms,
+            source_cold_decode_ms: source.source_cold_decode_ms,
             source_cache_bytes: source.source_cache_bytes,
             source_cache_peak_bytes: source.source_cache_peak_bytes,
             source_cache_pages: source.source_cache_pages,

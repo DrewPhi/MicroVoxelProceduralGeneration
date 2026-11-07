@@ -16,5 +16,8 @@ egui = "=0.31.1"
 egui-wgpu = { version = "=0.31.1", default-features = false }
 egui-winit = { version = "=0.31.1", default-features = false, features = ["x11"] }
 
+lz4_flex = "=0.11.6"
+
 [dev-dependencies]
+zstd = "=0.13.3"
 naga = { version = "=24.0.0", features = ["wgsl-in"] }

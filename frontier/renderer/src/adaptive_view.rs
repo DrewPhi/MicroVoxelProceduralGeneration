@@ -657,6 +657,10 @@ impl AdaptiveView {
         json.push_str(&format!(",\"render_bundles\":{{\"enabled\":{},\"active\":{},\"builds\":{},\"reuses\":{},\"build_ms\":{}}}}}", self.stats.bundle_enabled, self.stats.bundle_active, self.stats.bundle_builds, self.stats.bundle_reuses, self.stats.bundle_build_ms));
         let c = self.latest_cache;
         json.pop();
+        json.push_str(&format!(",\"cold_source_residency\":{{\"enabled_shards\":{},\"reserved_bytes\":{},\"resident_bytes\":{},\"entries\":{},\"retained_raw_bytes\":{}}}}}", c.source_cold_enabled_shards, c.source_cold_budget_bytes, c.source_cold_resident_bytes, c.source_cold_entries, c.source_cold_retained_raw_bytes));
+        json.pop();
+        json.push_str(&format!(",\"cold_source_cache\":{{\"hits\":{},\"encoded_bytes_cumulative\":{},\"raw_bytes_cumulative\":{},\"encode_ms\":{},\"decode_ms\":{}}}}}", c.source_cold_hits, c.source_cold_encoded_bytes, c.source_cold_raw_bytes, c.source_cold_encode_ms, c.source_cold_decode_ms));
+        json.pop();
         json.push_str(&format!(",\"exclusive_cpu_profile\":{{\"enabled\":{},\"source_lock_ms\":{},\"source_lookup_ms\":{},\"source_generate_ms\":{},\"appearance_ms\":{},\"certificate_ms\":{},\"native_mesh_ms\":{},\"proxy_ms\":{},\"cache_snapshot_ms\":{},\"cache_admission_ms\":{},\"cache_eviction_ms\":{},\"lru_metadata_bytes\":{}}}}}", c.profile_enabled, c.source_lock_ms, c.source_lookup_ms, c.source_generate_ms, c.appearance_exclusive_ms, c.certificate_exclusive_ms, c.native_mesh_exclusive_ms, c.proxy_exclusive_ms, c.cache_snapshot_ms, c.cache_admission_ms, c.cache_eviction_ms, c.lru_metadata_bytes));
         json.pop();
         json.push_str(&format!(",\"presentation_cpu_ms\":{{\"upload_enqueue\":{},\"publication_check\":{},\"gpu_visibility_uniforms_bundles\":{}}}}}", self.upload_cpu_ms, self.publication_cpu_ms, self.gpu_prepare_cpu_ms));
