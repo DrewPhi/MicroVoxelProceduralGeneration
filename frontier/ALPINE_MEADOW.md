@@ -64,7 +64,7 @@ The frozen Legacy exact-native comparison remains the primary regression check.
 Local captures, raw buffers, logs and manifests live under
 `output/alpine-scene/` and are ignored by Git.
 
-## Validation
+## Initial scene validation
 
 All 342 Rust workspace tests passed (11 profiling/optional tests ignored). The frozen 1080p Legacy capture matched
 its pre-change baseline exactly in float32 color, depth and coverage. This is
@@ -76,7 +76,7 @@ or frame-time certification.
 a three-pixel bound; final screenshots use that launch preset. Loading and performance
 tuning remain separate work.
 
-## Scene captures
+## Initial scene captures
 
 ![Player-height path view](reference/gallery/alpine/meadow.png)
 
@@ -87,3 +87,19 @@ The [capture manifest](reference/gallery/alpine/manifest.json) records source,
 cameras, commands, actual resident resources and quality state. Distant material
 coverage remains visibly coarse and some contour bands remain; these are not
 claims of invisible LOD or a completed photorealistic scene.
+
+## Path and native-mesh refinement
+
+The current preset uses Alpine source 4 / appearance 2: a narrower path with
+variable width and irregular turf shoulders, plus coherent soil relief bounded
+to ±4 cm. Exact nearby faces now meet at matching voxel-sized edges to repair
+visible rasterization pinholes. No fog, image filling or blur hides missing terrain.
+
+![Refined player-height scene](reference/gallery/alpine/meadow-refined.png)
+
+The [refined capture manifest](reference/gallery/alpine/refined-manifest.json)
+records the actual settled view. All 346 workspace tests pass (11 optional tests
+ignored). The [artifact audit](ALPINE_ARTIFACT_AUDIT.md) records coverage checks,
+measured memory/frame-time costs, reference differences and the remaining coarse
+material-grid limitation. These changes improve the scene; they do not claim to
+eliminate distant material blocks or physically present voxel steps.

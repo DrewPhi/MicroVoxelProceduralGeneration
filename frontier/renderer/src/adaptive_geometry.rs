@@ -47,6 +47,7 @@ pub struct NativeQuad {
     pub material: u32,
     pub profile_index: u32,
 }
+pub(crate) const MAX_NATIVE_QUADS: usize = 4_000_000;
 /// Lossless proxy primitive. The three positions retain the indexed triangle's
 /// original order; identical per-corner normal/color/profile data is stored once.
 #[repr(C)]
@@ -567,7 +568,34 @@ fn pack_native_quads(tile: &mut GeometryTile) -> Result<(), String> {
         Material::Stone,
         Material::Wood,
     ];
-    let mut quads = Vec::with_capacity(tile.mesh.vertices.len() / 4);
+    // Bound tessellation before allocating: steep native cliffs can expose
+    // many more unit faces than their greedy rectangle count suggests.
+    let quad_count = tile
+        .mesh
+        .vertices
+        .chunks_exact(4)
+        .try_fold(0usize, |sum, q| {
+            let axis = q[0]
+                .normal
+                .iter()
+                .position(|&v| v != 0.)
+                .ok_or("native quad has no normal")?;
+            let area = (0..3).filter(|&a| a != axis).try_fold(1usize, |area, a| {
+                let cells = ((q[2].position[a] - q[0].position[a]) as f64 / VOXEL_SIZE).round();
+                if !cells.is_finite() || cells <= 0. || cells > MAX_NATIVE_QUADS as f64 {
+                    return Err("invalid native quad extent");
+                }
+                area.checked_mul(cells as usize)
+                    .ok_or("native tessellation size overflow")
+            })?;
+            sum.checked_add(area)
+                .filter(|&n| n <= MAX_NATIVE_QUADS)
+                .ok_or("native tessellation exceeds output memory budget")
+        })?;
+    let mut quads = Vec::new();
+    quads
+        .try_reserve_exact(quad_count)
+        .map_err(|_| "native tessellation allocation failed")?;
     for (i, q) in tile.mesh.vertices.chunks_exact(4).enumerate() {
         let axis = q[0]
             .normal
@@ -582,16 +610,31 @@ fn pack_native_quads(tile: &mut GeometryTile) -> Result<(), String> {
             .ok_or("native quad color is outside canonical material palette")?
             as u32;
         let profile_index = tile.face_profile_indices.get(i * 4).copied().unwrap_or(0);
-        quads.push(NativeQuad {
-            anchor: q[0].position,
-            extent: [
-                q[2].position[u] - q[0].position[u],
-                q[2].position[v] - q[0].position[v],
-            ],
-            axis_sign: axis as u32 | if q[0].normal[axis] < 0. { 4 } else { 0 },
-            material,
-            profile_index,
-        });
+        // Greedy rectangles describe the right surface but leave T junctions
+        // where a short face meets a longer edge. After perspective projection
+        // and rasterizer subpixel rounding those edges can disagree, exposing
+        // background samples even though the canonical surface is closed.
+        // Exact near tiles use matching unit-cell edges on every face. This
+        // only tessellates the same planar surfaces; materials and coverage in
+        // world space remain canonical. Distant proxy geometry stays compact.
+        let extent = [
+            ((q[2].position[u] - q[0].position[u]) as f64 / VOXEL_SIZE).round() as usize,
+            ((q[2].position[v] - q[0].position[v]) as f64 / VOXEL_SIZE).round() as usize,
+        ];
+        for dv in 0..extent[1] {
+            for du in 0..extent[0] {
+                let mut anchor = q[0].position;
+                anchor[u] += (du as f64 * VOXEL_SIZE) as f32;
+                anchor[v] += (dv as f64 * VOXEL_SIZE) as f32;
+                quads.push(NativeQuad {
+                    anchor,
+                    extent: [VOXEL_SIZE as f32; 2],
+                    axis_sign: axis as u32 | if q[0].normal[axis] < 0. { 4 } else { 0 },
+                    material,
+                    profile_index,
+                });
+            }
+        }
     }
     let mut bins: Vec<NativeBin> = vec![];
     for (i, q) in quads.iter().enumerate() {
@@ -4814,7 +4857,7 @@ mod tests {
         }
     }
     #[test]
-    fn native_quad_records_decode_bitwise_to_exact_original_geometry() {
+    fn conforming_native_records_preserve_exact_faces_materials_and_profiles() {
         assert_eq!(std::mem::size_of::<NativeQuad>(), 32);
         let world = World::fbm(
             7,
@@ -4829,9 +4872,31 @@ mod tests {
             let k = TileKey { min, ..key(1) };
             let mut tile = build_surface(&world, k, || false, &mut SourceSamples::new(0)).unwrap();
             let vertices = tile.mesh.vertices.clone();
-            let indices = tile.mesh.indices.clone();
-            let profile_indices = tile.face_profile_indices.clone();
-            let old_bytes = tile.bytes;
+            let mut expected = std::collections::BTreeSet::new();
+            for (i, q) in vertices.chunks_exact(4).enumerate() {
+                let axis = q[0].normal.iter().position(|&n| n != 0.).unwrap();
+                let u = (axis + 1) % 3;
+                let v = (axis + 2) % 3;
+                let p = q[0]
+                    .position
+                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                let hi = q[2]
+                    .position
+                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                for vv in p[v]..hi[v] {
+                    for uu in p[u]..hi[u] {
+                        let mut cell = p;
+                        cell[u] = uu;
+                        cell[v] = vv;
+                        assert!(expected.insert((
+                            cell,
+                            axis as u32 | if q[0].normal[axis] < 0. { 4 } else { 0 },
+                            q[0].color.map(f32::to_bits),
+                            tile.face_profile_indices[i * 4]
+                        )));
+                    }
+                }
+            }
             pack_native_quads(&mut tile).unwrap();
             assert!(
                 tile.mesh.vertices.is_empty()
@@ -4839,22 +4904,47 @@ mod tests {
                     && tile.face_profile_indices.is_empty()
             );
             assert!(!tile.is_empty());
-            assert_eq!(tile.triangle_count(), indices.len() as u64 / 3);
-            let decoded = expanded_native(&tile);
-            assert_eq!(indices, decoded.indices);
-            for (a, b) in vertices.iter().zip(&decoded.vertices) {
-                assert_eq!(a.position.map(f32::to_bits), b.position.map(f32::to_bits));
-                assert_eq!(a.normal.map(f32::to_bits), b.normal.map(f32::to_bits));
-                assert_eq!(a.color.map(f32::to_bits), b.color.map(f32::to_bits));
+            let palette = [
+                Material::Air,
+                Material::Grass,
+                Material::Soil,
+                Material::Stone,
+                Material::Wood,
+            ];
+            let mut actual = std::collections::BTreeSet::new();
+            for q in &tile.native_quads {
+                // Every shared edge has exactly one canonical-cell segment:
+                // no edge can contain another unit face's vertex in its interior.
+                assert_eq!(q.extent, [VOXEL_SIZE as f32; 2]);
+                assert!(actual.insert((
+                    q.anchor.map(|n| (n as f64 / VOXEL_SIZE).round() as i64),
+                    q.axis_sign,
+                    palette[q.material as usize].color().map(f32::to_bits),
+                    q.profile_index
+                )));
             }
-            for (i, q) in tile.native_quads.iter().enumerate() {
-                assert_eq!(q.profile_index, profile_indices[i * 4]);
-            }
-            assert!(
-                tile.bytes < old_bytes / 3,
-                "native geometry must materially shrink without quality changes"
-            );
+            assert_eq!(expected, actual);
+            assert_eq!(tile.triangle_count(), expected.len() as u64 * 2);
         }
+    }
+    #[test]
+    fn oversized_native_tessellation_is_rejected_before_packed_allocation() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let mut tile = build_surface(&world, key(1), || false, &mut SourceSamples::new(0)).unwrap();
+        let axis = tile.mesh.vertices[0]
+            .normal
+            .iter()
+            .position(|&n| n != 0.)
+            .unwrap();
+        for a in (0..3).filter(|&a| a != axis) {
+            tile.mesh.vertices[2].position[a] = tile.mesh.vertices[0].position[a] + 1000.;
+        }
+        assert_eq!(
+            pack_native_quads(&mut tile).unwrap_err(),
+            "native tessellation exceeds output memory budget"
+        );
+        assert!(tile.native_quads.is_empty());
+        assert!(!tile.mesh.vertices.is_empty());
     }
     #[test]
     fn volume_boundary_profiles_use_canonical_face_fallback_instead_of_base_halo() {
@@ -5335,7 +5425,9 @@ mod tests {
             .get_or_build(
                 TileKey {
                     min: [-128, -128],
-                    width_cells: 128,
+                    // 64² canonical top records fit this deliberately tiny
+                    // mesh budget; the source halo still fills its reserve.
+                    width_cells: 64,
                     step_cells: 1,
                     edge_steps: [1; 4],
                     source_revision: 0,

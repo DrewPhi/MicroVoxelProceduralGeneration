@@ -74,16 +74,21 @@ pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     match p.recipe {
         FbmRecipe::Legacy => [-0.7325 * p.amplitude - VOXEL_SIZE, 1.13 * p.amplitude],
         // |meadow|<=54, all four peak weights sum to2520, crest<=3200,
-        // foothills<=480, envelope in[0,1], fine relief<=7.95.
+        // foothills<=480, envelope in[0,1], fine relief<=7.95 plus fixed
+        // microrelief. Each independent noise band has absolute value <=1.
         FbmRecipe::Alpine => [
-            -63.0 * p.amplitude / 1000.0 - VOXEL_SIZE,
-            3743.0 * p.amplitude / 1000.0,
+            (-63.0 - alpine_microrelief_amplitude()) * p.amplitude / 1000.0 - VOXEL_SIZE,
+            (3743.0 + alpine_microrelief_amplitude()) * p.amplitude / 1000.0,
         ],
         _ => [
             -103.5 * p.amplitude / 1000.0 - VOXEL_SIZE,
             423.5 * p.amplitude / 1000.0,
         ],
     }
+}
+
+fn alpine_microrelief_amplitude() -> f64 {
+    crate::alpine::MICRORELIEF_BANDS.iter().map(|b| b.1).sum()
 }
 
 /// Analytic global Euclidean Lipschitz bound of the continuous generator.
@@ -114,8 +119,12 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
             let ridge = n * (100.0 / 850.0 + 55.0 / 180.0 + 25.0 / 480.0) + peaks;
             let foothills = 4.0 * (190.0 / 900.0 + 290.0 / 1100.0);
             let detail = 7.95 * n * weighted_frequency(1.0 / 45.0, p.octaves, 0.65 * p.roughness);
+            let microrelief = n * crate::alpine::MICRORELIEF_BANDS
+                .iter()
+                .map(|b| b.1 / b.0)
+                .sum::<f64>();
             p.amplitude / 1000.0 * 1800.0 / p.horizontal_scale
-                * (meadow + 3207.5 * envelope_slope + ridge + detail + foothills)
+                * (meadow + 3207.5 * envelope_slope + ridge + detail + foothills + microrelief)
         }
         FbmRecipe::Legacy => {
             let warp = 1.0 + 2.0_f64.sqrt() * 0.32 * 0.55 * n;

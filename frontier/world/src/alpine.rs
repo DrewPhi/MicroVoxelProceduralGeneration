@@ -2,6 +2,12 @@
 //! outward-rounded affine bounds. No sampled slope/error claims or renderer LOD.
 use crate::FbmParams;
 
+/// (wavelength, amplitude, salt), in authored scene meters. These low relief
+/// bands retain irregular native stair boundaries on otherwise quiet meadows.
+/// Shared with the global source envelope/slope bounds, independent of octaves.
+pub(crate) const MICRORELIEF_BANDS: [(f64, f64, u64); 2] =
+    [(1.2, 0.03, 0xa130), (0.75, 0.01, 0xa131)];
+
 pub(crate) trait Value: Copy {
     fn point(v: f64) -> Self;
     fn add(self, b: Self) -> Self;
@@ -104,6 +110,12 @@ pub(crate) fn elevation<V: Value>(
             sum.scale(1.0 / norm)
                 .mul(envelope.scale(7.5).add(V::point(0.45))),
         );
+        // Fixed physical bands avoid the vanishing sub-meter amplitude of the
+        // larger 45m octave stack. The same expression feeds scalar values,
+        // derivatives and affine bounds; these are real heights, not paint.
+        for (wavelength, amplitude, salt) in MICRORELIEF_BANDS {
+            h = h.add(n(x, z, wavelength, salt, &mut noise).scale(amplitude));
+        }
     }
     h.scale(p.amplitude / 1000.0)
 }
@@ -122,6 +134,51 @@ mod tests {
         )
         .unwrap()
     }
+
+    #[test]
+    fn centimeter_relief_is_bounded_coherent_and_changes_native_stairs() {
+        for seed in [0, 7, 91] {
+            let mut changed = 0;
+            let mut max_relief = 0.0_f64;
+            let mut previous = 0.0;
+            let t = terrain(seed);
+            let p = t.params();
+            for i in 0..1024 {
+                let x = (-50.0 + (i as f64 + 0.5) * VOXEL_SIZE) / p.horizontal_scale;
+                let z = -249.96875 / p.horizontal_scale;
+                let full = elevation(x, z, p, true, |x, z, salt| {
+                    crate::terrain::noise(x, z, seed ^ salt)
+                });
+                let old = elevation(x, z, p, true, |x, z, salt| {
+                    if MICRORELIEF_BANDS.iter().any(|b| b.2 == salt) {
+                        0.0
+                    } else {
+                        crate::terrain::noise(x, z, seed ^ salt)
+                    }
+                });
+                let relief = full - old;
+                assert!(relief.abs() <= 0.04 + 1e-12);
+                max_relief = max_relief.max(relief.abs());
+                // Neighboring native columns share coherent relief rather than
+                // independent random heights at each 6.25cm address.
+                if i > 0 {
+                    assert!((relief - previous).abs() < 0.015);
+                }
+                previous = relief;
+                let old_cells = (old / VOXEL_SIZE).floor() as i64;
+                let full_cells = (full / VOXEL_SIZE).floor() as i64;
+                assert!((old_cells - full_cells).abs() <= 1);
+                changed += usize::from(old_cells != full_cells);
+                assert_eq!(
+                    t.height_m(x * p.horizontal_scale, z * p.horizontal_scale),
+                    full_cells as f64 * VOXEL_SIZE
+                );
+            }
+            assert!(max_relief > 0.015, "seed={seed} max={max_relief}");
+            assert!(changed > 50, "seed={seed} changed={changed}");
+        }
+    }
+
     #[test]
     fn quiet_meadow_connected_distant_range_and_native_path() {
         for seed in [0, 7, 91] {
@@ -173,8 +230,11 @@ mod tests {
                 }
             }
             assert!(rock_columns > 0);
-            assert_eq!(t.source_version(), 3);
-            assert_eq!(t.appearance_version(), 1);
+            assert_eq!(t.source_version(), 4);
+            assert_eq!(
+                t.appearance_version(),
+                crate::terrain::ALPINE_APPEARANCE_VERSION
+            );
         }
     }
 }

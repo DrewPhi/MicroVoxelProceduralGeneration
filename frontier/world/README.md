@@ -80,7 +80,7 @@ plus the existing independent-world/edit revision identity requirements.
 
 ## Alpine Meadow source
 
-`FbmRecipe::Alpine` is a separate source version 3 / appearance version 1; Legacy
+`FbmRecipe::Alpine` is a separate source version 4 / appearance version 2; Legacy
 and both Regional recipes retain their existing definitions. At default physical
 parameters (scale 1800, amplitude 1000, octaves 8, roughness 0.5), a quiet roughly
 1 km meadow surrounds the origin. One connected curved range occupies the +z
@@ -94,11 +94,22 @@ Rock exposure thresholds have coherent 120 m and 28 m cover variation within
 a modest slope/elevation transition belt; gentle meadow and exposed cliffs
 retain stable cover without cell-level randomness. Stone stays Stone through
 the subsurface band as well, avoiding brown soil
-staircase faces on bare rock. Two overlapping foothills soften the mountain feet. A 2.9 m
-Soil walking path curves from z=-550 to 1500 m. Materials retain the existing
+staircase faces on bare rock. Two overlapping foothills soften the mountain feet.
+A narrow Soil walking path curves from z=-550 to 1500 m. A connected roughly
+0.8–1.6 m worn core varies over several paces, with asymmetric irregular margins
+and broken turf shoulders up to 0.48 m beyond the core. Meter-scale coherent
+fields form the shoulder patches; there is no per-cell random paint. The
+centerline is unchanged from appearance version 1. Source version 4 adds coherent
+microrelief at 1.2 m / 3 cm and 0.75 m / 1 cm (wavelength / amplitude) to break
+regular native stair contours on the quiet meadow. Its total height perturbation
+is bounded by 4 cm at default scale/amplitude; it follows the complete scene's
+parameter scaling. This changes canonical heights and uses the same expression
+in scalar evaluation, analytic derivatives and affine bounds. Material cover
+continues to use the macro landform slope, excluding this fine relief.
+Materials retain the existing
 canonical enum and palette; there is no separate snow material. Native cells
 remain authoritative at 0.0625 m. The source costs six macro noise evaluations
-plus one per detail octave. Cover uses the same macro composition with analytic
+plus one per detail octave and two fixed microrelief bands. Cover uses the same macro composition with analytic
 noise derivatives, excluding small hummocks from its slope test.
 
 The height composition is shared between canonical f64 evaluation, analytic

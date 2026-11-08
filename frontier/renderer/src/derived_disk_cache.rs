@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 3;
+const REPRESENTATION_VERSION: u64 = 4;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -1271,7 +1271,6 @@ mod tests {
     fn disk_cache_cpu_measurement() {
         let w = World::fbm(7, FbmParams::default()).unwrap();
         let dir = Temp::new();
-        let mut c = cache(&dir, &w);
         for step in [1, 8] {
             let k = TileKey {
                 min: [-128, -512],
@@ -1283,16 +1282,27 @@ mod tests {
             let start = Instant::now();
             let t = build(&w, k, || false).unwrap();
             let build_ms = start.elapsed().as_secs_f64() * 1000.;
+            // This measurement exercises a complete 8m native tile. Its
+            // conforming unit faces can exceed the generic fixtures' 1MiB
+            // entry limit; size this measurement's explicit budget from its
+            // checked encoded upper bound, including restart/readback.
+            let entry_limit = encoded_size(&t).unwrap()
+                + source_identity(&w).unwrap().len()
+                + key_suffix(k).len()
+                + 8 // dependency count (this measurement has no edits)
+                + 16; // magic and checksum
+            let measurement_cache =
+                || DiskCache::new(dir.0.clone(), entry_limit as u64 * 4, entry_limit, &w).unwrap();
+            let mut c = measurement_cache();
             assert!(c.store(&t));
             let write_ms = c.stats().write_ms;
             let entry_bytes = fs::metadata(dir.0.join(c.name(k))).unwrap().len();
             drop(c);
-            let mut restart = cache(&dir, &w);
+            let mut restart = measurement_cache();
             let restored = restart.load(k).unwrap();
             assert_eq!(bytes(&restored), bytes(&t));
             println!("diskcache step={step} build_ms={build_ms:.3} write_ms={:.3} warm_read_ms={:.3} entry_bytes={} decoded_bytes={}",write_ms,restart.stats().read_ms,entry_bytes,restored.bytes);
             drop(restart);
-            c = cache(&dir, &w);
         }
     }
 }

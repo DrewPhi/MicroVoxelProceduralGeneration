@@ -9,8 +9,8 @@ pub const REGIONAL_FBM_SOURCE_VERSION: u32 = 2;
 /// Regional material painting version. Elevation/source v2 remains unchanged.
 pub const REGIONAL_APPEARANCE_VERSION: u32 = 3;
 /// Authored Austrian meadow and connected mountain backdrop.
-pub const ALPINE_FBM_SOURCE_VERSION: u32 = 3;
-pub const ALPINE_APPEARANCE_VERSION: u32 = 1;
+pub const ALPINE_FBM_SOURCE_VERSION: u32 = 4;
+pub const ALPINE_APPEARANCE_VERSION: u32 = 2;
 
 /// Explicit source identity: the legacy recipe retains existing worlds exactly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -346,7 +346,7 @@ impl FbmTerrain {
             let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
             let sx = x * 1800.0 / self.params.horizontal_scale;
             let sz = z * 1800.0 / self.params.horizontal_scale;
-            if (-550.0..1500.0).contains(&sz) && (sx - alpine_path_center_m(sz)).abs() < 1.45 {
+            if alpine_path_soil(sx, sz, self.seed) {
                 return Material::Soil;
             }
             let f = crate::alpine::elevation(
@@ -407,10 +407,37 @@ impl FbmTerrain {
     }
 }
 
-/// Center of the authored 2.9m walking path, in default-scale scene meters.
+/// Center of the authored walking path, in default-scale scene meters.
 /// Cover is evaluated at native column centers; this is independent of display LOD.
 pub fn alpine_path_center_m(z: f64) -> f64 {
     16.0 + 60.0 * (z / 310.0).sin() + 0.055 * z
+}
+
+/// Continuous wear fields are classified only at canonical column centers.
+/// The core stays connected; sub-meter turf tongues interrupt its shoulders.
+/// There is no cell hash/dither, so changing display LOD cannot repaint voxels.
+fn alpine_path_soil(x: f64, z: f64, seed: u64) -> bool {
+    if !(-550.0..1500.0).contains(&z) {
+        return false;
+    }
+    let offset = x - alpine_path_center_m(z);
+    // Bound the footprint before evaluating its finer fields. Broad variation
+    // changes the walking width over several paces, rather than every voxel.
+    if offset.abs() > 1.3 {
+        return false;
+    }
+    let core = 0.55 + 0.16 * noise(z / 9.0 + 4.7, 1.3, seed ^ 0xac11);
+    let margin = 0.10 * noise(z / 1.7 - 2.1, offset.signum() * 3.4, seed ^ 0xac12);
+    let distance = offset.abs() - core - margin;
+    if distance <= 0.0 {
+        return true;
+    }
+    let shoulder = 0.48;
+    if distance >= shoulder {
+        return false;
+    }
+    let turf = noise(x / 0.65 + 5.3, z / 0.85 - 7.1, seed ^ 0xac13);
+    turf > 2.0 * distance / shoulder - 1.0
 }
 
 impl crate::alpine::Value for Field {
@@ -641,6 +668,94 @@ mod tests {
                     .map(|(x, z)| a.elevation(x, z).to_bits()),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn alpine_path_has_connected_variable_wear_and_coherent_shoulders() {
+        for seed in [0, 7, 91, 997] {
+            let mut min_width = f64::INFINITY;
+            let mut max_width = 0.0_f64;
+            let mut shoulder_soil = 0;
+            let mut shoulder_turf = 0;
+            let mut shoulder_changes = 0;
+            let mut previous = [false; 2];
+            for step in 0..1600 {
+                let z = -400.0 + step as f64 * VOXEL_SIZE;
+                let center = alpine_path_center_m(z);
+                for offset in [-0.25, 0.0, 0.25] {
+                    assert!(alpine_path_soil(center + offset, z, seed));
+                }
+                let mut width = 0.0;
+                for ix in -24..=24 {
+                    let offset = ix as f64 * VOXEL_SIZE;
+                    width += f64::from(alpine_path_soil(center + offset, z, seed)) * VOXEL_SIZE;
+                    if offset.abs() >= 1.3 {
+                        assert!(!alpine_path_soil(center + offset, z, seed));
+                    }
+                }
+                min_width = min_width.min(width);
+                max_width = max_width.max(width);
+                for (side, offset) in [-0.8, 0.8].into_iter().enumerate() {
+                    let soil = alpine_path_soil(center + offset, z, seed);
+                    shoulder_soil += usize::from(soil);
+                    shoulder_turf += usize::from(!soil);
+                    if step > 0 {
+                        shoulder_changes += usize::from(soil != previous[side]);
+                    }
+                    previous[side] = soil;
+                }
+            }
+            assert!(
+                max_width - min_width >= 0.3,
+                "seed={seed} widths={min_width}..{max_width}"
+            );
+            assert!(max_width < 2.6);
+            assert!(shoulder_soil > 100 && shoulder_turf > 100);
+            // A cellwise coin toss changes about half the time. These coherent
+            // tongues instead persist for multiple native voxels along the path.
+            assert!(
+                shoulder_changes < 320,
+                "seed={seed} changes={shoulder_changes}"
+            );
+            for z in [-551.0, 1500.0, 1501.0] {
+                assert!(!alpine_path_soil(alpine_path_center_m(z), z, seed));
+            }
+        }
+    }
+
+    #[test]
+    fn alpine_path_paint_is_native_and_scaled_with_the_scene() {
+        for scale in [900.0, 1800.0, 3600.0] {
+            let terrain = FbmTerrain::new(
+                7,
+                FbmParams {
+                    recipe: FbmRecipe::Alpine,
+                    horizontal_scale: scale,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let world = World::fbm(7, terrain.params()).unwrap();
+            for z in [-400.0, -250.0, -0.03125, 100.0] {
+                for offset in [-1.4, -0.8, 0.0, 0.8, 1.4] {
+                    let x = (alpine_path_center_m(z) + offset) * scale / 1800.0;
+                    let z = z * scale / 1800.0;
+                    let h = terrain.height_m(x, z);
+                    let c = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                    let [cx, _, cz] = c.center_m();
+                    let material = terrain.surface_material(x, z, h);
+                    assert_eq!(material, world.material(c));
+                    assert_eq!(material, world.column(c.x, c.z).material(c.y));
+                    for (dx, dz) in [(-0.03, -0.03), (0.03, 0.03)] {
+                        assert_eq!(material, terrain.surface_material(cx + dx, cz + dz, h));
+                    }
+                    assert_eq!(
+                        material == Material::Soil,
+                        alpine_path_soil(cx * 1800.0 / scale, cz * 1800.0 / scale, 7)
+                    );
+                }
+            }
         }
     }
 
@@ -1121,53 +1236,55 @@ mod alpine_derivative_tests {
         assert_eq!(alpine_cover_material(0.1, 0.93, 0.5), Material::Grass);
     }
     #[test]
-    fn alpine_analytic_macro_slope_matches_centered_derivative() {
+    fn alpine_analytic_macro_and_full_slopes_match_centered_derivative() {
         let p = FbmParams {
             recipe: FbmRecipe::Alpine,
             ..Default::default()
         };
         let seed = 7;
-        let value = |x: f64, z: f64| {
-            crate::alpine::elevation(
-                x / p.horizontal_scale,
-                z / p.horizontal_scale,
-                p,
-                false,
-                |x, z, salt| noise(x, z, seed ^ salt),
-            )
-        };
-        for (x, z) in [
-            (0., 0.),
-            (-800., 1600.),
-            (1200., 2600.),
-            (-250., 3300.),
-            (1500., 4600.),
-        ] {
-            let f = crate::alpine::elevation(
-                Field {
-                    v: x / p.horizontal_scale,
-                    dx: 1.0 / p.horizontal_scale,
-                    dz: 0.,
-                },
-                Field {
-                    v: z / p.horizontal_scale,
-                    dx: 0.,
-                    dz: 1.0 / p.horizontal_scale,
-                },
-                p,
-                false,
-                |x: Field, z: Field, salt| {
-                    let [v, dx, dz] = noise_gradient(x.v, z.v, seed ^ salt);
+        for detail in [false, true] {
+            let value = |x: f64, z: f64| {
+                crate::alpine::elevation(
+                    x / p.horizontal_scale,
+                    z / p.horizontal_scale,
+                    p,
+                    detail,
+                    |x, z, salt| noise(x, z, seed ^ salt),
+                )
+            };
+            for (x, z) in [
+                (0., 0.),
+                (-800., 1600.),
+                (1200., 2600.),
+                (-250., 3300.),
+                (1500., 4600.),
+            ] {
+                let f = crate::alpine::elevation(
                     Field {
-                        v,
-                        dx: dx * x.dx + dz * z.dx,
-                        dz: dx * x.dz + dz * z.dz,
-                    }
-                },
-            );
-            let e = 0.001;
-            assert!((f.dx - (value(x + e, z) - value(x - e, z)) / (2. * e)).abs() < 1e-6);
-            assert!((f.dz - (value(x, z + e) - value(x, z - e)) / (2. * e)).abs() < 1e-6);
+                        v: x / p.horizontal_scale,
+                        dx: 1.0 / p.horizontal_scale,
+                        dz: 0.,
+                    },
+                    Field {
+                        v: z / p.horizontal_scale,
+                        dx: 0.,
+                        dz: 1.0 / p.horizontal_scale,
+                    },
+                    p,
+                    detail,
+                    |x: Field, z: Field, salt| {
+                        let [v, dx, dz] = noise_gradient(x.v, z.v, seed ^ salt);
+                        Field {
+                            v,
+                            dx: dx * x.dx + dz * z.dx,
+                            dz: dx * x.dz + dz * z.dz,
+                        }
+                    },
+                );
+                let e = 0.001;
+                assert!((f.dx - (value(x + e, z) - value(x - e, z)) / (2. * e)).abs() < 1e-6);
+                assert!((f.dz - (value(x, z + e) - value(x, z - e)) / (2. * e)).abs() < 1e-6);
+            }
         }
     }
 }

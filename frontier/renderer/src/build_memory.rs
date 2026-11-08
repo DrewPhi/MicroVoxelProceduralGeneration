@@ -48,6 +48,9 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
         // profile-address capacity. These are charged together conservatively
         // even though several phases release their inputs before later phases.
         quads * (4 * (4 * 36 + 6 * 4) + 32 + 40 + 32)
+            // Conforming native cells can expose tall side spans. Their
+            // explicit packing cap bounds the simultaneously live new output.
+            + crate::adaptive_geometry::MAX_NATIVE_QUADS as u128 * 32
             + halo * 64
             + w * w * 32
             + ((w / 16 + 2).pow(2) + 1) * 256
@@ -103,11 +106,11 @@ mod tests {
         }
     }
     #[test]
-    fn native_admission_is_bounded_and_default_budget_allows_two_full_jobs() {
+    fn native_admission_is_bounded_and_default_budget_allows_one_full_job() {
         let full = reservation(key(128, 1)).unwrap();
         assert!(full > 128 * 1024 * 1024);
-        assert!(full * 2 <= 512 * 1024 * 1024);
-        assert!(full * 3 > 512 * 1024 * 1024);
+        assert!(full <= 512 * 1024 * 1024);
+        assert!(full * 2 > 512 * 1024 * 1024);
         assert!(reservation(key(64, 1)).unwrap() < full);
         assert_eq!(reservation(key(256, 1)), None);
     }
@@ -137,8 +140,8 @@ mod tests {
             let tile = crate::adaptive_geometry::build(&world, key, || false).unwrap();
             let w = width as usize;
             let quads = 7 * w * w + 6 * w;
-            assert!(tile.native_quads.len() <= quads);
-            assert!(tile.native_quads.capacity() <= 2 * quads);
+            assert!(tile.native_quads.len() <= crate::adaptive_geometry::MAX_NATIVE_QUADS);
+            assert_eq!(tile.native_quads.capacity(), tile.native_quads.len());
             assert!(tile.native_bins.capacity() <= 2 * quads);
             assert!(tile.bytes <= reservation(key).unwrap());
             assert!(tile.exact);
