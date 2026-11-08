@@ -744,7 +744,7 @@ impl AdaptiveGpu {
             0.,
             if regional { 1. } else { 0. },
             amplitude,
-            0.,
+            crate::appearance_method::voxel_grain().unwrap_or(-1.),
             0.,
         ];
         if value != self.lighting {

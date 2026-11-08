@@ -176,3 +176,61 @@ The local reproducible run, frozen binaries, raw buffers, commands and reports
 are under `output/lod-methods/final-comparison/`. Use
 `tools/lod_method_compare.py --output DIR --refresh-metadata` to revalidate saved
 artifacts without launching the renderer.
+
+## Detailed-map inspection and optional color grain
+
+The user prefers the detailed-map mountain appearance. Its reference RMSE is not
+an artistic veto; this is the direction to refine while retaining the earlier
+working default as a comparison.
+
+The regular grassy patterns come from the map's sparse point samples and regular
+bilinear reconstruction grid. Each node measures one column and four immediate
+native neighbors; a quantized neighbor drop may be zero or one cell even on a
+gradual slope. Enlarging and interpolating those samples exposes the sampling
+lattice in side-lighting and material coverage. These storage-buffer maps have
+no automatic mip chain or anisotropic footprint filtering. Increasing map density
+can shrink the patterns but does not by itself prevent undersampling.
+
+The smeared ground strip remains in a no-fog/no-shadow capture with voxel
+appearance filtering disabled. Thus it is not solely detailed-map interpolation.
+The experimental maps do not affect native shading or the smallest proxy cells;
+the existing geometry/shading/filter handoff remains there. Grazing view angles
+stretch screen footprints over many columns. Our native filtering uses the smaller
+footprint axis, and coarse proxy shading follows another path. These mechanisms
+can contribute to the contrast/detail discontinuity. Further flat-color/normal
+diagnostics are needed to separate geometry, shading and broad paint contributions;
+this investigation does not claim that their individual contributions are measured.
+
+Recommended next tests: prefilter native face/material integrals over each map
+texel footprint, filter compatible map levels, and handle elongated grazing
+footprints directionally. Include the smallest proxy cells and native filtered
+appearance in the handoff test. Keep resolved voxel edges and the preferred
+mountain contrast; avoid blurring the entire image or tinting each coarse texel
+randomly into a large colored square.
+
+A small display-only grain trial is available:
+
+```sh
+FRONTIER_LOD_APPEARANCE=map FRONTIER_VOXEL_GRAIN=0.16 ./run.sh --preset alpine
+```
+
+This replaces the existing 0.055 full-range brightness amplitude with 0.16
+(roughly ±8%) plus a small warm/cool shift (at most ±1.2%). Integer world voxel
+coordinates provide deterministic variation shared by every face of a voxel.
+It applies to grass, soil and rock, retains the existing 12–40 m grain fade and
+native footprint filtering, and adds no per-voxel storage. It mainly affects
+nearby resolved voxels; coarse texels are not assigned random enlarged colors.
+Unset the variable for the previous look; zero disables fine grain. This is not
+a repair for the smear or map lattice, and no new frame-time result is claimed.
+
+WGSL validation passes; all three matched captures reached requested quality.
+Trial and filtering-off captures have exactly the same depth as the original map
+capture. With the override unset, the protected PNG is unchanged and depth is
+byte-identical; float RGB differs by at most 5.96e-8 from shader compilation
+rounding. Stale-executable captures discovered during validation were retaken and
+are excluded from the evidence.
+
+[Grain before/after crop](reference/gallery/lod-methods/grain-trial-crop.png) ·
+[Full grain trial](reference/gallery/lod-methods/map-grain-trial.png) ·
+[Filtering diagnostic crop](reference/gallery/lod-methods/smear-diagnostic.png) ·
+[Trial metadata](reference/gallery/lod-methods/grain-trial-manifest.json)

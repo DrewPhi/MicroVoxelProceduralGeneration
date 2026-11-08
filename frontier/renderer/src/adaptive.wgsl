@@ -41,9 +41,16 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
     let broad=paint_field(cell,9u)-0.5; // 32m patches
     let local=paint_field(cell,6u)-0.5; // 4m patches
     let speckle=(paint_hash(cell)-0.5)*0.055*grain;
-    return vec3<f32>(1.+broad*0.24+local*0.10+speckle,
-                     1.+broad*0.15+local*0.08+speckle,
-                     1.+broad*0.07+local*0.06+speckle);
+    let original=vec3<f32>(1.+broad*0.24+local*0.10+speckle,
+                          1.+broad*0.15+local*0.08+speckle,
+                          1.+broad*0.07+local*0.06+speckle);
+    if camera.paint.z<0. {return original;}
+    // Stable integer-cell grain: every face of one voxel gets the same tint.
+    // Existing distance and footprint filters remove unresolved grain; proxy
+    // texels are not randomly tinted and enlarged into distant colored squares.
+    let brightness=(paint_hash(cell)-0.5)*camera.paint.z*grain;
+    let hue=(paint_hash(cell^vec3<u32>(761u,157u,1103u))-0.5)*camera.paint.z*0.15*grain;
+    return original+vec3<f32>(brightness-speckle+hue,brightness-speckle,brightness-speckle-hue);
 }
 struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;

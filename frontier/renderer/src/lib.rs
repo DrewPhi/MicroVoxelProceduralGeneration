@@ -67,13 +67,15 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         return "\"render_appearance_version\":1".into();
     }
     let mode = adaptive_geometry::appearance_mode(world);
-    let version = if appearance_method::selected() == appearance_method::Method::Baseline {
+    let version = if appearance_method::voxel_grain().is_some() {
+        4
+    } else if appearance_method::selected() == appearance_method::Method::Baseline {
         ADAPTIVE_RENDER_APPEARANCE_VERSION
     } else {
         3
     };
     format!(
-        "\"render_appearance_version\":{version},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{},\"method\":\"{}\",\"map_intervals\":{},\"visibility_grid\":{},\"visibility_spatial\":{}}}",
+        "\"render_appearance_version\":{version},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{},\"method\":\"{}\",\"map_intervals\":{},\"visibility_grid\":{},\"visibility_spatial\":{},\"voxel_grain_amplitude\":{}}}",
         mode.spatial_profiles,
         mode.probe_cells,
         if mode.half_footprint { "half" } else { "full" },
@@ -82,6 +84,7 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         appearance_map::map_intervals(),
         appearance_visibility::grid_side(),
         appearance_visibility::spatial_enabled(),
+        appearance_method::voxel_grain().unwrap_or(0.055),
     )
 }
 

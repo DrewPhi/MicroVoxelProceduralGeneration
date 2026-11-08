@@ -30,3 +30,14 @@ pub(crate) fn selected() -> Method {
         },
     )
 }
+
+/// Optional display-only voxel grain amplitude; None retains the original shader.
+pub(crate) fn voxel_grain() -> Option<f32> {
+    static VALUE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("FRONTIER_VOXEL_GRAIN")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && (0.0..=0.3).contains(v))
+    })
+}
