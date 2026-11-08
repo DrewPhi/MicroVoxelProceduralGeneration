@@ -224,6 +224,7 @@ impl SettingsUi {
                             ui.checkbox(&mut self.settings.walking, "Walk on ground (F toggles flight)");
                             ui.separator();
                             ui.heading("Light & atmosphere");
+                            ui.checkbox(&mut self.settings.beauty, "Meadow lighting, foliage occlusion and sky");
                             ui.checkbox(&mut self.settings.terrain_shadows, "Bounded Alpine terrain shadows");
                             let mut clear_air = !self.settings.atmosphere;
                             if ui

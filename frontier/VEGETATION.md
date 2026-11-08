@@ -6,7 +6,8 @@ Run from `frontier/`:
 ./run.sh --preset alpine
 ```
 
-The Alpine preset enables procedural vegetation and walking. Later flags override
+The Alpine preset enables procedural vegetation, walking and the
+[beauty treatment](reference/BEAUTY_CHECKPOINT.md). Later flags override
 the preset: `--vegetation off` disables plants and `--walk off` starts in flight.
 Vegetation currently requires `--scene adaptive`. Existing comparison scenes
 retain their previous defaults.
@@ -33,7 +34,8 @@ Negative coordinates and neighboring tiles use the same global rules.
 - Rowan uses bounded space-colonization branching, connected curved wood,
   a thick flared trunk, fine leaf sprays, and scattered pale blossom clusters.
 
-Each species has three seeded reusable model variants. A plant record fixes its
+Plant source version 2 has eight seeded grass variants, three edelweiss variants
+and eight rowan variants, with coherent procedural colonies. A plant record fixes its
 root cell, seed, variant, and quarter turn. Palettes derive from the approved
 visual references and are converted from sRGB to linear RGB for rendering.
 Model generation retains the rooted face-connected component. Models are
@@ -61,6 +63,9 @@ conversion to floating point.
 
 Stride 1 retains the native lattice. Automatically generated strides 2, 4, and 8
 aggregate occupied native-grid cells, majority material, and palette coverage.
+At foliage strides 4/8, separate wood meshes use stride 2/4 and foliage stops
+at its native canopy base. This preserves curved trunks behind foreground
+ridges; native strides 1/2 and canonical colors stay unchanged.
 Projected voxel size selects stride; the preferred tree target is capped at 4.
 Every visible tree first reserves an actual stride-8 coverage template; nearby
 refinements may use the remaining tree budget. Resource-driven stride-8 fallback
@@ -85,8 +90,11 @@ Readiness statistics include demand that has not yet entered the bounded queue.
 ## Scope, provenance, and validation
 
 This is deterministic static generation, not live growth, ecology simulation,
-plant physics, or a complete botanical model. The first pass receives the scene
-lighting and atmosphere but **plants do not cast terrain shadows**.
+plant physics, or a complete botanical model. Plants receive scene lighting and
+atmosphere. Beauty mode adds bounded tree shadows and plant ambient occlusion;
+see the [beauty checkpoint](reference/BEAUTY_CHECKPOINT.md) for caster budgets,
+reference settings and remaining lighting limits. `--beauty off` disables that
+treatment independently of vegetation.
 
 Edited plant residual meshes can omit overridden native cells and refresh by
 world revision. This renderer capability does not enable arbitrary terrain edits
@@ -107,6 +115,10 @@ merging, palette coverage, coarse negative-grid alignment, cancellation, cache
 bounds, near-density preservation, triangle reservation, and shader validation.
 
 ## Playtest evidence
+
+The images, measurements and validation below record the earlier vegetation
+integration before plant source version 2 and the current beauty treatment.
+They are historical evidence, not measurements of the current preset.
 
 ![Native player-height meadow](reference/gallery/vegetation/player-view.png)
 

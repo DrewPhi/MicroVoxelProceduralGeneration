@@ -4,6 +4,30 @@ struct Camera { view_projection:mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u3
 @group(0) @binding(0) var<uniform> camera:Camera;
 struct Lighting { sun:vec4<f32>, sky:vec4<f32> };
 @group(1) @binding(0) var<uniform> lighting:Lighting;
+
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32> };
+@group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
+@group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
+@group(2) @binding(2) var<uniform> near_shadow:NearShadow;
+fn plant_shadow(local:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
+    if near_shadow.parameters.x<0.5 { return 1.; }
+    // Bounded receiver normal/light bias in metres; avoid the broad normal
+    // offsets that detach microvoxel branches from their own shadow.
+    let slope=1.-max(dot(normalize(normal),sun),0.);
+    let receiver=local-camera.eye.xyz+normal*(0.012+0.018*slope)+sun*0.012;
+    let p=(near_shadow.projection*vec4<f32>(receiver,1.)).xyz;
+    let uv=p.xy*vec2<f32>(0.5,-0.5)+0.5;
+    if any(uv<vec2<f32>(0.002)) || any(uv>vec2<f32>(0.998)) || p.z<=0. || p.z>=1. {return 1.;}
+    let texel=1./vec2<f32>(textureDimensions(near_shadow_depth));
+    let depth=p.z-0.00003;
+    let a=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(-0.5,-0.5)*texel,depth);
+    let b=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(0.5,-0.5)*texel,depth);
+    let c=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(-0.5,0.5)*texel,depth);
+    let d=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(0.5,0.5)*texel,depth);
+    let edge=min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+    return mix(1.,(a+b+c+d)*0.25,smoothstep(0.002,0.07,edge));
+}
+
 struct Out {
     @builtin(position) position:vec4<f32>,
     @location(0) color:vec3<f32>,
@@ -11,6 +35,7 @@ struct Out {
     @location(2) @interpolate(flat) fade:f32,
     @location(3) @interpolate(flat) seed:u32,
     @location(4) local:vec3<f32>,
+    @location(5) ao:f32,
 };
 fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     switch turn&3u {
@@ -22,7 +47,7 @@ fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
 }
 @vertex fn vs_main(
     @location(0) position:vec3<f32>, @location(1) normal:vec3<f32>, @location(2) color:vec3<f32>,
-    @location(3) root:vec3<f32>, @location(4) turn:u32, @location(5) fade:f32, @location(6) seed:u32
+    @location(3) root:vec3<f32>, @location(4) turn:u32, @location(5) fade:f32, @location(6) seed:u32, @location(7) ao:f32
 )->Out {
     var out:Out;
     // World cell indices rotate about the root cell center, so q1 maps the
@@ -34,16 +59,17 @@ fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     out.normal=rotate(normal,turn);
     out.fade=fade;
     out.seed=seed;
+    out.ao=ao;
     return out;
 }
-fn terrain_lighting(normal:vec3<f32>)->vec3<f32> {
+fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
     let n=normalize(normal);
     if lighting.sun.w>0.5 {
         let sky=0.5+0.5*n.y;
         let overcast=lighting.sky.x;
         let ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
         let direct=vec3(0.83,0.75,0.60)*max(dot(n,lighting.sun.xyz),0.);
-        return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast);
+        return ambient*(1.+overcast*0.3)*ao+direct*(1.-0.72*overcast)*visibility;
     }
     let sun=normalize(vec3<f32>(-0.5,0.8,-0.3));
     let sky=0.5+0.5*n.y;
@@ -59,5 +85,7 @@ fn terrain_lighting(normal:vec3<f32>)->vec3<f32> {
         h=(h^(h>>16u))*2246822519u;
         if f32(h&65535u)/65536.>=i.fade { discard; }
     }
-    return vec4<f32>(i.color*terrain_lighting(i.normal),1.);
+    let ao=mix(1.,i.ao,lighting.sky.y);
+    let visibility=plant_shadow(i.local,i.normal,lighting.sun.xyz);
+    return vec4<f32>(i.color*terrain_lighting(i.normal,visibility,ao),1.);
 }

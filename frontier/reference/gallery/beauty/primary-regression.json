@@ -1,0 +1,123 @@
+{
+  "base_git_revision": "fbf2084fae58b91d377af0c71e5ccffd806d822e",
+  "candidate_binary_sha256": "bc98a7d6620f0fa3cdd4e021fa0d64e0951fa59004f96f04394ff93fa36fbbb6",
+  "baseline_binary_sha256": "55f3e03dd309d254faf43ab6aa933bd28ed9abbdfa6d537c65c6b3fff87ebf49",
+  "camera": {
+    "reference": {
+      "schema": "frontier-landscape-reference-v1",
+      "source": "FbmTerrain CPU f64",
+      "seed": 7,
+      "params": {
+        "horizontal_scale": 1800,
+        "amplitude": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Legacy",
+      "source_version": 1,
+      "appearance_version": 0,
+      "voxel_size_m": 0.0625,
+      "lod": false,
+      "geometry": "all native columns; conservative exact-max rejection hierarchy",
+      "crop_policy": "exposed canonical faces only; no crop caps; unbounded downward solid columns",
+      "native_min_xz": [
+        -8192,
+        -8192
+      ],
+      "native_size_xz": 16384,
+      "width": 1920,
+      "height": 1080,
+      "spp": 256,
+      "eye": [
+        0.0,
+        94.8875,
+        0.0
+      ],
+      "target": [
+        -8.731370115810932e-08,
+        94.83756238296628,
+        -0.9987523555755615
+      ],
+      "fov_y_degrees": 60,
+      "near": 0.025,
+      "far": 300,
+      "fog": false,
+      "shadows": false,
+      "terrain_tint": true,
+      "tint": "same renderer 32m/4m coherent paint; fine grain zero",
+      "sampling": "deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation",
+      "sample_seed": 83,
+      "ray_count": 530841600,
+      "git_revision": "5909948a4059e604119d600baf4f13e1e270c0ee",
+      "git_dirty": true,
+      "source_fnv1a64": "15f641c6712febcf",
+      "cache_identity_fnv1a64": "c0d4d43f793859eb",
+      "raw_format": "little endian f32 top-left row-major",
+      "depth": "mean hit distance in meters; NaN on miss",
+      "build_seconds": 15.303278733,
+      "render_seconds": 153.192022298,
+      "snapshot_bytes": 1079334228,
+      "threads": 8,
+      "miss_fraction": 0.5333567075376158
+    },
+    "gpu": {
+      "width": 1920,
+      "height": 1080,
+      "eye": [
+        0.0,
+        94.8875,
+        0.0
+      ],
+      "target": [
+        -8.731370115810932e-08,
+        94.83756238296628,
+        -0.9987523555755615
+      ],
+      "fov_y_degrees": 60,
+      "near": 0.025,
+      "far": 300,
+      "samples": 1,
+      "depth_encoding": "ndc_0_1",
+      "color_encoding": "linear_rgb_float32_render_target",
+      "voxel_filter": true,
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "scene": "hybrid",
+      "renderer": "mesh",
+      "source_version": 1,
+      "edit_revision": 0,
+      "native_voxel_m": 0.0625,
+      "terrain_recipe": "Legacy",
+      "horizontal_scale_m": 1800,
+      "amplitude_m": 1000,
+      "octaves": 8,
+      "roughness": 0.5,
+      "appearance_version": 0,
+      "surface_layout": "clipmap",
+      "view_levels": 11
+    },
+    "linear_rgb_rmse": 0.04930703987367513,
+    "linear_rgb_mae": 0.015098356432560795,
+    "interpretation": "Appearance comparison, not a geometry error bound: exact sampled microfaces versus filtered LOD geometry/shading.",
+    "role": "Primary user-selected visual regression check, 2026-11-05",
+    "scope": "One player-height legacy-terrain still; 300m matched clip; secondary fixtures retain cave/bridge and other coverage."
+  },
+  "equality": {
+    "linear_rgb.f32": {
+      "bitwise_equal": true,
+      "baseline_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50",
+      "candidate_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50"
+    },
+    "depth.f32": {
+      "bitwise_equal": true,
+      "baseline_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e",
+      "candidate_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e"
+    },
+    "coverage.f32": {
+      "bitwise_equal": true,
+      "baseline_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7",
+      "candidate_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7"
+    }
+  },
+  "bare_vegetation_disabled_beauty_toggle_linear_rgb_bitwise_equal": true
+}

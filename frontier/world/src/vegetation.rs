@@ -6,11 +6,19 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-pub const VEGETATION_SOURCE_VERSION: u32 = 1;
+// Version 2: ecological patches, sparse colonies and a bounded larger model bank.
+// This intentionally changes canonical plant records/voxels; display AO does not.
+pub const VEGETATION_SOURCE_VERSION: u32 = 2;
 pub const TILE_SIZE_CELLS: i64 = 256;
 pub const MAX_PLANT_RADIUS_CELLS: i64 = 96;
 pub const MAX_PLANT_HEIGHT_CELLS: i64 = 176;
-const VARIANTS: usize = 3;
+pub const fn variant_count(species: Species) -> u8 {
+    match species {
+        Species::Grass | Species::Rowan => 8,
+        Species::Edelweiss => 3,
+    }
+}
+const MODEL_SLOTS: usize = 24;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Species {
     Grass,
@@ -172,8 +180,10 @@ fn model(mut cells: Cells, seed: u64) -> PlantModel {
             max.x = max.x.max(cell.x + 1);
             max.y = max.y.max(cell.y + 1);
             max.z = max.z.max(cell.z + 1);
-            let variation =
-                0.95 + (hash(seed, cell.x ^ cell.y.rotate_left(13), cell.z) % 1001) as f32 / 10000.;
+            // Broad pigment variation follows the plant, with only a quiet native-cell grain.
+            let patch = patch_field(seed, cell.x + cell.y / 2, cell.z, 6) as f32;
+            let grain = (hash(seed, cell.x ^ cell.y.rotate_left(13), cell.z) % 101) as f32 / 100.;
+            let variation = 0.94 + 0.09 * patch + 0.025 * grain;
             PlantVoxel {
                 cell,
                 material,
@@ -197,23 +207,40 @@ fn model(mut cells: Cells, seed: u64) -> PlantModel {
 pub fn generate_grass(seed: u64, variant: u8) -> PlantModel {
     let mut rng = Rng(seed);
     let mut v = Cells::new();
-    let height = 5 + 2 * (variant % 3) as i64;
-    for _ in 0..(7 + variant % 3 * 2) {
+    let height = [3, 4, 5, 6, 6, 7, 8, 10][variant as usize % 8];
+    let base = [96u8, 128, 57];
+    let fresh = [108u8, 142, 66];
+    let dry = [147u8, 158, 90];
+    for _ in 0..[5, 7, 9, 6, 10, 8, 7, 9][variant as usize % 8] {
         let a = rng.between(0., std::f64::consts::TAU);
-        let lean = rng.between(1., 3.);
+        let dry_tip = rng.unit() < 0.30;
+        let lean = rng.between(1., if variant < 4 { 3. } else { 4. });
         let bx = (rng.between(-1., 1.)).round() as i64;
         let bz = (rng.between(-1., 1.)).round() as i64;
-        stroke(&mut v, [0, 0, 0], [bx, 0, bz], 0, Material::Leaf, LEAF);
-        let h = height - (rng.unit() * 3.) as i64;
+        stroke(&mut v, [0, 0, 0], [bx, 0, bz], 0, Material::Leaf, base);
+        let h = (height - (rng.unit() * 4.) as i64).max(2);
         let mut p = [bx, 0, bz];
         for y in 1..h {
             let t = y as f64 / h as f64;
+            let bend = 0.35 * t + 0.65 * t * t;
             let q = [
-                bx + (a.cos() * lean * t * t).round() as i64,
+                bx + (a.cos() * lean * bend).round() as i64,
                 y,
-                bz + (a.sin() * lean * t * t).round() as i64,
+                bz + (a.sin() * lean * bend).round() as i64,
             ];
-            stroke(&mut v, p, q, 0, Material::Leaf, LEAF);
+            // Whole native voxels carry pigment; these are static leaf colors,
+            // not view-dependent highlights or sub-voxel texture detail.
+            let growth = (t / 0.65).min(1.);
+            let dry_amount = if dry_tip {
+                ((t - 0.65) / 0.35).max(0.)
+            } else {
+                0.
+            };
+            let color = std::array::from_fn(|i| {
+                let green = base[i] as f64 + (fresh[i] as f64 - base[i] as f64) * growth;
+                (green + (dry[i] as f64 - green) * dry_amount).round() as u8
+            });
+            stroke(&mut v, p, q, 0, Material::Leaf, color);
             p = q;
         }
     }
@@ -279,9 +306,21 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 /// Bounded local space-colonization growth, connected strokes, overlapping fine
 /// leaf sprays, exposed blossom clusters and a filled curved, flared bole.
+/// Algorithm references (greenfield implementation, no external source copied):
+/// https://www.algorithmicbotany.org/papers/colonization.egwnp2007.html
+/// https://www.algorithmicbotany.org/papers/selforg.sig2009.html
+/// The latter motivates light/space competition; this bounded prototype uses
+/// attractor competition rather than claiming its full biological simulation.
 pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
     let mut rng = Rng(seed);
-    let h = [52., 80., 104.][variant as usize % 3];
+    let h = [52., 65., 76., 84., 94., 104., 112., 88.][variant as usize % 8];
+    // The attractor volume supplies asymmetric, layered crowns; growth still
+    // follows the existing space-colonization algorithm, never an authored mesh.
+    let width = rng.between(0.27, 0.39);
+    let depth = rng.between(0.25, 0.36);
+    let crown_lift = rng.between(0.60, 0.69);
+    let crown_depth = rng.between(0.28, 0.35);
+    let bias = [rng.between(-0.08, 0.08), rng.between(-0.06, 0.06)];
     let mut attract = Vec::new();
     while attract.len() < 650 {
         let q = [
@@ -290,7 +329,14 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
             rng.between(-1., 1.),
         ];
         if q.iter().map(|x| x * x).sum::<f64>() < 1. {
-            attract.push([q[0] * h * 0.36, (0.67 + q[1] * 0.31) * h, q[2] * h * 0.33]);
+            // Crown tilt varies with height; a low-frequency lobe gives uneven
+            // shoulders without thinning out the approved full leaf sprays.
+            let lobe = 1. + 0.16 * (q[1] * 4. + q[2] * 2.).sin();
+            attract.push([
+                (q[0] * width * lobe + bias[0] * (q[1] + 1.)) * h,
+                (crown_lift + q[1] * crown_depth) * h,
+                (q[2] * depth + bias[1] * (q[1] + 1.)) * h,
+            ]);
         }
     }
     let mut nodes: Vec<[f64; 3]> = (0..(h * 0.33) as usize / 2)
@@ -460,10 +506,10 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
     model(v, seed)
 }
 pub fn model_for(record: &PlantRecord) -> &'static PlantModel {
-    static MODELS: [OnceLock<PlantModel>; 9] = [const { OnceLock::new() }; 9];
-    let variant = record.variant as usize % VARIANTS;
+    static MODELS: [OnceLock<PlantModel>; MODEL_SLOTS] = [const { OnceLock::new() }; MODEL_SLOTS];
+    let variant = record.variant as usize % variant_count(record.species) as usize;
     let species = record.species;
-    MODELS[species as usize * VARIANTS + variant].get_or_init(|| {
+    MODELS[species as usize * 8 + variant].get_or_init(|| {
         let seed = mix(0x726f77616e + species as u64 * 97 + variant as u64);
         match species {
             Species::Grass => generate_grass(seed, variant as u8),
@@ -477,7 +523,7 @@ pub fn model_for(record: &PlantRecord) -> &'static PlantModel {
 /// before either display jobs or canonical walking queries need these models.
 pub fn prewarm_models() {
     for species in [Species::Grass, Species::Edelweiss, Species::Rowan] {
-        for variant in 0..3 {
+        for variant in 0..variant_count(species) {
             model_for(&PlantRecord {
                 species,
                 variant,
@@ -512,14 +558,20 @@ impl TileCache {
 fn tree_candidate(seed: u64, x: i64, z: i64) -> (i64, i64, u64) {
     let h = hash(seed ^ 0x74726565, x, z);
     (
-        x * 256 + 64 + (h % 128) as i64,
-        z * 256 + 64 + ((h >> 16) % 128) as i64,
+        x * 256 + 16 + (h % 224) as i64,
+        z * 256 + 16 + ((h >> 16) % 224) as i64,
         h,
     )
 }
+fn tree_habitat(seed: u64, x: i64, z: i64, roll: u64) -> bool {
+    let broad = patch_field(seed ^ 0x776f6f646c616e64, x, z, 768);
+    let edge = patch_field(seed ^ 0x67726f7665, x, z, 320);
+    let density = (0.06 + 1.8 * (broad - 0.30).max(0.) + 0.35 * (edge - 0.5)).clamp(0.03, 0.94);
+    (roll >> 11) as f64 / ((1u64 << 53) as f64) < density
+}
 fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
     let (px, pz, h) = tree_candidate(seed, x, z);
-    if h % 5 == 0 {
+    if !tree_habitat(seed, px, pz, h) {
         return false;
     }
     for dx in -1..=1 {
@@ -528,7 +580,10 @@ fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
                 continue;
             }
             let (qx, qz, qh) = tree_candidate(seed, x + dx, z + dz);
-            if qh % 5 != 0 && qh < h && (px - qx).pow(2) + (pz - qz).pow(2) < 200 * 200 {
+            if tree_habitat(seed, qx, qz, qh)
+                && qh < h
+                && (px - qx).pow(2) + (pz - qz).pow(2) < 132 * 132
+            {
                 return false;
             }
         }
@@ -541,7 +596,19 @@ fn supported(w: &World, x: i64, z: i64, radius: i64, max_grade: i64) -> Option<i
         return None;
     }
     for (dx, dz) in [(radius, 0), (-radius, 0), (0, radius), (0, -radius)] {
-        if (w.height_cells(x + dx, z + dz) - h).abs() > max_grade {
+        let y = w.height_cells(x + dx, z + dz);
+        if (y - h).abs() > max_grade
+            || w.source(Cell {
+                x: x + dx,
+                y: y - 1,
+                z: z + dz,
+            }) != Material::Grass
+            || w.volume_owned(Cell {
+                x: x + dx,
+                y,
+                z: z + dz,
+            })
+        {
             return None;
         }
     } // Terrain paths/rock and explicit topology ownership are excluded.
@@ -566,13 +633,14 @@ fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option
     let seed = hash(world_seed ^ 0x6d6561646f77, gx, gz);
     let x = gx * 8 + 2 + (seed % 4) as i64;
     let z = gz * 8 + 2 + ((seed >> 16) % 4) as i64;
-    let meadow = patch_field(world_seed ^ 0x7061746368, x, z, 128);
-    let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 96);
-    let bloom_probability = 0.012 + 0.32 * ((colony - 0.45) / 0.55).max(0.).powi(2);
+    let meadow = patch_field(world_seed ^ 0x7061746368, x, z, 192);
+    let tuft = patch_field(world_seed ^ 0x74756674, x, z, 48);
+    let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 64);
+    let bloom_probability = 0.001 + 0.30 * ((colony - 0.65) / 0.35).max(0.).powi(2);
     let roll = |salt| (mix(seed ^ salt) >> 11) as f64 / ((1u64 << 53) as f64);
     let species = if roll(0x626c6f6f6d) < bloom_probability {
         Some(Species::Edelweiss)
-    } else if roll(0x6772617373) < 0.3 + 0.5 * meadow {
+    } else if roll(0x6772617373) < (0.08 + 0.85 * meadow + 0.25 * (tuft - 0.5)).clamp(0.04, 0.94) {
         Some(Species::Grass)
     } else {
         None
@@ -609,7 +677,7 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
                 species: Species::Rowan,
                 seed,
                 root: Cell { x, y: y - 2, z },
-                variant: (seed % 3) as u8,
+                variant: (seed % variant_count(Species::Rowan) as u64) as u8,
                 rotation: ((seed >> 8) % 4) as u8,
             });
         }
@@ -617,20 +685,39 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
     if species == Species::Rowan {
         return records;
     }
+    // Resolve supported neighbors once per tile: unsupported candidates cannot
+    // cast ecological shade or clear a phantom hole in the meadow.
+    let mut trees = Vec::new();
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let (a, b, _) = tree_candidate(w.seed, tx + dx, tz + dz);
+            if tree_allowed(w.seed, tx + dx, tz + dz) && tree_supported(w, a, b).is_some() {
+                trees.push((a, b));
+            }
+        }
+    }
     for gx in 0..32 {
         for gz in 0..32 {
             let (x, z, seed, chosen) = ground_candidate(w.seed, tx * 32 + gx, tz * 32 + gz);
             if chosen != Some(species) {
                 continue;
             }
-            let clear = (-1..=1).all(|dx| {
-                (-1..=1).all(|dz| {
-                    let (a, b, _) = tree_candidate(w.seed, tx + dx, tz + dz);
-                    !tree_allowed(w.seed, tx + dx, tz + dz)
-                        || (a - x).pow(2) + (b - z).pow(2) > 14 * 14
-                })
-            });
-            if !clear {
+            let nearest = trees
+                .iter()
+                .map(|(a, b)| (a - x).pow(2) + (b - z).pow(2))
+                .min()
+                .unwrap_or(i64::MAX);
+            if nearest <= 14 * 14 {
+                continue;
+            }
+            let shade = (nearest as f64).sqrt();
+            let retention = if species == Species::Edelweiss {
+                0.12
+            } else {
+                0.38
+            };
+            let canopy_keep = retention + (1. - retention) * ((shade - 20.) / 44.).clamp(0., 1.);
+            if (mix(seed ^ 0x7368616465) >> 11) as f64 / ((1u64 << 53) as f64) > canopy_keep {
                 continue;
             }
             if let Some(y) = supported(w, x, z, 3, 2) {
@@ -638,7 +725,14 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
                     species,
                     seed,
                     root: Cell { x, y, z },
-                    variant: ((seed >> 24) % 3) as u8,
+                    variant: if species == Species::Grass {
+                        // Height cohorts follow the same ecological field, so short
+                        // meadow mats and taller clumps coexist without a lattice.
+                        let tall = patch_field(w.seed ^ 0x686569676874, x, z, 64) > 0.57;
+                        ((seed >> 24) % 4) as u8 + if tall { 4 } else { 0 }
+                    } else {
+                        ((seed >> 24) % variant_count(species) as u64) as u8
+                    },
                     rotation: ((seed >> 32) % 4) as u8,
                 });
             }
@@ -772,6 +866,73 @@ mod tests {
         }
     }
     #[test]
+    fn model_bank_has_distinct_heights_full_crowns_and_native_grass() {
+        let mut signatures = BTreeSet::new();
+        let mut grass_heights = BTreeSet::new();
+        for variant in 0..variant_count(Species::Rowan) {
+            let m = model_for(&record(Species::Rowan, variant));
+            signatures.insert((
+                m.max.y,
+                m.max.x - m.min.x,
+                m.max.z - m.min.z,
+                m.voxels.len(),
+            ));
+            let leaves = m
+                .voxels
+                .iter()
+                .filter(|v| v.material == Material::Leaf)
+                .count();
+            assert!(leaves > 1800, "full crown, variant {variant}: {leaves}");
+        }
+        assert_eq!(signatures.len(), 8);
+        for variant in 0..variant_count(Species::Grass) {
+            let m = model_for(&record(Species::Grass, variant));
+            grass_heights.insert(m.max.y);
+            assert!(m.max.x - m.min.x >= 2 && m.max.z - m.min.z >= 2);
+        }
+        assert!(
+            grass_heights.len() >= 6,
+            "short/tall native tufts: {grass_heights:?}"
+        );
+    }
+    #[test]
+    fn ecological_fields_produce_openings_and_localized_flower_colonies() {
+        let seed = 37;
+        let mut flower_patches = Vec::new();
+        let mut tree_patches = Vec::new();
+        for tx in -8..8 {
+            for tz in -8..8 {
+                let mut flowers = 0;
+                for gx in 0..32 {
+                    for gz in 0..32 {
+                        if ground_candidate(seed, tx * 32 + gx, tz * 32 + gz).3
+                            == Some(Species::Edelweiss)
+                        {
+                            flowers += 1;
+                        }
+                    }
+                }
+                flower_patches.push(flowers);
+                let mut trees = 0;
+                for dx in 0..4 {
+                    for dz in 0..4 {
+                        trees += usize::from(tree_allowed(seed, tx * 4 + dx, tz * 4 + dz));
+                    }
+                }
+                tree_patches.push(trees);
+            }
+        }
+        flower_patches.sort();
+        assert!(flower_patches[0] <= 1);
+        assert!(flower_patches[255] > 3 * flower_patches[128].max(1));
+        assert!(*tree_patches.iter().min().unwrap() <= 2);
+        assert!(*tree_patches.iter().max().unwrap() >= 9);
+        let w = World::new(seed).with_vegetation();
+        for r in w.vegetation_records([-512, -512], [512, 512]) {
+            assert!(r.variant < variant_count(r.species));
+        }
+    }
+    #[test]
     fn coherent_meadow_and_colonies_cross_tile_borders() {
         let seed = 37;
         let mut grass = 0;
@@ -801,8 +962,11 @@ mod tests {
         let area = 256. * 256. * 0.25;
         let density = grass as f64 / area;
         let blooms = flowers as f64 / area;
-        assert!((1.5..2.8).contains(&density), "grass density {density}");
-        assert!((0.1..0.3).contains(&blooms), "edelweiss density {blooms}");
+        assert!((1.4..2.7).contains(&density), "grass density {density}");
+        assert!(
+            (0.005..0.08).contains(&blooms),
+            "edelweiss density {blooms}"
+        );
         for x in [-513, -512, -257, -256, -1, 0, 255, 256, 511, 512] {
             for z in -260..260 {
                 let a = patch_field(seed, x, z, 128);
@@ -831,7 +995,7 @@ mod tests {
     #[test]
     fn native_models_are_connected_bounded_and_repeatable() {
         for species in [Species::Grass, Species::Edelweiss, Species::Rowan] {
-            for variant in 0..3 {
+            for variant in 0..variant_count(species) {
                 let r = record(species, variant);
                 let m = model_for(&r);
                 assert!(!m.voxels.is_empty());
@@ -853,8 +1017,8 @@ mod tests {
                     }
                 }
                 if species == Species::Rowan {
-                    let target = [52., 80., 104.][variant as usize];
-                    assert!((target * 0.8..=target + 5.).contains(&(m.max.y as f64)));
+                    let target = [52., 65., 76., 84., 94., 104., 112., 88.][variant as usize];
+                    assert!((target * 0.72..=target * 1.08 + 5.).contains(&(m.max.y as f64)));
                     assert!(m.voxels.len() > 3000);
                     let flowers: Vec<_> = m
                         .voxels
@@ -986,7 +1150,7 @@ mod tests {
             for (i, a) in records.iter().enumerate() {
                 for b in &records[i + 1..] {
                     assert!(
-                        (a.root.x - b.root.x).pow(2) + (a.root.z - b.root.z).pow(2) >= 200 * 200
+                        (a.root.x - b.root.x).pow(2) + (a.root.z - b.root.z).pow(2) >= 132 * 132
                     );
                 }
             }

@@ -25,6 +25,8 @@ struct Uniform {
     sun: [f32; 4],
     fog: [f32; 4],
     weather: [f32; 4],
+    // Contract v2: beauty enabled, reserved, reserved, reserved.
+    beauty: [f32; 4],
 }
 
 pub(crate) fn sun_direction(elevation_degrees: f32, azimuth_degrees: f32) -> Vec3 {
@@ -125,7 +127,7 @@ fn make_pipeline(
 fn shader_source(samples: u32) -> String {
     let (bindings, body) = if samples > 1 {
         ("@group(0) @binding(1) var scene: texture_multisampled_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_multisampled_2d;",
-         "var color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
+         "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) >= 1.0;\nif all_sky { return vec4(composite(vec3(0.0),1.0,in.uv),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
     } else {
         ("@group(0) @binding(1) var scene: texture_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_2d;",
          "return vec4(composite(textureLoad(scene,pixel,0).rgb,textureLoad(depth,pixel,0),in.uv),1.0);")
@@ -358,6 +360,7 @@ impl Atmosphere {
                 settings.overcast.clamp(0.0, 1.0),
                 time_seconds,
             ],
+            beauty: [if settings.beauty { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
@@ -407,6 +410,27 @@ use bytemuck::Zeroable;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn atmosphere_uniform_contract_v2() {
+        // mat4 + six vec4 slots; WGSL uniform and Rust upload must agree.
+        assert_eq!(std::mem::size_of::<super::Uniform>(), 160);
+        assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
+        let module = naga::front::wgsl::parse_str(&super::shader_source(1)).unwrap();
+        let (_, uniform) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("AtmosphereUniform"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &uniform.inner else {
+            panic!("atmosphere uniform must be a struct");
+        };
+        assert_eq!(*span as usize, std::mem::size_of::<super::Uniform>());
+        assert_eq!(
+            members.last().unwrap().offset as usize,
+            std::mem::offset_of!(super::Uniform, beauty)
+        );
+    }
+
     #[test]
     fn atmosphere_shaders_validate() {
         for source in [

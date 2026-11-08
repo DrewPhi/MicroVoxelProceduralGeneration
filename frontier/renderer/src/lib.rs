@@ -722,6 +722,16 @@ impl Gpu {
         }
         if let Some(adaptive) = &self.adaptive {
             adaptive.draw_shadows(encoder);
+            if adaptive.near_shadows_active() {
+                if let Some(vegetation) = &self.vegetation {
+                    vegetation.draw_shadows(
+                        encoder,
+                        &self.bind_group,
+                        adaptive.near_shadow_view(),
+                        adaptive.near_shadow_depth_bind(),
+                    );
+                }
+            }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
@@ -749,8 +759,8 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
-        if let Some(vegetation) = &self.vegetation {
-            vegetation.draw(&mut pass, &self.bind_group);
+        if let (Some(vegetation), Some(adaptive)) = (&self.vegetation, &self.adaptive) {
+            vegetation.draw(&mut pass, &self.bind_group, adaptive.near_shadow_bind());
         }
         if let Some(adaptive) = &self.adaptive {
             adaptive.draw(&mut pass);
@@ -1077,6 +1087,8 @@ impl Gpu {
                 settings.sun_azimuth, settings.cloud_coverage, settings.cloud_speed,
                 settings.overcast, settings.terrain_shadows, shadows_active
             ));
+            metadata.pop();
+            metadata.push_str(&format!(",\"beauty\":{}}}", settings.beauty));
             std::fs::write(metadata_path, metadata)?;
         }
         let metadata_path = path.with_extension("capture.json");
@@ -3151,6 +3163,8 @@ pub fn run() -> Result<()> {
             visual.overcast, visual.terrain_shadows, visual.terrain_shadows && scene.starts_with("adaptive") && viewer.world.fbm_terrain().is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine) && visual.sun_elevation > 0., viewer.visual_menu_enabled, viewer.visual_menu_enabled,
             viewer.camera.fov_y, viewer.camera.far
         ));
+        json.pop();
+        json.push_str(&format!(",\"beauty\":{}}}", visual.beauty));
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             json.pop();
             json.push_str(&format!(

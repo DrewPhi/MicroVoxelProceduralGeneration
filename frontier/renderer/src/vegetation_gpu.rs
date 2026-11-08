@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
 const CACHE_BYTES: u64 = 256 * 1024 * 1024;
+const SHADOW_SHADER: &str = include_str!("vegetation_shadow.wgsl");
 const SHADER: &str = include_str!("vegetation.wgsl");
 
 #[repr(C)]
@@ -41,6 +42,7 @@ struct Template {
     instances: wgpu::Buffer,
     instance_capacity: u64,
     instance_count: u32,
+    shadow_count: u32,
     geometry_bytes: u64,
 }
 impl Template {
@@ -54,12 +56,16 @@ pub struct VegetationGpuStats {
     pub cached_templates: usize,
     pub draw_calls: usize,
     pub instances: usize,
+    pub shadow_instances: usize,
+    pub shadow_triangles: usize,
     pub resident_bytes: u64,
     pub uploaded_bytes: u64,
 }
 
 pub struct VegetationGpu {
     pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_enabled: bool,
     lighting_uniform: wgpu::Buffer,
     lighting_bind: wgpu::BindGroup,
     templates: HashMap<MeshKey, Template>,
@@ -102,14 +108,19 @@ impl VegetationGpu {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("instanced voxel vegetation"),
-            bind_group_layouts: &[camera_layout, &lighting_layout],
+            bind_group_layouts: &[
+                camera_layout,
+                &lighting_layout,
+                &crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(device),
+            ],
             push_constant_ranges: &[],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("instanced voxel vegetation"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let vertex_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3];
+        let vertex_attributes =
+            wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,7=>Float32];
         let instance_attributes =
             wgpu::vertex_attr_array![3=>Float32x3,4=>Uint32,5=>Float32,6=>Uint32];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -160,7 +171,61 @@ impl VegetationGpu {
             multiview: None,
             cache: None,
         });
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("instanced plant shadow depth"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("instanced plant shadow depth"),
+            bind_group_layouts: &[
+                camera_layout,
+                &crate::adaptive_gpu::adaptive_shadow::near_depth_layout(device),
+            ],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("instanced plant shadow depth"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<VegetationVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &vertex_attributes,
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Instance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &instance_attributes,
+                    },
+                ],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.,
+                    clamp: 0.,
+                },
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
         Self {
+            shadow_pipeline,
+            shadow_enabled: false,
             pipeline,
             lighting_uniform,
             lighting_bind,
@@ -172,11 +237,12 @@ impl VegetationGpu {
     }
 
     pub fn set_visual_lighting(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         settings: &crate::settings::VisualSettings,
         regional: bool,
     ) {
+        self.shadow_enabled = settings.beauty && settings.terrain_shadows;
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
         let lighting = [
             sun.x,
@@ -184,7 +250,7 @@ impl VegetationGpu {
             sun.z,
             if regional { 1. } else { 0. },
             settings.overcast,
-            0.,
+            if settings.beauty { 1. } else { 0. },
             0.,
             0.,
         ];
@@ -199,12 +265,15 @@ impl VegetationGpu {
         queue: &wgpu::Queue,
         frame: &VegetationFrame,
         origin: [i64; 3],
+        camera_local: [f32; 3],
     ) -> Result<(), String> {
         // A refused new frame must never draw old instance positions with the
         // new camera origin. Immutable templates remain available for retry.
         self.active.clear();
         self.stats.draw_calls = 0;
         self.stats.instances = 0;
+        self.stats.shadow_instances = 0;
+        self.stats.shadow_triangles = 0;
         self.stats.uploaded_bytes = 0;
         let wanted: HashSet<_> = frame
             .batches
@@ -271,17 +340,34 @@ impl VegetationGpu {
         self.active.clear();
         self.stats.uploaded_bytes = 0;
         self.stats.instances = 0;
-        for batch in &frame.batches {
+        self.stats.shadow_instances = 0;
+        self.stats.shadow_triangles = 0;
+        // Allocate globally by root distance, before grouping by template. A
+        // high-resolution variant must not consume the budget simply because
+        // its mesh key sorts before the tree beside the camera.
+        let (shadow_selection, shadow_triangles) = if self.shadow_enabled {
+            select_shadow_casters(frame, origin, camera_local, 200_000)
+        } else {
+            (HashSet::new(), 0)
+        };
+        for (batch_index, batch) in frame.batches.iter().enumerate() {
             if !wanted.contains(&batch.key) {
                 continue;
             }
             self.scratch.clear();
-            self.scratch.extend(
-                batch
-                    .instances
-                    .iter()
-                    .map(|instance| pack(instance, origin)),
-            );
+            // Reuse one instance allocation: selected roots form the depth-draw
+            // prefix; every instance still appears exactly once in scene draws.
+            for (index, instance) in batch.instances.iter().enumerate() {
+                if shadow_selection.contains(&(batch_index, index)) {
+                    self.scratch.push(pack(instance, origin));
+                }
+            }
+            let shadow_count = self.scratch.len() as u32;
+            for (index, instance) in batch.instances.iter().enumerate() {
+                if !shadow_selection.contains(&(batch_index, index)) {
+                    self.scratch.push(pack(instance, origin));
+                }
+            }
             let bytes = bytemuck::cast_slice(&self.scratch);
             let capacity = (bytes.len() as u64).next_power_of_two().max(32);
             let template = self.templates.entry(batch.key).or_insert_with(|| {
@@ -303,6 +389,7 @@ impl VegetationGpu {
                     instances: instance_buffer(device, capacity),
                     instance_capacity: capacity,
                     instance_count: 0,
+                    shadow_count: 0,
                     geometry_bytes: (vertex_bytes.len() + index_bytes.len()) as u64,
                 }
             });
@@ -312,6 +399,9 @@ impl VegetationGpu {
             }
             queue.write_buffer(&template.instances, 0, bytes);
             template.instance_count = self.scratch.len() as u32;
+            template.shadow_count = shadow_count;
+            self.stats.shadow_instances += shadow_count as usize;
+            self.stats.shadow_triangles = shadow_triangles;
             self.stats.uploaded_bytes += bytes.len() as u64;
             self.stats.instances += self.scratch.len();
             self.active.push(batch.key);
@@ -324,13 +414,19 @@ impl VegetationGpu {
     pub fn stats(&self) -> VegetationGpuStats {
         self.stats
     }
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, camera: &'a wgpu::BindGroup) {
+    pub fn draw<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        camera: &'a wgpu::BindGroup,
+        near_shadow: &'a wgpu::BindGroup,
+    ) {
         if self.active.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera, &[]);
         pass.set_bind_group(1, &self.lighting_bind, &[]);
+        pass.set_bind_group(2, near_shadow, &[]);
         for key in &self.active {
             let template = &self.templates[key];
             pass.set_vertex_buffer(0, template.vertices.slice(..));
@@ -339,7 +435,83 @@ impl VegetationGpu {
             pass.draw_indexed(0..template.index_count, 0, 0..template.instance_count);
         }
     }
+    pub(crate) fn draw_shadows(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        camera: &wgpu::BindGroup,
+        view: &wgpu::TextureView,
+        depth_bind: &wgpu::BindGroup,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bounded close plant shadow depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_bind_group(0, camera, &[]);
+        pass.set_bind_group(1, depth_bind, &[]);
+        for key in &self.active {
+            let t = &self.templates[key];
+            if t.shadow_count == 0 {
+                continue;
+            }
+            pass.set_vertex_buffer(0, t.vertices.slice(..));
+            pass.set_vertex_buffer(1, t.instances.slice(..));
+            pass.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..t.index_count, 0, 0..t.shadow_count);
+        }
+    }
 }
+/// Stable distance priority across every streamed template; geometry cost never
+/// changes priority, but casters that cannot fit leave room for later candidates.
+fn select_shadow_casters(
+    frame: &VegetationFrame,
+    origin: [i64; 3],
+    eye: [f32; 3],
+    triangle_budget: usize,
+) -> (HashSet<(usize, usize)>, usize) {
+    let mut candidates = Vec::new();
+    for (batch_index, batch) in frame.batches.iter().enumerate() {
+        if batch.key.species != 2 || batch.mesh.indices.is_empty() {
+            continue;
+        }
+        for (index, instance) in batch.instances.iter().enumerate() {
+            if instance.fade <= 0.99 {
+                continue;
+            }
+            let p = pack(instance, origin).root;
+            let distance = (0..3)
+                .map(|axis| (p[axis] - eye[axis]).powi(2))
+                .sum::<f32>();
+            if distance < 90. * 90. {
+                candidates.push((distance, batch_index, index, batch.mesh.indices.len() / 3));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| (a.1, a.2).cmp(&(b.1, b.2)))
+    });
+    let mut selected = HashSet::new();
+    let mut triangles = 0;
+    for (_, batch, index, cost) in candidates {
+        if cost <= triangle_budget - triangles {
+            selected.insert((batch, index));
+            triangles += cost;
+        }
+    }
+    (selected, triangles)
+}
+
 fn instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("reused vegetation instances"),
@@ -353,14 +525,55 @@ fn instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
 mod tests {
     use super::*;
     #[test]
+    fn shadow_budget_prioritizes_nearest_tree_across_templates() {
+        use crate::vegetation::{VegetationBatch, VegetationMesh};
+        let batch = |variant, roots: Vec<i64>, triangles: usize| VegetationBatch {
+            key: MeshKey {
+                species: 2,
+                variant,
+                lod: 1,
+                edit_id: 0,
+            },
+            mesh: std::sync::Arc::new(VegetationMesh {
+                vertices: vec![],
+                indices: vec![0; triangles * 3],
+            }),
+            instances: roots
+                .into_iter()
+                .map(|x| VegetationInstance {
+                    root_cell: [x * 16, 0, 0],
+                    quarter_turn: 0,
+                    fade: 1.,
+                })
+                .collect(),
+        };
+        let frame = VegetationFrame {
+            origin: [0; 3],
+            stats: Default::default(),
+            batches: vec![
+                batch(0, vec![60, 40], 4),
+                batch(1, vec![2, 5], 4),
+                batch(2, vec![3], 2),
+            ],
+        };
+        let (selected, triangles) = select_shadow_casters(&frame, [0; 3], [0.; 3], 6);
+        assert_eq!(triangles, 6);
+        assert_eq!(selected, HashSet::from([(1, 0), (2, 0)]));
+        let (selected, triangles) = select_shadow_casters(&frame, [0; 3], [0.; 3], 0);
+        assert!(selected.is_empty());
+        assert_eq!(triangles, 0);
+    }
+    #[test]
     fn vegetation_shader_validates() {
-        let module = naga::front::wgsl::parse_str(SHADER).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .unwrap();
+        for source in [SHADER, SHADOW_SHADER] {
+            let module = naga::front::wgsl::parse_str(source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
     }
     #[test]
     fn integer_roots_rebase_before_float_conversion() {

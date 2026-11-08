@@ -126,13 +126,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 camera_preset = "alpine".into();
                 start_xz = [frontier_world::terrain::alpine_path_center_m(-250.), -250.];
                 atmosphere = Some(true);
-                visual.sun_elevation = 24.;
-                visual.sun_azimuth = 120.;
-                visual.fog_density = 0.000022;
-                visual.cloud_coverage = 0.25;
+                visual.sun_elevation = 34.;
+                visual.sun_azimuth = 100.;
+                visual.exposure = 1.15;
+                visual.fog_density = 0.000045;
+                visual.cloud_coverage = 0.52;
                 visual.cloud_speed = 0.;
                 visual.overcast = 0.08;
                 visual.terrain_shadows = true;
+                visual.beauty = true;
                 visual.vegetation = true;
                 visual.walking = true;
             }
@@ -165,7 +167,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 }
                 *field = value;
             }
-            "--vegetation" | "--walk" => {
+            "--vegetation" | "--walk" | "--beauty" => {
                 let value = match args.next().as_deref() {
                     Some("on") => true,
                     Some("off") => false,
@@ -173,6 +175,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 };
                 if arg == "--vegetation" {
                     visual.vegetation = value;
+                } else if arg == "--beauty" {
+                    visual.beauty = value;
                 } else {
                     visual.walking = value;
                 }
@@ -456,7 +460,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 )
             }
             "--help" | "-h" => {
-                println!("Visual preview: --preset alpine selects the Alpine meadow scene; later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded Alpine adaptive geometry only). Alpine enables seeded vegetation and grounded walking; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("Visual preview: --preset alpine selects the Alpine meadow scene; later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded Alpine adaptive geometry only). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
@@ -691,6 +695,7 @@ mod tests {
         assert!(!defaults.visual.terrain_shadows);
         assert!(!defaults.visual.vegetation);
         assert!(!defaults.visual.walking);
+        assert!(!defaults.visual.beauty);
         let args = [
             "--preset",
             "alpine",
@@ -712,14 +717,25 @@ mod tests {
         assert_eq!(alpine.capture_far, Some(6000.));
         assert!(alpine.visual.vegetation);
         assert!(alpine.visual.walking);
+        assert!(alpine.visual.beauty);
         let disabled = parse_args(
-            ["--preset", "alpine", "--vegetation", "off", "--walk", "off"]
-                .into_iter()
-                .map(str::to_string),
+            [
+                "--preset",
+                "alpine",
+                "--vegetation",
+                "off",
+                "--walk",
+                "off",
+                "--beauty",
+                "off",
+            ]
+            .into_iter()
+            .map(str::to_string),
         )
         .unwrap()
         .unwrap();
         assert!(!disabled.visual.vegetation && !disabled.visual.walking);
+        assert!(!disabled.visual.beauty);
         assert_eq!(alpine.visual.sun_elevation, 31.);
         assert_eq!(alpine.visual.fog_density, 0.);
         assert!(!alpine.visual.terrain_shadows);

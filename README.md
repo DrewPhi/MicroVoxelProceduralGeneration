@@ -23,6 +23,8 @@ Use `--preset alpine` for the [Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
 now with [seeded voxel grass, edelweiss and flowering rowans](frontier/VEGETATION.md),
 grounded walking, a winding path and mountain backdrop. Press F for flight;
 `--vegetation off --walk off` restores the bare-terrain camera preview.
+The [Alpine beauty checkpoint](frontier/reference/BEAUTY_CHECKPOINT.md) documents
+the default lighting treatment, `--beauty off` and its bounded raster reference.
 See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md) and
 [basic lighting/painting pass](frontier/BEAUTY_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;

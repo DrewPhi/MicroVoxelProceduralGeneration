@@ -59,7 +59,13 @@ impl Gpu {
             .origin
             .to_array()
             .map(|v| (v / VOXEL_SIZE).round() as i64);
-        plants.update(&self.device, &self.queue, &frame, origin)?;
+        plants.update(
+            &self.device,
+            &self.queue,
+            &frame,
+            origin,
+            (camera.position - self.origin).as_vec3().to_array(),
+        )?;
         Ok(())
     }
     pub(super) fn settle_vegetation(
@@ -73,7 +79,9 @@ impl Gpu {
         loop {
             self.update_vegetation(world, camera, width, height)?;
             if self.vegetation_stats.pending_jobs == 0 {
-                if self.vegetation_stats.coverage_unresolved > 0 {
+                if self.vegetation_stats.coverage_unresolved > 0
+                    || self.vegetation_stats.reference_budget_exceeded
+                {
                     return Err(format!(
                         "vegetation tree coverage exceeds its resource budget: {}",
                         self.vegetation_json()
@@ -103,7 +111,7 @@ impl Gpu {
             .as_ref()
             .map(|v| v.stats())
             .unwrap_or_default();
-        format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":28,\"flower_radius_m\":56,\"tree_radius_m\":220,\"shadow_casters\":false,\"canonical_voxel_m\":0.0625}}",
-            self.vegetation.is_some(),frontier_world::vegetation::VEGETATION_SOURCE_VERSION,s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes)
+        format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":28,\"flower_radius_m\":56,\"tree_radius_m\":220,\"shadow_casters\":{},\"shadow_instances\":{},\"shadow_triangles\":{},\"reference_mode\":{},\"reference_budget_exceeded\":{},\"canonical_voxel_m\":0.0625}}",
+            self.vegetation.is_some(),frontier_world::vegetation::VEGETATION_SOURCE_VERSION,s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded)
     }
 }

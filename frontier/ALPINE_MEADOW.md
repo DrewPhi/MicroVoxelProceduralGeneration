@@ -10,7 +10,8 @@ A separate scene preset: roughly a kilometre-square rolling meadow, a winding
 soil path, overlapping foothills and a connected mountain backdrop several
 kilometres away. Seed 7 is the composed starting view. The default Regional and
 Legacy sources remain unchanged. This is a scene study, not a new global biome
-or geology system. No vegetation, water, or physical interaction is added.
+or geology system. [Procedural voxel vegetation](VEGETATION.md), grounded walking
+and rowan-wood collision are enabled; water and plant physics remain absent.
 
 The source remains canonical 6.25 cm voxels. Terrain composition is shared across
 scalar evaluation, analytic gradients and conservative affine bounds. Exposed
@@ -19,9 +20,13 @@ The normal adaptive renderer provides the display approximation.
 
 The preset starts at player eye height on the path, with a 6 km far clip,
 3-pixel requested geometric error, four-sample MSAA, voxel appearance filtering,
-low sun, light atmospheric haze and stationary placeholder clouds. These are
-artistic settings, not a new performance guarantee. The camera is still the
-existing free-fly camera. Esc opens settings.
+sun elevation 34° and azimuth 100°, exposure 1.15, fog density 0.000045 per meter,
+cloud coverage 0.52 and overcast 0.08. Clouds remain stationary. These are
+artistic settings, not a new performance guarantee. Walking follows canonical
+terrain; Space jumps and F toggles walking/free flight. Esc opens settings.
+`--walk off` starts in flight. The
+[beauty checkpoint](reference/BEAUTY_CHECKPOINT.md) documents the default lighting
+treatment, `--beauty off`, bounded plant shadows and the supersampled reference.
 
 See [the reference-driven LOD tuning results](ALPINE_LOD_TUNING.md) for the
 Alpine-only spatial material filtering and stronger nearby detail selection.
@@ -68,6 +73,10 @@ Local captures, raw buffers, logs and manifests live under
 `output/alpine-scene/` and are ignored by Git.
 
 ## Initial scene validation
+
+The validation, captures and path-refinement results below are historical
+checkpoints from before vegetation and the current beauty treatment. Their
+recorded settings and measurements do not certify the current preset.
 
 All 342 Rust workspace tests passed (11 profiling/optional tests ignored). The frozen 1080p Legacy capture matched
 its pre-change baseline exactly in float32 color, depth and coverage. This is

@@ -2,7 +2,7 @@
 //! automatically derived display meshes never change gameplay voxel identity.
 use frontier_world::{
     vegetation::{self, PlantRecord, Species},
-    Cell, World, VOXEL_SIZE,
+    Cell, Material, World, VOXEL_SIZE,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,6 +20,8 @@ pub struct VegetationVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    /// Static display-only ambient visibility; never modifies canonical pigment.
+    pub ao: f32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct MeshKey {
@@ -62,6 +64,8 @@ pub struct VegetationStats {
     pub culled_instances: usize,
     pub coverage_fallbacks: usize,
     pub coverage_unresolved: usize,
+    /// Offline native reference is incomplete if the global budget rejected a plant.
+    pub reference_budget_exceeded: bool,
 }
 pub struct VegetationFrame {
     pub origin: [i64; 3],
@@ -78,6 +82,8 @@ pub struct VegetationConfig {
     pub max_meshes: usize,
     pub max_instances: usize,
     pub max_triangles: usize,
+    /// Screenshot-only native meshes; retains runtime placement, density and fades.
+    pub reference: bool,
 }
 impl Default for VegetationConfig {
     fn default() -> Self {
@@ -90,7 +96,19 @@ impl Default for VegetationConfig {
             max_meshes: 128,
             max_instances: 12_000,
             max_triangles: 1_000_000,
+            reference: false,
         }
+    }
+}
+impl VegetationConfig {
+    fn with_reference_flag(mut self, flag: Option<&str>) -> Self {
+        self.reference |= flag == Some("1");
+        if self.reference {
+            self.max_triangles = self.max_triangles.max(32_000_000);
+            self.max_instances = self.max_instances.max(20_000);
+            self.max_meshes = self.max_meshes.max(128);
+        }
+        self
     }
 }
 fn ground_density_fade(distance: f64, radius: f64, rank: f64) -> f32 {
@@ -110,6 +128,9 @@ fn budget_allows(
         || triangles > config.max_triangles.saturating_sub(stats.triangles)
     {
         return false;
+    }
+    if config.reference {
+        return true;
     }
     // Trees are considered first for their silhouettes, but cannot consume
     // the 35% reserved for small ground cover. Ground cover may borrow any
@@ -258,6 +279,9 @@ pub struct VegetationStream {
 }
 impl VegetationStream {
     pub fn new(world: World, config: VegetationConfig) -> Self {
+        // Read once when the stream is created, never inside frame selection.
+        let reference_flag = std::env::var("FRONTIER_VEGETATION_REFERENCE").ok();
+        let config = config.with_reference_flag(reference_flag.as_deref());
         let (tx, jobs) = mpsc::sync_channel::<Job>(4);
         let (results, rx) = mpsc::sync_channel(8);
         let epoch = Arc::new(AtomicU64::new(1));
@@ -294,7 +318,7 @@ impl VegetationStream {
                                 .iter()
                                 .filter(|v| !edited.contains(&p.world_cell(v.cell)))
                                 .map(|v| (v.cell, v.material as u8, v.color));
-                            let mesh = mesh_cells(cells, key.lod, || {
+                            let mesh = mesh_plant_cells(p.species, cells, key.lod, || {
                                 generation != cancel.load(Ordering::Relaxed)
                             });
                             Done::Mesh(key, w.revision(), Arc::new(mesh))
@@ -500,7 +524,10 @@ impl VegetationStream {
         // fine requests, and their actual costs replace speculative estimates.
         let mut remaining_tree_coarse = 0usize;
         let mut tree_coverage_ready = true;
-        for (_, p) in plants.iter().filter(|(_, p)| p.species == Species::Rowan) {
+        for (_, p) in plants
+            .iter()
+            .filter(|(_, p)| !self.config.reference && p.species == Species::Rowan)
+        {
             let key = MeshKey {
                 species: 2,
                 variant: p.variant,
@@ -543,7 +570,10 @@ impl VegetationStream {
             }
             let pixel = VOXEL_SIZE * projection / distance.max(1.);
             let mut lod = 1;
-            while lod < 8 && pixel * (lod * 2) as f64 <= self.config.pixel_error as f64 {
+            while !self.config.reference
+                && lod < 8
+                && pixel * (lod * 2) as f64 <= self.config.pixel_error as f64
+            {
                 lod *= 2;
             }
             // More conservative tree contour than ground cover.
@@ -558,7 +588,7 @@ impl VegetationStream {
                 edit_id,
             };
             let coarse_key = MeshKey { lod: 8, ..key };
-            let tree_headroom = if s == 2 {
+            let tree_headroom = if s == 2 && !self.config.reference {
                 if let Some((mesh, _)) = self.meshes.get(&coarse_key) {
                     remaining_tree_coarse =
                         remaining_tree_coarse.saturating_sub(mesh.indices.len() / 3);
@@ -574,7 +604,7 @@ impl VegetationStream {
             // If fine geometry costs too much, automatically request the next
             // coarser stride. Native desired LOD still drives the quality target.
             let mut request_key = key;
-            if s == 2 {
+            if s == 2 && !self.config.reference {
                 if !tree_coverage_ready {
                     request_key = coarse_key;
                 } else {
@@ -603,7 +633,11 @@ impl VegetationStream {
                     submitted += 1;
                 }
             }
-            let render_key = if s == 2 {
+            let render_key = if self.config.reference {
+                // A missing native mesh stays pending; never substitute an LOD
+                // proxy in the reference target.
+                key
+            } else if s == 2 {
                 self.meshes
                     .iter()
                     .filter(|(k, (mesh, _))| {
@@ -638,6 +672,7 @@ impl VegetationStream {
                         stats.coverage_unresolved += 1;
                     }
                     stats.budget_rejected += 1;
+                    stats.reference_budget_exceeded |= self.config.reference;
                     stats.rejected_by_species[s as usize] += 1;
                     continue;
                 }
@@ -696,6 +731,106 @@ fn evict<K: Ord + Copy, V>(map: &mut BTreeMap<K, V>, limit: usize, age: impl Fn(
 struct Paint {
     material: u8,
     color: [u32; 3],
+    ao: u8,
+}
+// Exterior face samples distinguish crevices from convex edges. All samples
+// are in aggregate-grid coordinates, so this stays bounded at every LOD. Coarse
+// occupancy exaggerates canopy density; reduce its strength with stride.
+fn face_visibility(
+    blocks: &BTreeMap<[i64; 3], Paint>,
+    c: [i64; 3],
+    d: usize,
+    sign: i64,
+    step: i64,
+) -> u8 {
+    let mut exterior = c;
+    exterior[d] += sign;
+    let u = (d + 1) % 3;
+    let v = (d + 2) % 3;
+    let mut contact = 0.;
+    for (a, b) in [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+    ] {
+        let mut q = exterior;
+        q[u] += a;
+        q[v] += b;
+        if blocks.contains_key(&q) {
+            contact += 1.;
+        }
+    }
+    let mut canopy = 0.;
+    if d != 1 || sign > 0 {
+        for r in [2, 4, 8, 16] {
+            let mut q = c;
+            q[d] += sign * (r / 2).max(1);
+            q[1] += r;
+            if blocks.contains_key(&q) {
+                canopy += 1.;
+            }
+        }
+    }
+    let strength = 1. / (step as f32).sqrt();
+    let visibility = 1. - strength * (0.22 * contact / 8. + 0.12 * canopy / 4.);
+    // Sixteen visibility levels keep greedy merging useful without moving color.
+    ((visibility * 15.).round().clamp(0., 15.) as u8) * 17
+}
+/// Coarse foliage coverage must not replace the rooted woody scaffold. Keep a
+/// separately derived structural mesh and trim only the automatic downward
+/// expansion of the lowest foliage row. Native geometry is unchanged. The two
+/// display meshes may overlap inside the crown; this bounded proxy trades exact
+/// internal occlusion for retaining the external trunk and crown support.
+fn mesh_plant_cells(
+    species: Species,
+    cells: impl Iterator<Item = (Cell, u8, [f32; 3])>,
+    stride: u8,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
+    if species != Species::Rowan || stride < 4 {
+        return mesh_cells(cells, stride, cancel);
+    }
+    let mut wood = Vec::new();
+    let mut foliage = Vec::new();
+    let mut foliage_bottom = i64::MAX;
+    for (i, cell) in cells.enumerate() {
+        if i % 1024 == 0 && cancel() {
+            return VegetationMesh::default();
+        }
+        if cell.1 == Material::Wood as u8 {
+            wood.push(cell);
+        } else {
+            foliage_bottom = foliage_bottom.min(cell.0.y);
+            foliage.push(cell);
+        }
+    }
+    // One finer structural level preserves the bole without making every far
+    // tree pay near-native branch costs (stride8 crown -> stride4 wood).
+    let mut structural = mesh_cells(wood.into_iter(), stride / 2, &cancel);
+    if cancel() {
+        return VegetationMesh::default();
+    }
+    let mut crown = mesh_cells(foliage.into_iter(), stride, &cancel);
+    if cancel() {
+        return VegetationMesh::default();
+    }
+    if foliage_bottom != i64::MAX {
+        let floor = foliage_bottom as f32 * VOXEL_SIZE as f32;
+        for vertex in &mut crown.vertices {
+            vertex.position[1] = vertex.position[1].max(floor);
+        }
+    }
+    let base = structural.vertices.len() as u32;
+    structural.vertices.extend(crown.vertices);
+    structural
+        .indices
+        .extend(crown.indices.into_iter().map(|i| i + base));
+    structural
 }
 /// Palette-aware aggregation anchored on the canonical local grid, followed by
 /// exposed-face extraction and coplanar greedy merging. Thin occupied features
@@ -741,11 +876,13 @@ fn mesh_cells(
                     color[j] += sum[j];
                 }
             }
+            let color = color.map(|v| ((v / count as f64) as f32).to_bits());
             (
                 c,
                 Paint {
                     material,
-                    color: color.map(|v| ((v / count as f64) as f32).to_bits()),
+                    ao: 255,
+                    color,
                 },
             )
         })
@@ -760,10 +897,12 @@ fn mesh_cells(
                 let mut neighbor = *c;
                 neighbor[d] += sign;
                 if !blocks.contains_key(&neighbor) {
+                    let mut face_paint = *paint;
+                    face_paint.ao = face_visibility(&blocks, *c, d, sign, step);
                     planes
                         .entry((d, sign, c[d] + i64::from(sign > 0)))
                         .or_default()
-                        .insert([c[(d + 1) % 3], c[(d + 2) % 3]], *paint);
+                        .insert([c[(d + 1) % 3], c[(d + 2) % 3]], face_paint);
                 }
             }
         }
@@ -806,6 +945,7 @@ fn mesh_cells(
                     position: p,
                     normal,
                     color: paint.color.map(f32::from_bits),
+                    ao: paint.ao as f32 / 255.,
                 });
             }
             let indices = if sign > 0 {
@@ -822,6 +962,43 @@ fn mesh_cells(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn offline_reference_is_opt_in_native_budget_without_species_caps() {
+        let default = VegetationConfig::default();
+        assert!(!default.reference);
+        for flag in [None, Some("0"), Some("true"), Some("")] {
+            let config = default.clone().with_reference_flag(flag);
+            assert!(!config.reference);
+            assert_eq!(config.max_triangles, 1_000_000);
+        }
+        let reference = default.with_reference_flag(Some("1"));
+        assert!(reference.reference);
+        assert_eq!(reference.max_triangles, 32_000_000);
+        assert_eq!(reference.max_instances, 20_000);
+        assert!(budget_allows(
+            &reference,
+            &VegetationStats::default(),
+            2,
+            30_000_000
+        ));
+        assert!(budget_allows(
+            &reference,
+            &VegetationStats::default(),
+            1,
+            30_000_000
+        ));
+        assert!(!budget_allows(
+            &reference,
+            &VegetationStats::default(),
+            0,
+            32_000_001
+        ));
+        let full = VegetationStats {
+            triangles: 32_000_000,
+            ..Default::default()
+        };
+        assert!(!budget_allows(&reference, &full, 2, 1));
+    }
     #[test]
     fn tree_reservation_keeps_far_coverage_while_refining_near_trees() {
         let total = 1_000_000;
@@ -920,6 +1097,41 @@ mod tests {
         );
         assert_eq!(mesh.indices.len(), 36);
         assert_eq!(mesh.vertices.len(), 24);
+        assert!(mesh.vertices.iter().all(|v| v.ao == 1.));
+    }
+    #[test]
+    fn static_visibility_shades_crevices_without_changing_pigment() {
+        let single = mesh_cells([cell(0, 0, 0)].into_iter(), 1, || false);
+        assert!(single.vertices.iter().all(|v| v.ao == 1.));
+        let cells = [cell(0, 0, 0), cell(1, 1, 0), cell(1, 0, 1)];
+        let crevice = mesh_cells(cells.into_iter(), 1, || false);
+        assert!(crevice.vertices.iter().any(|v| v.ao < 1.));
+        assert!(crevice.vertices.iter().all(|v| v.ao >= 0.65 && v.ao <= 1.));
+        assert!(crevice.vertices.iter().all(|v| v.color == [0.2, 0.4, 0.1]));
+        // Filling a coarse block cannot amplify static occlusion strength.
+        let blocks = BTreeMap::from([
+            (
+                [0, 0, 0],
+                Paint {
+                    material: 1,
+                    color: [0; 3],
+                    ao: 255,
+                },
+            ),
+            (
+                [1, 1, 0],
+                Paint {
+                    material: 1,
+                    color: [0; 3],
+                    ao: 255,
+                },
+            ),
+        ]);
+        assert!(
+            face_visibility(&blocks, [0, 0, 0], 0, 1, 8)
+                >= face_visibility(&blocks, [0, 0, 0], 0, 1, 1)
+        );
+        assert_eq!(std::mem::size_of::<VegetationVertex>(), 40);
     }
     #[test]
     fn face_winding_is_outward() {
@@ -958,6 +1170,81 @@ mod tests {
         let mut cache = BTreeMap::from([(0, ("a", 2)), (1, ("b", 1)), (2, ("c", 3))]);
         evict(&mut cache, 2, |v| v.1);
         assert_eq!(cache.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
+    }
+    #[test]
+    fn coarse_tree_keeps_separate_wood_and_native_crown_floor() {
+        let bark = [0.4, 0.2, 0.1];
+        let leaf = [0.1, 0.5, 0.1];
+        let mut cells = vec![(Cell::default(), Material::Wood as u8, bark)];
+        for y in 1..14 {
+            cells.push((Cell { x: 0, y, z: 0 }, Material::Wood as u8, bark));
+        }
+        for x in -2..3 {
+            cells.push((Cell { x, y: 13, z: 0 }, Material::Leaf as u8, leaf));
+        }
+        let coarse = mesh_plant_cells(Species::Rowan, cells.clone().into_iter(), 8, || false);
+        assert!(coarse
+            .vertices
+            .iter()
+            .any(|v| v.color == bark && v.position[1] < 0.5));
+        let crown = coarse
+            .vertices
+            .iter()
+            .filter(|v| v.color == leaf)
+            .collect::<Vec<_>>();
+        assert!(!crown.is_empty());
+        assert_eq!(
+            crown
+                .iter()
+                .map(|v| v.position[1])
+                .fold(f32::INFINITY, f32::min),
+            13. / 16.
+        );
+        assert!(coarse
+            .indices
+            .iter()
+            .all(|&i| (i as usize) < coarse.vertices.len()));
+        assert!(
+            mesh_plant_cells(Species::Rowan, cells.clone().into_iter(), 8, || true)
+                .vertices
+                .is_empty()
+        );
+        for stride in [1, 2] {
+            let baseline = mesh_cells(cells.clone().into_iter(), stride, || false);
+            let actual =
+                mesh_plant_cells(Species::Rowan, cells.clone().into_iter(), stride, || false);
+            assert_eq!(actual.indices, baseline.indices);
+            assert_eq!(
+                bytemuck::cast_slice::<VegetationVertex, u8>(&actual.vertices),
+                bytemuck::cast_slice::<VegetationVertex, u8>(&baseline.vertices)
+            );
+        }
+    }
+    #[test]
+    fn structural_tree_template_costs_remain_bounded() {
+        let mut costs = Vec::new();
+        for variant in 0..vegetation::variant_count(Species::Rowan) {
+            let p = PlantRecord {
+                species: Species::Rowan,
+                variant,
+                seed: 0,
+                root: Cell::default(),
+                rotation: 0,
+            };
+            let model = vegetation::model_for(&p);
+            let cells = || {
+                model
+                    .voxels
+                    .iter()
+                    .map(|v| (v.cell, v.material as u8, v.color))
+            };
+            let coarse = mesh_plant_cells(Species::Rowan, cells(), 8, || false);
+            let native = mesh_plant_cells(Species::Rowan, cells(), 1, || false);
+            costs.push((variant, coarse.indices.len() / 3, native.indices.len() / 3));
+            assert!(coarse.indices.len() < native.indices.len());
+        }
+        eprintln!("structural tree costs (variant, stride8, native): {costs:?}");
+        assert!(costs.iter().map(|v| v.1).max().unwrap() * 64 <= 450_000);
     }
     #[test]
     fn coarse_palette_keeps_mean_coverage() {

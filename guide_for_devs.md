@@ -53,8 +53,12 @@ voxel lattice, halo face ownership and local-coordinate depth convention as the
 mesh. `brick-skip` is a conservative cache experiment, not the published NAADF
 implementation. Use `--msaa 1` for mesh/ray image comparisons. The quadtree probe
 uses hard LOD selection and remains a static experiment, not a production CDLOD
-implementation or a declared winner. No scene provides player collision or
-persistent edits.
+implementation or a declared winner. The Alpine adaptive preset adds grounded walking and wood collision. Other
+experimental scenes retain free flight. Persistent edits remain unimplemented.
+See the [Alpine vegetation beauty checkpoint](frontier/reference/BEAUTY_CHECKPOINT.md)
+for near-tree shadows, voxel ambient occlusion, procedural meadow variation and
+the current sky/fog profile.
+
 ## Adaptive loading controls
 
 See [loading optimization and measurements](frontier/LOADING_OPTIMIZATION.md).

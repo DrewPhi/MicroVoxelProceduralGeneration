@@ -58,6 +58,29 @@ fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
+
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32> };
+@group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
+@group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
+@group(2) @binding(2) var<uniform> near_shadow:NearShadow;
+fn plant_shadow(local:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
+    if near_shadow.parameters.x<0.5 { return 1.; }
+    // Bounded receiver normal/light bias in metres; avoid the broad normal
+    // offsets that detach microvoxel branches from their own shadow.
+    let slope=1.-max(dot(normalize(normal),sun),0.);
+    let receiver=local-camera.eye.xyz+normal*(0.012+0.018*slope)+sun*0.012;
+    let p=(near_shadow.projection*vec4<f32>(receiver,1.)).xyz;
+    let uv=p.xy*vec2<f32>(0.5,-0.5)+0.5;
+    if any(uv<vec2<f32>(0.002)) || any(uv>vec2<f32>(0.998)) || p.z<=0. || p.z>=1. {return 1.;}
+    let texel=1./vec2<f32>(textureDimensions(near_shadow_depth));
+    let depth=p.z-0.00003;
+    let a=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(-0.5,-0.5)*texel,depth);
+    let b=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(0.5,-0.5)*texel,depth);
+    let c=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(-0.5,0.5)*texel,depth);
+    let d=textureSampleCompareLevel(near_shadow_depth,near_shadow_sampler,uv+vec2(0.5,0.5)*texel,depth);
+    let edge=min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+    return mix(1.,(a+b+c+d)*0.25,smoothstep(0.002,0.07,edge));
+}
 // Finite map of published terrain, not a full-world or volume visibility oracle.
 fn terrain_shadow(local:vec3<f32>) -> f32 {
     if camera.sky.y < 0.5 { return 1.; }
@@ -241,7 +264,7 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
-    let visibility = terrain_shadow(in.local);
+    let visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));
     let light = terrain_lighting(in.normal,visibility);
     var tint=vec3<f32>(1.);
     let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));

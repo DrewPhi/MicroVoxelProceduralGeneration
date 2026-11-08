@@ -7,6 +7,7 @@ struct AtmosphereUniform {
     sun: vec4<f32>,
     fog: vec4<f32>, // density, height falloff, exposure, enabled
     weather: vec4<f32>, // coverage, speed, overcast, elapsed seconds
+    beauty: vec4<f32>, // contract v2: enabled, reserved, reserved, reserved
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS
@@ -62,6 +63,83 @@ fn sky(ray: vec3<f32>) -> vec3<f32> {
     }
     return color;
 }
+// Beauty profile: greenfield artistic single-scattering approximation. World
+// positions and actual depth alone drive fog; no clip distance/LOD inputs exist.
+fn alpine_clear_sky(ray: vec3<f32>) -> vec3<f32> {
+    let elevation = max(ray.y, 0.0);
+    let dusk = 1.0 - smoothstep(0.02, 0.40, atmosphere.sun.y);
+    let forward = max(dot(ray, atmosphere.sun.xyz), 0.0);
+    let sun_color = mix(vec3(1.0, 0.91, 0.74), vec3(1.0, 0.55, 0.29), dusk);
+    let horizon = mix(vec3(0.48, 0.63, 0.76), vec3(0.72, 0.52, 0.40), dusk * 0.65);
+    let zenith = mix(vec3(0.065, 0.22, 0.46), vec3(0.08, 0.13, 0.27), dusk);
+    var color = mix(horizon, zenith, pow(elevation, 0.42));
+    // Broad low-energy Mie lobe plus a correctly small angular solar disc.
+    color += sun_color * (pow(forward, 12.0) * 0.055 + pow(forward, 96.0) * 0.17);
+    color += sun_color * smoothstep(0.999975, 0.999989, forward) * 3.0;
+    return mix(color, vec3(0.48, 0.54, 0.61), atmosphere.weather.z * 0.72);
+}
+fn alpine_cloud_layer(ray: vec3<f32>, color: vec3<f32>, height: f32, scale: f32,
+                      weight: f32, shift: vec2<f32>) -> vec3<f32> {
+    let distance = (height - atmosphere.world_eye.y) / ray.y;
+    if distance <= 0.0 { return color; }
+    let wind = vec2(1.0, 0.32) * atmosphere.weather.w * atmosphere.weather.y;
+    let p = (atmosphere.world_eye.xz + ray.xz * distance) * scale + wind + shift;
+    let broad = noise(p);
+    // Three bounded bands break the bank into small lobes. The fine band shapes
+    // the edge, rather than painting a flat white texture over a giant mass.
+    let value = broad * 0.55 + noise(p * 2.13 + vec2(11.1, 5.7)) * 0.28
+        + noise(p * 5.07 + vec2(3.9, 18.2)) * 0.17;
+    let threshold = mix(0.87, 0.35, atmosphere.weather.x);
+    let density = smoothstep(threshold, threshold + 0.13, value);
+    // A density probe toward the sun approximates lit edges and shaded bodies.
+    // This lights the sheet only: it is not a volumetric shadow or sun shaft.
+    let toward_sun = noise(p + atmosphere.sun.xz * 0.23);
+    let edge_light = clamp((broad - toward_sun) * 4.0 + 0.48, 0.0, 1.0);
+    let thickness = smoothstep(threshold + 0.03, threshold + 0.25, value);
+    let warm = 1.0 - smoothstep(0.03, 0.45, atmosphere.sun.y);
+    let lit = mix(vec3(0.92, 0.95, 0.97), vec3(1.0, 0.83, 0.65), warm * 0.7);
+    let shadow = mix(vec3(0.39, 0.48, 0.59), vec3(0.36, 0.40, 0.47), atmosphere.weather.z);
+    let cloud = mix(shadow, lit, clamp(0.55 + edge_light * 0.52 - thickness * 0.30, 0.0, 1.0));
+    let fade = smoothstep(0.025, 0.18, ray.y);
+    let alpha = (1.0 - exp(-density * 2.5)) * fade * weight;
+    return mix(color, cloud, alpha);
+}
+fn alpine_sky(ray: vec3<f32>) -> vec3<f32> {
+    var color = alpine_clear_sky(ray);
+    if ray.y > 0.025 && atmosphere.weather.x > 0.001 {
+        // Far thin bank first, then lower broken cumulus. Both remain anchored
+        // in the world during movement; no temporal history or geometry blur.
+        color = alpine_cloud_layer(ray, color, 3400.0, 0.00065, 0.22, vec2(17.4, 8.1));
+        color = alpine_cloud_layer(ray, color, 1900.0, 0.00135, 0.92, vec2(0.0));
+    }
+    return color;
+}
+fn bounded_height_integral(start: f32, end: f32, distance: f32, falloff: f32) -> f32 {
+    // Density rho*exp(-k*max(y,0)). Cap LOCAL density at sea-level rho,
+    // never optical depth or visibility: very long paths can still become hazy.
+    // Split a sea-level crossing analytically; no ray-march or cancellation.
+    if falloff < 0.0000001 { return distance; }
+    let low = min(start, end);
+    let high = max(start, end);
+    let span = high - low;
+    if span < 0.01 { return distance * exp(-falloff * max((start + end) * 0.5, 0.0)); }
+    let below = clamp(-low / span, 0.0, 1.0);
+    let lo = max(low, 0.0);
+    let hi = max(high, 0.0);
+    let delta = falloff * (hi - lo);
+    var average = exp(-falloff * lo) * (1.0 - delta * 0.5 + delta * delta / 6.0);
+    if delta > 0.01 { average = (exp(-falloff * lo) - exp(-falloff * hi)) / delta; }
+    return distance * (below + (1.0 - below) * average);
+}
+fn beauty_finish(color: vec3<f32>) -> vec3<f32> {
+    let exposed = max(color * atmosphere.fog.z, vec3(0.0));
+    // Luminance-only shoulder preserves hues and native voxel edge contrast.
+    // Midtones stay unchanged; the sun/cloud highlights roll off without clips.
+    let luminance = dot(exposed, vec3(0.2126, 0.7152, 0.0722));
+    if luminance <= 0.65 { return exposed; }
+    let mapped = 0.65 + 0.35 * (1.0 - exp(-(luminance - 0.65) / 0.35));
+    return exposed * (mapped / luminance);
+}
 fn reconstruct(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let p = atmosphere.inverse_view_projection * vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth,1.0);
     return p.xyz / p.w;
@@ -84,6 +162,17 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
     let offset = position-atmosphere.relative_eye.xyz;
     let distance = length(offset);
     let ray = offset/max(distance,0.0001);
+    if atmosphere.beauty.x > 0.5 {
+        if depth >= 1.0 { return beauty_finish(alpine_sky(ray)); }
+        let end_height = atmosphere.world_eye.y + offset.y;
+        let integrated = bounded_height_integral(atmosphere.world_eye.y, end_height, distance, atmosphere.fog.y);
+        // Clean air includes a weak altitude-independent Rayleigh contribution.
+        // The user density scales BOTH terms, so zero fog remains exactly clear.
+        let optical_depth = atmosphere.fog.x * (integrated * 0.78 + distance * 0.22);
+        let transmittance = exp(-optical_depth);
+        let haze = alpine_clear_sky(vec3(ray.x, max(ray.y, 0.04), ray.z));
+        return beauty_finish(mix(haze, color, transmittance));
+    }
     if depth >= 1.0 { return sky(ray)*atmosphere.fog.z; }
     let transmittance = fog_transmittance(distance,ray.y);
     // Aerial perspective uses the distant sky's scattered-light hue.

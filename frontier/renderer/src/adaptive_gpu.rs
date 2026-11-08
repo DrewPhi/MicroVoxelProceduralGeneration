@@ -13,7 +13,7 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 #[path = "adaptive_shadow.rs"]
-mod adaptive_shadow;
+pub(crate) mod adaptive_shadow;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
 use adaptive_shadow::ShadowResources;
@@ -401,6 +401,7 @@ pub struct AdaptiveGpu {
     gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
     near_detail: bool,
+    near_beauty: bool,
     shadows: ShadowResources,
     prepared_view: Option<PreparedView>,
     prepared_view_hits: u64,
@@ -511,7 +512,11 @@ impl AdaptiveGpu {
             });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("adaptive cluster pipeline"),
-            bind_group_layouts: &[&layout, &shadows_layout],
+            bind_group_layouts: &[
+                &layout,
+                &shadows_layout,
+                &adaptive_shadow::near_sampling_layout(device),
+            ],
             push_constant_ranges: &[],
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3];
@@ -672,6 +677,7 @@ impl AdaptiveGpu {
                 ..Default::default()
             },
             lighting: [0.; 12],
+            near_beauty: false,
             near_detail: false,
             shadows,
             prepared_view: None,
@@ -727,6 +733,13 @@ impl AdaptiveGpu {
         alpine: bool,
         amplitude: f32,
     ) {
+        // With no plant pass there is no depth-map clear/draw. Do not sample
+        // a previous frame's plant shadows after vegetation is switched off.
+        let near_beauty = settings.beauty && settings.vegetation;
+        if self.near_beauty != near_beauty {
+            self.prepared_view = None;
+        }
+        self.near_beauty = near_beauty;
         self.near_detail = crate::adaptive_stream::near_detail_for_alpine(alpine);
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
         let value = [
@@ -1329,6 +1342,7 @@ impl AdaptiveGpu {
     }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(1, &self.shadows.sampling_bind, &[]);
+        pass.set_bind_group(2, &self.shadows.near.bind, &[]);
         if let Some(bundle) = &self.bundle {
             pass.execute_bundles(std::iter::once(bundle));
         } else {
@@ -1374,6 +1388,7 @@ impl AdaptiveGpu {
                 multiview: None,
             });
         encoder.set_bind_group(1, &self.shadows.sampling_bind, &[]);
+        encoder.set_bind_group(2, &self.shadows.near.bind, &[]);
         encode_cluster_draws!(&*self, &mut encoder);
         let bundle = encoder.finish(&wgpu::RenderBundleDescriptor {
             label: Some("adaptive stable draw commands"),

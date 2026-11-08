@@ -1,6 +1,7 @@
 //! Display and streaming controls; these never change authoritative voxels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualSettings {
+    pub beauty: bool,
     pub vegetation: bool,
     pub walking: bool,
     pub pixel_error: f64,
@@ -30,6 +31,7 @@ pub struct VisualSettings {
 impl Default for VisualSettings {
     fn default() -> Self {
         Self {
+            beauty: false,
             vegetation: false,
             walking: false,
             pixel_error: 3.,

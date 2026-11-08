@@ -1,0 +1,90 @@
+{
+  "scene": "seed7 Alpine adaptive default checkpoint",
+  "images": [
+    "output/beauty-pass/pre-structure/bench-on.png",
+    "output/beauty-pass/default-native.png"
+  ],
+  "camera_eye_m": [
+    -41.06016074388279,
+    28.95,
+    -250.0
+  ],
+  "suspect_tree": {
+    "approx_screen_x_px": 99,
+    "root_m": [
+      49.3125,
+      26.1875,
+      -152.1875
+    ],
+    "variant": 5,
+    "horizontal_distance_m": 133.2,
+    "range_fade": 1.0,
+    "native_leaf_lowest_local_y_cells": 37,
+    "native_model_height_cells": 97,
+    "terrain_ray_occlusion_above_root_m": 1.25,
+    "terrain_ray_method": "999 canonical height samples along eye-to-root horizontal segment; maximum terrain elevation above the eye-root ray divided by ray fraction estimates the required target elevation above root",
+    "native_visible_stem_height_estimate_m": 1.06,
+    "actual_mixed_lower_stride8_groups": [
+      {
+        "aggregate_cell": [
+          -3,
+          4,
+          -2
+        ],
+        "wood_voxels": 4,
+        "leaf_voxels": 16
+      },
+      {
+        "aggregate_cell": [
+          -3,
+          4,
+          -1
+        ],
+        "wood_voxels": 33,
+        "leaf_voxels": 38
+      },
+      {
+        "aggregate_cell": [
+          -2,
+          4,
+          -2
+        ],
+        "wood_voxels": 24,
+        "leaf_voxels": 55
+      },
+      {
+        "aggregate_cell": [
+          -2,
+          4,
+          -1
+        ],
+        "wood_voxels": 220,
+        "leaf_voxels": 10
+      },
+      {
+        "aggregate_cell": [
+          -2,
+          4,
+          0
+        ],
+        "wood_voxels": 14,
+        "leaf_voxels": 2
+      }
+    ]
+  },
+  "diagnosis": "Dither is inactive for the suspect tree. Same-camera native reference retains its curved stem. Stride8 occupancy expands the lower crown downward by 5 native cells (0.3125m); majority palette selection and all-material mean pigment can classify mixed lower-crown wood/leaf boxes as green. Canonical foreground terrain already occludes the lower 1.25m, amplifying apparent loss of the remaining coarse stem. Some smaller neighboring crowns are genuinely occluded by the foreground ridge.",
+  "fix": "At Rowan foliage strides4/8, derive separate wood at stride2/4, then clamp lowest coarse foliage vertices to actual native canopy minimum Y; combine meshes with index offsets. Native stride1/2, canonical data and source placement unchanged. Existing triangle/memory budgets remain.",
+  "tradeoff": "Coarse wood and foliage overlap inside the crown; extra internal faces are bounded by existing resource caps. No artificial root extensions, changed world heights or terrain edits.",
+  "validation": "434 Rust tests pass, including native1/2 byte identity and coarse-cost test. Final Vulkan captures confirm visible supporting wood in the suspect tree; see tree-support-comparison.png. Native-reference source unchanged.",
+  "superseded_attempt": "Lower mixed-cell wood pigment priority had no useful visible improvement in the matched GPU crop and was removed.",
+  "cpu_template_triangle_counts_stride8": [
+    1524,
+    2044,
+    3368,
+    3212,
+    4792,
+    5064,
+    6928,
+    4200
+  ]
+}
