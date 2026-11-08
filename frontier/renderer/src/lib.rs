@@ -33,8 +33,12 @@ mod source_page_cache;
 mod spatial_appearance;
 mod surface_compare;
 mod terrain;
+mod vegetation;
+mod vegetation_gpu;
+mod vegetation_scene;
 mod viewer_visual;
 pub mod volume;
+mod walking;
 
 use frontier_world::{Cell, Material, World, VOXEL_SIZE};
 use glam::{DVec3, Mat4, Vec3};
@@ -231,6 +235,11 @@ struct Gpu {
     hybrid: Option<hybrid_gpu::HybridGpu>,
     pages: Option<page_terrain::PageGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
+    vegetation: Option<vegetation_gpu::VegetationGpu>,
+    vegetation_stream: Option<vegetation::VegetationStream>,
+    vegetation_stats: vegetation::VegetationStats,
+    vegetation_revision: u64,
+    vegetation_samples: u32,
     summary_contention: Option<gpu_summary_probe::GpuSummaryProbe>,
     summary_contention_startup_ms: f64,
     draw_encode_cpu_ms: std::cell::Cell<f64>,
@@ -449,6 +458,11 @@ impl Gpu {
             hybrid: None,
             pages: None,
             adaptive: None,
+            vegetation: None,
+            vegetation_stream: None,
+            vegetation_stats: Default::default(),
+            vegetation_revision: 0,
+            vegetation_samples: sample_count,
             summary_contention: None,
             summary_contention_startup_ms: 0.,
             draw_encode_cpu_ms: std::cell::Cell::new(0.),
@@ -735,6 +749,9 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        if let Some(vegetation) = &self.vegetation {
+            vegetation.draw(&mut pass, &self.bind_group);
+        }
         if let Some(adaptive) = &self.adaptive {
             adaptive.draw(&mut pass);
             if !self.volume_owner {
@@ -1053,7 +1070,7 @@ impl Gpu {
             metadata.pop();
             let shadows_active = self.adaptive.as_ref().is_some_and(|a| a.shadows_active());
             metadata.push_str(&format!(
-                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"gpu_timing_scope\":\"terrain_pass_only\"}}}}",
+                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\"}}}}",
                 settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some(),
                 settings.atmosphere, settings.render_scale, settings.exposure,
                 settings.fog_density, settings.fog_height_falloff, settings.sun_elevation,
@@ -1062,6 +1079,11 @@ impl Gpu {
             ));
             std::fs::write(metadata_path, metadata)?;
         }
+        let metadata_path = path.with_extension("capture.json");
+        let mut metadata = std::fs::read_to_string(&metadata_path)?;
+        metadata.pop();
+        metadata.push_str(&format!(",{}}}", self.vegetation_json()));
+        std::fs::write(metadata_path, metadata)?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
         png.set_depth(png::BitDepth::Eight);
@@ -1264,6 +1286,7 @@ struct Viewer {
     depth: Option<wgpu::Texture>,
     multisample: Option<wgpu::Texture>,
     camera: Camera,
+    walking: walking::WalkingCamera,
     keys: HashSet<KeyCode>,
     grabbed: bool,
     last_frame: Instant,
@@ -1699,7 +1722,7 @@ impl Viewer {
                     movement += direction;
                 }
             }
-            let speed = if self.keys.contains(&KeyCode::ShiftLeft)
+            let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
                 || self.keys.contains(&KeyCode::ShiftRight)
             {
                 if self.fbm {
@@ -1714,7 +1737,20 @@ impl Viewer {
                     3.
                 }
             };
-            self.camera.position += movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+            if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
+                let horizontal =
+                    Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
+                self.camera.position = DVec3::from_array(self.walking.advance(
+                    &self.world,
+                    self.camera.position.to_array(),
+                    [horizontal.x as f64, horizontal.z as f64],
+                    self.keys.contains(&KeyCode::Space),
+                    dt as f64,
+                ));
+            } else {
+                self.camera.position +=
+                    movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+            }
         }
         let pose = self.route.pose_at(
             if !self.adaptive_route_started {
@@ -1747,6 +1783,13 @@ impl Viewer {
             self.camera.pitch = pose.pitch as f32;
         }
         self.poll_terrain();
+        if let Some(gpu) = &mut self.gpu {
+            let (width, height) = self
+                .atmosphere
+                .as_ref()
+                .map_or((self.width, self.height), |a| a.dimensions());
+            gpu.update_vegetation(&self.world, self.camera, width, height)?;
+        }
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             if !pages.contains(self.camera.position, self.camera.far) {
                 return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
@@ -1762,7 +1805,11 @@ impl Viewer {
         }
         if !self.adaptive_route_started && self.adaptive_wait_quality {
             if let Some(view) = &self.adaptive_view {
-                if !view.refinement_ready
+                if (!view.refinement_ready
+                    || self.gpu.as_ref().is_some_and(|g| {
+                        g.vegetation_stats.pending_jobs > 0
+                            || g.vegetation_stats.coverage_unresolved > 0
+                    }))
                     && (view.preparation_refused() || view.preparation_elapsed_seconds() >= 120.)
                 {
                     return Err(format!(
@@ -1774,6 +1821,11 @@ impl Viewer {
             }
         }
         if !self.adaptive_route_started
+            && (!self.adaptive_wait_quality
+                || self.gpu.as_ref().is_none_or(|g| {
+                    g.vegetation_stats.pending_jobs == 0
+                        && g.vegetation_stats.coverage_unresolved == 0
+                }))
             && self.adaptive_view.as_ref().is_some_and(|v| {
                 v.coverage_ready && (!self.adaptive_wait_quality || v.refinement_ready)
             })
@@ -2139,6 +2191,13 @@ impl ApplicationHandler for Viewer {
                     }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
+                        if key == KeyCode::KeyF && !event.repeat {
+                            self.visual_settings.walking = !self.visual_settings.walking;
+                            self.walking.reset();
+                            if let Some(ui) = &mut self.settings_ui {
+                                ui.set_walking(self.visual_settings.walking);
+                            }
+                        }
                         if key == KeyCode::KeyT && !event.repeat && self.hybrid_stream.is_some() {
                             let home = [
                                 self.initial_camera.position.x,
@@ -2316,6 +2375,10 @@ pub fn run() -> Result<()> {
     } else {
         World::fbm(seed, params)?
     };
+    let world = world.with_vegetation_enabled(visual_settings.vegetation);
+    if world.vegetation_enabled() {
+        frontier_world::vegetation::prewarm_models();
+    }
     let fbm = match scene.as_str() {
         "fbm" => true,
         "fixture" | "fbm-native" | "hybrid" | "hybrid-static" | "hybrid-topology" | "adaptive"
@@ -2756,6 +2819,7 @@ pub fn run() -> Result<()> {
                 "initial page experiment finite cover cannot cover requested camera/far".into(),
             );
         }
+        gpu.settle_vegetation(&world, camera, width, height)?;
         gpu.capture(&camera, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
@@ -2904,6 +2968,7 @@ pub fn run() -> Result<()> {
             pitch: camera.pitch,
         },
         camera,
+        walking: Default::default(),
         terrain_data,
         hybrid_initial,
         page_initial,
@@ -3039,6 +3104,10 @@ pub fn run() -> Result<()> {
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
             if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+        if let Some(gpu) = &viewer.gpu {
+            json.pop();
+            json.push_str(&format!(",{}}}", gpu.vegetation_json()));
+        }
         if scene == "hybrid" || scene == "hybrid-topology" {
             json.pop();
             json.push_str(&format!(",\"hybrid_scope\":{{\"native_half_extent_m\":32,\"approximate_collar_outer_m\":34,\"moving_native_ownership\":true,\"edits_supported\":{},\"volume_handoff_passed\":false,\"proxy_error_bound_certified\":false}}}}",scene=="hybrid-topology"));
@@ -3075,7 +3144,7 @@ pub fn run() -> Result<()> {
         let visual = &viewer.visual_settings;
         json.pop();
         json.push_str(&format!(
-            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"menu_enabled\":{},\"gpu_timing_scope\":\"terrain_pass_only\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
+            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"menu_enabled\":{},\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,

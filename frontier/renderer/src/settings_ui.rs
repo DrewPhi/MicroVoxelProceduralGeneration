@@ -62,6 +62,11 @@ impl SettingsUi {
         self.open
     }
 
+    pub fn set_walking(&mut self, walking: bool) {
+        self.settings.walking = walking;
+        self.loading_draft.walking = walking;
+    }
+
     pub fn settings(&self) -> &VisualSettings {
         &self.settings
     }
@@ -123,7 +128,7 @@ impl SettingsUi {
                         );
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_ms {
-                                ui.label(format!("Terrain GPU {ms:.1} ms  ·"));
+                                ui.label(format!("Scene GPU {ms:.1} ms  ·"));
                             }
                             ui.label(format!(
                                 "{} pending  ·  {}",
@@ -144,6 +149,9 @@ impl SettingsUi {
                         }
                         ui.label(memory);
                         ui.small("Terrain GPU figures exclude atmosphere and UI.");
+                        if self.settings.vegetation {
+                            ui.label(format!("Plants: {} instances · {} pending · {:.1} MiB GPU", stats.plant_instances, stats.plant_pending, stats.plant_gpu_mib));
+                        }
                     });
                 });
             if !self.open {
@@ -210,6 +218,10 @@ impl SettingsUi {
                                 &mut self.loading_draft.voxel_filter,
                                 "Filter distant voxel detail",
                             );
+                            ui.separator();
+                            ui.heading("Meadow & movement");
+                            ui.checkbox(&mut self.settings.vegetation, "Procedural vegetation");
+                            ui.checkbox(&mut self.settings.walking, "Walk on ground (F toggles flight)");
                             ui.separator();
                             ui.heading("Light & atmosphere");
                             ui.checkbox(&mut self.settings.terrain_shadows, "Bounded Alpine terrain shadows");

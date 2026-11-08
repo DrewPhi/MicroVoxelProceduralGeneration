@@ -1,6 +1,8 @@
 //! Display and streaming controls; these never change authoritative voxels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualSettings {
+    pub vegetation: bool,
+    pub walking: bool,
     pub pixel_error: f64,
     pub view_distance: f32,
     pub render_scale: f32,
@@ -28,6 +30,8 @@ pub struct VisualSettings {
 impl Default for VisualSettings {
     fn default() -> Self {
         Self {
+            vegetation: false,
+            walking: false,
             pixel_error: 3.,
             view_distance: 20_000.,
             render_scale: 1.,
@@ -56,6 +60,9 @@ impl Default for VisualSettings {
 
 #[derive(Clone, Debug, Default)]
 pub struct SettingsStats {
+    pub plant_instances: usize,
+    pub plant_pending: usize,
+    pub plant_gpu_mib: f64,
     pub frame_ms: f64,
     pub gpu_ms: Option<f64>,
     pub pending: usize,

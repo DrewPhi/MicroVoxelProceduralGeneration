@@ -12,6 +12,8 @@ pub fn material_id(m: Material) -> u8 {
         Material::Soil => 2,
         Material::Stone => 3,
         Material::Wood => 4,
+        Material::Leaf => 5,
+        Material::Flower => 6,
     }
 }
 pub fn material(id: u8) -> Material {
@@ -20,6 +22,8 @@ pub fn material(id: u8) -> Material {
         2 => Material::Soil,
         3 => Material::Stone,
         4 => Material::Wood,
+        5 => Material::Leaf,
+        6 => Material::Flower,
         _ => Material::Air,
     }
 }

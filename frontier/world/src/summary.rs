@@ -22,8 +22,8 @@ pub enum TopologyClass {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AppearanceSummary {
-    /// Exposed canonical face area (m²), indexed Air/Grass/Soil/Stone/Wood.
-    pub material_area_m2: [f64; 5],
+    /// Exposed canonical face area (m²), indexed Air/Grass/Soil/Stone/Wood/Leaf/Flower.
+    pub material_area_m2: [f64; 7],
     /// Exposed canonical face area indexed +X/-X/+Y/-Y/+Z/-Z.
     pub normal_area_m2: [f64; 6],
 }
@@ -55,7 +55,7 @@ impl TerrainSummary {
                 (TopologyClass::Unknown, _) | (_, TopologyClass::Unknown) => TopologyClass::Unknown,
                 _ => TopologyClass::Heightfield,
             };
-            for i in 0..5 {
+            for i in 0..7 {
                 result.appearance.material_area_m2[i] += c.appearance.material_area_m2[i];
             }
             for i in 0..6 {
@@ -328,6 +328,8 @@ fn add_face(a: &mut AppearanceSummary, m: Material, axis: usize, area: f64) {
         Material::Soil => 2,
         Material::Stone => 3,
         Material::Wood => 4,
+        Material::Leaf => 5,
+        Material::Flower => 6,
     };
     a.material_area_m2[i] += area;
     a.normal_area_m2[axis] += area;

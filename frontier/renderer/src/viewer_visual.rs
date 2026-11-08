@@ -41,6 +41,12 @@ impl Viewer {
             stats.cache_mib = view.cache_bytes as f64 / 1048576.;
             stats.quality_ready = view.quality_ready;
         }
+        stats.plant_instances = gpu.vegetation_stats.selected_instances;
+        stats.plant_pending = gpu.vegetation_stats.pending_jobs;
+        stats.plant_gpu_mib = gpu
+            .vegetation
+            .as_ref()
+            .map_or(0., |p| p.stats().resident_bytes as f64 / 1048576.);
         let was_open = ui.menu_open();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let changes = ui.prepare(window, &gpu.device, &gpu.queue, &mut encoder, &stats);
@@ -50,6 +56,18 @@ impl Viewer {
         if was_open && !now_open {
             self.keys.clear();
             self.grab(true);
+        }
+        if self.world.vegetation_enabled() != settings.vegetation {
+            if settings.vegetation {
+                frontier_world::vegetation::prewarm_models();
+            }
+            self.world = self
+                .world
+                .clone()
+                .with_vegetation_enabled(settings.vegetation);
+        }
+        if self.visual_settings.walking != settings.walking {
+            self.walking.reset();
         }
         self.visual_settings = settings;
         if changes.loading_applied {

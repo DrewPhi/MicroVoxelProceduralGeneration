@@ -222,9 +222,10 @@ fn proxy_position(address:u32)->vec3<f32> {
     let positions=array<vec3<f32>,3>(a,b,c);
     return vertex_out(positions[vertex],MATERIAL_COLORS[material],normalize(cross(b-a,c-a)),profile_index);
 }
-const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
+const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
     vec3<f32>(0.,0.,0.),vec3<f32>(0.18,0.34,0.10),vec3<f32>(0.32,0.22,0.13),
-    vec3<f32>(0.35,0.37,0.39),vec3<f32>(0.41,0.25,0.13));
+    vec3<f32>(0.35,0.37,0.39),vec3<f32>(0.41,0.25,0.13),
+    vec3<f32>(0.40,0.53,0.25),vec3<f32>(0.93,0.92,0.84));
 @vertex fn vs_native(@builtin(vertex_index) vertex:u32,
     @location(0) anchor:vec3<f32>,@location(1) extent:vec2<f32>,
     @location(2) axis_sign:u32,@location(3) material:u32,@location(4) profile_index:u32)->VertexOut {
@@ -235,7 +236,7 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     position[(axis+1u)%3u]+=extent.x*select(0.,1.,corner==1u || corner==2u);
     position[(axis+2u)%3u]+=extent.y*select(0.,1.,corner>=2u);
     var normal=vec3<f32>(0.);normal[axis]=select(1.,-1.,negative);
-    return vertex_out(position,MATERIAL_COLORS[min(material,4u)],normal,profile_index);
+    return vertex_out(position,MATERIAL_COLORS[min(material,6u)],normal,profile_index);
 }
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Identical material/light transfer to terrain, per fragment so the collar's

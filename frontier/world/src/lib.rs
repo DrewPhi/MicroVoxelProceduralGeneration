@@ -13,6 +13,7 @@ pub mod affine_bounds;
 mod alpine;
 pub mod summary;
 pub mod terrain;
+pub mod vegetation;
 pub mod visual_source;
 pub mod volume_summary;
 pub use terrain::{
@@ -82,8 +83,13 @@ pub enum Material {
     Soil,
     Stone,
     Wood,
+    Leaf,
+    Flower,
 }
 impl Material {
+    pub fn is_blocking(self) -> bool {
+        !matches!(self, Self::Air | Self::Leaf | Self::Flower)
+    }
     pub fn color(self) -> [f32; 3] {
         match self {
             Self::Air => [0.0, 0.0, 0.0],
@@ -91,6 +97,8 @@ impl Material {
             Self::Soil => [0.32, 0.22, 0.13],
             Self::Stone => [0.35, 0.37, 0.39],
             Self::Wood => [0.41, 0.25, 0.13],
+            Self::Leaf => [0.40, 0.53, 0.25],
+            Self::Flower => [0.93, 0.92, 0.84],
         }
     }
 }
@@ -103,13 +111,15 @@ impl Material {
 pub struct World {
     seed: u64,
     terrain: Option<FbmTerrain>,
+    vegetation: Option<Arc<vegetation::TileCache>>,
     topology_base: Option<i64>,
     edits: Arc<BTreeMap<Cell, Material>>,
     revision: u64,
     counter: Arc<AtomicU64>,
 }
 
-/// Read-only column snapshot borrowing its world. Reuses the canonical source
+/// Terrain-only column snapshot borrowing its world; excludes vegetation.
+/// Reuses the canonical source
 /// height for many native y queries; material overrides and fixture volumes still
 /// apply. Useful for bounded native reference extraction, not a display LOD.
 pub struct WorldColumn<'a> {
@@ -140,6 +150,7 @@ impl World {
         Self {
             seed,
             terrain: None,
+            vegetation: None,
             topology_base: None,
             edits: Arc::default(),
             revision: 0,
@@ -177,6 +188,7 @@ impl World {
     pub fn fbm_terrain(&self) -> Option<&FbmTerrain> {
         self.terrain.as_ref()
     }
+    /// Terrain and edits only. Vegetation has separate volume ownership.
     pub fn column(&self, x: i64, z: i64) -> WorldColumn<'_> {
         WorldColumn {
             world: self,
@@ -210,10 +222,14 @@ impl World {
         self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
     }
     pub fn material(&self, c: Cell) -> Material {
-        self.edits
-            .get(&c)
-            .copied()
-            .unwrap_or_else(|| self.source(c))
+        self.edits.get(&c).copied().unwrap_or_else(|| {
+            let terrain = self.source(c);
+            if terrain == Material::Air {
+                self.vegetation_voxel(c).map_or(terrain, |v| v.material)
+            } else {
+                terrain
+            }
+        })
     }
     fn height_cells(&self, x: i64, z: i64) -> i64 {
         if let Some(terrain) = &self.terrain {

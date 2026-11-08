@@ -19,8 +19,10 @@ terrain, voxel appearance filtering and 4×MSAA. Press **Esc** for live light an
 atmosphere controls plus image-quality and loading settings. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
 Use `--terrain-recipe legacy` for the original spiky terrain.
-Use `--preset alpine` for the [vegetation-free Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
-with a winding path, foothills, mountain backdrop and bounded terrain shadows.
+Use `--preset alpine` for the [Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
+now with [seeded voxel grass, edelweiss and flowering rowans](frontier/VEGETATION.md),
+grounded walking, a winding path and mountain backdrop. Press F for flight;
+`--vegetation off --walk off` restores the bare-terrain camera preview.
 See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md) and
 [basic lighting/painting pass](frontier/BEAUTY_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;
@@ -47,6 +49,7 @@ performance gates.
 ```sh
 cd frontier
 cargo build --release --locked
+./run.sh --preset alpine
 ./run.sh --seed 7 --camera valley
 ./run.sh --scene fbm --seed 42 --scale 1200 --amplitude 700 --camera aerial
 ./run.sh --scene fbm-native

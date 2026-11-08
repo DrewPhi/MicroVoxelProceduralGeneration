@@ -261,3 +261,10 @@ original world. See [regional terrain results](frontier/REGIONAL_TERRAIN_CHECKPO
 and use `--start-xz X,Z` to inspect another physical region.
 
 Current lighting and deterministic terrain color: [beautification notes](frontier/BEAUTY_CHECKPOINT.md).
+
+Procedural vegetation lives in `frontier/world/src/vegetation.rs`; its canonical
+records, voxel models and collision queries are independent of display LOD.
+`renderer/src/vegetation.rs` streams placement and cached face meshes,
+`vegetation_gpu.rs` batches instances, and `vegetation_scene.rs` integrates them.
+`walking.rs` provides the small axis-swept walking camera. See
+[vegetation controls, budgets and validation](frontier/VEGETATION.md).
