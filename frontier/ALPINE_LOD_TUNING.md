@@ -1,5 +1,9 @@
 # Alpine reference convergence — 2026-11-07
 
+Follow-up: [three selectable appearance LOD experiments](LOD_APPEARANCE_EXPERIMENTS.md)
+compare alternative summaries against this retained default, with matched frames
+and laptop motion measurements.
+
 Launch with `./run.sh --preset alpine`. This pass changes Alpine display
 selection and appearance, not terrain generation, materials, native voxel
 identity, camera, fog, or lighting. Legacy/spiky and Regional retain their prior

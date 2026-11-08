@@ -71,9 +71,62 @@ struct FaceProfile {top:vec4<f32>,px:vec4<f32>,nx:vec4<f32>,pz:vec4<f32>,nz:vec4
 fn mix_profile(a:FaceProfile,b:FaceProfile,t:f32)->FaceProfile {
     return FaceProfile(mix(a.top,b.top,t),mix(a.px,b.px,t),mix(a.nx,b.nx,t),mix(a.pz,b.pz,t),mix(a.nz,b.nz,t));
 }
+// Packed map references are relative to the descriptor, not the pack itself.
+fn map_node(id:u32,node:u32)->FaceProfile {
+    let record=face_profiles[id+1u+node/16u];
+    let lane=node%16u;
+    var row=record.px;
+    switch lane/4u {
+        case 1u: {row=record.nx;}
+        case 2u: {row=record.pz;}
+        case 3u: {row=record.nz;}
+        default: {}
+    }
+    return face_profiles[u32(i32(id)+i32(row[lane%4u]))];
+}
+// Evaluate one -3 descriptor with an explicit view vector. Spatial nodes use
+// the same fragment view so their directional response agrees at shared edges.
+fn conditional_profile(id:u32,view:vec3<f32>)->FaceProfile {
+    let p=face_profiles[id];
+    let horizontal=length(view.xz);
+    var azimuth=0.;
+    if horizontal>0.000001 {
+        let angle=atan2(view.z,view.x)*0.6366197723675814;
+        azimuth=angle-floor(angle/4.)*4.;
+    }
+    let first=u32(floor(azimuth))%4u;
+    let next=(first+1u)%4u;
+    let azimuth_fraction=fract(azimuth);
+    let elevation=clamp((view.y/max(horizontal,0.000001)-p.px.y)/(p.px.z-p.px.y),0.,1.);
+    let base=u32(i32(id)+i32(p.px.x));
+    return mix_profile(
+        mix_profile(face_profiles[base+first],face_profiles[base+next],azimuth_fraction),
+        mix_profile(face_profiles[base+4u+first],face_profiles[base+4u+next],azimuth_fraction),elevation);
+}
 fn appearance_profile(id:u32,local:vec3<f32>)->FaceProfile {
     let p=face_profiles[id];
     if p.top.w>=0. {return p;}
+    if p.top.w == -2. {
+        let dimension=u32(p.px.x);
+        let uv=clamp((local.xz-p.top.xy)*p.top.z,vec2(0.),vec2(f32(dimension-1u)));
+        let cell=min(vec2<u32>(floor(uv)),vec2<u32>(dimension-2u));
+        let fraction=uv-vec2<f32>(cell);
+        let node=cell.y*dimension+cell.x;
+        return mix_profile(
+            mix_profile(map_node(id,node),map_node(id,node+1u),fraction.x),
+            mix_profile(map_node(id,node+dimension),map_node(id,node+dimension+1u),fraction.x),fraction.y);
+    }
+    if p.top.w == -3. {
+        return conditional_profile(id,camera.eye.xyz-vec3(p.top.x,p.top.z,p.top.y));
+    }
+    if p.top.w == -5. {
+        let uv=clamp((local.xz-p.top.xy)*p.top.z,vec2(0.),vec2(1.));
+        let ids=vec4<i32>(i32(id))+vec4<i32>(p.px);
+        let view=camera.eye.xyz-local;
+        return mix_profile(
+            mix_profile(conditional_profile(u32(ids.x),view),conditional_profile(u32(ids.y),view),uv.x),
+            mix_profile(conditional_profile(u32(ids.z),view),conditional_profile(u32(ids.w),view),uv.x),uv.y);
+    }
     let uv=clamp((local.xz-p.top.xy)*p.top.z,vec2(0.),vec2(1.));
     let ids=vec4<i32>(i32(id))+vec4<i32>(p.px);
     // Interpolate color-times-area and area together; normalize only once after

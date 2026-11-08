@@ -125,6 +125,11 @@ impl DiskCache {
         max_entry_bytes: usize,
         world: &World,
     ) -> io::Result<Self> {
+        if crate::appearance_method::selected() != crate::appearance_method::Method::Baseline {
+            return Err(io::Error::other(
+                "LOD appearance experiments require derived disk cache disabled",
+            ));
+        }
         if budget_bytes == 0 || max_entry_bytes < 1024 || max_entry_bytes as u64 > budget_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

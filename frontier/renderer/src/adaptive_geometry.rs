@@ -923,7 +923,8 @@ fn build_surface(
     let defer_profiles = samples.gpu_profiles.enabled
         && samples.gpu_job_allowed
         && appearance_mode(world).probe_cells == 1
-        && !appearance_mode(world).spatial_profiles;
+        && !appearance_mode(world).spatial_profiles
+        && crate::appearance_method::selected() == crate::appearance_method::Method::Baseline;
     if defer_profiles {
         samples.gpu_profiles.eligible_tiles += 1;
     }
@@ -2129,7 +2130,25 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        let index = if appearance_mode(self.world).spatial_profiles
+        let method = crate::appearance_method::selected();
+        let index = if self.key.width_cells > MAX_NATIVE_WIDTH
+            && s >= 16
+            && method == crate::appearance_method::Method::Visibility
+            && (!crate::appearance_visibility::spatial_enabled()
+                || s <= crate::appearance_visibility::SPATIAL_MAX_EDGE_CELLS)
+        {
+            if crate::appearance_visibility::spatial_enabled() {
+                self.visible_spatial_profile(x, z, s)?
+            } else {
+                self.visible_profile(x, z, s)?
+            }
+        } else if self.key.width_cells > MAX_NATIVE_WIDTH
+            && s >= 16
+            && method == crate::appearance_method::Method::Map
+        {
+            self.mapped_profile(x, z, s)?
+        } else if (appearance_mode(self.world).spatial_profiles
+            || method == crate::appearance_method::Method::Hierarchy)
             && self.key.width_cells > MAX_NATIVE_WIDTH
             && s >= 16
         {
@@ -2175,9 +2194,19 @@ impl Generator<'_> {
                     size: footprint,
                     stride: (footprint / 4).max(1),
                 };
-                let mut value = self
-                    .compute_patch_profile(min[0], min[1], footprint, key.stride, key)?
-                    .value;
+                let mut value = if crate::appearance_method::selected()
+                    == crate::appearance_method::Method::Hierarchy
+                    && footprint <= crate::appearance_hierarchy::MAX_EDGE_CELLS.min(128)
+                {
+                    crate::appearance_hierarchy::profile(
+                        [self.key.min[0] + nx, self.key.min[1] + nz],
+                        footprint,
+                        &mut |gx, gz| self.appearance_column(gx, gz),
+                    )?
+                } else {
+                    self.compute_patch_profile(min[0], min[1], footprint, key.stride, key)?
+                        .value
+                };
                 let area_scale = (s * s) as f32 / (footprint * footprint) as f32;
                 for field in value.iter_mut().flatten() {
                     *field *= area_scale;
@@ -2211,6 +2240,121 @@ impl Generator<'_> {
             id,
         ));
         Ok(id)
+    }
+    fn appearance_column(
+        &mut self,
+        gx: i64,
+        gz: i64,
+    ) -> Result<crate::appearance_hierarchy::AppearanceColumn, String> {
+        let x = gx - self.key.min[0];
+        let z = gz - self.key.min[1];
+        let height = self.height(x, z)?;
+        let column = self.heights[&[x, z]];
+        Ok(crate::appearance_hierarchy::AppearanceColumn {
+            height,
+            colors: [
+                column.material(height - 1).color(),
+                column.material(height - 2).color(),
+                column.material(height - 13).color(),
+            ],
+        })
+    }
+    fn note_profile_mean(&mut self, values: &[[[f32; 4]; 5]], area_scale: f64) {
+        for value in values {
+            for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
+                self.appearance.area_m2[a] +=
+                    value[p][3] as f64 * area_scale * VOXEL_SIZE * VOXEL_SIZE / values.len() as f64;
+                for c in 0..3 {
+                    self.appearance.color_area[a][c] +=
+                        value[p][c] as f64 * area_scale * VOXEL_SIZE * VOXEL_SIZE
+                            / values.len() as f64;
+                }
+            }
+        }
+    }
+    fn visible_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
+        let origin = [self.key.min[0] + x, self.key.min[1] + z];
+        let field = crate::appearance_visibility::build_visible_appearance(origin, s, |gx, gz| {
+            self.appearance_column(gx, gz)
+        })?;
+        self.note_profile_mean(&field.profiles, 1.);
+        let base = self.face_profiles.len() as u32;
+        self.face_profiles.extend(field.profiles);
+        let height = self.height(x + s / 2, z + s / 2)?;
+        let at = self.face_profiles.len() as u32;
+        self.face_profiles
+            .push(crate::spatial_appearance::visibility_header(
+                [
+                    (x + s / 2) as f32 * VOXEL_SIZE as f32,
+                    (z + s / 2) as f32 * VOXEL_SIZE as f32,
+                    height as f32 * VOXEL_SIZE as f32,
+                ],
+                base,
+                at,
+            ));
+        Ok(at)
+    }
+    fn visible_spatial_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
+        let footprint = (s / 2).max(1);
+        let mut nodes = [0; 4];
+        for (i, (nx, nz)) in [(x, z), (x + s, z), (x, z + s), (x + s, z + s)]
+            .into_iter()
+            .enumerate()
+        {
+            nodes[i] = if let Some(&id) = self.spatial_nodes.get(&(nx, nz, s)) {
+                id
+            } else {
+                let id = self.visible_profile(nx - footprint / 2, nz - footprint / 2, footprint)?;
+                self.spatial_nodes.insert((nx, nz, s), id);
+                id
+            };
+        }
+        let at = self.face_profiles.len() as u32;
+        self.face_profiles
+            .push(crate::spatial_appearance::visibility_spatial_header(
+                [x as f32 * VOXEL_SIZE as f32, z as f32 * VOXEL_SIZE as f32],
+                s as f32 * VOXEL_SIZE as f32,
+                nodes,
+                at,
+            ));
+        Ok(at)
+    }
+    fn mapped_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
+        let origin = [self.key.min[0] + x, self.key.min[1] + z];
+        let map =
+            crate::appearance_map::build_map(origin, s, |gx, gz| self.appearance_column(gx, gz))?;
+        self.note_profile_mean(&map.profiles, (s * s) as f64);
+        // Maps store compact row-major node references. Raw profiles are shared
+        // between adjacent maps using the existing per-tile world-aligned cache.
+        let mut refs = Vec::with_capacity(map.profiles.len());
+        for (i, value) in map.profiles.into_iter().enumerate() {
+            let nx = map.origin_cells[0] + (i % map.dimension) as i64 * map.spacing_cells
+                - self.key.min[0];
+            let nz = map.origin_cells[1] + (i / map.dimension) as i64 * map.spacing_cells
+                - self.key.min[1];
+            let id = if let Some(&id) = self.spatial_nodes.get(&(nx, nz, -1)) {
+                id
+            } else {
+                let id = self.face_profiles.len() as u32;
+                self.face_profiles.push(value);
+                self.spatial_nodes.insert((nx, nz, -1), id);
+                id
+            };
+            refs.push(id);
+        }
+        let at = self.face_profiles.len() as u32;
+        let header = crate::spatial_appearance::map_header(
+            [
+                (map.origin_cells[0] - self.key.min[0]) as f32 * VOXEL_SIZE as f32,
+                (map.origin_cells[1] - self.key.min[1]) as f32 * VOXEL_SIZE as f32,
+            ],
+            map.spacing_cells as f32 * VOXEL_SIZE as f32,
+            map.dimension,
+            &refs,
+            at,
+        );
+        self.face_profiles.extend(header);
+        Ok(at)
     }
     fn record_affine(&mut self, x: i64, z: i64, s: i64, start_index: usize) {
         // All native columns are already enumerated at <=8m, providing a

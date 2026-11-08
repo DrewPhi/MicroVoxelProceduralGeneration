@@ -98,7 +98,41 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
     } else {
         0
     };
-    usize::try_from((modeled + deferred_profiles + 1024 * 1024) * 2).ok()
+    // Experimental profile payload, node maps and extra source-column workspace.
+    // Charges are conservative; default renderer's reservation stays unchanged.
+    let appearance_extra = if w > 128 && step >= 16 {
+        use crate::appearance_method::Method;
+        match crate::appearance_method::selected() {
+            Method::Baseline => 0,
+            Method::Hierarchy if step <= 256 => {
+                let leaves = (w / 16 + step / 16 + 4).pow(2);
+                (leaves * 5).min(300_000) * 256
+            }
+            Method::Hierarchy => 0,
+            Method::Visibility
+                if !crate::appearance_visibility::spatial_enabled()
+                    || step <= crate::appearance_visibility::SPATIAL_MAX_EDGE_CELLS as u128 =>
+            {
+                // At most544canonical columns perpatch; cache maysharethem.
+                let grid = crate::appearance_visibility::grid_side() as u128;
+                let columns = (grid + 2).pow(2) + 4 * grid * grid;
+                let nodes = if crate::appearance_visibility::spatial_enabled() {
+                    (g + 1).pow(2)
+                } else {
+                    g * g
+                };
+                (nodes * columns).min(300_000) * 256 + (nodes * 9 + g * g) * 80 * 2
+            }
+            Method::Visibility => 0,
+            Method::Map => {
+                let n = g * crate::appearance_map::map_intervals() as u128 + 3;
+                (n * n * 5).min(300_000) * 256 + n * n * 256 + g * g * 8 * 80 * 2
+            }
+        }
+    } else {
+        0
+    };
+    usize::try_from((modeled + deferred_profiles + appearance_extra + 1024 * 1024) * 2).ok()
 }
 
 #[cfg(test)]
