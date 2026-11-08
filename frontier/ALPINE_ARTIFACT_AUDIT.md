@@ -1,5 +1,10 @@
 # Alpine image artifact audit
 
+Subsequent reference-driven appearance/LOD changes and their measured limits are
+recorded in [ALPINE_LOD_TUNING.md](ALPINE_LOD_TUNING.md). The diagnosis below is
+historical; equal-resolution spatial profile boundaries are now shared, while
+cross-resolution filtering and exact self-occlusion remain approximate.
+
 Read-only diagnosis, 2026-11-07. Images inspected:
 `reference/gallery/alpine/meadow.png` and
 `output/alpine-scene/reference-final/color.png`. This note records evidence and

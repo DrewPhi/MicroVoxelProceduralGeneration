@@ -400,6 +400,7 @@ pub struct AdaptiveGpu {
     gpu_profiles: Option<GpuOrderedProfiles>,
     gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
+    near_detail: bool,
     shadows: ShadowResources,
     prepared_view: Option<PreparedView>,
     prepared_view_hits: u64,
@@ -671,6 +672,7 @@ impl AdaptiveGpu {
                 ..Default::default()
             },
             lighting: [0.; 12],
+            near_detail: false,
             shadows,
             prepared_view: None,
             prepared_view_hits: 0,
@@ -725,6 +727,7 @@ impl AdaptiveGpu {
         alpine: bool,
         amplitude: f32,
     ) {
+        self.near_detail = crate::adaptive_stream::near_detail_for_alpine(alpine);
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
         let value = [
             sun.x,
@@ -1165,6 +1168,12 @@ impl AdaptiveGpu {
                     height,
                 )
             });
+            let error = crate::adaptive_stream::weighted_near_detail_error(
+                error,
+                [c.canonical_bounds.min, c.canonical_bounds.max],
+                camera.position,
+                self.near_detail,
+            );
             if error.is_finite() {
                 stats.current_max_finite_error_px = Some(
                     stats
@@ -1460,6 +1469,9 @@ impl AdaptiveGpu {
         queue: &wgpu::Queue,
         tile: &GeometryTile,
     ) -> Result<(), String> {
+        if !crate::spatial_appearance::valid_table(&tile.face_profiles) {
+            return Err("invalid spatial appearance table".into());
+        }
         if tile
             .proxy_triangles
             .iter()
@@ -1682,6 +1694,7 @@ impl AdaptiveGpu {
         Ok(())
     }
 }
+
 fn validated_bins(bins: &[NativeBin], quad_count: u32) -> Vec<NativeBin> {
     let mut end = 0u32;
     if bins.is_empty() || bins.len() > 8 {

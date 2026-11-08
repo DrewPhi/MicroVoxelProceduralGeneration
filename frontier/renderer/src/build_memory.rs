@@ -73,7 +73,15 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
         };
         // Packing is performed before admission while every worker output may
         // remain live. Reserve the new 64-byte primitive alongside its inputs.
-        vertices * 88 + (vertices / 3) * 64 + compact + columns + (g * g + 1) * 160
+        // The reservation API has no world; charge every eligible far job
+        // for Alpine/default or explicitly enabled spatial appearance.
+        let spatial = if w > 128 && step >= 16 {
+            // Shared corner table (Vec growth), node lookup and halo probes.
+            (g + 1).pow(2) * 224 + (250 * (2 * g + 1)).min(300_000) * 256
+        } else {
+            0
+        };
+        vertices * 88 + (vertices / 3) * 64 + compact + columns + (g * g + 1) * 160 + spatial
     };
     // Fixed temporary vectors, clipping/affine workspace, small allocations;
     // factor two is deliberately retained pending measured allocation auditing.

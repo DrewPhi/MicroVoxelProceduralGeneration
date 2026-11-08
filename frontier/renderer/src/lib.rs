@@ -26,6 +26,7 @@ mod settings_ui;
 #[cfg(test)]
 mod source_cache_probe;
 mod source_page_cache;
+mod spatial_appearance;
 mod surface_compare;
 mod terrain;
 mod viewer_visual;
@@ -54,6 +55,23 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+/// Renderer shader/filter contract; independent of canonical source appearance.
+const ADAPTIVE_RENDER_APPEARANCE_VERSION: u32 = 2;
+
+fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
+    if !adaptive {
+        return "\"render_appearance_version\":1".into();
+    }
+    let mode = adaptive_geometry::appearance_mode(world);
+    format!(
+        "\"render_appearance_version\":{ADAPTIVE_RENDER_APPEARANCE_VERSION},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{}}}",
+        mode.spatial_profiles,
+        mode.probe_cells,
+        if mode.half_footprint { "half" } else { "full" },
+        adaptive_stream::near_detail_setting(world),
+    )
+}
+
 /// CPU command encoding only; GPU execution is measured separately.
 struct EncodeTimer<'a>(&'a std::cell::Cell<f64>, &'a std::cell::Cell<f64>, Instant);
 impl Drop for EncodeTimer<'_> {
@@ -2713,6 +2731,11 @@ pub fn run() -> Result<()> {
                 source.source_version()
             });
         metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"native_voxel_m\":{VOXEL_SIZE},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
+        metadata.pop();
+        metadata.push_str(&format!(
+            ",{}}}",
+            renderer_appearance_json(&world, adaptive_view.is_some())
+        ));
         if let Some(pages) = &gpu.pages {
             metadata.pop();
             metadata.push_str(&format!(
@@ -2864,8 +2887,9 @@ pub fn run() -> Result<()> {
                 let mut metadata = std::fs::read_to_string(&metadata_path)?;
                 metadata.pop();
                 metadata.push_str(&format!(
-                    ",\"scene\":{scene:?},\"seed\":{seed},\"adaptive\":{}}}",
-                    adaptive.json()
+                    ",\"scene\":{scene:?},\"seed\":{seed},\"adaptive\":{},{}}}",
+                    adaptive.json(),
+                    renderer_appearance_json(&viewer.world, true),
                 ));
                 std::fs::write(metadata_path, metadata)?;
                 if !adaptive.quality_ready {
@@ -2919,12 +2943,13 @@ pub fn run() -> Result<()> {
         }
         json.pop();
         json.push_str(&format!(
-            ",\"terrain_recipe\":\"{:?}\",\"appearance_version\":{},\"render_appearance_version\":1}}",
+            ",\"terrain_recipe\":\"{:?}\",\"appearance_version\":{},{}}}",
             params.recipe,
             viewer
                 .world
                 .fbm_terrain()
-                .map_or(0, |source| source.appearance_version())
+                .map_or(0, |source| source.appearance_version()),
+            renderer_appearance_json(&viewer.world, viewer.adaptive_view.is_some()),
         ));
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
@@ -3055,6 +3080,41 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn renderer_appearance_metadata_reports_resolved_world_modes() {
+        for recipe in [
+            frontier_world::FbmRecipe::Legacy,
+            frontier_world::FbmRecipe::Alpine,
+        ] {
+            let world = frontier_world::World::fbm(
+                super::SEED,
+                frontier_world::FbmParams {
+                    recipe,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mode = super::adaptive_geometry::appearance_mode(&world);
+            let metadata = super::renderer_appearance_json(&world, true);
+            assert!(metadata.contains("\"render_appearance_version\":2"));
+            assert!(metadata.contains(&format!("\"spatial_profiles\":{}", mode.spatial_profiles)));
+            assert!(metadata.contains(&format!("\"profile_probe_cells\":{}", mode.probe_cells)));
+            assert!(metadata.contains(&format!(
+                "\"profile_footprint\":\"{}\"",
+                if mode.half_footprint { "half" } else { "full" }
+            )));
+            assert!(metadata.contains(&format!(
+                "\"near_detail\":{}",
+                super::adaptive_stream::near_detail_setting(&world)
+            )));
+            assert!(!metadata.contains("\"appearance_version\":"));
+            assert_eq!(
+                super::renderer_appearance_json(&world, false),
+                "\"render_appearance_version\":1"
+            );
+        }
+    }
+
     #[test]
     fn measured_encode_excludes_warmup_missing_draws_and_reset_history() {
         let mut stats = super::DrawEncodeFrames::new();

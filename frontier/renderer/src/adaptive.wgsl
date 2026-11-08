@@ -68,6 +68,20 @@ fn terrain_shadow(local:vec3<f32>) -> f32 {
 }
 struct FaceProfile {top:vec4<f32>,px:vec4<f32>,nx:vec4<f32>,pz:vec4<f32>,nz:vec4<f32>};
 @group(0) @binding(1) var<storage,read> face_profiles:array<FaceProfile>;
+fn mix_profile(a:FaceProfile,b:FaceProfile,t:f32)->FaceProfile {
+    return FaceProfile(mix(a.top,b.top,t),mix(a.px,b.px,t),mix(a.nx,b.nx,t),mix(a.pz,b.pz,t),mix(a.nz,b.nz,t));
+}
+fn appearance_profile(id:u32,local:vec3<f32>)->FaceProfile {
+    let p=face_profiles[id];
+    if p.top.w>=0. {return p;}
+    let uv=clamp((local.xz-p.top.xy)*p.top.z,vec2(0.),vec2(1.));
+    let ids=vec4<i32>(i32(id))+vec4<i32>(p.px);
+    // Interpolate color-times-area and area together; normalize only once after
+    // weighting visible directions. Relative addresses survive pool relocation.
+    return mix_profile(
+        mix_profile(face_profiles[u32(ids.x)],face_profiles[u32(ids.y)],uv.x),
+        mix_profile(face_profiles[u32(ids.z)],face_profiles[u32(ids.w)],uv.x),uv.y);
+}
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -157,7 +171,7 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     if blend<=0. {return vec4<f32>(resolved,1.);}
     // All three triangle vertices share this ID. Fetch only for unresolved
     // radiance, rather than exporting80bytes of repeated vertex varyings.
-    let profile=face_profiles[in.profile_index];
+    let profile=appearance_profile(in.profile_index,in.local);
     // Source-derived canonical exposed face/material integrals. Self-occlusion
     // within the patch remains approximate; this is not a visibility oracle.
     let v=normalize(camera.eye.xyz-in.local);

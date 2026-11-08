@@ -19,6 +19,51 @@ use std::{
 /// Internal convergence reserve; the reported quality contract is unchanged.
 pub(crate) const REFINEMENT_RESERVE: f64 = 0.8;
 
+/// Alpine spends extra error budget near the camera; other recipes retain their policy.
+pub(crate) fn near_detail_setting(world: &World) -> bool {
+    near_detail_for_alpine(
+        world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine),
+    )
+}
+pub(crate) fn near_detail_for_alpine(alpine: bool) -> bool {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| match std::env::var("FRONTIER_NEAR_DETAIL").as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            _ => None,
+        })
+        .unwrap_or(alpine)
+}
+
+/// Spend additional detail near the camera without weakening the certified
+/// bound or changing far selection. This is an Alpine near-camera quality reserve, not
+/// a change to canonical source geometry or the geometric error certificate.
+fn near_detail_weight(distance_m: f64) -> f64 {
+    let t = ((distance_m - 16.) / 48.).clamp(0., 1.);
+    1. + 2. * (1. - t * t * (3. - 2. * t))
+}
+
+fn surface_bounds_distance(bounds: [[f64; 3]; 2], eye: DVec3) -> f64 {
+    let nearest = eye.clamp(DVec3::from(bounds[0]), DVec3::from(bounds[1]));
+    eye.distance(nearest)
+}
+
+pub(crate) fn weighted_near_detail_error(
+    error: f64,
+    bounds: [[f64; 3]; 2],
+    eye: DVec3,
+    enabled: bool,
+) -> f64 {
+    if enabled {
+        error * near_detail_weight(surface_bounds_distance(bounds, eye))
+    } else {
+        error
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct StreamSettings {
     pub pixel_error: f64,
@@ -293,6 +338,7 @@ struct PredictedRetention {
 struct RejectedCoarsen {
     error_m: f64,
     bounds: [[f64; 3]; 2],
+    surface_bounds: [[f64; 3]; 2],
     origin: DVec3,
 }
 /// Priority-only cancellation: never infer missing geometry from sampled data.
@@ -306,6 +352,7 @@ fn obsolete_refinement_demand(
     width: u32,
     height: u32,
     pixel_error: f64,
+    near_detail: bool,
 ) -> bool {
     let Some(first) = committed.first() else {
         return false;
@@ -365,8 +412,12 @@ fn obsolete_refinement_demand(
                 max: tile.conservative_surface_bounds[1],
             })
             && tile.best_certified_vertical_error_m.map_or(true, |error| {
-                let projected =
-                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection);
+                let projected = weighted_near_detail_error(
+                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection),
+                    tile.conservative_surface_bounds,
+                    camera.position,
+                    near_detail,
+                );
                 !projected.is_finite() || projected > pixel_error
             })
     })
@@ -558,6 +609,7 @@ impl AdaptiveStream {
                 width,
                 height,
                 self.settings.pixel_error,
+                near_detail_setting(&self.world),
             )
         {
             // Drop demand only. Immutable completed products remain reusable;
@@ -1227,6 +1279,7 @@ impl AdaptiveStream {
                     RejectedCoarsen {
                         error_m,
                         bounds: tile.bounds,
+                        surface_bounds: tile.conservative_surface_bounds,
                         origin: tile_origin(tile),
                     },
                 );
@@ -1261,12 +1314,17 @@ impl AdaptiveStream {
                     world_bounds_to_view(expanded, camera),
                     p,
                     conservative_clip_depth(camera).unwrap_or(f64::INFINITY),
-                ) && vertical_pixel_bound(
-                    rejected.error_m,
-                    rejected.bounds,
-                    rejected.origin,
-                    camera,
-                    p,
+                ) && weighted_near_detail_error(
+                    vertical_pixel_bound(
+                        rejected.error_m,
+                        rejected.bounds,
+                        rejected.origin,
+                        camera,
+                        p,
+                    ),
+                    rejected.surface_bounds,
+                    camera.position,
+                    near_detail_setting(&self.world),
                 ) > self.settings.pixel_error * 0.65
                 {
                     continue;
@@ -1554,8 +1612,15 @@ impl AdaptiveStream {
     }
     fn projected_error(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> f64 {
         let e = tile.best_certified_vertical_error_m;
-        e.map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
-            .unwrap_or(f64::INFINITY)
+        let bound = e
+            .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
+            .unwrap_or(f64::INFINITY);
+        weighted_near_detail_error(
+            bound,
+            tile.conservative_surface_bounds,
+            camera.position,
+            near_detail_setting(&self.world),
+        )
     }
     pub fn prepare(&mut self, cancelled: impl Fn() -> bool + Sync) -> Result<usize, String> {
         let mut completed = 0;
@@ -2079,6 +2144,106 @@ fn diagnostic_boxes_disjoint(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_detail_weights_are_bounded_monotonic_and_preserve_far_quality() {
+        assert_eq!(near_detail_weight(0.), 3.);
+        assert_eq!(near_detail_weight(16.), 3.);
+        assert_eq!(near_detail_weight(40.), 2.);
+        assert_eq!(near_detail_weight(64.), 1.);
+        assert_eq!(near_detail_weight(10_000.), 1.);
+        assert_eq!(near_detail_weight(f64::INFINITY), 1.);
+        let mut previous = 3.;
+        for i in 0..=800 {
+            let weight = near_detail_weight(i as f64 * 0.1);
+            assert!((1. ..=3.).contains(&weight));
+            assert!(weight <= previous);
+            // Multiplication cannot lower a valid existing error bound.
+            for error in [0., 0.125, 2., 100., f64::INFINITY] {
+                assert!(error * weight >= error);
+            }
+            previous = weight;
+        }
+        // Smoothstep reaches each plateau with zero first derivative.
+        let epsilon = 0.001;
+        assert!(3. - near_detail_weight(16. + epsilon) < epsilon * epsilon);
+        assert!(near_detail_weight(64. - epsilon) - 1. < epsilon * epsilon);
+    }
+
+    #[test]
+    fn near_detail_distance_uses_the_nearest_global_surface_bound() {
+        let bounds = [[1000., -2., -500.], [1010., 8., -480.]];
+        assert_eq!(
+            surface_bounds_distance(bounds, DVec3::new(1005., 0., -490.)),
+            0.
+        );
+        assert_eq!(
+            surface_bounds_distance(bounds, DVec3::new(1026., 0., -490.)),
+            16.
+        );
+        assert_eq!(
+            surface_bounds_distance(bounds, DVec3::new(1074., 0., -490.)),
+            64.
+        );
+        assert_eq!(
+            surface_bounds_distance(bounds, DVec3::new(1013., 12., -480.)),
+            5.
+        );
+    }
+
+    #[test]
+    fn near_detail_delivery_revalidates_the_stricter_quality_threshold() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut tile = crate::adaptive_geometry::build(
+            &world,
+            TileKey {
+                min: [-8, -8],
+                width_cells: 16,
+                step_cells: 4,
+                edge_steps: [4; 4],
+                source_revision: 0,
+            },
+            || false,
+        )
+        .unwrap();
+        // Synthetic projection metadata isolates delivery policy from source
+        // quality. The geometry is never published or treated as a certificate.
+        tile.key.min = [-128, -128];
+        tile.key.width_cells = 256;
+        tile.bounds = [[-8., 0., -8.], [8., 0., 8.]];
+        tile.conservative_surface_bounds = tile.bounds;
+        tile.best_certified_vertical_error_m = Some(0.01);
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0., 1., 0.);
+        camera.pitch = -std::f32::consts::FRAC_PI_2;
+        camera.far = 1.;
+        let p = camera_projection(&camera, 160, 90).unwrap();
+        let raw = vertical_pixel_bound(0.01, tile.bounds, tile_origin(&tile), &camera, p);
+        assert!(raw.is_finite() && raw > 0.);
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        let mut frame = stream.plan(&camera, 160, 90);
+        frame.tiles = vec![Arc::new(tile)];
+        let policy = |near_detail| DeliveryPolicy {
+            volume_owner: false,
+            pixel_error: raw * 2.,
+            near_detail,
+        };
+        assert!(policy(false).revalidate(&mut frame, &camera, 160, 90));
+        assert!(frame.quality_ready);
+        assert_eq!(frame.max_visible_error_px, Some(raw));
+        assert!(policy(true).revalidate(&mut frame, &camera, 160, 90));
+        assert!(!frame.quality_ready);
+        assert_eq!(frame.visible_unresolved_count, 1);
+        assert_eq!(frame.max_visible_error_px, Some(raw * 3.));
+    }
+
     #[test]
     fn obsolete_priority_requires_all_parents_outside_both_views_and_current_failure() {
         let world = World::fbm(
@@ -2125,7 +2290,7 @@ mod tests {
                         current: &[Arc<GeometryTile>],
                         pose: &Camera,
                         forecast: Option<&Camera>| {
-            obsolete_refinement_demand(parents, current, pose, forecast, 320, 180, 5.0)
+            obsolete_refinement_demand(parents, current, pose, forecast, 320, 180, 5.0, false)
         };
         assert!(obsolete(&[front.clone()], &committed, &reverse, None));
         assert!(
@@ -2974,6 +3139,7 @@ mod tests {
 struct DeliveryPolicy {
     volume_owner: bool,
     pixel_error: f64,
+    near_detail: bool,
 }
 impl DeliveryPolicy {
     /// Metadata only: no world/source-column generation on the render thread.
@@ -3012,6 +3178,12 @@ impl DeliveryPolicy {
             let error = error_m
                 .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
                 .unwrap_or(f64::INFINITY);
+            let error = weighted_near_detail_error(
+                error,
+                tile.conservative_surface_bounds,
+                camera.position,
+                self.near_detail,
+            );
             if error.is_finite() {
                 maximum = maximum.max(error)
             } else {
@@ -3152,6 +3324,7 @@ impl Worker {
         let delivery = DeliveryPolicy {
             volume_owner: world.topology_base_cells().is_some(),
             pixel_error: settings.pixel_error,
+            near_detail: near_detail_setting(&world),
         };
         let mut stream = AdaptiveStream::new(world, settings)?;
         if let Some(disk) = disk {
@@ -3254,6 +3427,7 @@ impl Worker {
                     Vec::new()
                 };
                 let pixel_error = stream.settings.pixel_error;
+                let near_detail = near_detail_setting(&stream.world);
                 let checked_epoch = std::sync::atomic::AtomicU64::new(epoch);
                 let obsolete = std::sync::atomic::AtomicBool::new(false);
                 let cancel = || {
@@ -3284,6 +3458,7 @@ impl Worker {
                                         *width,
                                         *height,
                                         pixel_error,
+                                        near_detail,
                                     ))
                             {
                                 obsolete.store(true, Ordering::Relaxed);

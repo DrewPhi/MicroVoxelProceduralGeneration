@@ -23,6 +23,9 @@ low sun, light atmospheric haze and stationary placeholder clouds. These are
 artistic settings, not a new performance guarantee. The camera is still the
 existing free-fly camera. Esc opens settings.
 
+See [the reference-driven LOD tuning results](ALPINE_LOD_TUNING.md) for the
+Alpine-only spatial material filtering and stronger nearby detail selection.
+
 ## Lighting and limits
 
 Directional terrain shadows use a 2048-square depth map covering a 2 km light-space

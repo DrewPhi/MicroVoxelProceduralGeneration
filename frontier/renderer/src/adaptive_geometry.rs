@@ -920,7 +920,10 @@ fn build_surface(
         tile.appearance = appearance;
         return Ok(tile);
     }
-    let defer_profiles = samples.gpu_profiles.enabled && samples.gpu_job_allowed;
+    let defer_profiles = samples.gpu_profiles.enabled
+        && samples.gpu_job_allowed
+        && appearance_mode(world).probe_cells == 1
+        && !appearance_mode(world).spatial_profiles;
     if defer_profiles {
         samples.gpu_profiles.eligible_tiles += 1;
     }
@@ -948,6 +951,7 @@ fn build_surface(
         affine_complete: true,
         affine_stats: AffineStats::default(),
         face_profiles: vec![[[0.; 4]; 5]],
+        spatial_nodes: HashMap::new(),
         face_profile_indices: vec![],
         appearance: FaceAppearance {
             available: true,
@@ -1436,6 +1440,76 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
     })
 }
 
+/// Source-derived display settings. Only Alpine opts into spatial filtering by
+/// default; explicit process overrides retain the comparison/experiment modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AppearanceMode {
+    pub(crate) probe_cells: i64,
+    pub(crate) spatial_profiles: bool,
+    pub(crate) half_footprint: bool,
+}
+impl AppearanceMode {
+    fn defaults(world: &World) -> Self {
+        let alpine = world
+            .fbm_terrain()
+            .is_some_and(|terrain| terrain.params().recipe == frontier_world::FbmRecipe::Alpine);
+        Self {
+            probe_cells: if alpine { 4 } else { 1 },
+            spatial_profiles: alpine,
+            half_footprint: alpine,
+        }
+    }
+}
+#[derive(Clone, Copy, Default)]
+struct AppearanceOverrides {
+    probe_cells: Option<i64>,
+    spatial_profiles: Option<bool>,
+    half_footprint: Option<bool>,
+}
+impl AppearanceOverrides {
+    fn apply(self, mut mode: AppearanceMode) -> AppearanceMode {
+        mode.probe_cells = self.probe_cells.unwrap_or(mode.probe_cells);
+        mode.spatial_profiles = self.spatial_profiles.unwrap_or(mode.spatial_profiles);
+        mode.half_footprint = self.half_footprint.unwrap_or(mode.half_footprint);
+        mode
+    }
+}
+pub(crate) fn appearance_mode(world: &World) -> AppearanceMode {
+    static OVERRIDES: std::sync::OnceLock<AppearanceOverrides> = std::sync::OnceLock::new();
+    let overrides = *OVERRIDES.get_or_init(|| AppearanceOverrides {
+        probe_cells: match std::env::var("FRONTIER_PROFILE_PROBE_CELLS").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            Ok("4") => Some(4),
+            Ok("8") => Some(8),
+            _ => None,
+        },
+        spatial_profiles: match std::env::var("FRONTIER_SPATIAL_PROFILES").as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            _ => None,
+        },
+        half_footprint: match std::env::var("FRONTIER_SPATIAL_FOOTPRINT").as_deref() {
+            Ok("half") => Some(true),
+            Ok("full") => Some(false),
+            _ => None,
+        },
+    });
+    overrides.apply(AppearanceMode::defaults(world))
+}
+
+/// Approximate exposed area per native column, measured in native face units.
+/// This suppresses quantization phase variance but is not an exact source-face
+/// integral: material strata are applied to the estimated one-cell drop.
+fn profile_probe_bands(height: i64, neighbor: i64, probe: i64) -> [f32; 3] {
+    let drop = ((height - neighbor) as f32 / probe as f32).max(0.);
+    [
+        drop.min(1.),
+        (drop - 1.).clamp(0., 11.),
+        (drop - 12.).max(0.),
+    ]
+}
+
 /// Exact immutable source payload shared with native extraction.
 type NativeColumn = column_mesh::SampledColumn;
 const SOURCE_SHARDS: usize = 32;
@@ -1911,6 +1985,7 @@ struct Generator<'a> {
     affine_complete: bool,
     affine_stats: AffineStats,
     face_profiles: Vec<[[f32; 4]; 5]>,
+    spatial_nodes: HashMap<(i64, i64, i64), u32>,
     face_profile_indices: Vec<u32>,
     appearance: FaceAppearance,
 }
@@ -2054,19 +2129,88 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        let profile = if self.defer_profiles {
-            [[0.; 4]; 5]
+        let index = if appearance_mode(self.world).spatial_profiles
+            && self.key.width_cells > MAX_NATIVE_WIDTH
+            && s >= 16
+        {
+            self.spatial_profile(x, z, s)?
         } else {
-            self.patch_profile(x, z, s)?
+            let profile = if self.defer_profiles {
+                [[0.; 4]; 5]
+            } else {
+                self.patch_profile(x, z, s)?
+            };
+            let index = self.face_profiles.len() as u32;
+            self.face_profiles.push(profile);
+            index
         };
         self.samples.source_stage = SourceStage::Proxy;
         self.samples.stages.appearance_ms += started.elapsed().as_secs_f64() * 1000.;
-        let index = self.face_profiles.len() as u32;
-        self.face_profiles.push(profile);
         self.face_profile_indices
             .resize(self.mesh.vertices.len(), index);
         self.face_profile_indices[start_vertex..].fill(index);
         Ok(())
+    }
+    /// Shared corner integrals and a half-footprint halo; geometry is unchanged.
+    /// Equal-resolution neighbours share boundary data. Cross-level appearance
+    /// remains approximate and must be evaluated in the image, not certified.
+    fn spatial_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
+        let mut nodes = [0; 4];
+        let mut mean = [[0.; 4]; 5];
+        for (i, (nx, nz)) in [(x, z), (x + s, z), (x, z + s), (x + s, z + s)]
+            .into_iter()
+            .enumerate()
+        {
+            let id = if let Some(&id) = self.spatial_nodes.get(&(nx, nz, s)) {
+                id
+            } else {
+                let footprint = if appearance_mode(self.world).half_footprint {
+                    s / 2
+                } else {
+                    s
+                };
+                let min = [nx - footprint / 2, nz - footprint / 2];
+                let key = ProfileKey {
+                    min: [self.key.min[0] + min[0], self.key.min[1] + min[1]],
+                    size: footprint,
+                    stride: (footprint / 4).max(1),
+                };
+                let mut value = self
+                    .compute_patch_profile(min[0], min[1], footprint, key.stride, key)?
+                    .value;
+                let area_scale = (s * s) as f32 / (footprint * footprint) as f32;
+                for field in value.iter_mut().flatten() {
+                    *field *= area_scale;
+                }
+                let id = self.face_profiles.len() as u32;
+                self.face_profiles.push(value);
+                self.spatial_nodes.insert((nx, nz, s), id);
+                id
+            };
+            nodes[i] = id;
+            for a in 0..5 {
+                for c in 0..4 {
+                    mean[a][c] += self.face_profiles[id as usize][a][c] * 0.25;
+                }
+            }
+        }
+        for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
+            self.appearance.area_m2[a] += mean[p][3] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+            for c in 0..3 {
+                self.appearance.color_area[a][c] += mean[p][c] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+            }
+        }
+        let id = self.face_profiles.len() as u32;
+        self.face_profiles.push(crate::spatial_appearance::header(
+            [
+                (x as f64 * VOXEL_SIZE) as f32,
+                (z as f64 * VOXEL_SIZE) as f32,
+            ],
+            (s as f64 * VOXEL_SIZE) as f32,
+            nodes,
+            id,
+        ));
+        Ok(id)
     }
     fn record_affine(&mut self, x: i64, z: i64, s: i64, start_index: usize) {
         // All native columns are already enumerated at <=8m, providing a
@@ -2140,6 +2284,12 @@ impl Generator<'_> {
         let cache_enabled = true;
         #[cfg(test)]
         let cache_enabled = self.experiment.is_none();
+        // Exact native-neighbor queries remain shareable with native extraction.
+        // Sampled microprobes must not publish under the probe-free ProfileKey.
+        let cache_enabled = cache_enabled
+            && (stride == 1
+                || self.key.width_cells <= MAX_NATIVE_WIDTH
+                || appearance_mode(self.world).probe_cells == 1);
         let cached = cache_enabled
             .then(|| self.samples.pages.profile(key))
             .flatten();
@@ -2205,6 +2355,11 @@ impl Generator<'_> {
             }
         };
         let weight = (stride * stride) as f32;
+        let probe = if self.key.width_cells > MAX_NATIVE_WIDTH && stride > 1 {
+            appearance_mode(self.world).probe_cells.min(stride)
+        } else {
+            1
+        };
         for zz in (z..z + s).step_by(stride as usize) {
             for xx in (x..x + s).step_by(stride as usize) {
                 #[cfg(test)]
@@ -2245,8 +2400,32 @@ impl Generator<'_> {
                 };
                 add(&mut profile, 0, 1, top_material);
                 for (axis, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
-                    let mut lo = self.height(xx + dx, zz + dz)?;
-                    note([self.key.min[0] + xx + dx, self.key.min[1] + zz + dz], lo);
+                    let mut lo = self.height(xx + dx * probe, zz + dz * probe)?;
+                    note(
+                        [
+                            self.key.min[0] + xx + dx * probe,
+                            self.key.min[1] + zz + dz * probe,
+                        ],
+                        lo,
+                    );
+                    if probe > 1 {
+                        // Approximate native side density with a finite microprobe.
+                        // Divide the height difference BEFORE applying native depth
+                        // bands; the raw probe span is not an exposed native wall.
+                        let bands = profile_probe_bands(h, lo, probe);
+                        let column = self.heights[&[xx, zz]];
+                        for (area, depth) in bands.into_iter().zip([1, 2, 13]) {
+                            if area > 0. {
+                                let material = column.material(h - depth);
+                                let a = area * weight;
+                                for (channel, c) in material.color().into_iter().enumerate() {
+                                    profile[axis][channel] += c * a;
+                                }
+                                profile[axis][3] += a;
+                            }
+                        }
+                        continue;
+                    }
                     for hi in [h - 12, h - 1, h] {
                         if hi > lo {
                             let material = match center {
@@ -2980,6 +3159,167 @@ impl GeometryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpine_appearance_defaults_are_scoped_and_explicit_overrides_remain_available() {
+        use frontier_world::FbmRecipe;
+        for recipe in [
+            FbmRecipe::Legacy,
+            FbmRecipe::Regional,
+            FbmRecipe::RegionalUnwarped,
+            FbmRecipe::Alpine,
+        ] {
+            let world = World::fbm(
+                7,
+                frontier_world::FbmParams {
+                    recipe,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let defaults = AppearanceMode::defaults(&world);
+            let alpine = recipe == FbmRecipe::Alpine;
+            assert_eq!(
+                defaults,
+                AppearanceMode {
+                    probe_cells: if alpine { 4 } else { 1 },
+                    spatial_profiles: alpine,
+                    half_footprint: alpine,
+                }
+            );
+            let baseline = AppearanceOverrides {
+                probe_cells: Some(1),
+                spatial_profiles: Some(false),
+                half_footprint: Some(false),
+            }
+            .apply(defaults);
+            assert_eq!(
+                baseline,
+                AppearanceMode {
+                    probe_cells: 1,
+                    spatial_profiles: false,
+                    half_footprint: false,
+                }
+            );
+            assert_eq!(AppearanceOverrides::default().apply(defaults), defaults);
+        }
+    }
+
+    #[test]
+    fn spatial_profiles_share_equal_resolution_corner_integrals_across_patches_and_tiles() {
+        fn generator<'a>(
+            world: &'a World,
+            samples: &'a mut SourceSamples,
+            min: [i64; 2],
+        ) -> Generator<'a> {
+            Generator {
+                defer_profiles: false,
+                experiment: None,
+                world,
+                samples,
+                key: TileKey {
+                    min,
+                    width_cells: 256,
+                    step_cells: 16,
+                    edge_steps: [16; 4],
+                    source_revision: 0,
+                },
+                heights: LocalColumns::new(256),
+                mesh: Mesh {
+                    vertices: vec![],
+                    indices: vec![],
+                    origin: Cell::default(),
+                    exposed_native_faces: 0,
+                },
+                empirical_error_m: 0.,
+                affine_error: 0.,
+                affine_range: [f64::INFINITY, f64::NEG_INFINITY],
+                affine_complete: true,
+                affine_stats: AffineStats::default(),
+                face_profiles: vec![[[0.; 4]; 5]],
+                spatial_nodes: HashMap::new(),
+                face_profile_indices: vec![],
+                appearance: FaceAppearance::default(),
+            }
+        }
+        fn nodes(g: &Generator<'_>, header: u32) -> [usize; 4] {
+            assert!(crate::spatial_appearance::is_header(
+                &g.face_profiles[header as usize]
+            ));
+            g.face_profiles[header as usize][1]
+                .map(|offset| (header as i64 + offset as i64) as usize)
+        }
+
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let mut samples = SourceSamples::new(0);
+        let mut g = generator(&world, &mut samples, [-256, -512]);
+        let left = g.spatial_profile(0, 0, 16).unwrap();
+        let right = g.spatial_profile(16, 0, 16).unwrap();
+        let back = g.spatial_profile(0, 16, 16).unwrap();
+        let l = nodes(&g, left);
+        let r = nodes(&g, right);
+        let b = nodes(&g, back);
+        assert_eq!([l[1], l[3]], [r[0], r[2]]);
+        assert_eq!([l[2], l[3]], [b[0], b[1]]);
+        assert!(g.face_profiles[l[1]][0][3] > 0.);
+        assert!(crate::spatial_appearance::valid_table(&g.face_profiles));
+
+        // A separate tile computes the same global halo without sharing IDs or
+        // source-cache entries. Its boundary integrals must still match exactly.
+        let mut other_samples = SourceSamples::new(0);
+        let mut other = generator(&world, &mut other_samples, [-240, -512]);
+        let other_header = other.spatial_profile(0, 0, 16).unwrap();
+        let o = nodes(&other, other_header);
+        for (a, b) in [(l[1], o[0]), (l[3], o[2]), (r[1], o[1]), (r[3], o[3])] {
+            assert_eq!(g.face_profiles[a], other.face_profiles[b]);
+        }
+        assert!(crate::spatial_appearance::valid_table(&other.face_profiles));
+        // This test establishes equal-resolution sharing only. Unequal-LOD
+        // footprints use different integrals and remain an uncertified visual
+        // approximation, including their material coverage and narrow features.
+    }
+
+    #[test]
+    fn microprobe_planar_quantization_phases_preserve_fractional_side_density() {
+        // Eight phases of a quantized plane. Probes are bounded to the same
+        // 2/4/8 cells used by the runtime; no continuous height is queried.
+        for numerator in [1_i64, 3, 12, 106] {
+            let expected_drop = numerator as f32 / 8.;
+            let expected = [
+                expected_drop.min(1.),
+                (expected_drop - 1.).clamp(0., 11.),
+                (expected_drop - 12.).max(0.),
+            ];
+            for probe in [2_i64, 4, 8] {
+                let mut mean = [0.; 3];
+                for phase in 0..8 {
+                    let h = (phase * numerator).div_euclid(8);
+                    let neighbor = ((phase - probe) * numerator).div_euclid(8);
+                    for (sum, area) in mean.iter_mut().zip(profile_probe_bands(h, neighbor, probe))
+                    {
+                        *sum += area / 8.;
+                    }
+                    assert_eq!(profile_probe_bands(neighbor, h, probe), [0.; 3]);
+                }
+                assert_eq!(mean, expected, "slope={numerator}/8, probe={probe}");
+            }
+        }
+    }
+
+    #[test]
+    fn microprobe_applies_native_strata_after_dividing_the_probe_span() {
+        // A raw 24-cell wall would contain stone. Its 8-cell finite difference
+        // estimates a 3-cell native drop: one top face and two soil faces.
+        assert_eq!(profile_probe_bands(100, 76, 8), [1., 2., 0.]);
+        assert_eq!(profile_probe_bands(100, 47, 4), [1., 11., 1.25]);
+        assert_eq!(profile_probe_bands(100, 99, 8), [0.125, 0., 0.]);
+        for drop in 0..32 {
+            let bands = profile_probe_bands(100, 100 - drop, 1);
+            assert_eq!(bands[0], drop.min(1) as f32);
+            assert_eq!(bands[1], (drop - 1).clamp(0, 11) as f32);
+            assert_eq!(bands[2], (drop - 12).max(0) as f32);
+        }
+    }
     use frontier_world::FbmParams;
     fn key(step: u32) -> TileKey {
         TileKey {
@@ -3895,6 +4235,7 @@ mod tests {
                         affine_complete: true,
                         affine_stats: AffineStats::default(),
                         face_profiles: vec![[[0.; 4]; 5]],
+                        spatial_nodes: HashMap::new(),
                         face_profile_indices: vec![],
                         appearance: FaceAppearance::default(),
                     };
@@ -4478,6 +4819,7 @@ mod tests {
             FbmRecipe::Legacy,
             FbmRecipe::Regional,
             FbmRecipe::RegionalUnwarped,
+            FbmRecipe::Alpine,
         ] {
             for seed in [7, 11] {
                 let world = World::fbm(
@@ -5215,6 +5557,7 @@ mod tests {
                 affine_complete: true,
                 affine_stats: AffineStats::default(),
                 face_profiles: vec![[[0.; 4]; 5]],
+                spatial_nodes: HashMap::new(),
                 face_profile_indices: vec![],
                 appearance: FaceAppearance::default(),
             };
@@ -5478,6 +5821,7 @@ mod tests {
             affine_complete: true,
             affine_stats: AffineStats::default(),
             face_profiles: vec![[[0.; 4]; 5]],
+            spatial_nodes: HashMap::new(),
             face_profile_indices: vec![],
             appearance: FaceAppearance {
                 available: true,

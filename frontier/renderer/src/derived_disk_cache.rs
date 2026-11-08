@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 4;
+const REPRESENTATION_VERSION: u64 = 5;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -54,11 +54,23 @@ impl DiskCacheKeyer {
         crate::adaptive_geometry::disk_cache_key_supported(&self.world, key)
     }
     fn dependencies(&self, key: TileKey) -> Vec<u8> {
-        // All geometry/appearance/bounds samplers consume interior columns plus
-        // a one-native-column neighbor halo. Include every y in those columns.
+        // Include every y in source columns used by geometry and appearance.
+        // Spatial corner integrals reach outside the tile by half their sample
+        // footprint, and the finite microprobe adds its own neighbor halo.
         // i128 prevents overflow before unsupported coordinates are rejected.
-        let min = key.min.map(|v| v as i128 - 1);
-        let max = key.min.map(|v| v as i128 + key.width_cells as i128);
+        let mode = crate::adaptive_geometry::appearance_mode(&self.world);
+        let mut halo = 1_i128;
+        if key.width_cells > 128 {
+            halo = mode.probe_cells as i128;
+            if mode.spatial_profiles && key.step_cells >= 16 {
+                let footprint = key.step_cells as i128 / if mode.half_footprint { 2 } else { 1 };
+                halo += footprint / 2;
+            }
+        }
+        let min = key.min.map(|v| v as i128 - halo);
+        let max = key
+            .min
+            .map(|v| v as i128 + key.width_cells as i128 + halo - 1);
         let mut b = Vec::new();
         put(&mut b, 0);
         let mut count = 0;
@@ -373,11 +385,18 @@ impl DiskCache {
     }
 }
 fn source_identity(w: &World) -> io::Result<Vec<u8>> {
+    source_identity_with_mode(w, crate::adaptive_geometry::appearance_mode(w))
+}
+fn source_identity_with_mode(
+    w: &World,
+    mode: crate::adaptive_geometry::AppearanceMode,
+) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());
     put(&mut b, VOXEL_SIZE.to_bits());
+    append_appearance_identity(&mut b, mode);
     match w.topology_base_cells() {
         Some(v) => {
             put(&mut b, 1);
@@ -402,6 +421,11 @@ fn source_identity(w: &World) -> io::Result<Vec<u8>> {
         put(&mut b, 0);
     }
     Ok(b)
+}
+fn append_appearance_identity(b: &mut Vec<u8>, mode: crate::adaptive_geometry::AppearanceMode) {
+    put(b, mode.probe_cells as u64);
+    put(b, mode.spatial_profiles as u64);
+    put(b, mode.half_footprint as u64);
 }
 fn checksum(b: &[u8]) -> u64 {
     checksum_from(0xcbf29ce484222325, b)
@@ -753,6 +777,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
 fn validate(t: &GeometryTile) -> bool {
     let bbox = |b: [[f64; 3]; 2]| (0..3).all(|a| b[0][a] <= b[1][a]);
     bbox(t.bounds)
+        && crate::spatial_appearance::valid_table(&t.face_profiles)
         && (t.proxy_triangles.is_empty()
             || (!t.exact
                 && t.native_quads.is_empty()
@@ -885,6 +910,90 @@ mod tests {
         encode(t, &mut b);
         b
     }
+    #[test]
+    fn appearance_modes_have_distinct_cache_identities() {
+        use crate::adaptive_geometry::AppearanceMode;
+        let w = world();
+        let baseline = AppearanceMode {
+            probe_cells: 1,
+            spatial_profiles: false,
+            half_footprint: false,
+        };
+        let modes = [
+            baseline,
+            AppearanceMode {
+                probe_cells: 4,
+                ..baseline
+            },
+            AppearanceMode {
+                spatial_profiles: true,
+                ..baseline
+            },
+            AppearanceMode {
+                half_footprint: true,
+                ..baseline
+            },
+            AppearanceMode {
+                probe_cells: 4,
+                spatial_profiles: true,
+                half_footprint: true,
+            },
+        ];
+        let identities: HashSet<_> = modes
+            .into_iter()
+            .map(|mode| source_identity_with_mode(&w, mode).unwrap())
+            .collect();
+        assert_eq!(identities.len(), modes.len());
+        assert_eq!(
+            source_identity(&w).unwrap(),
+            source_identity_with_mode(&w, crate::adaptive_geometry::appearance_mode(&w),).unwrap()
+        );
+    }
+
+    #[test]
+    fn alpine_spatial_headers_and_relative_references_survive_disk_restart() {
+        let w = World::fbm(
+            7,
+            FbmParams {
+                recipe: FbmRecipe::Alpine,
+                amplitude: 16.,
+                octaves: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let k = TileKey {
+            min: [-256, -512],
+            width_cells: 256,
+            step_cells: 32,
+            edge_steps: [32; 4],
+            source_revision: 0,
+        };
+        let mut t = build(&w, k, || false).unwrap();
+        let headers = t
+            .face_profiles
+            .iter()
+            .filter(|p| crate::spatial_appearance::is_header(p))
+            .count();
+        // Explicit comparison overrides may intentionally disable spatial mode.
+        if crate::adaptive_geometry::appearance_mode(&w).spatial_profiles {
+            assert_eq!(headers, 64);
+        }
+        assert!(crate::spatial_appearance::valid_table(&t.face_profiles));
+        crate::adaptive_geometry::pack_proxy_triangles(&mut t).unwrap();
+        let dir = Temp::new();
+        let mut cold = cache(&dir, &w);
+        assert!(cold.store(&t));
+        drop(cold);
+        let mut warm = cache(&dir, &w);
+        let restored = warm.load(k).unwrap();
+        assert_eq!(bytes(&restored), bytes(&t));
+        assert!(crate::spatial_appearance::valid_table(
+            &restored.face_profiles
+        ));
+        assert_eq!(warm.stats().hits, 1);
+    }
+
     #[test]
     fn keyer_names_preserve_format_and_report_index_deltas() {
         let w = world();
