@@ -76,6 +76,8 @@ pub struct VegetationStats {
     pub gpu_budget_bytes: usize,
     pub shadow_only_instances: usize,
     pub shadow_only_triangles: usize,
+    /// Resident ground detail kept while unrelated coverage is being prepared.
+    pub retained_ground_detail: usize,
 }
 #[derive(Clone)]
 pub struct VegetationFrame {
@@ -903,6 +905,13 @@ impl VegetationStream {
             };
             // If fine geometry costs too much, automatically request the next
             // coarser stride. Native desired LOD still drives the quality target.
+            let ground_target = key.lod.max(if distance <= 8. {
+                1
+            } else if distance <= 16. {
+                2
+            } else {
+                4
+            });
             let mut request_key = key;
             if s == 2 && !self.config.reference {
                 if !tree_coverage_ready {
@@ -922,17 +931,10 @@ impl VegetationStream {
             if s != 2 && !self.config.reference {
                 request_key = coarse_key;
                 if ground_coverage_ready {
-                    let preferred = key.lod.max(if distance <= 8. {
-                        1
-                    } else if distance <= 16. {
-                        2
-                    } else {
-                        4
-                    });
                     // Refine one automatically derived level at a time, and only
                     // if its measured/estimated cost leaves every later tile's
                     // actual baseline intact. Rejected native work is not queued.
-                    while request_key.lod > preferred {
+                    while request_key.lod > ground_target {
                         let next = MeshKey {
                             lod: request_key.lod / 2,
                             ..key
@@ -1008,7 +1010,10 @@ impl VegetationStream {
                             && k.seed == key.seed
                             && k.tile == key.tile
                             && k.edit_id == key.edit_id
-                            && k.lod >= request_key.lod
+                            // Generation priority is not display quality. A new
+                            // neighbor may need a coarse baseline, but that must
+                            // not hide affordable resident detail on this tile.
+                            && k.lod >= ground_target
                             && m.indices.len() / 3 <= ground_headroom
                     })
                     .min_by_key(|(k, _)| k.lod)
@@ -1027,6 +1032,9 @@ impl VegetationStream {
                     continue;
                 }
                 *used = self.tick;
+                if s != 2 && render_key.lod < request_key.lod {
+                    stats.retained_ground_detail += 1;
+                }
                 if s == 2 && render_key.lod > key.lod {
                     stats.coverage_fallbacks += 1;
                 }
@@ -1129,11 +1137,23 @@ impl VegetationStream {
             }
         }
         evict(&mut self.tiles, self.config.max_tiles, |v| v.1);
-        evict(&mut self.meshes, self.config.max_meshes, |v| v.1);
         evict(&mut self.mesh_costs, 2048, |v| v.1);
+        // Equal-age baseline/selected meshes used to evict in key order, which
+        // can evict a just-selected fine mesh before an unused cached variant.
+        // Prefer unused geometry; hard limits still win if all entries are live.
+        let selected: BTreeSet<_> = batches
+            .keys()
+            .chain(shadow_batches.iter().map(|b| &b.key))
+            .copied()
+            .collect();
         let mut bytes: usize = self.meshes.values().map(|(m, _)| mesh_bytes(m)).sum();
-        while bytes > stats.mesh_budget_bytes {
-            let Some(key) = self.meshes.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) else {
+        while bytes > stats.mesh_budget_bytes || self.meshes.len() > self.config.max_meshes {
+            let Some(key) = self
+                .meshes
+                .iter()
+                .min_by_key(|(k, v)| (selected.contains(k), v.1))
+                .map(|(k, _)| *k)
+            else {
                 break;
             };
             bytes -= mesh_bytes(&self.meshes.remove(&key).unwrap().0);
@@ -1147,6 +1167,17 @@ impl VegetationStream {
             shadow_batches,
             stats,
         };
+        if vegetation_trace() {
+            let mut ground_lods = [0usize; 4];
+            for batch in &frame.batches {
+                if batch.key.species != 2 {
+                    ground_lods[batch.key.lod.ilog2() as usize] += 1;
+                }
+            }
+            eprintln!("vegetation_selection tick={} camera={camera:?} ground_ready={} ground_lods={ground_lods:?} retained={} pending={} triangles={} cache_bytes={}",
+                self.tick, ground_coverage_ready, stats.retained_ground_detail,
+                stats.pending_jobs, stats.triangles, bytes);
+        }
         if frame.stats.pending_jobs == 0
             && self.pending_tiles.is_empty()
             && self.pending_meshes.is_empty()
@@ -1160,6 +1191,10 @@ impl VegetationStream {
         }
         frame
     }
+}
+fn vegetation_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var("FRONTIER_VEGETATION_TRACE").as_deref() == Ok("1"))
 }
 impl Drop for VegetationStream {
     fn drop(&mut self) {
@@ -1911,6 +1946,104 @@ mod tests {
         );
         stream.update(moved, 900, 1., 0);
         assert_eq!(stream.regroup_builds, builds + 4);
+    }
+    #[test]
+    fn missing_neighbor_coverage_does_not_demote_resident_ground_detail() {
+        // Exercise the real selector with cheap, deterministic cached geometry.
+        // A new tile's missing baseline must not reset every existing tile to 8.
+        let world = World::new(7);
+        let mut stream = VegetationStream::new(
+            world.clone(),
+            VegetationConfig {
+                grass_radius_m: 20.,
+                flower_radius_m: 0.,
+                tree_radius_m: 0.,
+                ..Default::default()
+            },
+        );
+        let tile = Tile {
+            species: 0,
+            x: 0,
+            z: 0,
+        };
+        let plant = PlantRecord {
+            species: Species::Grass,
+            variant: 0,
+            seed: 123,
+            root: Cell { x: 64, y: 0, z: 64 },
+            rotation: 0,
+        };
+        stream.tiles.insert(tile, (vec![plant], 0));
+        let batch = PlantRecord {
+            variant: u8::MAX,
+            seed: mix(world.seed() ^ mix(0) ^ 0u64.rotate_left(31)),
+            root: Cell { x: 0, y: 0, z: 0 },
+            ..plant
+        };
+        let mesh = Arc::new(mesh_ground_cells(
+            [(plant.root, Material::Grass as u8, [0.2, 0.5, 0.1])].into_iter(),
+            1,
+            || false,
+        ));
+        for lod in [1, 2, 4, 8] {
+            let key = ground_key(&batch, lod, 0);
+            stream.mesh_costs.insert(key, (mesh.indices.len() / 3, 0));
+            stream.meshes.insert(key, (mesh.clone(), 0));
+        }
+        let camera = [4., 1.7, 4.];
+        let before = stream.update(camera, 720, 1., world.revision());
+        assert_eq!(
+            before
+                .batches
+                .iter()
+                .find(|b| b.key.tile == [0, 0])
+                .unwrap()
+                .key
+                .lod,
+            1
+        );
+        // Reveal another batch while its coarse mesh is still being generated.
+        stream.tiles.get_mut(&tile).unwrap().0.push(PlantRecord {
+            root: Cell {
+                x: 192,
+                y: 0,
+                z: 64,
+            },
+            seed: 456,
+            ..plant
+        });
+        stream.stable_frame = None;
+        let during = stream.update(camera, 720, 1., world.revision());
+        assert_eq!(
+            during
+                .batches
+                .iter()
+                .find(|b| b.key.tile == [0, 0])
+                .unwrap()
+                .key
+                .lod,
+            1,
+            "unrelated missing coverage must not flash an already resident tile coarse"
+        );
+        assert!(during.stats.retained_ground_detail > 0);
+        let farther = stream.update([21., 1.7, 4.], 720, 1., world.revision());
+        assert_eq!(
+            farther
+                .batches
+                .iter()
+                .find(|b| b.key.tile == [0, 0])
+                .unwrap()
+                .key
+                .lod,
+            4,
+            "retention must still respect distance-based quality"
+        );
+        stream.config.max_triangles = mesh.indices.len() / 3 - 1;
+        let constrained = stream.update(camera, 720, 1., world.revision());
+        assert!(
+            constrained.stats.triangles <= stream.config.max_triangles,
+            "retention must not bypass the hard geometry budget"
+        );
     }
     #[test]
     fn static_frame_key_uses_exact_pose_projection_and_config_bits() {

@@ -1,0 +1,46 @@
+{
+  "isolated_change_max": 2.59621594551282,
+  "isolated_change_frames": [
+    [
+      196,
+      2.59621594551282
+    ],
+    [
+      199,
+      2.576942107371795
+    ],
+    [
+      195,
+      2.5681590544871797
+    ],
+    [
+      191,
+      2.5297556089743587
+    ],
+    [
+      197,
+      2.5197465945512825
+    ],
+    [
+      198,
+      2.506040665064103
+    ]
+  ],
+  "trace_count": 650,
+  "retention_frames": 154,
+  "max_retained_batches": 69,
+  "scope": "20fps recording heuristic; includes movement and capture overhead; not proof of artifact-free rendering or controlled performance improvement",
+  "primary_equal": {
+    "png": true,
+    "linear_rgb.f32": true,
+    "depth.f32": true,
+    "coverage.f32": true
+  },
+  "workspace_tests_passed": 458,
+  "workspace_tests_ignored": 11,
+  "binary_sha256": "beb061546fe859fa7b1418a3f560a00081263d4747fd07c2b2f29db28bac5b7c",
+  "terrain_source_version": 4,
+  "vegetation_source_version": 3,
+  "native_voxel_m": 0.0625,
+  "change": "Separate ground generation request priority from display LOD selection; prefer evicting unused meshes before currently selected meshes; hard budgets retained."
+}

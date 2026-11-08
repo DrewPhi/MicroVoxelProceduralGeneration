@@ -256,3 +256,11 @@ comparison against the earlier featured pose.
 and the frozen primary PNG/linear color/depth/coverage buffers remain identical.
 Future visual acceptance needs movement, stop/resume and turn evidence alongside
 frame/loading traces; this short run does not certify motion smoothness.
+
+## Follow-up: transient coarse vegetation flashes
+
+The [movement investigation](MOVEMENT_DIAGNOSIS.md) reproduced and fixed the
+selector resetting loaded fine cover when an unrelated baseline was missing.
+It also records the measured cold-loading costs and unresolved camera/streaming
+questions. The normal launcher includes that fix; this does not claim cold
+readiness or all motion transitions are solved.
