@@ -1,0 +1,15 @@
+{
+  "scope": "User-requested removal of camera-local nearby-tree haze. Ordinary fog/clouds/plant shadows remain. Diagnostic-only air retained.",
+  "primary_equal": {
+    "png": true,
+    "linear_rgb.f32": true,
+    "depth.f32": true,
+    "coverage.f32": true
+  },
+  "atmosphere_tests_passed": 3,
+  "walk": "22-second normal-startup run; actual keyboard W/stop/W/A. 14-second video at20fps,1280x720. Screen recording adds overhead; not a controlled performance A/B.",
+  "observations": "Early coarse ground-cover clumps visibly refine over several seconds. No local tree haze in sampled walking frames. This is not certification of smooth walking or completed loading.",
+  "raw_video": "output/haze-removal/walking-no-tree-haze.mp4 (local ignored)",
+  "raw_report": "output/haze-removal/walking.json (local ignored)",
+  "binary_sha256": "d4d6059ff97a9e9a71231d94f1c0070ac47c51a58956396ab286bdb6c5e51f47"
+}

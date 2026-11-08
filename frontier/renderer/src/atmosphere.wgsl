@@ -137,7 +137,7 @@ fn fog_transmittance(distance: f32, direction_y: f32) -> f32 {
 // Bilateral reconstruction operates on scattering only; native scene colour
 // and depth never pass through a spatial blur. Reject across terrain/sky edges.
 fn meadow_scattering(uv:vec2<f32>,distance:f32)->vec3<f32> {
-    if atmosphere.beauty.z>2.5 {return vec3(0.);}
+    if atmosphere.beauty.y<.5 || atmosphere.beauty.z>2.5 {return vec3(0.);}
     let size=vec2<i32>(textureDimensions(meadow_air));
     let p=uv*vec2<f32>(size)-.5;let base=vec2<i32>(floor(p));let f=fract(p);
     var light=vec3(0.);var total=0.;

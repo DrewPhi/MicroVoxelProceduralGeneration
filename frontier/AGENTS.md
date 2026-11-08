@@ -45,6 +45,12 @@ reference is an artistic target, not proof of a real-time implementation's speed
 or correctness. For motion and LOD transitions use offline reference trajectories
 and temporal comparisons too; one still cannot certify invisible transitions.
 Keep existing correctness tests active while detailed transition polish is deferred.
+For vegetation/atmosphere visual acceptance, inspect actual grounded walking,
+stop/resume and heading changes, including ordinary startup before detail has
+settled. Preserve video or timestamped frames with loading counters and frame
+intervals. A static capture or settled straight-flight timing does not establish
+that walking looks smooth. Screen recording itself adds overhead: profile in a
+separate run.
 New Regional/atmospheric targets supplement rather than overwrite the approved
 Legacy comparison. #74 coordinates efficiency research; do not silently turn an
 unmatched lighting or terrain change into an apparent optimization win.

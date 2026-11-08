@@ -1,5 +1,12 @@
 # Cozy Meadow checkpoint — 2026-11-08
 
+**Motion-review correction:** nearby-tree scattering is now disabled in ordinary
+play after the user observed artificial moving haze. Its integration pass is
+skipped entirely; ordinary distance fog, sky/clouds and plant surface shadows
+remain. The images and timings below document the earlier haze-enabled
+checkpoint, not a claim that its motion was acceptable. The isolated air and
+visibility diagnostics remain opt-in for investigation.
+
 This checkpoint moves the Alpine scene toward the
 [AI meadow inspiration](reference/inspiration/cozy-meadow-ai-v1.png).
 The [image provenance and prompt](reference/inspiration/cozy-meadow-ai-v1.md)
@@ -227,3 +234,25 @@ The result is a stronger playable scene checkpoint, not parity with the concept
 art. Remaining visible gaps are richer indirect lighting, cleaner cloud forms,
 more detailed distant plant silhouettes and less coarse ground-cover fallback.
 The shaft model is deliberately bounded and approximate; this is not weather.
+
+## Tree-haze removal and actual walking check
+
+The nearby-tree scattering pass is no longer executed during normal play.
+Clouds, ordinary distance fog and plant surface shadows remain enabled.
+The isolated `air` and `visibility` diagnostic modes still explicitly execute
+the experimental medium; they are not play settings.
+
+A 22-second ordinary-startup X11 check used actual grounded W / stop / W / A
+input, without a settled-quality wait or persistent terrain cache. A 14-second
+20 FPS recording captured only the game window. Sampled frames show early coarse
+grass clumps replacing with fine cover over several seconds, even when the FPS
+overlay is close to 60. This confirms that settled stills miss visible loading.
+Recording overhead and different camera/loaded content prevent a performance
+comparison against the earlier featured pose.
+
+[Walking frame without tree haze](reference/gallery/cozy/no-haze-walking.png),
+[validation summary](reference/gallery/cozy/haze-removal.json). Local raw video:
+`output/haze-removal/walking-no-tree-haze.mp4`. The three atmosphere tests pass,
+and the frozen primary PNG/linear color/depth/coverage buffers remain identical.
+Future visual acceptance needs movement, stop/resume and turn evidence alongside
+frame/loading traces; this short run does not certify motion smoothness.

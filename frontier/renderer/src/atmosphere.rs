@@ -638,7 +638,13 @@ impl Atmosphere {
             ],
             beauty: [
                 if settings.beauty { 1.0 } else { 0.0 },
-                if settings.terrain_shadows { 1.0 } else { 0.0 },
+                // The nearby-tree medium is diagnostic-only: its camera-local
+                // density and finite shadow coverage look unstable in motion.
+                if settings.terrain_shadows && matches!(atmosphere_debug(), 1 | 2) {
+                    1.0
+                } else {
+                    0.0
+                },
                 atmosphere_debug() as f32,
                 0.0,
             ],
@@ -674,24 +680,28 @@ impl Atmosphere {
                 pass.set_bind_group(0, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
             }
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("half resolution shadowed meadow air"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.air,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.air_pipeline);
-            pass.set_bind_group(0, &self.air_bind, &[]);
-            pass.set_bind_group(1, near_shadow.unwrap_or(&self.fallback_shadow), &[]);
-            pass.draw(0..3, 0..1);
+            // Keep the experimental medium available for explicit diagnostics,
+            // but do not integrate it during ordinary play.
+            if matches!(atmosphere_debug(), 1 | 2) {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("half resolution shadowed meadow air"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.air,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.air_pipeline);
+                pass.set_bind_group(0, &self.air_bind, &[]);
+                pass.set_bind_group(1, near_shadow.unwrap_or(&self.fallback_shadow), &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         for (view, pipeline, group, label) in [
             (
