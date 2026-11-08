@@ -16,6 +16,7 @@ pub struct WalkingCamera {
     jump_was_held: bool,
     last_eye: Option<[f64; 3]>,
     samples: HashMap<Cell, bool>,
+    presented_eye: Option<[f64; 3]>,
 }
 impl WalkingCamera {
     pub fn reset(&mut self) {
@@ -24,6 +25,47 @@ impl WalkingCamera {
         self.jump_was_held = false;
         self.last_eye = None;
         self.samples.clear();
+        self.presented_eye = None;
+    }
+    /// Render-only upward step easing. Collision and gravity continue from
+    /// last_eye, never from the eased presentation. External camera changes
+    /// (teleports/flight/routes) invalidate the presentation history.
+    pub fn advance_presented(
+        &mut self,
+        world: &World,
+        eye: [f64; 3],
+        velocity: [f64; 2],
+        jump: bool,
+        dt: f64,
+        smooth: bool,
+    ) -> [f64; 3] {
+        self.advance_presented_sampled(eye, velocity, jump, dt, smooth, |c| {
+            world.blocking_material(c)
+        })
+    }
+    fn advance_presented_sampled(
+        &mut self,
+        eye: [f64; 3],
+        velocity: [f64; 2],
+        jump: bool,
+        dt: f64,
+        smooth: bool,
+        material: impl FnMut(Cell) -> Material,
+    ) -> [f64; 3] {
+        let continuous = self.presented_eye == Some(eye);
+        let physical = if continuous {
+            self.last_eye.unwrap_or(eye)
+        } else {
+            eye
+        };
+        let previous = self.presented_eye.filter(|_| continuous);
+        let actual = self.advance_sampled(physical, velocity, jump, dt, material);
+        let shown = ease_step(previous, actual, dt, smooth && self.grounded && !jump);
+        self.presented_eye = Some(shown);
+        shown
+    }
+    pub fn physical_eye(&self) -> Option<[f64; 3]> {
+        self.last_eye
     }
     pub fn advance(
         &mut self,
@@ -141,6 +183,22 @@ impl WalkingCamera {
     }
 }
 
+fn ease_step(previous: Option<[f64; 3]>, actual: [f64; 3], dt: f64, enabled: bool) -> [f64; 3] {
+    let mut shown = actual;
+    if let Some(old) = previous.filter(|p| {
+        enabled && dt.is_finite() && dt > 0. && (p[1] - actual[1]).abs() <= 3. * VOXEL_SIZE + EPS
+    }) {
+        // Only ascending steps need easing: the view never lags above a fall.
+        if actual[1] > old[1] {
+            shown[1] = actual[1] + (old[1] - actual[1]) * (-dt / 0.055).exp();
+            if actual[1] - shown[1] < 0.0005 {
+                shown[1] = actual[1];
+            }
+        }
+    }
+    shown
+}
+
 fn bounds(eye: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     (
         [
@@ -239,6 +297,52 @@ mod tests {
         } else {
             Material::Air
         }
+    }
+    #[test]
+    fn eased_camera_uses_exact_physical_path_and_resets_on_external_motion() {
+        let solid = |c: Cell| {
+            if c.y < if c.x >= 2 { 1 } else { 0 } {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let mut physical = WalkingCamera::default();
+        let mut view = WalkingCamera::default();
+        let mut eye = [-1., EYE_HEIGHT, 0.];
+        let mut shown = eye;
+        let mut eased = false;
+        for _ in 0..120 {
+            eye = physical.advance_sampled(eye, [2., 0.], false, 1. / 60., solid);
+            shown = view.advance_presented_sampled(shown, [2., 0.], false, 1. / 60., true, solid);
+            assert_eq!(view.physical_eye(), Some(eye));
+            eased |= shown != eye;
+        }
+        assert!(eased, "fixture must cross and visually ease a native step");
+        let moved =
+            view.advance_presented_sampled([100., 50., 0.], [0.; 2], false, 1. / 60., true, solid);
+        assert_eq!(
+            view.physical_eye(),
+            Some(moved),
+            "external move snaps presentation to actual airborne eye"
+        );
+    }
+    #[test]
+    fn presentation_easing_is_bounded_and_does_not_delay_falls_or_teleports() {
+        let start = [0., EYE_HEIGHT, 0.];
+        let step = [0., EYE_HEIGHT + VOXEL_SIZE, 0.];
+        let shown = ease_step(Some(start), step, 1. / 60., true);
+        assert!(shown[1] > start[1] && shown[1] < step[1]);
+        assert_eq!(ease_step(Some(step), start, 1. / 60., true), start);
+        assert_eq!(
+            ease_step(Some(start), [0., 10., 0.], 1. / 60., true),
+            [0., 10., 0.]
+        );
+        assert_eq!(ease_step(Some(start), step, 1. / 60., false), step);
+        // Exponential easing is frame-rate independent before its snap epsilon.
+        let a = ease_step(Some(start), step, 1. / 120., true);
+        let b = ease_step(Some(a), step, 1. / 120., true);
+        assert!((b[1] - shown[1]).abs() < 1e-12);
     }
     #[test]
     fn thin_wood_wall_stops_sprint_and_slides() {

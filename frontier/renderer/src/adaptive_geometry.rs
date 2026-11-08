@@ -1583,8 +1583,9 @@ impl SharedSourcePages {
                 };
                 // Share the existing source reservation; no additional cache
                 // budget or growing key index accompanies memoized appearance.
-                let profile_slots =
-                    reserve.saturating_sub(64) / std::mem::size_of::<Option<ProfileEntry>>();
+                let profile_reserve = (budget / 8).min(16 * 1024 * 1024 / SOURCE_SHARDS);
+                let profile_slots = profile_reserve.saturating_sub(64)
+                    / std::mem::size_of::<Option<ProfileEntry>>();
                 let profiles = vec![None; profile_slots];
                 let profile_bytes = if profile_slots == 0 {
                     0
@@ -2380,16 +2381,116 @@ impl Generator<'_> {
         Ok(at)
     }
     fn mapped_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
-        let origin = [self.key.min[0] + x, self.key.min[1] + z];
-        let soft_only = crate::appearance_method::map_filter_soft_surfaces();
-        let map = crate::appearance_map::build_map_with_config_and_predicate(
-            origin,
+        static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let reuse =
+            *REUSE.get_or_init(|| std::env::var("FRONTIER_MAP_NODE_REUSE").as_deref() != Ok("off"));
+        self.mapped_profile_with_reuse(x, z, s, reuse)
+    }
+    fn mapped_profile_with_reuse(
+        &mut self,
+        x: i64,
+        z: i64,
+        s: i64,
+        reuse: bool,
+    ) -> Result<u32, String> {
+        self.mapped_profile_config(
+            x,
+            z,
             s,
-            crate::appearance_map::map_intervals(),
+            reuse,
             crate::appearance_map::map_prefilter(),
-            |rgb| !soft_only || rgb == Material::Grass.color() || rgb == Material::Soil.color(),
-            |gx, gz| self.appearance_column(gx, gz),
-        )?;
+            crate::appearance_method::map_filter_soft_surfaces(),
+        )
+    }
+    fn mapped_profile_config(
+        &mut self,
+        x: i64,
+        z: i64,
+        s: i64,
+        reuse: bool,
+        filter: crate::appearance_map::MapPrefilter,
+        soft_only: bool,
+    ) -> Result<u32, String> {
+        let origin = [self.key.min[0] + x, self.key.min[1] + z];
+        let allowed =
+            |rgb| !soft_only || rgb == Material::Grass.color() || rgb == Material::Soil.color();
+        let map = if !reuse {
+            crate::appearance_map::build_map_with_config_and_predicate(
+                origin,
+                s,
+                crate::appearance_map::map_intervals(),
+                filter,
+                allowed,
+                |gx, gz| self.appearance_column(gx, gz),
+            )?
+        } else {
+            let mut map =
+                crate::appearance_map::layout(origin, s, crate::appearance_map::map_intervals())?;
+            let kind = filter.cache_key(map.spacing_cells);
+            for iz in 0..map.dimension {
+                for ix in 0..map.dimension {
+                    let point = [
+                        map.origin_cells[0] + ix as i64 * map.spacing_cells,
+                        map.origin_cells[1] + iz as i64 * map.spacing_cells,
+                    ];
+                    let local = [point[0] - self.key.min[0], point[1] - self.key.min[1]];
+                    let value =
+                        if let Some(&id) = self.spatial_nodes.get(&(local[0], local[1], kind)) {
+                            self.face_profiles[id as usize]
+                        } else {
+                            // Negative size is a separate namespace from positive-area
+                            // patch profiles. The shared cache owns one immutable world.
+                            let key = ProfileKey {
+                                min: point,
+                                size: -1,
+                                stride: kind * 2 + i64::from(soft_only),
+                            };
+                            if let Some(entry) = self.samples.pages.profile(key) {
+                                // Same exact height envelope as a cold evaluation.
+                                for p in entry.extrema {
+                                    self.height(p[0] - self.key.min[0], p[1] - self.key.min[1])?;
+                                }
+                                entry.value
+                            } else {
+                                let mut limits = [i64::MAX, i64::MIN];
+                                let mut extrema = [point; 2];
+                                let mut columns = HashMap::new();
+                                let value = crate::appearance_map::node_profile(
+                                    point,
+                                    map.spacing_cells,
+                                    filter,
+                                    &allowed,
+                                    &mut |p| {
+                                        if let Some(v) = columns.get(&p) {
+                                            return Ok(*v);
+                                        }
+                                        let c = self.appearance_column(p[0], p[1])?;
+                                        if c.height < limits[0] {
+                                            limits[0] = c.height;
+                                            extrema[0] = p;
+                                        }
+                                        if c.height > limits[1] {
+                                            limits[1] = c.height;
+                                            extrema[1] = p;
+                                        }
+                                        let value = (c.height, c.colors);
+                                        columns.insert(p, value);
+                                        Ok(value)
+                                    },
+                                )?;
+                                self.samples.pages.store_profile(ProfileEntry {
+                                    key,
+                                    value,
+                                    extrema,
+                                });
+                                value
+                            }
+                        };
+                    map.profiles.push(value);
+                }
+            }
+            map
+        };
         self.note_profile_mean(&map.profiles, (s * s) as f64);
         // Maps store compact row-major node references. Raw profiles are shared
         // between adjacent maps using the existing per-tile world-aligned cache.
@@ -2968,7 +3069,15 @@ fn source_budget_for(total: usize, override_mib: Option<&str>) -> usize {
 impl GeometryCache {
     pub fn new(world: World, budget_bytes: usize) -> Self {
         let override_mib = std::env::var("FRONTIER_SOURCE_CACHE_MIB").ok();
-        let source_budget = source_budget_for(budget_bytes, override_mib.as_deref());
+        let alpine = world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine);
+        let source_budget = source_budget_for(
+            budget_bytes,
+            override_mib
+                .as_deref()
+                .or(if alpine { Some("128") } else { None }),
+        );
         Self {
             world,
             budget: budget_bytes,
@@ -3372,6 +3481,90 @@ impl GeometryCache {
 mod tests {
     use super::*;
 
+    #[test]
+    fn map_node_memo_preserves_bits_and_height_extrema_across_jobs() {
+        fn run(
+            world: &World,
+            samples: &mut SourceSamples,
+            reuse: bool,
+            filter: crate::appearance_map::MapPrefilter,
+        ) -> (Vec<[[f32; 4]; 5]>, [i64; 2], usize) {
+            let key = TileKey {
+                min: [-713, -4017],
+                width_cells: 128,
+                step_cells: 16,
+                edge_steps: [16; 4],
+                source_revision: world.revision(),
+            };
+            let mut g = Generator {
+                defer_profiles: false,
+                experiment: None,
+                world,
+                samples,
+                key,
+                heights: LocalColumns::new(128),
+                mesh: Mesh {
+                    vertices: vec![],
+                    indices: vec![],
+                    origin: Cell {
+                        x: key.min[0],
+                        y: 0,
+                        z: key.min[1],
+                    },
+                    exposed_native_faces: 0,
+                },
+                empirical_error_m: 0.,
+                affine_error: 0.,
+                affine_range: [f64::INFINITY, f64::NEG_INFINITY],
+                affine_complete: true,
+                affine_stats: AffineStats::default(),
+                face_profiles: vec![[[0.; 4]; 5]],
+                spatial_nodes: HashMap::new(),
+                face_profile_indices: vec![],
+                appearance: FaceAppearance::default(),
+            };
+            for (x, z) in [(0, 0), (32, 0), (0, 32), (32, 32)] {
+                g.mapped_profile_config(x, z, 32, reuse, filter, true)
+                    .unwrap();
+            }
+            let mut range = [i64::MAX, i64::MIN];
+            for c in g.heights.values() {
+                range[0] = range[0].min(c.height);
+                range[1] = range[1].max(c.height);
+            }
+            (g.face_profiles, range, g.heights.len())
+        }
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                recipe: frontier_world::FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for filter in [
+            crate::appearance_map::MapPrefilter::Off,
+            crate::appearance_map::MapPrefilter::NativeBox { radius_cells: 2 },
+            crate::appearance_map::MapPrefilter::Footprint,
+        ] {
+            let mut sources = SourceSamples::new(32 * 1024 * 1024);
+            let original = run(&world, &mut sources, false, filter);
+            let cold = run(&world, &mut sources, true, filter);
+            let warm = run(&world, &mut sources, true, filter);
+            let bits = |v: &Vec<[[f32; 4]; 5]>| {
+                v.iter()
+                    .flatten()
+                    .flatten()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&original.0), bits(&cold.0));
+            assert_eq!(bits(&cold.0), bits(&warm.0));
+            assert_eq!(original.1, cold.1);
+            assert_eq!(original.1, warm.1);
+            assert!(warm.2 < cold.2, "warm memo must avoid native sample work");
+        }
+    }
     #[test]
     fn alpine_appearance_defaults_are_scoped_and_explicit_overrides_remain_available() {
         use frontier_world::FbmRecipe;

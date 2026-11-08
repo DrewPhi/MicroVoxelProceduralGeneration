@@ -16,9 +16,14 @@ pub enum Route {
     Fly,
     StopResume,
     TurnReturn,
+    WalkStopResume,
+    WalkTurnReturn,
 }
 
 impl Route {
+    pub fn grounded(self) -> bool {
+        matches!(self, Self::WalkStopResume | Self::WalkTurnReturn)
+    }
     /// Sample the route from an initial camera pose at an explicit travel speed
     /// in meters per second. Invalid/negative time or speed is treated as zero.
     ///
@@ -68,8 +73,10 @@ impl Route {
         let distance = match self {
             Route::Stationary => 0.0,
             Route::Fly => speed * t,
-            Route::StopResume => speed * (t - (t - 2.0).clamp(0.0, 2.0)),
-            Route::TurnReturn => speed * t.min(2.0) - speed * (t - 3.0).clamp(0.0, 2.0),
+            Route::StopResume | Route::WalkStopResume => speed * (t - (t - 2.0).clamp(0.0, 2.0)),
+            Route::TurnReturn | Route::WalkTurnReturn => {
+                speed * t.min(2.0) - speed * (t - 3.0).clamp(0.0, 2.0)
+            }
         };
         let distance = if distance.is_finite() { distance } else { 0.0 };
         for (axis, component) in pose.position.iter_mut().zip(forward) {
@@ -81,10 +88,12 @@ impl Route {
             };
         }
         match self {
-            Route::TurnReturn if t >= 2.0 && t < 3.0 => {
+            Route::TurnReturn | Route::WalkTurnReturn if t >= 2.0 && t < 3.0 => {
                 pose.yaw += std::f64::consts::PI * (t - 2.0);
             }
-            Route::TurnReturn if t >= 3.0 => pose.yaw += std::f64::consts::PI,
+            Route::TurnReturn | Route::WalkTurnReturn if t >= 3.0 => {
+                pose.yaw += std::f64::consts::PI
+            }
             _ => {}
         }
         pose

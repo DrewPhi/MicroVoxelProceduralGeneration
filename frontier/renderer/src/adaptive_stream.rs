@@ -254,6 +254,24 @@ struct PredictionCandidate {
     need_fraction: f64,
     error_px: f64,
 }
+fn protected_near_refinements(
+    candidates: &[RefinementCandidate],
+    pixel_error: f64,
+    budget: usize,
+) -> HashSet<TileKey> {
+    let mut near: Vec<_> = candidates
+        .iter()
+        .filter(|c| {
+            c.distance_squared <= 32. * 32. && (!c.error_px.is_finite() || c.error_px > pixel_error)
+        })
+        .collect();
+    near.sort_by(|a, b| {
+        a.distance_squared
+            .total_cmp(&b.distance_squared)
+            .then(a.key.cmp(&b.key))
+    });
+    near.into_iter().take(budget).map(|c| c.key).collect()
+}
 fn select_with_prediction(
     current: Vec<RefinementCandidate>,
     predicted: Vec<PredictionCandidate>,
@@ -753,12 +771,27 @@ impl AdaptiveStream {
             self.settings.pixel_error,
             self.finest_cells(),
         );
-        let (refine, predicted_footprint) = select_with_prediction(
-            urgent,
-            predicted,
+        // A coherent transaction publishes all children together. Mixing slow
+        // distant appearance work into an urgent near replacement delays both.
+        let near = protected_near_refinements(
+            &urgent,
             self.settings.pixel_error,
             self.settings.refinements_per_transaction,
         );
+        let alpine = self
+            .world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine);
+        let (refine, predicted_footprint) = if alpine && !near.is_empty() {
+            (near, None)
+        } else {
+            select_with_prediction(
+                urgent,
+                predicted,
+                self.settings.pixel_error,
+                self.settings.refinements_per_transaction,
+            )
+        };
         // The experiment never adds work outside the existing priority budget.
         let direct_native = direct_native.filter(|key| refine.contains(key));
         self.predicted_footprint = predicted_footprint;
@@ -1843,6 +1876,74 @@ fn complete_key_guard(
     area == expected
         && (0..2).all(|a| cell[a] - far[a] >= min[a] as f64 && cell[a] + far[a] <= max[a] as f64)
 }
+/// Current-view constants reused by every GPU-visible cluster. Same conservative
+/// f32 projection contract as the scalar helpers, without rebuilding trig/bases.
+pub(crate) struct CameraQueries {
+    camera: Camera,
+    projection: Option<Projection>,
+    far: f64,
+    axes: [DVec3; 3],
+    tx: f64,
+    ty: f64,
+}
+impl CameraQueries {
+    pub(crate) fn new(camera: &Camera, width: u32, height: u32) -> Self {
+        let projection = camera_projection(camera, width, height);
+        let forward = camera.direction().as_dvec3().normalize();
+        let right = forward.cross(DVec3::Y).normalize();
+        let up = right.cross(forward);
+        let ty = projection.map_or(0., |p| (p.vertical_fov_radians * 0.5).tan() * (1. + 1e-6));
+        Self {
+            camera: *camera,
+            projection,
+            far: conservative_clip_depth(camera).unwrap_or(f64::INFINITY),
+            axes: [right, up, forward],
+            tx: ty * width as f64 / height.max(1) as f64,
+            ty,
+        }
+    }
+    fn bounds(&self, bounds: [[f64; 3]; 2]) -> ViewBounds {
+        let mut result = ViewBounds {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        };
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    let d =
+                        DVec3::new(bounds[x][0], bounds[y][1], bounds[z][2]) - self.camera.position;
+                    for (a, basis) in self.axes.iter().enumerate() {
+                        let value = d.dot(*basis);
+                        result.min[a] = result.min[a].min(value);
+                        result.max[a] = result.max[a].max(value);
+                    }
+                }
+            }
+        }
+        result
+    }
+    pub(crate) fn visible(&self, bounds: [[f64; 3]; 2]) -> bool {
+        let Some(p) = self.projection else {
+            return true;
+        };
+        let b = self.bounds(bounds);
+        !(b.max[2] < p.near_m
+            || b.min[2] > self.far
+            || b.max[0] + self.tx * b.max[2] < 0.
+            || -b.min[0] + self.tx * b.max[2] < 0.
+            || b.max[1] + self.ty * b.max[2] < 0.
+            || -b.min[1] + self.ty * b.max[2] < 0.)
+    }
+    pub(crate) fn vertical_error(&self, error: f64, bounds: [[f64; 3]; 2], origin: DVec3) -> f64 {
+        let Some(p) = self.projection else {
+            return f64::INFINITY;
+        };
+        if visible_vertical_bound_enabled() {
+            return vertical_pixel_bound(error, bounds, origin, &self.camera, p);
+        }
+        p.projected_vertical_error_px(error, self.bounds(bounds), self.axes.map(|v| v.y))
+    }
+}
 pub(crate) fn cached_bounds_visible(
     bounds: [[f64; 3]; 2],
     camera: &Camera,
@@ -2145,6 +2246,55 @@ fn diagnostic_boxes_disjoint(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn view_constants_match_scalar_visibility_and_error_queries() {
+        for yaw in [-2.3, 0., 1.7] {
+            for pitch in [-1., 0.01, 1.] {
+                let mut c = Camera::fixture();
+                c.position = DVec3::new(-5000., 93., 7000.);
+                c.yaw = yaw;
+                c.pitch = pitch;
+                c.far = 6000.;
+                let q = CameraQueries::new(&c, 1920, 1080);
+                for x in -8..8 {
+                    for z in -8..8 {
+                        let low = [-5000. + x as f64 * 173., -100., 7000. + z as f64 * 143.];
+                        let b = [low, [low[0] + 128., 220., low[2] + 128.]];
+                        assert_eq!(q.visible(b), cached_bounds_visible(b, &c, 1920, 1080));
+                        assert_eq!(
+                            q.vertical_error(0.5, b, DVec3::ZERO).to_bits(),
+                            projected_cached_vertical_error(0.5, b, DVec3::ZERO, &c, 1920, 1080)
+                                .to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn protected_near_transactions_do_not_wait_on_far_refinement() {
+        let make = |x, distance, error| RefinementCandidate {
+            key: TileKey {
+                min: [x, 0],
+                width_cells: 128,
+                step_cells: 8,
+                edge_steps: [8; 4],
+                source_revision: 0,
+            },
+            distance_squared: distance,
+            error_px: error,
+        };
+        let near = make(0, 9., 6.);
+        let far = make(128, 10000., 900.);
+        let reserve = make(256, 1., 2.);
+        let set = protected_near_refinements(&[far, reserve, near], 3., 8);
+        assert_eq!(set, HashSet::from([near.key]));
+        assert!(
+            protected_near_refinements(&[far, reserve], 3., 8).is_empty(),
+            "far work resumes after near requested failures finish"
+        );
+        assert!(protected_near_refinements(&[near], 3., 0).is_empty());
+    }
     #[test]
     fn near_detail_weights_are_bounded_monotonic_and_preserve_far_quality() {
         assert_eq!(near_detail_weight(0.), 3.);

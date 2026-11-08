@@ -274,3 +274,5 @@ records, voxel models and collision queries are independent of display LOD.
 [vegetation controls, budgets and validation](frontier/VEGETATION.md).
 
 The [cozy meadow checkpoint](frontier/COZY_SCENE.md) describes the current Alpine procedural vegetation, cache budgets, HDR scene target and bounded shadowed-air/cloud passes. Plant geometry is derived from each canonical record seed; caches retain generated products rather than choosing prebuilt assets.
+
+[Playability and motion checks](frontier/PLAYABILITY_CHECKPOINT.md) describe the bounded appearance-node cache, nearby refinement priority, event-driven window sizing, physical-versus-render camera state, full-render GPU query span and frame observation ring. Use `tools/record_walk.py` for window-scoped walking/turn captures; use unrecorded `walk-*` routes for timings.

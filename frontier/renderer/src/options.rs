@@ -124,6 +124,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 view_levels = 11;
                 pixel_error = 3.;
                 camera_preset = "alpine".into();
+                adaptive_cache_mib = 640;
+                adaptive_disk_cache = Some(std::path::PathBuf::from("output/cache/alpine-terrain"));
                 start_xz = [frontier_world::terrain::alpine_path_center_m(-250.), -250.];
                 atmosphere = Some(true);
                 visual.sun_elevation = 20.;
@@ -167,7 +169,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 }
                 *field = value;
             }
-            "--vegetation" | "--walk" | "--beauty" => {
+            "--vegetation" | "--walk" | "--beauty" | "--step-smoothing" => {
                 let value = match args.next().as_deref() {
                     Some("on") => true,
                     Some("off") => false,
@@ -175,6 +177,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 };
                 if arg == "--vegetation" {
                     visual.vegetation = value;
+                } else if arg == "--step-smoothing" {
+                    visual.step_smoothing = value;
                 } else if arg == "--beauty" {
                     visual.beauty = value;
                 } else {
@@ -239,6 +243,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 if !(1..=16).contains(&adaptive_workers) {
                     return Err("--adaptive-workers requires 1..16".into());
                 }
+            }
+            "--no-adaptive-disk-cache" => {
+                adaptive_disk_cache = None;
             }
             "--adaptive-disk-cache" => {
                 let path = args
@@ -433,7 +440,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     Some("fly") => frontier_runtime::routes::Route::Fly,
                     Some("stop-resume") => frontier_runtime::routes::Route::StopResume,
                     Some("turn-return") => frontier_runtime::routes::Route::TurnReturn,
-                    _ => return Err("--route requires static|fly|stop-resume|turn-return".into()),
+                    Some("walk-stop-resume") => frontier_runtime::routes::Route::WalkStopResume,
+                    Some("walk-turn-return") => frontier_runtime::routes::Route::WalkTurnReturn,
+                    _ => return Err("--route requires static|fly|stop-resume|turn-return|walk-stop-resume|walk-turn-return".into()),
                 }
             }
             "--seconds" => {

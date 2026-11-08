@@ -91,7 +91,7 @@ impl AdaptiveView {
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
         Ok(Self {
-            upload_budget: 8 * 1024 * 1024,
+            upload_budget: 2 * 1024 * 1024,
             worker: Worker::new_with_cache(
                 world,
                 StreamSettings {

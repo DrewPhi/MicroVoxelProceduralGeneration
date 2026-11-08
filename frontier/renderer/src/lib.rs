@@ -25,6 +25,7 @@ mod native_fbm;
 mod native_stream;
 mod options;
 mod page_terrain;
+mod playability;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -305,7 +306,9 @@ impl Gpu {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Frontier device"),
-                    required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+                    required_features: adapter.features()
+                        & (wgpu::Features::TIMESTAMP_QUERY
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
@@ -1328,8 +1331,10 @@ struct Viewer {
     multisample: Option<wgpu::Texture>,
     camera: Camera,
     walking: walking::WalkingCamera,
+    frame_trace: playability::FrameTrace,
     keys: HashSet<KeyCode>,
     grabbed: bool,
+    minimized: bool,
     last_frame: Instant,
     fps_start: Instant,
     frames: u32,
@@ -1698,6 +1703,7 @@ impl Viewer {
         }
     }
     fn resize(&mut self, width: u32, height: u32) {
+        self.minimized = width == 0 || height == 0;
         self.width = width.max(1);
         self.height = height.max(1);
         if width == 0 || height == 0 {
@@ -1723,6 +1729,9 @@ impl Viewer {
         }
     }
     fn render(&mut self) -> Result<()> {
+        if self.minimized {
+            return Ok(());
+        }
         self.poll_edit();
         if self.adaptive_route_started {
             self.drive_edit_test();
@@ -1781,12 +1790,13 @@ impl Viewer {
             if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
                 let horizontal =
                     Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
-                self.camera.position = DVec3::from_array(self.walking.advance(
+                self.camera.position = DVec3::from_array(self.walking.advance_presented(
                     &self.world,
                     self.camera.position.to_array(),
                     [horizontal.x as f64, horizontal.z as f64],
                     self.keys.contains(&KeyCode::Space),
                     dt as f64,
+                    self.visual_settings.step_smoothing,
                 ));
             } else {
                 self.camera.position +=
@@ -1810,20 +1820,51 @@ impl Viewer {
             && self.pending_teleport.is_none()
             && !matches!(self.route, frontier_runtime::routes::Route::Stationary)
         {
-            self.camera.position = DVec3::from_array(pose.position);
-            if self.fbm || self.hybrid {
-                let floor = self
-                    .world
-                    .fbm_terrain()
-                    .unwrap()
-                    .height_m(self.camera.position.x, self.camera.position.z)
-                    + if self.hybrid { 1.7 } else { 10. };
-                self.camera.position.y = self.camera.position.y.max(floor);
+            if self.route.grounded() {
+                let t = if self.route_realtime {
+                    self.route_started.elapsed().as_secs_f64()
+                } else {
+                    self.total_frames.saturating_sub(self.route_frame_origin) as f64
+                        * self.route_step
+                };
+                let previous = self.route.pose_at(
+                    (t - dt as f64).max(0.),
+                    self.initial_camera.position.to_array(),
+                    self.initial_camera.yaw as f64,
+                    self.initial_camera.pitch as f64,
+                    self.route_speed,
+                );
+                let velocity = [
+                    (pose.position[0] - previous.position[0]) / dt.max(0.000001) as f64,
+                    (pose.position[2] - previous.position[2]) / dt.max(0.000001) as f64,
+                ];
+                self.camera.position = DVec3::from_array(self.walking.advance_presented(
+                    &self.world,
+                    self.camera.position.to_array(),
+                    velocity,
+                    false,
+                    dt as f64,
+                    self.visual_settings.step_smoothing,
+                ));
+            } else {
+                self.camera.position = DVec3::from_array(pose.position);
+                if self.fbm || self.hybrid {
+                    let floor = self
+                        .world
+                        .fbm_terrain()
+                        .unwrap()
+                        .height_m(self.camera.position.x, self.camera.position.z)
+                        + if self.hybrid { 1.7 } else { 10. };
+                    self.camera.position.y = self.camera.position.y.max(floor);
+                }
             }
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
         }
+        let terrain_started = Instant::now();
         self.poll_terrain();
+        let terrain_ms = terrain_started.elapsed().as_secs_f64() * 1000.;
+        let plants_started = Instant::now();
         if let Some(gpu) = &mut self.gpu {
             let (width, height) = self
                 .atmosphere
@@ -1831,6 +1872,7 @@ impl Viewer {
                 .map_or((self.width, self.height), |a| a.dimensions());
             gpu.update_vegetation(&self.world, self.camera, width, height)?;
         }
+        let vegetation_ms = plants_started.elapsed().as_secs_f64() * 1000.;
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             if !pages.contains(self.camera.position, self.camera.far) {
                 return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
@@ -1878,6 +1920,7 @@ impl Viewer {
             self.draw_encode_frames = DrawEncodeFrames::new();
             if let Some(probe) = &mut self.gpu_probe {
                 probe.stats = frontier_runtime::FrameStats::new(10000);
+                probe.full_stats = frontier_runtime::FrameStats::new(10000);
             }
             eprintln!(
                 "adaptive route starts after {} publication",
@@ -1902,7 +1945,9 @@ impl Viewer {
             return Ok(());
         };
         let window = self.window.as_ref().unwrap();
-        if window.inner_size().width == 0 || window.inner_size().height == 0 {
+        // Resize events own dimensions. X11 inner_size() performs a server
+        // round trip and can serialize CPU preparation against presentation.
+        if self.minimized {
             return Ok(());
         }
         let benchmark_preparing = self.adaptive_wait_quality && !self.adaptive_route_started;
@@ -1920,6 +1965,7 @@ impl Viewer {
             }
             self.last_preparation_present = Some(Instant::now());
         }
+        let preparation_ms = now.elapsed().as_secs_f64() * 1000.;
         let frame = match surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1966,6 +2012,9 @@ impl Viewer {
             )
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
+            probe.begin_frame(&mut encoder, slot);
+        }
         let target = frame.texture.create_view(&Default::default());
         let multisample_view = self
             .multisample
@@ -2015,6 +2064,7 @@ impl Viewer {
             ui.render(&mut encoder, &target);
         }
         if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
+            probe.end_frame(&mut encoder, slot);
             probe.resolve(&mut encoder, slot);
         }
         gpu.queue.submit(Some(encoder.finish()));
@@ -2022,6 +2072,25 @@ impl Viewer {
             probe.submitted(slot);
         }
         frame.present();
+        self.frame_trace.record(playability::Observation {
+            seconds: self.visual_started.elapsed().as_secs_f64(),
+            frame_ms: interval.as_secs_f64() * 1000.,
+            prepare_ms: preparation_ms,
+            terrain_ms,
+            vegetation_ms,
+            yaw: self.camera.yaw,
+            eye: self.camera.position.to_array(),
+            physical_eye: if self.visual_settings.walking {
+                self.walking.physical_eye()
+            } else {
+                None
+            },
+            terrain_pending: self.adaptive_view.as_ref().map_or(0, |v| v.pending_count),
+            terrain_ready: self.adaptive_view.as_ref().is_none_or(|v| v.quality_ready),
+            native_clusters: self.adaptive_view.as_ref().map_or(0, |v| v.native_clusters),
+            plant_pending: gpu.vegetation_stats.pending_jobs,
+            plant_triangles: gpu.vegetation_stats.triangles,
+        });
         self.draw_encode_frames.pending_ms = Some(gpu.last_draw_encode_cpu_ms.get());
         if let Some(ui) = &mut self.settings_ui {
             ui.finish_frame();
@@ -2213,6 +2282,7 @@ impl ApplicationHandler for Viewer {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
+            WindowEvent::Occluded(value) => self.minimized = value,
             WindowEvent::Focused(false) => {
                 self.keys.clear();
                 self.grab(false);
@@ -3028,6 +3098,7 @@ pub fn run() -> Result<()> {
         },
         camera,
         walking: Default::default(),
+        frame_trace: Default::default(),
         terrain_data,
         hybrid_initial,
         page_initial,
@@ -3066,6 +3137,7 @@ pub fn run() -> Result<()> {
         terrain_center_lag_end_m: 0.,
         keys: HashSet::new(),
         grabbed: false,
+        minimized: false,
         last_frame: now,
         fps_start: now,
         frames: 0,
@@ -3260,6 +3332,20 @@ pub fn run() -> Result<()> {
         json.push_str(&format!(",\"renderer_backend\":\"{}\",\"gpu_render_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{}}},\"teleports\":{{\"completed\":{},\"last_readiness_ms\":{}}},\"prediction_horizon_seconds\":{},\"brick_gpu_bytes\":{}}}",
             viewer.renderer, gpu_stats.as_ref().map_or(0,|s| s.sample_count), number(gpu_stats.as_ref().and_then(|s|s.p50_ms)), number(gpu_stats.as_ref().and_then(|s|s.p95_ms)), number(gpu_stats.as_ref().and_then(|s|s.p99_ms)), viewer.teleport_count, viewer.teleport_last_ms,
             number(viewer.hybrid_stream.as_ref().map(|s|s.prediction_horizon_seconds())), viewer.gpu.as_ref().and_then(|g|g.brick.as_ref()).map_or(0,|b|b.resident_bytes)));
+        json.pop();
+        json.push_str(&format!(
+            ",\"frame_observations\":{},\"step_smoothing\":{}}}",
+            viewer.frame_trace.json(),
+            viewer.visual_settings.step_smoothing
+        ));
+        let full = viewer
+            .gpu_probe
+            .as_ref()
+            .filter(|p| p.full_supported)
+            .map(|p| p.full_stats.summary());
+        json.pop();
+        json.push_str(&format!(",\"gpu_full_render\":{{\"supported\":{},\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps\"}}}}",
+            full.is_some(),full.as_ref().map_or(0,|s|s.sample_count),number(full.as_ref().and_then(|s|s.p50_ms)),number(full.as_ref().and_then(|s|s.p95_ms)),number(full.as_ref().and_then(|s|s.p99_ms))));
         if let Some(gpu) = &viewer.gpu {
             let m = &gpu.brick_cache_metrics;
             json.pop();

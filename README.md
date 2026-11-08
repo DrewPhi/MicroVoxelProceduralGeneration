@@ -21,7 +21,7 @@ atmosphere controls plus image-quality and loading settings. See the
 Use `--terrain-recipe legacy` for the original spiky terrain.
 Use `--preset alpine` for the [Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
 now with [seeded voxel grass, edelweiss and flowering rowans](frontier/VEGETATION.md),
-grounded walking, a winding path and mountain backdrop. The [cozy meadow checkpoint](frontier/COZY_SCENE.md) adds full-seed growth, fuller crowns, denser ground cover, HDR lighting and shadowed near haze. Press F for flight;
+grounded walking, a winding path and mountain backdrop. See the [playability pass](frontier/PLAYABILITY_CHECKPOINT.md) for nearby streaming, cache defaults, camera easing and motion capture tools. The [cozy meadow checkpoint](frontier/COZY_SCENE.md) adds full-seed growth, fuller crowns, denser ground cover, HDR lighting and shadowed near haze. Press F for flight;
 `--vegetation off --walk off` restores the bare-terrain camera preview.
 The [Alpine beauty checkpoint](frontier/reference/BEAUTY_CHECKPOINT.md) documents
 the default lighting treatment, `--beauty off` and its bounded raster reference.

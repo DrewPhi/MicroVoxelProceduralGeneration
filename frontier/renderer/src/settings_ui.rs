@@ -17,6 +17,7 @@ pub struct SettingsUi {
     paint_jobs: Vec<egui::ClippedPrimitive>,
     free_textures: Vec<egui::TextureId>,
     screen: ScreenDescriptor,
+    started: std::time::Instant,
 }
 
 impl SettingsUi {
@@ -43,6 +44,7 @@ impl SettingsUi {
             Some(device.limits().max_texture_dimension_2d as usize),
         );
         Self {
+            started: std::time::Instant::now(),
             context,
             input,
             renderer: Renderer::new(device, format, None, 1, false),
@@ -104,10 +106,24 @@ impl SettingsUi {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         stats: &SettingsStats,
+        dimensions: [u32; 2],
     ) -> SettingsChanges {
         let previous = self.settings.clone();
         let mut changes = SettingsChanges::default();
-        let input = self.input.take_egui_input(window);
+        // The standard convenience adapter queries X11 geometry every frame.
+        // Feed its public RawInput the event-maintained output dimensions instead.
+        let native_scale = window.scale_factor() as f32;
+        let points = egui::vec2(dimensions[0] as f32, dimensions[1] as f32)
+            / (native_scale * self.context.zoom_factor());
+        let raw = self.input.egui_input_mut();
+        raw.time = Some(self.started.elapsed().as_secs_f64());
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, points));
+        raw.viewport_id = egui::ViewportId::ROOT;
+        raw.viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(native_scale);
+        let input = raw.take();
         let output = self.context.run(input, |ctx| {
             egui::Area::new(egui::Id::new("frontier telemetry"))
                 .anchor(egui::Align2::LEFT_TOP, [14., 14.])
@@ -127,8 +143,10 @@ impl SettingsUi {
                             .strong(),
                         );
                         ui.horizontal(|ui| {
-                            if let Some(ms) = stats.gpu_ms {
-                                ui.label(format!("Scene GPU {ms:.1} ms  ·"));
+                            if let Some(ms) = stats.gpu_full_ms {
+                                ui.label(format!("Render GPU {ms:.1} ms  ·"));
+                            } else if let Some(ms) = stats.gpu_ms {
+                                ui.label(format!("Opaque GPU {ms:.1} ms  ·"));
                             }
                             ui.label(format!(
                                 "{} pending  ·  {}",
@@ -148,7 +166,7 @@ impl SettingsUi {
                             memory.push_str(&format!("  ·  process {rss:.0} MiB"));
                         }
                         ui.label(memory);
-                        ui.small("Terrain GPU figures exclude atmosphere and UI.");
+                        ui.small("Render GPU includes shadows/atmosphere/UI when supported; excludes CPU and prior uploads.");
                         if self.settings.vegetation {
                             ui.label(format!("Plants: {} instances · {} pending · {:.1} MiB GPU", stats.plant_instances, stats.plant_pending, stats.plant_gpu_mib));
                         }
@@ -222,6 +240,7 @@ impl SettingsUi {
                             ui.heading("Meadow & movement");
                             ui.checkbox(&mut self.settings.vegetation, "Procedural vegetation");
                             ui.checkbox(&mut self.settings.walking, "Walk on ground (F toggles flight)");
+                            ui.checkbox(&mut self.settings.step_smoothing, "Ease camera over voxel steps (visual only)");
                             ui.separator();
                             ui.heading("Light & atmosphere");
                             ui.checkbox(&mut self.settings.beauty, "Meadow lighting, foliage occlusion and sky");
@@ -334,7 +353,7 @@ impl SettingsUi {
         self.input
             .handle_platform_output(window, output.platform_output);
         self.screen = ScreenDescriptor {
-            size_in_pixels: [window.inner_size().width, window.inner_size().height],
+            size_in_pixels: dimensions,
             pixels_per_point: output.pixels_per_point,
         };
         for (id, delta) in &output.textures_delta.set {

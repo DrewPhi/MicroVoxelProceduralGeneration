@@ -1,0 +1,1087 @@
+{
+  "baseline_commit": "5a919a4",
+  "candidate_executable_sha256": "99a54e0309cfad9994a3a7fa148696374e21c412556be846a31d969860a22d3f",
+  "hardware": "Ryzen 5 7640U / Radeon 760M, RADV Mesa 25.2.8",
+  "tests": {
+    "passed": 465,
+    "ignored": 11,
+    "failed": 0
+  },
+  "timing_scope": "Sequential uncapped settled runs, separate from recording/builds. Frame includes presentation interval; full GPU span excludes prior uploads/CPU/present. Not a locked 60 FPS result.",
+  "runs": {
+    "720": {
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "frames": {
+        "sample_count": 282,
+        "accepted_frames": 282,
+        "missed_budget_frames": 180,
+        "rejected_inputs": 0,
+        "p50_ms": 17.295624,
+        "p95_ms": 20.312592000000002,
+        "p99_ms": 28.571558
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 210,
+        "p50_ms": 16.120429014759065,
+        "p95_ms": 17.39801644670105,
+        "p99_ms": 17.870313817554475,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "used_memory_bytes": null,
+      "committed_memory_bytes": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 239,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 984236,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 41,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          649548
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 144458040,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 16,
+        "shadow_triangles": 199784,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 74808,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "adaptive": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 272629760,
+        "cpu_cache_bytes": 663499216,
+        "source_cache_bytes": 134203648,
+        "pending_selection_arc_bytes": 0,
+        "deferred_selection_arc_bytes": 0,
+        "peak_live_tile_payload_bytes": 528237768,
+        "cpu_cache_budget_bytes": 671088640,
+        "source_budget_bytes": 134217728,
+        "first_coverage_ms": 220.96178999999998,
+        "first_quality_ms": 22899.206111000003,
+        "source_cache_page_evictions": 2069979
+      }
+    },
+    "1080": {
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "frames": {
+        "sample_count": 181,
+        "accepted_frames": 181,
+        "missed_budget_frames": 181,
+        "rejected_inputs": 0,
+        "p50_ms": 25.161587,
+        "p95_ms": 28.277102,
+        "p99_ms": 30.721784
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 134,
+        "p50_ms": 23.214147167095184,
+        "p95_ms": 24.79587246474838,
+        "p99_ms": 25.272177450119017,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "used_memory_bytes": null,
+      "committed_memory_bytes": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 237,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 984236,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 43,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          649548
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 155698208,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 16,
+        "shadow_triangles": 199784,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 74808,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "adaptive": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289406976,
+        "cpu_cache_bytes": 523031604,
+        "source_cache_bytes": 21395776,
+        "pending_selection_arc_bytes": 0,
+        "deferred_selection_arc_bytes": 0,
+        "peak_live_tile_payload_bytes": 500578028,
+        "cpu_cache_budget_bytes": 671088640,
+        "source_budget_bytes": 134217728,
+        "first_coverage_ms": 253.811224,
+        "first_quality_ms": 8824.390296000001,
+        "source_cache_page_evictions": 0
+      }
+    },
+    "walk": {
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 3,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "frames": {
+        "sample_count": 660,
+        "accepted_frames": 660,
+        "missed_budget_frames": 524,
+        "rejected_inputs": 0,
+        "p50_ms": 21.156771000000003,
+        "p95_ms": 32.446952,
+        "p99_ms": 37.46692
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 634,
+        "p50_ms": 17.408316016010286,
+        "p95_ms": 20.628273976009368,
+        "p99_ms": 21.367318169128417,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "used_memory_bytes": null,
+      "committed_memory_bytes": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 243,
+        "resident_templates": 283,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 129,
+        "triangles": 950112,
+        "budget_rejected": 0,
+        "culled_instances": 165,
+        "coverage_fallbacks": 44,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          48,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          646900
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 263590000,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 13,
+        "shadow_triangles": 198716,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 0,
+        "shadow_only_triangles": 0,
+        "retained_ground_detail": 69,
+        "canonical_voxel_m": 0.0625
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "adaptive": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "native_clusters": 31,
+        "resident_clusters": 4582,
+        "visible_clusters": 3872,
+        "gpu_resident_bytes": 243256128,
+        "gpu_allocated_bytes": 306184192,
+        "cpu_cache_bytes": 671030396,
+        "source_cache_bytes": 134161120,
+        "pending_selection_arc_bytes": 0,
+        "deferred_selection_arc_bytes": 0,
+        "peak_live_tile_payload_bytes": 535921380,
+        "cpu_cache_budget_bytes": 671088640,
+        "source_budget_bytes": 134217728,
+        "first_coverage_ms": 302.802216,
+        "first_quality_ms": 9174.920942,
+        "source_cache_page_evictions": 37476
+      }
+    },
+    "turn": {
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkTurnReturn",
+      "route_clock": "realtime",
+      "route_speed_mps": 3,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "frames": {
+        "sample_count": 607,
+        "accepted_frames": 607,
+        "missed_budget_frames": 113,
+        "rejected_inputs": 0,
+        "p50_ms": 13.207695000000001,
+        "p95_ms": 24.556053000000002,
+        "p99_ms": 30.41664
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 537,
+        "p50_ms": 11.439294801784515,
+        "p95_ms": 16.624827377895354,
+        "p99_ms": 19.39885807056427,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "used_memory_bytes": null,
+      "committed_memory_bytes": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 216,
+        "resident_templates": 175,
+        "pending_jobs": 25,
+        "missing_tiles": 0,
+        "missing_templates": 25,
+        "selected_instances": 110,
+        "triangles": 801776,
+        "budget_rejected": 0,
+        "culled_instances": 162,
+        "coverage_fallbacks": 53,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          20,
+          33,
+          57
+        ],
+        "triangles_by_species": [
+          146008,
+          8580,
+          647188
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 107,
+        "gpu_bytes": 266130904,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 18,
+        "shadow_triangles": 198154,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 0,
+        "shadow_only_triangles": 0,
+        "retained_ground_detail": 7,
+        "canonical_voxel_m": 0.0625
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "adaptive": {
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 58,
+        "native_clusters": 29,
+        "resident_clusters": 4531,
+        "visible_clusters": 168,
+        "gpu_resident_bytes": 238580320,
+        "gpu_allocated_bytes": 314572800,
+        "cpu_cache_bytes": 657458056,
+        "source_cache_bytes": 120587936,
+        "pending_selection_arc_bytes": 0,
+        "deferred_selection_arc_bytes": 0,
+        "peak_live_tile_payload_bytes": 535936516,
+        "cpu_cache_budget_bytes": 671088640,
+        "source_budget_bytes": 134217728,
+        "first_coverage_ms": 141.668081,
+        "first_quality_ms": 9053.575515,
+        "source_cache_page_evictions": 19666
+      }
+    },
+    "laptop": {
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 3,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "frames": {
+        "sample_count": 703,
+        "accepted_frames": 703,
+        "missed_budget_frames": 254,
+        "rejected_inputs": 0,
+        "p50_ms": 14.691837,
+        "p95_ms": 24.300779000000002,
+        "p99_ms": 28.17855
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 666,
+        "p50_ms": 12.403647083061218,
+        "p95_ms": 14.53730105202484,
+        "p99_ms": 15.174992674003601,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "used_memory_bytes": null,
+      "committed_memory_bytes": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 228,
+        "resident_templates": 277,
+        "pending_jobs": 4,
+        "missing_tiles": 0,
+        "missing_templates": 4,
+        "selected_instances": 119,
+        "triangles": 991410,
+        "budget_rejected": 0,
+        "culled_instances": 168,
+        "coverage_fallbacks": 27,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          39,
+          56
+        ],
+        "triangles_by_species": [
+          317942,
+          23800,
+          649668
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 118,
+        "gpu_bytes": 267837584,
+        "uploaded_bytes_last_update": 1751608,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 15,
+        "shadow_triangles": 198584,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 3,
+        "shadow_only_triangles": 66604,
+        "retained_ground_detail": 3,
+        "canonical_voxel_m": 0.0625
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 0.75,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "adaptive": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 11,
+        "native_clusters": 28,
+        "resident_clusters": 3232,
+        "visible_clusters": 2691,
+        "gpu_resident_bytes": 175420160,
+        "gpu_allocated_bytes": 213909504,
+        "cpu_cache_bytes": 549268172,
+        "source_cache_bytes": 66692704,
+        "pending_selection_arc_bytes": 0,
+        "deferred_selection_arc_bytes": 0,
+        "peak_live_tile_payload_bytes": 481724788,
+        "cpu_cache_budget_bytes": 671088640,
+        "source_budget_bytes": 134217728,
+        "first_coverage_ms": 273.190538,
+        "first_quality_ms": 5976.893561,
+        "source_cache_page_evictions": 481783
+      }
+    }
+  },
+  "primary_regression": {
+    "png": {
+      "equal": true,
+      "baseline_sha256": "6ff80d1f04cdc315ee6d8cca54b5a9b6b1d80b07d916201ac65f7e9800fd856e",
+      "candidate_sha256": "6ff80d1f04cdc315ee6d8cca54b5a9b6b1d80b07d916201ac65f7e9800fd856e"
+    },
+    "linear_rgb.f32": {
+      "equal": true,
+      "baseline_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50",
+      "candidate_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50"
+    },
+    "depth.f32": {
+      "equal": true,
+      "baseline_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e",
+      "candidate_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e"
+    },
+    "coverage.f32": {
+      "equal": true,
+      "baseline_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7",
+      "candidate_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7"
+    }
+  },
+  "motion": {
+    "manifest": {
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--width",
+        "1280",
+        "--height",
+        "720",
+        "--seconds",
+        "28",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playability/recording-release/game.json",
+        "--adaptive-disk-cache",
+        "output/cozy-scene/map-cache",
+        "--adaptive-disk-mib",
+        "1024"
+      ],
+      "failure": null,
+      "events": [
+        {
+          "seconds_from_launch": 0.7671,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 1.8532,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 4.9345,
+          "action": "hold_None"
+        },
+        {
+          "seconds_from_launch": 7.0166,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 10.0987,
+          "action": "mouse_turn"
+        },
+        {
+          "seconds_from_launch": 11.7895,
+          "action": "walk_after_turn"
+        },
+        {
+          "seconds_from_launch": 14.7898,
+          "action": "stop_after_turn"
+        },
+        {
+          "seconds_from_launch": 21.1739,
+          "action": "record_end"
+        }
+      ],
+      "scope": "Actual X11 inputs and 20 FPS child-window recording; includes normal startup. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+    },
+    "inspection": "20 FPS startup/walk/stop/resume/turn contact sheet and largest adjacent-frame changes inspected. Refinement and loading remain visible; no isolated coarse-reset spike identified in sampled footage. Recording does not certify all presented frames or performance."
+  },
+  "ui_smoke": {
+    "command": [
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+      "--preset",
+      "alpine",
+      "--width",
+      "1280",
+      "--height",
+      "720",
+      "--seconds",
+      "40.0",
+      "--report",
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke.json",
+      "--capture-on-exit",
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/exit.png"
+    ],
+    "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728",
+    "events": [
+      {
+        "seconds": 0.015,
+        "action": "launched",
+        "pid": 1909880
+      },
+      {
+        "seconds": 0.605,
+        "action": "window_ready",
+        "window": 138412036,
+        "title": "Frontier adaptive clusters | 38 FPS | 1312 triangles | 3 px error | refining | Esc settings / F12"
+      },
+      {
+        "seconds": 0.686,
+        "action": "click_capture_mouse"
+      },
+      {
+        "seconds": 1.067,
+        "action": "key_down",
+        "key": "F12"
+      },
+      {
+        "seconds": 1.148,
+        "action": "key_up",
+        "key": "F12"
+      },
+      {
+        "seconds": 1.149,
+        "action": "capture",
+        "label": "baseline",
+        "eye": [
+          -41.06016074388279,
+          28.93750001,
+          -250.0
+        ]
+      },
+      {
+        "seconds": 1.229,
+        "action": "key_down",
+        "key": "w"
+      },
+      {
+        "seconds": 3.232,
+        "action": "key_up",
+        "key": "w"
+      },
+      {
+        "seconds": 3.314,
+        "action": "key_down",
+        "key": "F12"
+      },
+      {
+        "seconds": 3.395,
+        "action": "key_up",
+        "key": "F12"
+      },
+      {
+        "seconds": 3.446,
+        "action": "capture",
+        "label": "after_walk",
+        "eye": [
+          -40.990785696125506,
+          28.62500001,
+          -244.0019376460641
+        ]
+      },
+      {
+        "seconds": 3.526,
+        "action": "key_down",
+        "key": "space"
+      },
+      {
+        "seconds": 3.608,
+        "action": "key_up",
+        "key": "space"
+      },
+      {
+        "seconds": 3.81,
+        "action": "key_down",
+        "key": "F12"
+      },
+      {
+        "seconds": 3.891,
+        "action": "key_up",
+        "key": "F12"
+      },
+      {
+        "seconds": 3.994,
+        "action": "capture",
+        "label": "jump",
+        "eye": [
+          -40.990785696125506,
+          29.363379375237532,
+          -244.0019376460641
+        ]
+      },
+      {
+        "seconds": 5.206,
+        "action": "key_down",
+        "key": "F12"
+      },
+      {
+        "seconds": 5.294,
+        "action": "key_up",
+        "key": "F12"
+      },
+      {
+        "seconds": 5.813,
+        "action": "capture",
+        "label": "landed",
+        "eye": [
+          -40.990785696125506,
+          28.62500001,
+          -244.0019376460641
+        ]
+      },
+      {
+        "seconds": 5.926,
+        "action": "key_down",
+        "key": "f"
+      },
+      {
+        "seconds": 6.021,
+        "action": "key_up",
+        "key": "f"
+      },
+      {
+        "seconds": 6.106,
+        "action": "key_down",
+        "key": "space"
+      },
+      {
+        "seconds": 7.006,
+        "action": "key_up",
+        "key": "space"
+      },
+      {
+        "seconds": 7.315,
+        "action": "key_down",
+        "key": "F12"
+      },
+      {
+        "seconds": 7.511,
+        "action": "key_up",
+        "key": "F12"
+      },
+      {
+        "seconds": 22.649,
+        "action": "capture",
+        "label": "flight",
+        "eye": [
+          -40.990785696125506,
+          30.31640938924385,
+          -244.0019376460641
+        ]
+      },
+      {
+        "seconds": 23.158,
+        "action": "key_down",
+        "key": "f"
+      },
+      {
+        "seconds": 23.292,
+        "action": "key_up",
+        "key": "f"
+      },
+      {
+        "seconds": 23.379,
+        "action": "key_down",
+        "key": "Escape"
+      },
+      {
+        "seconds": 23.47,
+        "action": "key_up",
+        "key": "Escape"
+      },
+      {
+        "seconds": 23.475,
+        "action": "settings_menu_requested_open"
+      },
+      {
+        "seconds": 23.909,
+        "action": "key_down",
+        "key": "Escape"
+      },
+      {
+        "seconds": 23.992,
+        "action": "key_up",
+        "key": "Escape"
+      },
+      {
+        "seconds": 23.995,
+        "action": "settings_menu_requested_closed"
+      },
+      {
+        "seconds": 24.004,
+        "action": "input_complete"
+      },
+      {
+        "seconds": 40.661,
+        "action": "finally_release_all_keys"
+      }
+    ],
+    "captures": {
+      "baseline": {
+        "metadata": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-000.capture.json",
+        "eye": [
+          -41.06016074388279,
+          28.93750001,
+          -250.0
+        ],
+        "png": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-000.png"
+      },
+      "after_walk": {
+        "metadata": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-001.capture.json",
+        "eye": [
+          -40.990785696125506,
+          28.62500001,
+          -244.0019376460641
+        ],
+        "png": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-001.png"
+      },
+      "jump": {
+        "metadata": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-002.capture.json",
+        "eye": [
+          -40.990785696125506,
+          29.363379375237532,
+          -244.0019376460641
+        ],
+        "png": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-002.png"
+      },
+      "landed": {
+        "metadata": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-003.capture.json",
+        "eye": [
+          -40.990785696125506,
+          28.62500001,
+          -244.0019376460641
+        ],
+        "png": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-003.png"
+      },
+      "flight": {
+        "metadata": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-004.capture.json",
+        "eye": [
+          -40.990785696125506,
+          30.31640938924385,
+          -244.0019376460641
+        ],
+        "png": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-integration/ui-smoke-20261108-143007-1909728/frontier-capture-004.png"
+      }
+    },
+    "limitations": [
+      "Capture eye Y checks jump/flight motion; canonical terrain height is absent from capture metadata, so grounded clearance is not certified.",
+      "Esc menu toggles are input smoke only; scene captures do not contain UI state."
+    ],
+    "checks": {
+      "walk_xz_distance_m": 5.9984635448549914,
+      "jump_y_above_landed_m": 0.738379365237531,
+      "flight_y_above_landed_m": 1.6914093792438507,
+      "grounded_terrain_clearance": "unavailable: no canonical terrain height in metadata",
+      "walk_moved": true,
+      "jump_observed": true,
+      "flight_observed": true
+    },
+    "returncode": 0,
+    "passed": true,
+    "elapsed_seconds": 40.661
+  }
+}

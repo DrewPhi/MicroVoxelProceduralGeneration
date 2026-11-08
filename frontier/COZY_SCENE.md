@@ -264,3 +264,10 @@ selector resetting loaded fine cover when an unrelated baseline was missing.
 It also records the measured cold-loading costs and unresolved camera/streaming
 questions. The normal launcher includes that fix; this does not claim cold
 readiness or all motion transitions are solved.
+
+## Follow-up: playability
+
+The [playability checkpoint](PLAYABILITY_CHECKPOINT.md) records appearance reuse,
+nearby streaming priority, bounded caches, camera step easing, frame observability
+and the measured window-server/culling stall fixes. Historical pictures/timings
+above retain their original settings; the new checkpoint identifies new defaults.

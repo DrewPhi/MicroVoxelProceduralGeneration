@@ -15,6 +15,8 @@ pub struct GpuProbe {
     period_ns: f64,
     pub stats: frontier_runtime::FrameStats,
     pub dropped: u64,
+    pub full_stats: frontier_runtime::FrameStats,
+    pub full_supported: bool,
 }
 
 impl GpuProbe {
@@ -26,7 +28,7 @@ impl GpuProbe {
             query: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("render pass timestamps"),
                 ty: wgpu::QueryType::Timestamp,
-                count: 6,
+                count: 12,
             }),
             resolve: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("timestamp resolve"),
@@ -37,7 +39,7 @@ impl GpuProbe {
             slots: std::array::from_fn(|_| Slot {
                 readback: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("timestamp asynchronous readback"),
-                    size: 16,
+                    size: 32,
                     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                     mapped_at_creation: false,
                 }),
@@ -47,6 +49,10 @@ impl GpuProbe {
             period_ns: queue.get_timestamp_period() as f64,
             stats: frontier_runtime::FrameStats::new(10000),
             dropped: 0,
+            full_stats: frontier_runtime::FrameStats::new(10000),
+            full_supported: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
         })
     }
 
@@ -63,6 +69,14 @@ impl GpuProbe {
                         if slot.record && end >= start {
                             self.stats
                                 .record((end - start) as f64 * self.period_ns / 1_000_000.);
+                        }
+                        if slot.record && self.full_supported {
+                            let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+                            let end = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+                            if end >= start {
+                                self.full_stats
+                                    .record((end - start) as f64 * self.period_ns / 1_000_000.);
+                            }
                         }
                     }
                     slot.readback.unmap();
@@ -90,15 +104,36 @@ impl GpuProbe {
     pub fn writes(&self, slot: usize) -> wgpu::RenderPassTimestampWrites<'_> {
         wgpu::RenderPassTimestampWrites {
             query_set: &self.query,
-            beginning_of_pass_write_index: Some(slot as u32 * 2),
-            end_of_pass_write_index: Some(slot as u32 * 2 + 1),
+            beginning_of_pass_write_index: Some(slot as u32 * 4),
+            end_of_pass_write_index: Some(slot as u32 * 4 + 1),
         }
     }
 
+    pub fn begin_frame(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
+        if self.full_supported {
+            encoder.write_timestamp(&self.query, slot as u32 * 4 + 2);
+        }
+    }
+    pub fn end_frame(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
+        if self.full_supported {
+            encoder.write_timestamp(&self.query, slot as u32 * 4 + 3);
+        }
+    }
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
-        let first = slot as u32 * 2;
-        encoder.resolve_query_set(&self.query, first..first + 2, &self.resolve, 0);
-        encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.slots[slot].readback, 0, 16);
+        let first = slot as u32 * 4;
+        encoder.resolve_query_set(
+            &self.query,
+            first..first + if self.full_supported { 4 } else { 2 },
+            &self.resolve,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.resolve,
+            0,
+            &self.slots[slot].readback,
+            0,
+            if self.full_supported { 32 } else { 16 },
+        );
     }
 
     /// Call after submitting the encoder that resolves this slot.

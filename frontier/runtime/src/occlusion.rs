@@ -38,6 +38,8 @@ impl Aabb {
 struct Occluder {
     relative: Aabb,
     priority: f64,
+    projected_min: [f64; 2],
+    projected_max: [f64; 2],
 }
 
 /// A bounded, current-camera set. Reconstruct when the camera changes; source
@@ -141,7 +143,12 @@ impl OcclusionSet {
         if !priority.is_finite() || priority <= 0.0 {
             return false;
         }
-        let next = Occluder { relative, priority };
+        let next = Occluder {
+            relative,
+            priority,
+            projected_min,
+            projected_max,
+        };
         if self.occluders.len() == MAX_OCCLUDERS {
             let worst = self
                 .occluders
@@ -164,14 +171,56 @@ impl OcclusionSet {
     /// The candidate must enclose all possible current source geometry, including
     /// its certified approximation error. Unknown geometry needs global bounds.
     pub fn occludes(&self, candidate: Aabb) -> bool {
+        self.occludes_impl(candidate, true)
+    }
+    fn occludes_impl(&self, candidate: Aabb, broad_phase: bool) -> bool {
         let Some((candidate, margin)) = self.relative(candidate, true) else {
             return false;
         };
         if candidate.contains_origin() {
             return false;
         }
+        let corners: [[f64; 3]; 8] = std::array::from_fn(|i| candidate.corner(i));
+        let mut low = [f64::INFINITY; 2];
+        let mut high = [f64::NEG_INFINITY; 2];
+        let mut projectable = true;
+        if broad_phase {
+            for p in &corners {
+                let z = dot(*p, self.forward);
+                if z <= self.near_m || !z.is_finite() {
+                    projectable = false;
+                    break;
+                }
+                for (axis, basis) in [self.right, self.up].into_iter().enumerate() {
+                    let q = dot(*p, basis) / z;
+                    low[axis] = low[axis].min(q);
+                    high[axis] = high[axis].max(q);
+                }
+            }
+        }
         self.occluders.iter().any(|occluder| {
-            (0..8).all(|i| segment_enters_before(candidate.corner(i), occluder.relative, margin))
+            // Necessary angular containment only. This never establishes
+            // occlusion: every survivor still passes the original 8-corner
+            // same-solid-box proof. Uncertain near-plane projections fall back.
+            if broad_phase
+                && projectable
+                && (0..2).any(|a| {
+                    let pad = 1e-9
+                        * (1.
+                            + low[a]
+                                .abs()
+                                .max(high[a].abs())
+                                .max(occluder.projected_min[a].abs())
+                                .max(occluder.projected_max[a].abs()));
+                    low[a] < occluder.projected_min[a] - pad
+                        || high[a] > occluder.projected_max[a] + pad
+                })
+            {
+                return false;
+            }
+            corners
+                .iter()
+                .all(|p| segment_enters_before(*p, occluder.relative, margin))
         })
     }
 
@@ -277,6 +326,32 @@ mod tests {
             }
         }
         false
+    }
+    #[test]
+    fn angular_broad_phase_matches_original_convex_box_proof() {
+        let mut random = 17u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as f64 / u32::MAX as f64
+        };
+        for _ in 0..24 {
+            let mut scene = set();
+            for _ in 0..96 {
+                let x = next() * 40. - 20.;
+                let y = next() * 20. - 10.;
+                let z = next() * 40. + 1.;
+                let size = next() * 6. + 0.1;
+                scene.insert_solid(b([x, y, z], [x + size, y + size, z + size]));
+            }
+            for _ in 0..500 {
+                let x = next() * 100. - 50.;
+                let y = next() * 60. - 30.;
+                let z = next() * 120. - 5.;
+                let size = next() * 12. + 0.01;
+                let box_ = b([x, y, z], [x + size, y + size, z + size]);
+                assert_eq!(scene.occludes(box_), scene.occludes_impl(box_, false));
+            }
+        }
     }
     #[test]
     fn one_box_shadows_entire_candidate_verified_by_dense_independent_oracle() {

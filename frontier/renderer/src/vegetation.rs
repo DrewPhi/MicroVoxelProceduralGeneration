@@ -144,6 +144,21 @@ fn selected_stride(distance: f64, projection: f64, config: &VegetationConfig) ->
     }
     lod
 }
+fn ground_stride(distance: f64, projection: f64, config: &VegetationConfig) -> u8 {
+    selected_stride(distance, projection, config).max(if distance <= 8. {
+        1
+    } else if distance <= 16. {
+        2
+    } else {
+        4
+    })
+}
+fn hysteretic_stride(target: u8, relaxed: u8, previous: Option<u8>) -> u8 {
+    match previous {
+        Some(old) if old < target => target.min(old.max(relaxed)),
+        _ => target,
+    }
+}
 fn budget_allows(
     config: &VegetationConfig,
     stats: &VegetationStats,
@@ -347,6 +362,7 @@ impl StableFrameKey {
     }
 }
 
+type GroundGroups = BTreeMap<(u8, i64, i64), Vec<PlantRecord>>;
 pub struct VegetationStream {
     world: World,
     edits: Vec<Cell>,
@@ -363,6 +379,8 @@ pub struct VegetationStream {
     tick: u64,
     center: Option<[i64; 2]>,
     stable_frame: Option<(StableFrameKey, VegetationFrame)>,
+    previous_lods: BTreeMap<MeshKey, u8>,
+    grouped_ground: Option<(Vec<Tile>, GroundGroups)>,
     #[cfg(test)]
     regroup_builds: usize,
 }
@@ -484,6 +502,8 @@ impl VegetationStream {
             tick: 0,
             center: None,
             stable_frame: None,
+            previous_lods: BTreeMap::new(),
+            grouped_ground: None,
             #[cfg(test)]
             regroup_builds: 0,
         }
@@ -491,6 +511,8 @@ impl VegetationStream {
     /// Replace the immutable snapshot after edits; no stale plant mesh survives.
     pub fn set_world(&mut self, world: World) {
         self.stable_frame = None;
+        self.previous_lods.clear();
+        self.grouped_ground = None;
         self.edits = world.edit_cells().collect();
         self.world = world;
         self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -567,6 +589,9 @@ impl VegetationStream {
             self.stable_frame = None;
             match done {
                 Done::Tile(t, r, p) => {
+                    if t.species != 2 {
+                        self.grouped_ground = None;
+                    }
                     self.pending_tiles.remove(&t);
                     if r == self.world.revision() {
                         self.tiles.insert(t, (p, self.tick.wrapping_add(1)));
@@ -652,12 +677,26 @@ impl VegetationStream {
         let mut submitted = 0;
         let mut plants = Vec::new();
         let mut offscreen = Vec::new();
-        let mut ground: BTreeMap<(u8, i64, i64), Vec<PlantRecord>> = BTreeMap::new();
+        let mut group_key: Vec<_> = demand
+            .iter()
+            .map(|(_, t)| *t)
+            .filter(|t| t.species != 2 && self.tiles.contains_key(t))
+            .collect();
+        group_key.sort_unstable();
+        let previous = self
+            .grouped_ground
+            .take()
+            .filter(|(key, _)| key == &group_key);
+        let ground_reused = previous.is_some();
+        let mut ground = previous.map_or_else(BTreeMap::new, |(_, groups)| groups);
         for (_, t) in demand {
             if let Some((records, used)) = self.tiles.get_mut(&t) {
                 *used = self.tick;
                 for p in records.iter() {
                     if p.species != Species::Rowan {
+                        if ground_reused {
+                            continue;
+                        }
                         for x in (p.root.x - 8).div_euclid(128)..=(p.root.x + 8).div_euclid(128) {
                             for z in (p.root.z - 8).div_euclid(128)..=(p.root.z + 8).div_euclid(128)
                             {
@@ -696,7 +735,7 @@ impl VegetationStream {
                 }
             }
         }
-        for ((s, x, z), records) in ground {
+        for (&(s, x, z), records) in &ground {
             let dx = (x as f64 + 0.5) * 8. - camera[0];
             let dz = (z as f64 + 0.5) * 8. - camera[2];
             let distance = (dx * dx + dz * dz).sqrt();
@@ -725,6 +764,7 @@ impl VegetationStream {
             };
             plants.push((distance, p));
         }
+        self.grouped_ground = Some((group_key, ground));
         // Preserve tall silhouettes before spending the remaining geometry
         // budget on small repeated ground cover. Within each class, nearest wins.
         plants.sort_by(|a, b| {
@@ -748,7 +788,7 @@ impl VegetationStream {
                 .filter(|(_, p)| p.species != Species::Rowan)
                 .map(|(d, p)| {
                     let s = species_id(p.species);
-                    let key = MeshKey {
+                    let mut key = MeshKey {
                         species: s,
                         variant: p.variant,
                         seed: p.seed,
@@ -760,6 +800,33 @@ impl VegetationStream {
                             self.world.revision().max(1)
                         },
                     };
+                    // Reserve this fair worker slot for nearby refinement as
+                    // soon as its own baseline exists. Distant missing baselines
+                    // must not serialize the entire meadow's fine generation.
+                    if !self.config.reference && *d <= 12. && self.meshes.contains_key(&key) {
+                        let preferred = ground_stride(*d, projection, &self.config);
+                        while key.lod > preferred {
+                            let next = MeshKey {
+                                lod: key.lod / 2,
+                                ..key
+                            };
+                            if self.meshes.contains_key(&next) {
+                                key = next;
+                                continue;
+                            }
+                            let limit = self.config.max_triangles / 5;
+                            let estimate =
+                                self.mesh_costs.get(&next).map(|v| v.0).unwrap_or_else(|| {
+                                    self.meshes.get(&key).map_or(usize::MAX, |v| {
+                                        (v.0.indices.len() / 3).saturating_mul(4)
+                                    })
+                                });
+                            if estimate <= limit {
+                                key = next;
+                            }
+                            break;
+                        }
+                    }
                     (*d, *p, key)
                 })
                 .filter(|(_, _, k)| {
@@ -859,7 +926,7 @@ impl VegetationStream {
             } else {
                 self.world.revision().max(1)
             };
-            let key = MeshKey {
+            let mut key = MeshKey {
                 species: s,
                 variant: p.variant,
                 seed: p.seed,
@@ -871,6 +938,14 @@ impl VegetationStream {
                 lod,
                 edit_id,
             };
+            let previous = self.previous_lods.get(&MeshKey { lod: 0, ..key }).copied();
+            if s == 2 && !self.config.reference {
+                key.lod = hysteretic_stride(
+                    key.lod,
+                    selected_stride(distance * 0.9, projection, &self.config).min(4),
+                    previous,
+                );
+            }
             let coarse_key = MeshKey { lod: 8, ..key };
             let ground_headroom = if s != 2 && !self.config.reference {
                 if let Some((mesh, _)) = self.meshes.get(&coarse_key) {
@@ -905,13 +980,15 @@ impl VegetationStream {
             };
             // If fine geometry costs too much, automatically request the next
             // coarser stride. Native desired LOD still drives the quality target.
-            let ground_target = key.lod.max(if distance <= 8. {
+            let ground_target = if self.config.reference {
                 1
-            } else if distance <= 16. {
-                2
             } else {
-                4
-            });
+                hysteretic_stride(
+                    ground_stride(distance, projection, &self.config),
+                    ground_stride(distance * 0.9, projection, &self.config),
+                    previous,
+                )
+            };
             let mut request_key = key;
             if s == 2 && !self.config.reference {
                 if !tree_coverage_ready {
@@ -1167,6 +1244,12 @@ impl VegetationStream {
             shadow_batches,
             stats,
         };
+        self.previous_lods = frame
+            .batches
+            .iter()
+            .take(self.config.max_meshes)
+            .map(|b| (MeshKey { lod: 0, ..b.key }, b.key.lod))
+            .collect();
         if vegetation_trace() {
             let mut ground_lods = [0usize; 4];
             for batch in &frame.batches {
@@ -1512,6 +1595,36 @@ fn mesh_cells_scaled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distance_hysteresis_preserves_detail_until_outside_exit_band() {
+        let c = VegetationConfig::default();
+        assert_eq!(
+            hysteretic_stride(
+                ground_stride(8.1, 100., &c),
+                ground_stride(8.1 * 0.9, 100., &c),
+                Some(1)
+            ),
+            1
+        );
+        assert_eq!(
+            hysteretic_stride(
+                ground_stride(9., 100., &c),
+                ground_stride(9. * 0.9, 100., &c),
+                Some(1)
+            ),
+            2
+        );
+        assert_eq!(
+            hysteretic_stride(1, 1, Some(4)),
+            1,
+            "approach refines immediately"
+        );
+        assert_eq!(
+            hysteretic_stride(4, 2, None),
+            4,
+            "new demand has no invented history"
+        );
+    }
     #[test]
     fn offline_reference_is_opt_in_native_budget_without_species_caps() {
         let default = VegetationConfig::default();
@@ -2002,8 +2115,10 @@ mod tests {
                 .lod,
             1
         );
-        // Reveal another batch while its coarse mesh is still being generated.
-        stream.tiles.get_mut(&tile).unwrap().0.push(PlantRecord {
+        // Deliver the new placement through the real completion/invalidation
+        // path, as opposed to mutating a cached source behind its revision key.
+        let mut records = stream.tiles[&tile].0.clone();
+        records.push(PlantRecord {
             root: Cell {
                 x: 192,
                 y: 0,
@@ -2012,7 +2127,10 @@ mod tests {
             seed: 456,
             ..plant
         });
-        stream.stable_frame = None;
+        let (done, receive) = mpsc::sync_channel(1);
+        stream.rx = receive;
+        done.send(Done::Tile(tile, world.revision(), records))
+            .unwrap();
         let during = stream.update(camera, 720, 1., world.revision());
         assert_eq!(
             during
@@ -2026,7 +2144,7 @@ mod tests {
             "unrelated missing coverage must not flash an already resident tile coarse"
         );
         assert!(during.stats.retained_ground_detail > 0);
-        let farther = stream.update([21., 1.7, 4.], 720, 1., world.revision());
+        let farther = stream.update([25., 1.7, 4.], 720, 1., world.revision());
         assert_eq!(
             farther
                 .batches

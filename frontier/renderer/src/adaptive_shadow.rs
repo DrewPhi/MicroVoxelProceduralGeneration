@@ -110,35 +110,54 @@ impl ShadowResources {
 }
 // Camera-relative matrix keeps double-precision world coordinates out of WGSL.
 // Snap in light-space texels; translations smaller than a map texel remain stable.
-pub(super) fn light_matrix(camera: &Camera, lighting: [f32; 12], origin: DVec3) -> Mat4 {
-    let sun = Vec3::new(lighting[0], lighting[1], lighting[2]).normalize_or_zero();
-    let sun = if sun.length_squared() > 0.5 {
-        sun
-    } else {
-        Vec3::Y
-    };
-    let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let right = up.cross(sun).normalize();
-    let light_up = sun.cross(right).normalize();
-    let forward = camera.direction().as_dvec3();
-    let mut center =
-        camera.position + DVec3::new(forward.x, 0., forward.z).normalize_or_zero() * 300.;
-    let texel = (HALF_EXTENT * 2. / SIZE as f32) as f64;
-    for axis in [right.as_dvec3(), light_up.as_dvec3()] {
-        let distance = center.dot(axis);
-        center += axis * ((distance / texel).round() * texel - distance);
-    }
-    let center = (center - origin).as_vec3();
-    let view = Mat4::look_at_rh(center + sun * 6000., center, up);
-    Mat4::orthographic_rh(
-        -HALF_EXTENT,
-        HALF_EXTENT,
-        -HALF_EXTENT,
-        HALF_EXTENT,
-        1.,
-        12000.,
-    ) * view
+pub(super) struct LightFrame {
+    sun: Vec3,
+    up: Vec3,
+    center: DVec3,
+    projection: Mat4,
 }
+impl LightFrame {
+    pub(super) fn new(camera: &Camera, lighting: [f32; 12]) -> Self {
+        let sun = Vec3::new(lighting[0], lighting[1], lighting[2]).normalize_or_zero();
+        let sun = if sun.length_squared() > 0.5 {
+            sun
+        } else {
+            Vec3::Y
+        };
+        let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+        let right = up.cross(sun).normalize();
+        let light_up = sun.cross(right).normalize();
+        let forward = camera.direction().as_dvec3();
+        let mut center =
+            camera.position + DVec3::new(forward.x, 0., forward.z).normalize_or_zero() * 300.;
+        let texel = (HALF_EXTENT * 2. / SIZE as f32) as f64;
+        for axis in [right.as_dvec3(), light_up.as_dvec3()] {
+            let distance = center.dot(axis);
+            center += axis * ((distance / texel).round() * texel - distance);
+        }
+        Self {
+            sun,
+            up,
+            center,
+            projection: Mat4::orthographic_rh(
+                -HALF_EXTENT,
+                HALF_EXTENT,
+                -HALF_EXTENT,
+                HALF_EXTENT,
+                1.,
+                12000.,
+            ),
+        }
+    }
+    pub(super) fn matrix(&self, origin: DVec3) -> Mat4 {
+        let center = (self.center - origin).as_vec3();
+        self.projection * Mat4::look_at_rh(center + self.sun * 6000., center, self.up)
+    }
+}
+pub(super) fn light_matrix(camera: &Camera, lighting: [f32; 12], origin: DVec3) -> Mat4 {
+    LightFrame::new(camera, lighting).matrix(origin)
+}
+
 fn intersects_light_bounds(matrix: Mat4, bounds: [Vec3; 2]) -> bool {
     let mut low = Vec3::splat(f32::INFINITY);
     let mut high = Vec3::splat(f32::NEG_INFINITY);
@@ -163,6 +182,7 @@ impl AdaptiveGpu {
         owners: &HashSet<TileKey>,
     ) {
         self.shadows.keys.clear();
+        let light_frame = LightFrame::new(camera, self.lighting);
         let matrix = near_light_matrix(camera, self.lighting);
         let mut near_uniform = [0f32; 20];
         near_uniform[..16].copy_from_slice(&matrix.to_cols_array());
@@ -198,10 +218,7 @@ impl AdaptiveGpu {
                 .iter()
                 .filter(|k| {
                     self.clusters.get(k).is_some_and(|c| {
-                        intersects_light_bounds(
-                            light_matrix(camera, self.lighting, c.origin),
-                            c.bounds,
-                        )
+                        intersects_light_bounds(light_frame.matrix(c.origin), c.bounds)
                     })
                 })
                 .copied(),
@@ -210,7 +227,7 @@ impl AdaptiveGpu {
         let mut bytes = vec![0u8; self.shadows.keys.len() * UNIFORM_STRIDE as usize];
         for (i, key) in self.shadows.keys.iter().enumerate() {
             let c = &self.clusters[key];
-            let matrix = light_matrix(camera, self.lighting, c.origin).to_cols_array();
+            let matrix = light_frame.matrix(c.origin).to_cols_array();
             let start = i * UNIFORM_STRIDE as usize;
             bytes[start..start + 64].copy_from_slice(bytemuck::cast_slice(&matrix));
         }

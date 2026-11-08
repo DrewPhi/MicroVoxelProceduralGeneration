@@ -213,31 +213,10 @@ pub(crate) fn build_map_with_config_and_predicate(
     ) {
         return Err("appearance map prefilter radius must be 1, 2 or 4 native cells".into());
     }
-    if !matches!(intervals, 2 | 4 | 8) {
-        return Err("appearance map intervals must be 2, 4 or 8".into());
-    }
-    if edge <= 0 {
-        return Err("appearance map requires a positive native-cell edge".into());
-    }
-    let mut spacing = TARGET_SPACING_CELLS;
-    while i128::from(spacing) * (intervals as i128) < i128::from(edge) {
-        spacing = spacing
-            .checked_mul(2)
-            .ok_or("appearance map spacing overflow")?;
-    }
-    let mut map_origin = [0; 2];
-    let mut dimension = 0;
-    for axis in 0..2 {
-        // i128 intermediates also make negative floor division explicit.
-        let start = i128::from(origin[axis]).div_euclid(i128::from(spacing)) * i128::from(spacing);
-        map_origin[axis] = i64::try_from(start).map_err(|_| "appearance map origin overflow")?;
-        let end = i128::from(origin[axis]) + i128::from(edge);
-        let intervals = (end - start + i128::from(spacing) - 1) / i128::from(spacing);
-        dimension = dimension.max(intervals as usize + 1);
-    }
-    if dimension > intervals + 2 {
-        return Err("appearance map exceeds bounded dimensions".into());
-    }
+    let map = layout(origin, edge, intervals)?;
+    let map_origin = map.origin_cells;
+    let spacing = map.spacing_cells;
+    let dimension = map.dimension;
     // Cache only the native source payload, keeping this independent of the
     // hierarchy's representation or any mip/geometry-dependent cache key.
     let mut columns = HashMap::<[i64; 2], (i64, [[f32; 3]; 3])>::new();
@@ -266,21 +245,7 @@ pub(crate) fn build_map_with_config_and_predicate(
                     .map_err(|_| "appearance map node overflow".to_string())
             };
             let point = [coordinate(0, x)?, coordinate(1, z)?];
-            let node_prefilter = if prefilter != MapPrefilter::Off && !allowed(column(point)?.1[0])
-            {
-                MapPrefilter::Off
-            } else {
-                prefilter
-            };
-            let profile = if node_prefilter == MapPrefilter::Footprint && spacing > 4 {
-                let mut filtered = [[0.; 4]; 5];
-                for probe in footprint_probes(point, spacing)? {
-                    add_weighted(&mut filtered, box_profile(probe, 1, &mut column)?, 0.25);
-                }
-                filtered
-            } else {
-                box_profile(point, node_prefilter.footprint_radius(spacing), &mut column)?
-            };
+            let profile = node_profile(point, spacing, prefilter, &allowed, &mut column)?;
             profiles.push(profile);
         }
     }
@@ -290,6 +255,71 @@ pub(crate) fn build_map_with_config_and_predicate(
         dimension,
         profiles,
     })
+}
+
+/// Globally aligned layout, available before any expensive source queries.
+pub(crate) fn layout(
+    origin: [i64; 2],
+    edge: i64,
+    intervals: usize,
+) -> Result<AppearanceMap, String> {
+    if !matches!(intervals, 2 | 4 | 8) {
+        return Err("appearance map intervals must be 2, 4 or 8".into());
+    }
+    if edge <= 0 {
+        return Err("appearance map requires a positive native-cell edge".into());
+    }
+    let mut spacing = TARGET_SPACING_CELLS;
+    while i128::from(spacing) * (intervals as i128) < i128::from(edge) {
+        spacing = spacing
+            .checked_mul(2)
+            .ok_or("appearance map spacing overflow")?;
+    }
+    let mut map_origin = [0; 2];
+    let mut dimension = 0;
+    for axis in 0..2 {
+        // i128 intermediates also make negative floor division explicit.
+        let start = i128::from(origin[axis]).div_euclid(i128::from(spacing)) * i128::from(spacing);
+        map_origin[axis] = i64::try_from(start).map_err(|_| "appearance map origin overflow")?;
+        let end = i128::from(origin[axis]) + i128::from(edge);
+        let intervals = (end - start + i128::from(spacing) - 1) / i128::from(spacing);
+        dimension = dimension.max(intervals as usize + 1);
+    }
+    if dimension > intervals + 2 {
+        return Err("appearance map exceeds bounded dimensions".into());
+    }
+    Ok(AppearanceMap {
+        origin_cells: map_origin,
+        spacing_cells: spacing,
+        dimension,
+        profiles: Vec::new(),
+    })
+}
+
+/// Evaluate exactly one node. Callers may memoize the result using world,
+/// position, effective footprint and surface-filter policy identity.
+pub(crate) fn node_profile(
+    point: [i64; 2],
+    spacing: i64,
+    prefilter: MapPrefilter,
+    allowed: &impl Fn([f32; 3]) -> bool,
+    column: &mut impl FnMut([i64; 2]) -> Result<(i64, [[f32; 3]; 3]), String>,
+) -> Result<Profile, String> {
+    let node_prefilter = if prefilter != MapPrefilter::Off && !allowed(column(point)?.1[0]) {
+        MapPrefilter::Off
+    } else {
+        prefilter
+    };
+    let profile = if node_prefilter == MapPrefilter::Footprint && spacing > 4 {
+        let mut filtered = [[0.; 4]; 5];
+        for probe in footprint_probes(point, spacing)? {
+            add_weighted(&mut filtered, box_profile(probe, 1, column)?, 0.25);
+        }
+        filtered
+    } else {
+        box_profile(point, node_prefilter.footprint_radius(spacing), column)?
+    };
+    Ok(profile)
 }
 
 fn add_weighted(target: &mut Profile, source: Profile, weight: f32) {

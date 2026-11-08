@@ -6,7 +6,7 @@ use crate::{
     mesh, Camera,
 };
 use frontier_runtime::occlusion::{Aabb, OcclusionSet};
-use glam::{DVec3, Vec3};
+use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -1050,7 +1050,6 @@ impl AdaptiveGpu {
         owners: &HashSet<TileKey>,
         pixel_error: f64,
     ) -> DrawStats {
-        self.prepare_shadows(device, queue, camera, owners);
         // Reuse only identical current demand and immutable resident content.
         // Upload/removal/filter changes invalidate this snapshot immediately.
         if self.prepared_view_enabled
@@ -1065,9 +1064,19 @@ impl AdaptiveGpu {
             self.update_command_stats(&mut stats);
             return stats;
         }
+        self.prepare_shadows(device, queue, camera, owners);
         self.prepared_view_misses += 1;
         self.visible.clear();
         self.camera_upload.clear();
+        let light_frame = adaptive_shadow::LightFrame::new(camera, self.lighting);
+        let projection = Mat4::perspective_rh(
+            camera.fov_y.to_radians(),
+            width as f32 / height as f32,
+            0.025,
+            camera.far,
+        );
+        let direction = camera.direction();
+        let queries = crate::adaptive_stream::CameraQueries::new(camera, width, height);
         let mut stats = DrawStats {
             resident_clusters: self.clusters.len(),
             cluster_capacity: MAX_CLUSTERS,
@@ -1147,15 +1156,11 @@ impl AdaptiveGpu {
             if !owners.contains(&key) {
                 continue;
             }
-            if !crate::adaptive_stream::cached_bounds_visible(
-                [c.canonical_bounds.min, c.canonical_bounds.max],
-                camera,
-                width,
-                height,
-            ) {
+            if !queries.visible([c.canonical_bounds.min, c.canonical_bounds.max]) {
                 continue;
             }
-            let matrix = camera.matrix(c.origin, width as f32 / height as f32);
+            let matrix = projection
+                * Mat4::look_to_rh((camera.position - c.origin).as_vec3(), direction, Vec3::Y);
             if occlusion
                 .as_ref()
                 .is_some_and(|set| set.occludes(c.canonical_bounds))
@@ -1177,14 +1182,7 @@ impl AdaptiveGpu {
                 _ => {}
             }
             let error = c.best_error_m.map_or(f64::INFINITY, |e| {
-                crate::adaptive_stream::projected_cached_vertical_error(
-                    e,
-                    c.proxy_bounds,
-                    c.origin,
-                    camera,
-                    width,
-                    height,
-                )
+                queries.vertical_error(e,c.proxy_bounds,c.origin)
             });
             let error = crate::adaptive_stream::weighted_near_detail_error(
                 error,
@@ -1259,7 +1257,7 @@ impl AdaptiveGpu {
             lighting[11] = ((key.width_cells.ilog2() << 5) | key.step_cells.ilog2()) as f32;
             bytes[96..144].copy_from_slice(bytemuck::cast_slice(&lighting));
             bytes[144..208].copy_from_slice(bytemuck::cast_slice(
-                &adaptive_shadow::light_matrix(camera, self.lighting, c.origin).to_cols_array(),
+                &light_frame.matrix(c.origin).to_cols_array(),
             ));
             let offset = self.camera_upload.len();
             self.camera_upload

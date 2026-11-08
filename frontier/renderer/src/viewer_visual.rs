@@ -34,6 +34,10 @@ impl Viewer {
         };
         if let Some(probe) = &self.gpu_probe {
             stats.gpu_ms = probe.stats.summary().p50_ms;
+            stats.gpu_full_ms = probe
+                .full_supported
+                .then(|| probe.full_stats.summary().p50_ms)
+                .flatten();
         }
         if let Some(view) = &self.adaptive_view {
             stats.pending = view.pending_count;
@@ -49,7 +53,14 @@ impl Viewer {
             .map_or(0., |p| p.stats().resident_bytes as f64 / 1048576.);
         let was_open = ui.menu_open();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let changes = ui.prepare(window, &gpu.device, &gpu.queue, &mut encoder, &stats);
+        let changes = ui.prepare(
+            window,
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &stats,
+            [self.width, self.height],
+        );
         gpu.queue.submit(Some(encoder.finish()));
         let now_open = ui.menu_open();
         let settings = ui.settings().clone();
