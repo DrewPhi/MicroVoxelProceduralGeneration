@@ -88,9 +88,28 @@ impl MapPrefilter {
 /// FRONTIER_MAP_PREFILTER=off|on|footprint (default off). Native `on`
 /// accepts FRONTIER_MAP_PREFILTER_RADIUS_CELLS=1|2|4, default 1. Footprint
 /// uses four radius-one microfilters, bounded to 85 source columns per node, including the center policy query.
+static PREFILTER: std::sync::OnceLock<MapPrefilter> = std::sync::OnceLock::new();
+
+/// Viewer meadow policy. Explicit environment settings remain authoritative;
+/// tests and file-format fixtures retain point sampling unless initialized here.
+/// Radius two integrates a full four-cell staircase phase without increasing
+/// map density or applying a texel-sized blur to canonical rock detail.
+pub(crate) fn initialize_meadow_application() {
+    PREFILTER.get_or_init(|| {
+        let mode = std::env::var("FRONTIER_MAP_PREFILTER").ok();
+        let radius = std::env::var("FRONTIER_MAP_PREFILTER_RADIUS_CELLS").ok();
+        meadow_prefilter(mode.as_deref(), radius.as_deref())
+    });
+}
+fn meadow_prefilter(mode: Option<&str>, radius: Option<&str>) -> MapPrefilter {
+    match mode {
+        None => parse_prefilter(Some("on"), radius.or(Some("2"))),
+        Some(_) => parse_prefilter(mode, radius),
+    }
+}
+
 pub(crate) fn map_prefilter() -> MapPrefilter {
-    static CONFIG: std::sync::OnceLock<MapPrefilter> = std::sync::OnceLock::new();
-    *CONFIG.get_or_init(|| {
+    *PREFILTER.get_or_init(|| {
         parse_prefilter(
             std::env::var("FRONTIER_MAP_PREFILTER").ok().as_deref(),
             std::env::var("FRONTIER_MAP_PREFILTER_RADIUS_CELLS")
@@ -617,6 +636,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn meadow_policy_filters_full_staircase_phase_with_bounded_work_and_overrides() {
+        let candidate = MapPrefilter::NativeBox { radius_cells: 2 };
+        assert_eq!(meadow_prefilter(None, None), candidate);
+        assert_eq!(candidate.max_probe_columns(1024), 45);
+        assert_eq!(meadow_prefilter(Some("off"), None), MapPrefilter::Off);
+        assert_eq!(
+            meadow_prefilter(Some("footprint"), None),
+            MapPrefilter::Footprint
+        );
+        assert_eq!(
+            meadow_prefilter(None, Some("1")),
+            MapPrefilter::NativeBox { radius_cells: 1 }
+        );
+        assert_eq!(
+            meadow_prefilter(Some("on"), None),
+            MapPrefilter::NativeBox { radius_cells: 1 }
+        );
+        // The canonical quarter-slope can alias to a constant wrong side area
+        // at arbitrarily large map spacings. Integrate native phase first.
+        for edge in [16, 128, 1024] {
+            let mut areas = Vec::new();
+            for phase in 0..4 {
+                let map = build_map_with_config([0, 0], edge, 2, candidate, |x, _| {
+                    Ok(AppearanceColumn {
+                        height: (x + phase).div_euclid(4),
+                        colors: [[0.2, 0.6, 0.1]; 3],
+                    })
+                })
+                .unwrap();
+                areas.push(map.profiles[0][2][3]);
+            }
+            assert_eq!(areas, vec![0.25; 4]);
+        }
+    }
     #[test]
     fn prefilter_configuration_is_opt_in_and_radius_is_native_bounded() {
         for mode in [None, Some("off"), Some("ON"), Some(""), Some("true")] {

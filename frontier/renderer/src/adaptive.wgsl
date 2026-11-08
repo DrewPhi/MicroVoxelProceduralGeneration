@@ -14,8 +14,13 @@ fn terrain_lighting(normal:vec3<f32>, visibility:f32) -> vec3<f32> {
     if camera.sun.w > 0.5 {
         let sky=0.5+0.5*n.y;
         let overcast=camera.sky.x;
-        let ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
-        let direct=vec3(0.83,0.75,0.60)*max(dot(n,camera.sun.xyz),0.);
+        var ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
+        var sun_color=vec3(0.83,0.75,0.60);
+        if (camera.paint_origin.w&4u)!=0u {
+            ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
+            sun_color=vec3(2.0,1.7,1.2);
+        }
+        let direct=sun_color*max(dot(n,camera.sun.xyz),0.);
         return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
     }
     return legacy_terrain_lighting(normal);

@@ -18,7 +18,7 @@ pub(super) struct ShadowResources {
     empty_bind: Option<wgpu::BindGroup>,
     keys: Vec<TileKey>,
 }
-pub(super) fn sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(crate) fn sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bounded Alpine shadow sampling"),
         entries: &[
@@ -432,6 +432,15 @@ fn near_light_matrix(camera: &Camera, lighting: [f32; 12]) -> Mat4 {
         * Mat4::look_at_rh(center + sun * 128., center, up)
 }
 impl AdaptiveGpu {
+    /// Published terrain depth uses the same bounded owner set as surface shadows.
+    pub(crate) fn far_shadow_bind(&self) -> &wgpu::BindGroup {
+        &self.shadows.sampling_bind
+    }
+    /// Eye-relative input for the atmosphere pass; terrain's draw uniforms instead
+    /// use each cluster origin. Both map to the identical world-snapped light map.
+    pub(crate) fn far_shadow_projection(&self, camera: &Camera) -> Mat4 {
+        light_matrix(camera, self.lighting, camera.position)
+    }
     pub(crate) fn near_shadow_bind(&self) -> &wgpu::BindGroup {
         &self.shadows.near.bind
     }
@@ -467,6 +476,19 @@ impl AdaptiveGpu {
 #[cfg(test)]
 mod near_tests {
     use super::*;
+    #[test]
+    fn atmosphere_and_cluster_shadow_coordinates_agree() {
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(1e8, 42., -1e8);
+        let origin = camera.position + DVec3::new(32., -8., 64.);
+        let world_point = camera.position + DVec3::new(7., 3., 22.);
+        let lighting = [0.4, 0.8, 0.3, 1., 0., 1., 0., 0., 0., 0., 0., 1.];
+        let eye_relative = light_matrix(&camera, lighting, camera.position)
+            .transform_point3((world_point - camera.position).as_vec3());
+        let cluster_relative = light_matrix(&camera, lighting, origin)
+            .transform_point3((world_point - origin).as_vec3());
+        assert!((eye_relative - cluster_relative).abs().max_element() < 1e-5);
+    }
     #[test]
     fn near_shadow_depth_decreases_toward_the_sun() {
         let camera = Camera::fixture();

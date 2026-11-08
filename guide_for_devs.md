@@ -272,3 +272,5 @@ records, voxel models and collision queries are independent of display LOD.
 `vegetation_gpu.rs` batches instances, and `vegetation_scene.rs` integrates them.
 `walking.rs` provides the small axis-swept walking camera. See
 [vegetation controls, budgets and validation](frontier/VEGETATION.md).
+
+The [cozy meadow checkpoint](frontier/COZY_SCENE.md) describes the current Alpine procedural vegetation, cache budgets, HDR scene target and bounded shadowed-air/cloud passes. Plant geometry is derived from each canonical record seed; caches retain generated products rather than choosing prebuilt assets.

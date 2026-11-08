@@ -36,6 +36,7 @@ struct Out {
     @location(3) @interpolate(flat) seed:u32,
     @location(4) local:vec3<f32>,
     @location(5) ao:f32,
+    @location(6) transmission:f32,
 };
 fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     switch turn&3u {
@@ -47,7 +48,7 @@ fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
 }
 @vertex fn vs_main(
     @location(0) position:vec3<f32>, @location(1) normal:vec3<f32>, @location(2) color:vec3<f32>,
-    @location(3) root:vec3<f32>, @location(4) turn:u32, @location(5) fade:f32, @location(6) seed:u32, @location(7) ao:f32
+    @location(3) root:vec3<f32>, @location(4) turn:u32, @location(5) fade:f32, @location(6) seed:u32, @location(7) ao:f32, @location(8) transmission:f32
 )->Out {
     var out:Out;
     // World cell indices rotate about the root cell center, so q1 maps the
@@ -60,6 +61,7 @@ fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     out.fade=fade;
     out.seed=seed;
     out.ao=ao;
+    out.transmission=transmission;
     return out;
 }
 fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
@@ -76,6 +78,35 @@ fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
     let ambient=mix(vec3<f32>(0.12,0.105,0.085),vec3<f32>(0.28,0.33,0.40),sky);
     return ambient+vec3<f32>(0.78,0.70,0.58)*max(dot(n,sun),0.);
 }
+// A bounded thin-leaf approximation, selected by canonical material rather than
+// pigment. It changes illumination only: wood remains opaque and voxel geometry,
+// silhouettes and depth stay identical. Ambient visibility limits interior glow.
+fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
+    let n=normalize(i.normal);
+    let sun=normalize(lighting.sun.xyz);
+    let overcast=clamp(lighting.sky.x,0.,1.);
+    let sky=0.5+0.5*n.y;
+    let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
+    let sunlight=vec3(2.0,1.7,1.2)*(1.-0.72*overcast);
+    let direct=sunlight*max(dot(n,sun),0.)*visibility;
+    let view=normalize(camera.eye.xyz-i.local);
+    // Forward scattering is strongest when the observer faces the sun through
+    // the leaf. A small residual represents leaf thickness below shadow texels;
+    // this is artistic single scattering, not a volume transport solution.
+    let forward=pow(max(dot(-view,sun),0.),4.);
+    let back=max(-dot(n,sun),0.);
+    let transmitted=sunlight*vec3(0.88,1.,0.44)*0.50*i.transmission
+        *(0.25+0.75*forward)*back*(0.08+0.92*visibility)*ao*ao;
+    // Nontransmitting plant material is wood, selected by its explicit material
+    // response rather than pigment. Approximate warm ground irradiance reaches
+    // vertical/down-facing bark in addition to cool sky fill. It follows solar
+    // elevation, overcast and ambient visibility; it is reflected illumination,
+    // independent of the directly shadowed sun term, never added emission.
+    let wood=1.-step(0.001,i.transmission);
+    let ground=0.5-0.5*n.y;
+    let bounce=sunlight*vec3(0.45,0.30,0.12)*max(sun.y,0.)*ground*ao*wood;
+    return ambient*(1.+overcast*0.3)*ao+direct+transmitted+bounce;
+}
 @fragment fn fs_main(i:Out)->@location(0) vec4<f32> {
     // Fixed canonical-cell/instance threshold: no time noise or transparency.
     // Opaque survivors write normal scene depth and receive its atmosphere pass.
@@ -87,5 +118,8 @@ fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
     }
     let ao=mix(1.,i.ao,lighting.sky.y);
     let visibility=plant_shadow(i.local,i.normal,lighting.sun.xyz);
+    if lighting.sky.y>0.5 && lighting.sun.w>0.5 {
+        return vec4<f32>(i.color*beauty_plant_lighting(i,visibility,ao),1.);
+    }
     return vec4<f32>(i.color*terrain_lighting(i.normal,visibility,ao),1.);
 }

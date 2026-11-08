@@ -110,17 +110,18 @@ impl Viewer {
         gpu.voxel_filter = s.voxel_filter;
         gpu.adaptive = Some(adaptive_gpu::AdaptiveGpu::new(
             &gpu.device,
-            gpu.format,
+            gpu.scene_format,
             s.msaa,
         ));
         gpu.visual_settings = Some(s.clone());
-        self.atmosphere = Some(atmosphere::Atmosphere::new(
+        self.atmosphere = Some(atmosphere::Atmosphere::new_with_scene_format(
             &gpu.device,
             gpu.format,
             self.width,
             self.height,
             s.render_scale,
             s.msaa,
+            gpu.scene_format,
         ));
         self.depth = Some(gpu.texture(self.width, self.height, true));
         self.multisample = gpu.multisample_texture(self.width, self.height);

@@ -1,0 +1,32 @@
+{
+  "scope": "Art-direction comparison; changed procedural vegetation and lighting, not a matched quality/performance optimization claim",
+  "reuse_tier": "G; greenfield implementation, no old renderer port",
+  "binary_sha256": "e8a7313940c3e350c6b8549622f25f4fbfba07cf14ac656e094911adb1e9b56b",
+  "terrain_source_version": 4,
+  "vegetation_source_version": 3,
+  "native_voxel_m": 0.0625,
+  "camera": {
+    "eye": [
+      -43.625,
+      31.0625,
+      -289.5625
+    ],
+    "target": [
+      -43.625,
+      31.3625,
+      -259.5625
+    ],
+    "fov_y_degrees": 60
+  },
+  "normal_command": "./run.sh --preset alpine --width 1280 --height 720 --eye -43.625,31.0625,-289.5625 --target -43.625,31.3625,-259.5625 --adaptive-disk-cache output/cozy-scene/map-cache --adaptive-disk-mib 1024 --capture output/cozy-scene/final.png",
+  "reference_qualification": "Same world/camera/light. 1920x1080, pixel-error 4.5 (same angular error as 1280x720 at 3), native plant geometry and 2048-square near shadow map. Terrain remains adaptive with finite plant ranges. Not path-traced or full-world exact.",
+  "benchmark_scope": "Short uncapped settled laptop runs: static 1080p at pixel-error 4.5; moving 720p at pixel-error 3 and 3 m/s. Opaque GPU query excludes atmosphere and shadows; whole-frame intervals include presentation. Not a 60 FPS claim.",
+  "ai_asset": "../../inspiration/cozy-meadow-ai-v1.png; concept only",
+  "tests": {
+    "workspace_passed": 457,
+    "ignored": 11,
+    "shaders": "Naga validates1x/4x atmosphere variants, vegetation and shadows",
+    "primary": "PNG, linear RGB, depth and coverage buffers all byte-identical to frozen pre-change baseline; primary-regression.json"
+  },
+  "generated_assets": "Every plant full-record seed and habitat/growth rules. Mesh caches retain derived geometry, never pick copied plant assets."
+}

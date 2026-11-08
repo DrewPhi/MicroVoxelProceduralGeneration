@@ -8,6 +8,7 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
             self.vegetation.take();
             self.vegetation_stream.take();
@@ -45,7 +46,7 @@ impl Gpu {
         if self.vegetation.is_none() || self.vegetation_samples != self.sample_count {
             self.vegetation = Some(vegetation_gpu::VegetationGpu::new(
                 &self.device,
-                self.format,
+                self.scene_format,
                 self.sample_count,
                 &self.native_layout,
             ));
@@ -111,7 +112,7 @@ impl Gpu {
             .as_ref()
             .map(|v| v.stats())
             .unwrap_or_default();
-        format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":28,\"flower_radius_m\":56,\"tree_radius_m\":220,\"shadow_casters\":{},\"shadow_instances\":{},\"shadow_triangles\":{},\"reference_mode\":{},\"reference_budget_exceeded\":{},\"canonical_voxel_m\":0.0625}}",
-            self.vegetation.is_some(),frontier_world::vegetation::VEGETATION_SOURCE_VERSION,s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded)
+        format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"instance_units\":\"ground_tiles_and_individual_trees\",\"model_generation\":\"full_record_seed_rules\",\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":28,\"flower_radius_m\":56,\"tree_radius_m\":220,\"shadow_casters\":{},\"shadow_instances\":{},\"shadow_triangles\":{},\"reference_mode\":{},\"reference_budget_exceeded\":{},\"cpu_geometry_budget_bytes\":{},\"gpu_budget_bytes\":{},\"gpu_actual_budget_bytes\":{},\"shadow_only_instances\":{},\"shadow_only_triangles\":{},\"canonical_voxel_m\":0.0625}}",
+            self.vegetation.is_some(),frontier_world::vegetation::VEGETATION_SOURCE_VERSION,s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded,s.mesh_budget_bytes,s.gpu_budget_bytes,g.cache_budget_bytes,s.shadow_only_instances,s.shadow_only_triangles)
     }
 }

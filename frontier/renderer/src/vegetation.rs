@@ -22,11 +22,15 @@ pub struct VegetationVertex {
     pub color: [f32; 3],
     /// Static display-only ambient visibility; never modifies canonical pigment.
     pub ao: f32,
+    pub transmission: f32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct MeshKey {
     pub species: u8,
     pub variant: u8,
+    pub seed: u64,
+    /// Global native-grid ground-cover tile; zero for individual trees.
+    pub tile: [i64; 2],
     /// Native-cell stride: 1,2,4,8.
     pub lod: u8,
     pub edit_id: u64,
@@ -42,6 +46,7 @@ pub struct VegetationInstance {
     pub quarter_turn: u32,
     pub fade: f32,
 }
+#[derive(Clone)]
 pub struct VegetationBatch {
     pub key: MeshKey,
     pub mesh: Arc<VegetationMesh>,
@@ -66,10 +71,18 @@ pub struct VegetationStats {
     pub coverage_unresolved: usize,
     /// Offline native reference is incomplete if the global budget rejected a plant.
     pub reference_budget_exceeded: bool,
+    pub reference: bool,
+    pub mesh_budget_bytes: usize,
+    pub gpu_budget_bytes: usize,
+    pub shadow_only_instances: usize,
+    pub shadow_only_triangles: usize,
 }
+#[derive(Clone)]
 pub struct VegetationFrame {
     pub origin: [i64; 3],
     pub batches: Vec<VegetationBatch>,
+    /// Light-visible near trees culled from the color view.
+    pub shadow_batches: Vec<VegetationBatch>,
     pub stats: VegetationStats,
 }
 #[derive(Clone, Debug)]
@@ -93,7 +106,7 @@ impl Default for VegetationConfig {
             tree_radius_m: 220.,
             pixel_error: 1.25,
             max_tiles: 384,
-            max_meshes: 128,
+            max_meshes: 512,
             max_instances: 12_000,
             max_triangles: 1_000_000,
             reference: false,
@@ -111,12 +124,23 @@ impl VegetationConfig {
         self
     }
 }
-fn ground_density_fade(distance: f64, radius: f64, rank: f64) -> f32 {
-    let t = ((distance / radius.max(0.001) - 0.25) / 0.75).clamp(0., 1.);
-    let density = 1. - 0.65 * t * t;
-    // The upper end of the interval is density+0.1, so density=1 gives
-    // complete native coverage for every stable rank, including rank=1.
-    ((density + 0.1 - rank) / 0.1).clamp(0., 1.) as f32
+fn ground_key(p: &PlantRecord, lod: u8, edit_id: u64) -> MeshKey {
+    MeshKey {
+        species: species_id(p.species),
+        variant: p.variant,
+        seed: p.seed,
+        tile: [p.root.x.div_euclid(128), p.root.z.div_euclid(128)],
+        lod,
+        edit_id,
+    }
+}
+fn selected_stride(distance: f64, projection: f64, config: &VegetationConfig) -> u8 {
+    let pixel = VOXEL_SIZE * projection / distance.max(1.);
+    let mut lod = 1;
+    while !config.reference && lod < 8 && pixel * (lod * 2) as f64 <= config.pixel_error as f64 {
+        lod *= 2;
+    }
+    lod
 }
 fn budget_allows(
     config: &VegetationConfig,
@@ -207,22 +231,23 @@ impl CullView {
                 <= radius * (1. + self.tan_y * self.tan_y).sqrt()
     }
     fn plant_visible(&self, p: &PlantRecord) -> bool {
-        // Canonical models are prewarmed at scene startup. The bounding sphere
-        // encloses the full rotated box, including automatic coarse-cell expansion.
-        let model = vegetation::model_for(p);
-        let min = glam::DVec3::new(model.min.x as f64, model.min.y as f64, model.min.z as f64);
-        let max = glam::DVec3::new(model.max.x as f64, model.max.y as f64, model.max.z as f64);
-        let pivot = glam::DVec3::new(0.5, 0., 0.5);
-        let center = (min + max) * 0.5 - pivot;
-        let center = match p.rotation % 4 {
-            1 => glam::DVec3::new(-center.z, center.y, center.x),
-            2 => glam::DVec3::new(-center.x, center.y, -center.z),
-            3 => glam::DVec3::new(center.z, center.y, -center.x),
-            _ => center,
+        // Conservative source bounds avoid generating unique trees on the render
+        // thread. Detailed meshes and their exact boxes belong to the worker.
+        let (radius, height) = if p.species == Species::Rowan {
+            (
+                vegetation::MAX_PLANT_RADIUS_CELLS as f64,
+                vegetation::MAX_PLANT_HEIGHT_CELLS as f64,
+            )
+        } else {
+            (8., 12.)
         };
-        let root = glam::DVec3::new(p.root.x as f64, p.root.y as f64, p.root.z as f64);
-        let radius = ((max - min) * 0.5).length() * VOXEL_SIZE + 7. * VOXEL_SIZE * 3f64.sqrt();
-        self.intersects_sphere((root + pivot + center) * VOXEL_SIZE, radius)
+        let center = glam::DVec3::new(
+            p.root.x as f64,
+            p.root.y as f64 + height * 0.5,
+            p.root.z as f64,
+        ) * VOXEL_SIZE;
+        let bound = (2. * radius * radius + height * height * 0.25).sqrt() * VOXEL_SIZE;
+        self.intersects_sphere(center, bound + 7. * VOXEL_SIZE * 3f64.sqrt())
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -234,6 +259,7 @@ struct Tile {
 enum Job {
     Tile(Tile, World, u64),
     Mesh(MeshKey, PlantRecord, World, u64),
+    Ground(MeshKey, PlantRecord, World, u64),
 }
 enum Done {
     Tile(Tile, u64, Vec<PlantRecord>),
@@ -262,6 +288,63 @@ fn mix(mut x: u64) -> u64 {
 }
 const TILE_CELLS: i64 = 512;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StableFrameKey {
+    camera: [u64; 3],
+    viewport_height: u32,
+    fov_y: u32,
+    world_revision: u64,
+    config: [u64; 9],
+    view: Option<[u64; 14]>,
+}
+impl StableFrameKey {
+    fn new(
+        camera: [f64; 3],
+        viewport_height: u32,
+        fov_y: f32,
+        world_revision: u64,
+        config: &VegetationConfig,
+        view: Option<CullView>,
+    ) -> Self {
+        Self {
+            camera: camera.map(f64::to_bits),
+            viewport_height,
+            fov_y: fov_y.to_bits(),
+            world_revision,
+            config: [
+                config.grass_radius_m.to_bits(),
+                config.flower_radius_m.to_bits(),
+                config.tree_radius_m.to_bits(),
+                u64::from(config.pixel_error.to_bits()),
+                config.max_tiles as u64,
+                config.max_meshes as u64,
+                config.max_instances as u64,
+                config.max_triangles as u64,
+                u64::from(config.reference),
+            ],
+            view: view.map(|v| {
+                [
+                    v.eye.x,
+                    v.eye.y,
+                    v.eye.z,
+                    v.forward.x,
+                    v.forward.y,
+                    v.forward.z,
+                    v.right.x,
+                    v.right.y,
+                    v.right.z,
+                    v.up.x,
+                    v.up.y,
+                    v.up.z,
+                    v.tan_x,
+                    v.tan_y,
+                ]
+                .map(f64::to_bits)
+            }),
+        }
+    }
+}
+
 pub struct VegetationStream {
     world: World,
     edits: Vec<Cell>,
@@ -272,10 +355,14 @@ pub struct VegetationStream {
     epoch: Arc<AtomicU64>,
     tiles: BTreeMap<Tile, (Vec<PlantRecord>, u64)>,
     meshes: BTreeMap<MeshKey, (Arc<VegetationMesh>, u64)>,
+    mesh_costs: BTreeMap<MeshKey, (usize, u64)>,
     pending_tiles: BTreeSet<Tile>,
     pending_meshes: BTreeSet<MeshKey>,
     tick: u64,
     center: Option<[i64; 2]>,
+    stable_frame: Option<(StableFrameKey, VegetationFrame)>,
+    #[cfg(test)]
+    regroup_builds: usize,
 }
 impl VegetationStream {
     pub fn new(world: World, config: VegetationConfig) -> Self {
@@ -291,7 +378,7 @@ impl VegetationStream {
             .spawn(move || {
                 while let Ok(job) = jobs.recv() {
                     let generation = match &job {
-                        Job::Tile(_, _, e) | Job::Mesh(_, _, _, e) => *e,
+                        Job::Tile(_, _, e) | Job::Mesh(_, _, _, e) | Job::Ground(_, _, _, e) => *e,
                     };
                     if generation != cancel.load(Ordering::Relaxed) {
                         continue;
@@ -307,7 +394,11 @@ impl VegetationStream {
                             )
                         }
                         Job::Mesh(key, p, w, _) => {
-                            let model = vegetation::model_for(&p);
+                            let Some(model) = vegetation::model_for_cancellable(&p, || {
+                                generation != cancel.load(Ordering::Relaxed)
+                            }) else {
+                                continue;
+                            };
                             let edited: BTreeSet<Cell> = if key.edit_id == 0 {
                                 BTreeSet::new()
                             } else {
@@ -318,9 +409,39 @@ impl VegetationStream {
                                 .iter()
                                 .filter(|v| !edited.contains(&p.world_cell(v.cell)))
                                 .map(|v| (v.cell, v.material as u8, v.color));
-                            let mesh = mesh_plant_cells(p.species, cells, key.lod, || {
+                            let mut mesh = mesh_plant_cells(p.species, cells, key.lod, || {
                                 generation != cancel.load(Ordering::Relaxed)
                             });
+                            // Bound resident payload by content size, not Vec's
+                            // geometric growth slack left during face extraction.
+                            mesh.vertices.shrink_to_fit();
+                            mesh.indices.shrink_to_fit();
+                            Done::Mesh(key, w.revision(), Arc::new(mesh))
+                        }
+                        Job::Ground(key, p, w, _) => {
+                            // Include neighboring roots, then assign every native
+                            // cell to exactly one tile. Source query is independent
+                            // of which placement neighbors are currently resident.
+                            let records = w.vegetation_records_species(
+                                [p.root.x - 8, p.root.z - 8],
+                                [p.root.x + 136, p.root.z + 136],
+                                p.species,
+                            );
+                            let edited: BTreeSet<Cell> = w.edit_cells().collect();
+                            let Some(cells) = ground_cells(&records, p.root, &edited, || {
+                                generation != cancel.load(Ordering::Relaxed)
+                            }) else {
+                                continue;
+                            };
+                            let mut mesh = mesh_ground_cells(
+                                cells.into_iter().map(|(c, (m, rgb))| (c, m, rgb)),
+                                key.lod,
+                                || generation != cancel.load(Ordering::Relaxed),
+                            );
+                            // Bound resident payload by content size, not Vec's
+                            // geometric growth slack left during face extraction.
+                            mesh.vertices.shrink_to_fit();
+                            mesh.indices.shrink_to_fit();
                             Done::Mesh(key, w.revision(), Arc::new(mesh))
                         }
                     };
@@ -355,19 +476,25 @@ impl VegetationStream {
             epoch,
             tiles: BTreeMap::new(),
             meshes: BTreeMap::new(),
+            mesh_costs: BTreeMap::new(),
             pending_tiles: BTreeSet::new(),
             pending_meshes: BTreeSet::new(),
             tick: 0,
             center: None,
+            stable_frame: None,
+            #[cfg(test)]
+            regroup_builds: 0,
         }
     }
     /// Replace the immutable snapshot after edits; no stale plant mesh survives.
     pub fn set_world(&mut self, world: World) {
+        self.stable_frame = None;
         self.edits = world.edit_cells().collect();
         self.world = world;
         self.epoch.fetch_add(1, Ordering::Relaxed);
         self.tiles.clear();
         self.meshes.retain(|k, _| k.edit_id == 0);
+        self.mesh_costs.retain(|k, _| k.edit_id == 0);
         self.pending_tiles.clear();
         self.pending_meshes.clear();
         self.center = None;
@@ -408,7 +535,22 @@ impl VegetationStream {
         world_revision: u64,
         view: Option<CullView>,
     ) -> VegetationFrame {
-        self.tick = self.tick.wrapping_add(1);
+        let key = StableFrameKey::new(
+            camera,
+            viewport_height,
+            fov_y,
+            world_revision,
+            &self.config,
+            view,
+        );
+        // Release retained frame Arcs before changed demand can evict geometry.
+        if self
+            .stable_frame
+            .as_ref()
+            .is_some_and(|(old, _)| old != &key)
+        {
+            self.stable_frame = None;
+        }
         let c = Cell::from_meters(camera);
         let center = [c.x.div_euclid(TILE_CELLS), c.z.div_euclid(TILE_CELLS)];
         if self.center != Some(center) {
@@ -417,23 +559,55 @@ impl VegetationStream {
             self.pending_tiles.clear();
             self.pending_meshes.clear();
         }
+        let mut drained = false;
         while let Ok(done) = self.rx.try_recv() {
+            drained = true;
+            self.stable_frame = None;
             match done {
                 Done::Tile(t, r, p) => {
                     self.pending_tiles.remove(&t);
                     if r == self.world.revision() {
-                        self.tiles.insert(t, (p, self.tick));
+                        self.tiles.insert(t, (p, self.tick.wrapping_add(1)));
                     }
                 }
                 Done::Mesh(k, r, m) => {
                     self.pending_meshes.remove(&k);
                     if r == self.world.revision() {
-                        self.meshes.insert(k, (m, self.tick));
+                        self.mesh_costs
+                            .insert(k, (m.indices.len() / 3, self.tick.wrapping_add(1)));
+                        self.meshes.insert(k, (m, self.tick.wrapping_add(1)));
                     }
                 }
             }
         }
-        let mut stats = VegetationStats::default();
+        if !drained && self.pending_tiles.is_empty() && self.pending_meshes.is_empty() {
+            if let Some((old, frame)) = &self.stable_frame {
+                if old == &key {
+                    return frame.clone();
+                }
+            }
+        }
+        // LRU age is a selection-build epoch. Idle cache hits neither age
+        // demanded geometry nor make unused content artificially recent.
+        self.tick = self.tick.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.regroup_builds += 1;
+        }
+        let mut stats = VegetationStats {
+            reference: self.config.reference,
+            mesh_budget_bytes: if self.config.reference {
+                768 * 1024 * 1024
+            } else {
+                160 * 1024 * 1024
+            },
+            gpu_budget_bytes: if self.config.reference {
+                1024 * 1024 * 1024
+            } else {
+                256 * 1024 * 1024
+            },
+            ..Default::default()
+        };
         let mut batches: BTreeMap<MeshKey, VegetationBatch> = BTreeMap::new();
         // A revision without its new immutable snapshot must never resurrect edits.
         if world_revision != self.world.revision() {
@@ -441,6 +615,7 @@ impl VegetationStream {
             return VegetationFrame {
                 origin: [c.x, c.y, c.z],
                 batches: Vec::new(),
+                shadow_batches: Vec::new(),
                 stats,
             };
         }
@@ -474,10 +649,21 @@ impl VegetationStream {
         let epoch = self.epoch.load(Ordering::Relaxed);
         let mut submitted = 0;
         let mut plants = Vec::new();
+        let mut offscreen = Vec::new();
+        let mut ground: BTreeMap<(u8, i64, i64), Vec<PlantRecord>> = BTreeMap::new();
         for (_, t) in demand {
             if let Some((records, used)) = self.tiles.get_mut(&t) {
                 *used = self.tick;
                 for p in records.iter() {
+                    if p.species != Species::Rowan {
+                        for x in (p.root.x - 8).div_euclid(128)..=(p.root.x + 8).div_euclid(128) {
+                            for z in (p.root.z - 8).div_euclid(128)..=(p.root.z + 8).div_euclid(128)
+                            {
+                                ground.entry((t.species, x, z)).or_default().push(*p);
+                            }
+                        }
+                        continue;
+                    }
                     let dx = (p.root.x - c.x) as f64 * VOXEL_SIZE;
                     let dz = (p.root.z - c.z) as f64 * VOXEL_SIZE;
                     let distance = (dx * dx + dz * dz).sqrt();
@@ -486,6 +672,9 @@ impl VegetationStream {
                             plants.push((distance, *p));
                         } else {
                             stats.culled_instances += 1;
+                            if distance < 32. {
+                                offscreen.push((distance, *p));
+                            }
                         }
                     }
                 }
@@ -505,6 +694,35 @@ impl VegetationStream {
                 }
             }
         }
+        for ((s, x, z), records) in ground {
+            let dx = (x as f64 + 0.5) * 8. - camera[0];
+            let dz = (z as f64 + 0.5) * 8. - camera[2];
+            let distance = (dx * dx + dz * dz).sqrt();
+            if distance > radii[s as usize] + 5.7 {
+                continue;
+            }
+            if view
+                .as_ref()
+                .is_some_and(|v| !records.iter().any(|p| v.plant_visible(p)))
+            {
+                continue;
+            }
+            let p = PlantRecord {
+                species: species(s),
+                variant: u8::MAX,
+                seed: mix(self.world.seed()
+                    ^ mix(x as u64)
+                    ^ (z as u64).rotate_left(31)
+                    ^ s as u64),
+                root: Cell {
+                    x: x * 128,
+                    y: 0,
+                    z: z * 128,
+                },
+                rotation: 0,
+            };
+            plants.push((distance, p));
+        }
         // Preserve tall silhouettes before spending the remaining geometry
         // budget on small repeated ground cover. Within each class, nearest wins.
         plants.sort_by(|a, b| {
@@ -519,6 +737,67 @@ impl VegetationStream {
                 .then(a.1.root.cmp(&b.1.root))
         });
         let edits = &self.edits;
+        let projection = viewport_height as f64 / (2. * (fov_y as f64 * 0.5).tan().max(0.01));
+        // Give nearby carpet a worker slot while distant woody coverage warms.
+        // Alternate frames retain a fair path for placement and tree requests.
+        if self.tick % 2 == 0 && submitted < 2 {
+            if let Some((_, p, key)) = plants
+                .iter()
+                .filter(|(_, p)| p.species != Species::Rowan)
+                .map(|(d, p)| {
+                    let s = species_id(p.species);
+                    let key = MeshKey {
+                        species: s,
+                        variant: p.variant,
+                        seed: p.seed,
+                        tile: [p.root.x.div_euclid(128), p.root.z.div_euclid(128)],
+                        lod: if self.config.reference { 1 } else { 8 },
+                        edit_id: if edits.is_empty() {
+                            0
+                        } else {
+                            self.world.revision().max(1)
+                        },
+                    };
+                    (*d, *p, key)
+                })
+                .filter(|(_, _, k)| {
+                    !self.meshes.contains_key(k) && !self.pending_meshes.contains(k)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+            {
+                if self
+                    .tx
+                    .as_ref()
+                    .unwrap()
+                    .try_send(Job::Ground(key, p, self.world.clone(), epoch))
+                    .is_ok()
+                {
+                    self.pending_meshes.insert(key);
+                    submitted += 1;
+                }
+            }
+        }
+        let mut remaining_ground_coarse = 0usize;
+        let mut ground_coverage_ready = true;
+        if !self.config.reference {
+            for (_, p) in plants.iter().filter(|(_, p)| p.species != Species::Rowan) {
+                let key = ground_key(
+                    p,
+                    8,
+                    if edits.is_empty() {
+                        0
+                    } else {
+                        self.world.revision().max(1)
+                    },
+                );
+                if let Some((mesh, used)) = self.meshes.get_mut(&key) {
+                    *used = self.tick;
+                    remaining_ground_coarse += mesh.indices.len() / 3;
+                } else {
+                    ground_coverage_ready = false;
+                }
+            }
+        }
         // Reserve cheap geometry for every visible tree before any near tree
         // spends the refinement budget. Baseline templates have priority over
         // fine requests, and their actual costs replace speculative estimates.
@@ -531,10 +810,13 @@ impl VegetationStream {
             let key = MeshKey {
                 species: 2,
                 variant: p.variant,
+                seed: p.seed,
+                tile: [0; 2],
                 lod: 8,
                 edit_id: plant_edit_id(p, edits, self.world.revision()),
             };
-            if let Some((mesh, _)) = self.meshes.get(&key) {
+            if let Some((mesh, used)) = self.meshes.get_mut(&key) {
+                *used = self.tick;
                 remaining_tree_coarse =
                     remaining_tree_coarse.saturating_add(mesh.indices.len() / 3);
             } else {
@@ -554,40 +836,58 @@ impl VegetationStream {
                 }
             }
         }
-        let projection = viewport_height as f64 / (2. * (fov_y as f64 * 0.5).tan().max(0.01));
         for (distance, p) in plants {
             let s = species_id(p.species);
             let radius = radii[s as usize];
-            let mut fade = ((radius - distance) / (radius * 0.2).max(1.)).clamp(0., 1.) as f32;
-            // Stable density thinning for ground cover only. Tall tree silhouettes
-            // remain present until the outer range fade, with no distance lottery.
-            let rank = mix(p.seed) as f64 / u64::MAX as f64;
-            if s != 2 {
-                fade *= ground_density_fade(distance, radius, rank);
-            }
+            let fade = ((radius + if s == 2 { 0. } else { 5.7 } - distance)
+                / (radius * 0.2).max(1.))
+            .clamp(0., 1.) as f32;
             if fade <= 0. {
                 continue;
             }
-            let pixel = VOXEL_SIZE * projection / distance.max(1.);
-            let mut lod = 1;
-            while !self.config.reference
-                && lod < 8
-                && pixel * (lod * 2) as f64 <= self.config.pixel_error as f64
-            {
-                lod *= 2;
-            }
+            let mut lod = selected_stride(distance, projection, &self.config);
             // More conservative tree contour than ground cover.
             if s == 2 {
                 lod = lod.min(4);
             }
-            let edit_id = plant_edit_id(&p, edits, self.world.revision());
+            let edit_id = if s == 2 {
+                plant_edit_id(&p, edits, self.world.revision())
+            } else if edits.is_empty() {
+                0
+            } else {
+                self.world.revision().max(1)
+            };
             let key = MeshKey {
                 species: s,
                 variant: p.variant,
+                seed: p.seed,
+                tile: if s == 2 {
+                    [0; 2]
+                } else {
+                    [p.root.x.div_euclid(128), p.root.z.div_euclid(128)]
+                },
                 lod,
                 edit_id,
             };
             let coarse_key = MeshKey { lod: 8, ..key };
+            let ground_headroom = if s != 2 && !self.config.reference {
+                if let Some((mesh, _)) = self.meshes.get(&coarse_key) {
+                    remaining_ground_coarse =
+                        remaining_ground_coarse.saturating_sub(mesh.indices.len() / 3);
+                }
+                self.config
+                    .max_triangles
+                    .saturating_sub(stats.triangles)
+                    .saturating_sub(remaining_ground_coarse)
+                    .min(if s == 1 {
+                        (self.config.max_triangles / 10)
+                            .saturating_sub(stats.triangles_by_species[1])
+                    } else {
+                        usize::MAX
+                    })
+            } else {
+                usize::MAX
+            };
             let tree_headroom = if s == 2 && !self.config.reference {
                 if let Some((mesh, _)) = self.meshes.get(&coarse_key) {
                     remaining_tree_coarse =
@@ -609,11 +909,55 @@ impl VegetationStream {
                     request_key = coarse_key;
                 } else {
                     while request_key.lod < 8 {
-                        match self.meshes.get(&request_key) {
-                            Some((mesh, _)) if mesh.indices.len() / 3 > tree_headroom => {
+                        match self.mesh_costs.get_mut(&request_key) {
+                            Some((cost, used)) if *cost > tree_headroom => {
+                                *used = self.tick;
                                 request_key.lod *= 2
                             }
                             _ => break,
+                        }
+                    }
+                }
+            }
+            if s != 2 && !self.config.reference {
+                request_key = coarse_key;
+                if ground_coverage_ready {
+                    let preferred = key.lod.max(if distance <= 8. {
+                        1
+                    } else if distance <= 16. {
+                        2
+                    } else {
+                        4
+                    });
+                    // Refine one automatically derived level at a time, and only
+                    // if its measured/estimated cost leaves every later tile's
+                    // actual baseline intact. Rejected native work is not queued.
+                    while request_key.lod > preferred {
+                        let next = MeshKey {
+                            lod: request_key.lod / 2,
+                            ..key
+                        };
+                        if let Some((cost, used)) = self.mesh_costs.get_mut(&next) {
+                            *used = self.tick;
+                            if *cost > ground_headroom {
+                                break;
+                            }
+                        }
+                        if let Some((mesh, _)) = self.meshes.get(&next) {
+                            if mesh.indices.len() / 3 <= ground_headroom {
+                                request_key = next;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            let current = self
+                                .meshes
+                                .get(&request_key)
+                                .map_or(usize::MAX, |(m, _)| m.indices.len() / 3);
+                            if current.saturating_mul(4) <= ground_headroom {
+                                request_key = next;
+                            }
+                            break;
                         }
                     }
                 }
@@ -626,7 +970,11 @@ impl VegetationStream {
                         .tx
                         .as_ref()
                         .unwrap()
-                        .try_send(Job::Mesh(request_key, p, self.world.clone(), epoch))
+                        .try_send(if s == 2 {
+                            Job::Mesh(request_key, p, self.world.clone(), epoch)
+                        } else {
+                            Job::Ground(request_key, p, self.world.clone(), epoch)
+                        })
                         .is_ok()
                 {
                     self.pending_meshes.insert(request_key);
@@ -643,6 +991,8 @@ impl VegetationStream {
                     .filter(|(k, (mesh, _))| {
                         k.species == 2
                             && k.variant == key.variant
+                            && k.seed == key.seed
+                            && k.tile == key.tile
                             && k.edit_id == key.edit_id
                             && k.lod >= key.lod
                             && mesh.indices.len() / 3 <= tree_headroom
@@ -650,22 +1000,22 @@ impl VegetationStream {
                     .min_by_key(|(k, _)| k.lod)
                     .map(|(k, _)| *k)
                     .unwrap_or(coarse_key)
-            } else if self.meshes.contains_key(&key) {
-                key
             } else {
                 self.meshes
-                    .keys()
-                    .filter(|k| {
+                    .iter()
+                    .filter(|(k, (m, _))| {
                         k.species == key.species
-                            && k.variant == key.variant
+                            && k.seed == key.seed
+                            && k.tile == key.tile
                             && k.edit_id == key.edit_id
+                            && k.lod >= request_key.lod
+                            && m.indices.len() / 3 <= ground_headroom
                     })
-                    .min_by_key(|k| (k.lod.abs_diff(key.lod), k.lod))
-                    .copied()
-                    .unwrap_or(key)
+                    .min_by_key(|(k, _)| k.lod)
+                    .map(|(k, _)| *k)
+                    .unwrap_or(coarse_key)
             };
             if let Some((mesh, used)) = self.meshes.get_mut(&render_key) {
-                *used = self.tick;
                 let tris = mesh.indices.len() / 3;
                 if !budget_allows(&self.config, &stats, s as usize, tris) {
                     if s == 2 {
@@ -676,6 +1026,7 @@ impl VegetationStream {
                     stats.rejected_by_species[s as usize] += 1;
                     continue;
                 }
+                *used = self.tick;
                 if s == 2 && render_key.lod > key.lod {
                     stats.coverage_fallbacks += 1;
                 }
@@ -698,16 +1049,116 @@ impl VegetationStream {
                     });
             }
         }
+        // Shadow-only work follows all color/ground requests and has its own
+        // small geometry admission. Identity follows canonical roots, not view
+        // heading; turning merely transfers a record between color/depth sets.
+        offscreen.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.root.cmp(&b.1.root)));
+        offscreen.truncate(8);
+        let mut shadow_batches = Vec::new();
+        let mut shadow_room = 80_000usize;
+        for (distance, p) in offscreen {
+            let mut key = MeshKey {
+                species: 2,
+                variant: p.variant,
+                seed: p.seed,
+                tile: [0; 2],
+                lod: 4,
+                edit_id: plant_edit_id(&p, edits, self.world.revision()),
+            };
+            if self.mesh_costs.get(&key).is_some_and(|v| v.0 > shadow_room) {
+                continue;
+            }
+            if distance < 16. {
+                let fine = MeshKey { lod: 2, ..key };
+                if self
+                    .mesh_costs
+                    .get(&fine)
+                    .is_some_and(|v| v.0 <= shadow_room)
+                    || self
+                        .mesh_costs
+                        .get(&key)
+                        .is_some_and(|v| v.0.saturating_mul(4) <= shadow_room)
+                {
+                    key = fine;
+                }
+            }
+            if !self.meshes.contains_key(&key) {
+                stats.missing_meshes += 1;
+                if submitted < 2
+                    && !self.pending_meshes.contains(&key)
+                    && self
+                        .tx
+                        .as_ref()
+                        .unwrap()
+                        .try_send(Job::Mesh(key, p, self.world.clone(), epoch))
+                        .is_ok()
+                {
+                    self.pending_meshes.insert(key);
+                    submitted += 1;
+                }
+            }
+            let selected = self
+                .meshes
+                .iter()
+                .filter(|(k, (m, _))| {
+                    k.species == 2
+                        && k.seed == key.seed
+                        && k.variant == key.variant
+                        && k.edit_id == key.edit_id
+                        && (2..=4).contains(&k.lod)
+                        && m.indices.len() / 3 <= shadow_room
+                })
+                .min_by_key(|(k, _)| k.lod)
+                .map(|(k, _)| *k);
+            if let Some(selected) = selected {
+                let (mesh, used) = self.meshes.get_mut(&selected).unwrap();
+                *used = self.tick;
+                let triangles = mesh.indices.len() / 3;
+                shadow_room -= triangles;
+                stats.shadow_only_instances += 1;
+                stats.shadow_only_triangles += triangles;
+                shadow_batches.push(VegetationBatch {
+                    key: selected,
+                    mesh: mesh.clone(),
+                    instances: vec![VegetationInstance {
+                        root_cell: [p.root.x, p.root.y, p.root.z],
+                        quarter_turn: p.rotation as u32,
+                        fade: 1.,
+                    }],
+                });
+            }
+        }
         evict(&mut self.tiles, self.config.max_tiles, |v| v.1);
         evict(&mut self.meshes, self.config.max_meshes, |v| v.1);
+        evict(&mut self.mesh_costs, 2048, |v| v.1);
+        let mut bytes: usize = self.meshes.values().map(|(m, _)| mesh_bytes(m)).sum();
+        while bytes > stats.mesh_budget_bytes {
+            let Some(key) = self.meshes.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) else {
+                break;
+            };
+            bytes -= mesh_bytes(&self.meshes.remove(&key).unwrap().0);
+        }
         stats.resident_tiles = self.tiles.len();
         stats.resident_meshes = self.meshes.len();
         stats.pending_jobs = stats.missing_tiles + stats.missing_meshes;
-        VegetationFrame {
+        let frame = VegetationFrame {
             origin: [c.x, c.y, c.z],
             batches: batches.into_values().collect(),
+            shadow_batches,
             stats,
+        };
+        if frame.stats.pending_jobs == 0
+            && self.pending_tiles.is_empty()
+            && self.pending_meshes.is_empty()
+            && frame
+                .batches
+                .iter()
+                .chain(&frame.shadow_batches)
+                .all(|b| self.meshes.contains_key(&b.key))
+        {
+            self.stable_frame = Some((key, frame.clone()));
         }
+        frame
     }
 }
 impl Drop for VegetationStream {
@@ -718,6 +1169,45 @@ impl Drop for VegetationStream {
             let _ = worker.join();
         }
     }
+}
+type GroundCells = BTreeMap<Cell, (u8, [f32; 3])>;
+/// Assemble a complete globally addressed tile. Never pass a camera-selected
+/// subset here: identical content keys must always produce identical voxels.
+fn ground_cells(
+    records: &[PlantRecord],
+    origin: Cell,
+    edited: &BTreeSet<Cell>,
+    cancel: impl Fn() -> bool,
+) -> Option<GroundCells> {
+    let mut cells = BTreeMap::new();
+    for record in records {
+        let model = vegetation::model_for_cancellable(record, &cancel)?;
+        for v in &model.voxels {
+            let cell = record.world_cell(v.cell);
+            if cell.x >= origin.x
+                && cell.x < origin.x + 128
+                && cell.z >= origin.z
+                && cell.z < origin.z + 128
+                && !edited.contains(&cell)
+            {
+                cells
+                    .entry(Cell {
+                        x: cell.x - origin.x,
+                        y: cell.y - origin.y,
+                        z: cell.z - origin.z,
+                    })
+                    .or_insert((v.material as u8, v.color));
+            }
+        }
+    }
+    if cancel() {
+        None
+    } else {
+        Some(cells)
+    }
+}
+fn mesh_bytes(mesh: &VegetationMesh) -> usize {
+    mesh.vertices.capacity() * std::mem::size_of::<VegetationVertex>() + mesh.indices.capacity() * 4
 }
 fn evict<K: Ord + Copy, V>(map: &mut BTreeMap<K, V>, limit: usize, age: impl Fn(&V) -> u64) {
     while map.len() > limit {
@@ -840,7 +1330,25 @@ fn mesh_cells(
     stride: u8,
     cancel: impl Fn() -> bool,
 ) -> VegetationMesh {
+    mesh_cells_scaled(cells, stride, stride, cancel)
+}
+fn mesh_ground_cells(
+    cells: impl Iterator<Item = (Cell, u8, [f32; 3])>,
+    stride: u8,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
+    // Horizontal coverage may coarsen under pressure, but a low carpet must
+    // not turn into half-meter-high cubes or bury its roots by half a meter.
+    mesh_cells_scaled(cells, stride, stride.min(2), cancel)
+}
+fn mesh_cells_scaled(
+    cells: impl Iterator<Item = (Cell, u8, [f32; 3])>,
+    stride: u8,
+    vertical_stride: u8,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
     let step = i64::from(stride.max(1));
+    let steps = [step, i64::from(vertical_stride.max(1)), step];
     let mut groups: BTreeMap<[i64; 3], BTreeMap<u8, (usize, [f64; 3])>> = BTreeMap::new();
     for (i, (c, mat, color)) in cells.enumerate() {
         if i % 1024 == 0 && cancel() {
@@ -848,7 +1356,7 @@ fn mesh_cells(
         }
         let key = [
             c.x.div_euclid(step),
-            c.y.div_euclid(step),
+            c.y.div_euclid(steps[1]),
             c.z.div_euclid(step),
         ];
         let entry = groups
@@ -938,14 +1446,21 @@ fn mesh_cells(
             normal[d] = sign as f32;
             for [a, b] in [[0, 0], [w, 0], [w, h], [0, h]] {
                 let mut p = [0.; 3];
-                p[d] = (plane * step) as f32 * VOXEL_SIZE as f32;
-                p[u] = ((start[0] + a) * step) as f32 * VOXEL_SIZE as f32;
-                p[v] = ((start[1] + b) * step) as f32 * VOXEL_SIZE as f32;
+                p[d] = (plane * steps[d]) as f32 * VOXEL_SIZE as f32;
+                p[u] = ((start[0] + a) * steps[u]) as f32 * VOXEL_SIZE as f32;
+                p[v] = ((start[1] + b) * steps[v]) as f32 * VOXEL_SIZE as f32;
                 mesh.vertices.push(VegetationVertex {
                     position: p,
                     normal,
                     color: paint.color.map(f32::from_bits),
                     ao: paint.ao as f32 / 255.,
+                    transmission: if paint.material == Material::Leaf as u8 {
+                        1.
+                    } else if paint.material == Material::Flower as u8 {
+                        0.35
+                    } else {
+                        0.
+                    },
                 });
             }
             let indices = if sign > 0 {
@@ -1048,15 +1563,82 @@ mod tests {
         assert!(CullView::new([0.; 3], [0.; 3], 1., 1.).is_none());
     }
     #[test]
-    fn near_ground_cover_has_complete_native_coverage() {
-        for rank in [0., 0.5, 0.95, 0.999999, 1.] {
-            for distance in [0., 1., 7.] {
-                assert_eq!(ground_density_fade(distance, 28., rank), 1.);
+    fn ground_tiles_preserve_seeded_rotated_native_cells_and_edits() {
+        let origin = Cell {
+            x: -128,
+            y: 0,
+            z: 256,
+        };
+        let records = [
+            PlantRecord {
+                species: Species::Grass,
+                variant: 2,
+                seed: 17,
+                root: Cell {
+                    x: -90,
+                    y: 64,
+                    z: 290,
+                },
+                rotation: 3,
+            },
+            PlantRecord {
+                species: Species::Grass,
+                variant: 2,
+                seed: 18,
+                root: Cell {
+                    x: -70,
+                    y: 61,
+                    z: 312,
+                },
+                rotation: 1,
+            },
+        ];
+        let mut expected = BTreeMap::new();
+        for p in &records {
+            for v in &vegetation::model_for(p).voxels {
+                let c = p.world_cell(v.cell);
+                expected
+                    .entry(Cell {
+                        x: c.x - origin.x,
+                        y: c.y,
+                        z: c.z - origin.z,
+                    })
+                    .or_insert((v.material as u8, v.color));
             }
         }
-        assert!(ground_density_fade(28., 28., 0.4) > 0.);
-        assert!(ground_density_fade(28., 28., 0.4) < 1.);
-        assert_eq!(ground_density_fade(28., 28., 0.5), 0.);
+        assert_eq!(
+            ground_cells(&records, origin, &BTreeSet::new(), || false).unwrap(),
+            expected
+        );
+        let edited = records[0].root;
+        expected.remove(&Cell {
+            x: edited.x - origin.x,
+            y: edited.y,
+            z: edited.z - origin.z,
+        });
+        assert_eq!(
+            ground_cells(&records, origin, &BTreeSet::from([edited]), || false).unwrap(),
+            expected
+        );
+        // A neighboring root may cross the tile edge, but each native voxel
+        // belongs to one tile, preventing duplicate coplanar seeded colors.
+        let boundary = PlantRecord {
+            root: Cell {
+                x: 0,
+                y: 10,
+                z: 290,
+            },
+            ..records[0]
+        };
+        let left = ground_cells(&[boundary], origin, &BTreeSet::new(), || false).unwrap();
+        let right_origin = Cell { x: 0, ..origin };
+        let right = ground_cells(&[boundary], right_origin, &BTreeSet::new(), || false).unwrap();
+        assert!(!left.is_empty() && !right.is_empty());
+        assert_eq!(
+            left.len() + right.len(),
+            vegetation::model_for(&boundary).voxels.len()
+        );
+        assert!(ground_cells(&records, origin, &BTreeSet::new(), || true).is_none());
     }
     #[test]
     fn rowans_reserve_ground_budget_and_ground_borrows_unused_tree_budget() {
@@ -1131,7 +1713,7 @@ mod tests {
             face_visibility(&blocks, [0, 0, 0], 0, 1, 8)
                 >= face_visibility(&blocks, [0, 0, 0], 0, 1, 1)
         );
-        assert_eq!(std::mem::size_of::<VegetationVertex>(), 40);
+        assert_eq!(std::mem::size_of::<VegetationVertex>(), 44);
     }
     #[test]
     fn face_winding_is_outward() {
@@ -1247,12 +1829,105 @@ mod tests {
         assert!(costs.iter().map(|v| v.1).max().unwrap() * 64 <= 450_000);
     }
     #[test]
+    fn coarse_ground_keeps_low_native_carpet_height() {
+        let cells = [cell(1, 101, 1), cell(6, 102, 6), cell(2, 101, 6)];
+        let mesh = mesh_ground_cells(cells.into_iter(), 8, || false);
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.position[1] >= 100. * VOXEL_SIZE as f32
+                && v.position[1] <= 104. * VOXEL_SIZE as f32));
+        assert!(!mesh.indices.is_empty());
+        assert!(mesh_ground_cells(cells.into_iter(), 8, || true)
+            .indices
+            .is_empty());
+    }
+    #[test]
     fn coarse_palette_keeps_mean_coverage() {
         let a = (Cell { x: 0, y: 0, z: 0 }, 1, [1., 0., 0.]);
         let b = (Cell { x: 1, y: 0, z: 0 }, 2, [0., 0., 1.]);
         let mesh = mesh_cells([a, b].into_iter(), 2, || false);
         assert_eq!(mesh.indices.len(), 36);
         assert!(mesh.vertices.iter().all(|v| v.color == [0.5, 0., 0.5]));
+    }
+    #[test]
+    fn settled_static_frames_reuse_mesh_arcs_and_invalidate_on_inputs() {
+        let world = World::new(37).with_vegetation();
+        let config = VegetationConfig {
+            grass_radius_m: 2.,
+            flower_radius_m: 0.,
+            tree_radius_m: 0.,
+            max_tiles: 16,
+            ..Default::default()
+        };
+        let camera = [20., world.height_m(20., 0.) + 1.7, 0.];
+        let mut stream = VegetationStream::new(world.clone(), config);
+        let mut settled = None;
+        for _ in 0..2000 {
+            let frame = stream.update(camera, 900, 1., world.revision());
+            if frame.stats.pending_jobs == 0 {
+                settled = Some(frame);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let first = settled.expect("small canonical grass demand settles");
+        assert!(
+            !first.batches.is_empty(),
+            "fixture must exercise real mesh Arc reuse"
+        );
+        let builds = stream.regroup_builds;
+        let tick = stream.tick;
+        let second = stream.update(camera, 900, 1., world.revision());
+        assert_eq!(
+            stream.regroup_builds, builds,
+            "settled hit must skip record grouping and jobs"
+        );
+        assert_eq!(stream.tick, tick, "idle reuse preserves relative LRU ages");
+        assert_eq!(first.batches.len(), second.batches.len());
+        for (a, b) in first.batches.iter().zip(&second.batches) {
+            assert_eq!(a.key, b.key);
+            assert!(Arc::ptr_eq(&a.mesh, &b.mesh));
+            let instances = |b: &VegetationBatch| {
+                b.instances
+                    .iter()
+                    .map(|i| (i.root_cell, i.quarter_turn, i.fade.to_bits()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(instances(a), instances(b));
+        }
+        let moved = [camera[0] + 0.125, camera[1], camera[2]];
+        stream.update(moved, 900, 1., world.revision());
+        assert_eq!(stream.regroup_builds, builds + 1);
+        stream.config.pixel_error += 0.125;
+        stream.update(moved, 900, 1., world.revision());
+        assert_eq!(stream.regroup_builds, builds + 2);
+        stream.update_view(moved, 900, 1., world.revision(), [0., 0., 1.], 16. / 9.);
+        assert_eq!(stream.regroup_builds, builds + 3);
+        stream.set_world(World::new(38).with_vegetation());
+        assert!(
+            stream.stable_frame.is_none(),
+            "new snapshot releases retained frame before eviction"
+        );
+        stream.update(moved, 900, 1., 0);
+        assert_eq!(stream.regroup_builds, builds + 4);
+    }
+    #[test]
+    fn static_frame_key_uses_exact_pose_projection_and_config_bits() {
+        let config = VegetationConfig::default();
+        let key = |camera, height, fov, revision, config: &VegetationConfig, view| {
+            StableFrameKey::new(camera, height, fov, revision, config, view)
+        };
+        let baseline = key([0.; 3], 900, 1., 0, &config, None);
+        assert_ne!(baseline, key([-0., 0., 0.], 900, 1., 0, &config, None));
+        assert_ne!(baseline, key([0.; 3], 901, 1., 0, &config, None));
+        assert_ne!(baseline, key([0.; 3], 900, 1.1, 0, &config, None));
+        assert_ne!(baseline, key([0.; 3], 900, 1., 1, &config, None));
+        let mut changed = config.clone();
+        changed.max_meshes += 1;
+        assert_ne!(baseline, key([0.; 3], 900, 1., 0, &changed, None));
+        let view = CullView::new([0.; 3], [0., 0., 1.], 1., 16. / 9.);
+        assert_ne!(baseline, key([0.; 3], 900, 1., 0, &config, view));
     }
     #[test]
     fn stream_settles_with_bounded_tiles_and_rejects_stale_revision() {

@@ -176,10 +176,16 @@ impl AdaptiveView {
         height: u32,
     ) -> Result<(), String> {
         if gpu.adaptive.is_none() {
-            gpu.adaptive = Some(AdaptiveGpu::new(&gpu.device, gpu.format, gpu.sample_count));
+            gpu.adaptive = Some(AdaptiveGpu::new(
+                &gpu.device,
+                gpu.scene_format,
+                gpu.sample_count,
+            ));
         }
-        let color_bytes = if gpu.format == wgpu::TextureFormat::Rgba32Float {
+        let color_bytes = if gpu.scene_format == wgpu::TextureFormat::Rgba32Float {
             16u64
+        } else if gpu.scene_format == wgpu::TextureFormat::Rgba16Float {
+            8u64
         } else {
             4u64
         };

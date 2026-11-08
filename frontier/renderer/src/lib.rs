@@ -258,6 +258,9 @@ struct Gpu {
     index_count: u32,
     origin: DVec3,
     format: wgpu::TextureFormat,
+    /// Linear scene target; output/UI/capture retain `format`.
+    scene_format: wgpu::TextureFormat,
+    medium_ground_height: f32,
     sample_count: u32,
     voxel_filter: bool,
     terrain: Option<terrain::TerrainGpu>,
@@ -271,6 +274,7 @@ impl Gpu {
         mesh: &mesh::Mesh,
         sample_count: u32,
         voxel_filter: bool,
+        hdr_scene: bool,
     ) -> Result<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -281,7 +285,7 @@ impl Gpu {
             .await
             .ok_or("no compatible GPU adapter (try Vulkan software ICD for headless capture)")?;
         eprintln!("adapter: {:?}", adapter.get_info());
-        let format = format.unwrap_or_else(|| {
+        let output_format = format.unwrap_or_else(|| {
             surface
                 .map(|s| {
                     s.get_capabilities(&adapter)
@@ -292,6 +296,11 @@ impl Gpu {
                 })
                 .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
         });
+        let format = if hdr_scene && output_format != wgpu::TextureFormat::Rgba32Float {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            output_format
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -484,7 +493,9 @@ impl Gpu {
                 mesh.origin.y as f64,
                 mesh.origin.z as f64,
             ) * VOXEL_SIZE,
-            format,
+            format: output_format,
+            scene_format: format,
+            medium_ground_height: 0.,
             sample_count,
             voxel_filter,
             terrain: None,
@@ -499,7 +510,7 @@ impl Gpu {
         self.brick = Some(brick_ray::BrickRayGpu::new(
             &self.device,
             snapshot,
-            self.format,
+            self.scene_format,
             self.sample_count,
         )?);
         self.brick_skip_mode = skip_mode;
@@ -552,7 +563,7 @@ impl Gpu {
     fn init_hybrid(&mut self, prepared: hybrid_gpu::Prepared) -> Result<()> {
         let terrain = terrain::TerrainGpu::new_with_samples(
             &self.device,
-            self.format,
+            self.scene_format,
             &prepared.terrain.data,
             self.sample_count,
         );
@@ -579,7 +590,8 @@ impl Gpu {
         Ok(())
     }
     fn init_pages(&mut self, cover: &page_terrain::Cover) {
-        let mut pages = page_terrain::PageGpu::new(&self.device, self.format, self.sample_count);
+        let mut pages =
+            page_terrain::PageGpu::new(&self.device, self.scene_format, self.sample_count);
         pages.upload(&self.queue, cover);
         self.pages = Some(pages);
     }
@@ -845,20 +857,27 @@ impl Gpu {
         let multisample_view = multisample
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
-        let post_settings = self
-            .visual_settings
-            .as_ref()
-            .filter(|s| (s.atmosphere || s.exposure != 1. || s.render_scale != 1.) && !floating);
+        let post_settings = self.visual_settings.as_ref().filter(|s| {
+            (s.atmosphere
+                || s.exposure != 1.
+                || s.render_scale != 1.
+                || self.scene_format != self.format)
+                && !floating
+        });
+        let mut post_attachment_bytes = 0u64;
         if let Some(settings) = post_settings {
-            let atmosphere = atmosphere::Atmosphere::new(
+            let atmosphere = atmosphere::Atmosphere::new_with_scene_format(
                 &self.device,
                 self.format,
                 width,
                 height,
                 settings.render_scale,
                 self.sample_count,
+                self.scene_format,
             );
+            post_attachment_bytes = atmosphere.attachment_bytes();
             let (rw, rh) = atmosphere.dimensions();
+            atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.prepare(
                 &self.queue,
                 camera
@@ -879,7 +898,11 @@ impl Gpu {
                 rh,
                 None,
             );
-            atmosphere.encode(&mut encoder, &target);
+            atmosphere.encode_with_shadows(
+                &mut encoder,
+                &target,
+                self.adaptive.as_ref().map(|a| a.near_shadow_bind()),
+            );
         } else {
             self.draw(
                 &mut encoder,
@@ -1051,16 +1074,7 @@ impl Gpu {
         let mut capture_render_texture_bytes = width as u64
             * height as u64
             * (bpp as u64 + samples * 4 + if samples > 1 { samples * bpp as u64 } else { 0 });
-        if let Some(settings) = post_settings {
-            let rw = ((width as f32 * settings.render_scale).round() as u64).max(1);
-            let rh = ((height as f32 * settings.render_scale).round() as u64).max(1);
-            // Resolved scene + composite, depth, and optional multisample scene.
-            capture_render_texture_bytes += rw
-                * rh
-                * (2 * bpp as u64
-                    + samples * 4
-                    + if samples > 1 { samples * bpp as u64 } else { 0 });
-        }
+        capture_render_texture_bytes += post_attachment_bytes;
         let capture_readback_bytes = (row as u64
             + if depth_buffer.is_some() {
                 depth_row as u64
@@ -1088,7 +1102,22 @@ impl Gpu {
                 settings.overcast, settings.terrain_shadows, shadows_active
             ));
             metadata.pop();
-            metadata.push_str(&format!(",\"beauty\":{}}}", settings.beauty));
+            metadata.push_str(&format!(
+                ",\"beauty\":{},\"scene_color_format\":{:?}}}",
+                settings.beauty,
+                format!("{:?}", self.scene_format)
+            ));
+            let atmosphere_debug = match std::env::var("FRONTIER_ATMOSPHERE_DEBUG").as_deref() {
+                Ok("air") => 1,
+                Ok("visibility") => 2,
+                Ok("no-air") => 3,
+                _ => 0,
+            };
+            metadata.pop();
+            metadata.push_str(&format!(
+                ",\"medium_ground_height_m\":{},\"atmosphere_debug_code\":{atmosphere_debug}}}",
+                self.medium_ground_height
+            ));
             std::fs::write(metadata_path, metadata)?;
         }
         let metadata_path = path.with_extension("capture.json");
@@ -1944,6 +1973,7 @@ impl Viewer {
             .map(|t| t.create_view(&Default::default()));
         if let Some(atmosphere) = &self.atmosphere {
             let (width, height) = atmosphere.dimensions();
+            atmosphere.set_medium_ground_height(gpu.medium_ground_height);
             atmosphere.prepare(
                 &gpu.queue,
                 self.camera
@@ -1964,7 +1994,11 @@ impl Viewer {
                 height,
                 timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
             );
-            atmosphere.encode(&mut encoder, &target);
+            atmosphere.encode_with_shadows(
+                &mut encoder,
+                &target,
+                gpu.adaptive.as_ref().map(|a| a.near_shadow_bind()),
+            );
         } else {
             gpu.draw(
                 &mut encoder,
@@ -2048,6 +2082,9 @@ impl ApplicationHandler for Viewer {
                 self.mesh.as_ref().unwrap(),
                 self.sample_count,
                 self.voxel_filter,
+                self.world
+                    .fbm_terrain()
+                    .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine),
             ))?;
             gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
@@ -2062,7 +2099,7 @@ impl ApplicationHandler for Viewer {
                 if self.surface_layout == "quadtree" {
                     let probe = surface_compare::SurfaceCompareGpu::new(
                         &gpu.device,
-                        gpu.format,
+                        gpu.scene_format,
                         gpu.sample_count,
                         &data.data,
                     );
@@ -2072,7 +2109,7 @@ impl ApplicationHandler for Viewer {
                 if gpu.surface_probe.is_none() {
                     let mut terrain = terrain::TerrainGpu::new_with_samples(
                         &gpu.device,
-                        gpu.format,
+                        gpu.scene_format,
                         &data.data,
                         gpu.sample_count,
                     );
@@ -2120,14 +2157,16 @@ impl ApplicationHandler for Viewer {
             if self.visual_menu_enabled
                 || self.visual_settings.atmosphere
                 || self.visual_settings.render_scale != 1.
+                || gpu.scene_format != gpu.format
             {
-                self.atmosphere = Some(atmosphere::Atmosphere::new(
+                self.atmosphere = Some(atmosphere::Atmosphere::new_with_scene_format(
                     &gpu.device,
                     gpu.format,
                     config.width,
                     config.height,
                     self.visual_settings.render_scale,
                     gpu.sample_count,
+                    gpu.scene_format,
                 ));
             }
             self.config = Some(config);
@@ -2377,6 +2416,12 @@ pub fn run() -> Result<()> {
     if capture_linear {
         visual_settings.atmosphere = false;
         visual_settings.render_scale = 1.;
+    }
+    if visual_settings.beauty
+        && params.recipe != frontier_world::FbmRecipe::Legacy
+        && !capture_linear
+    {
+        appearance_method::initialize_meadow_application();
     }
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
@@ -2784,6 +2829,7 @@ pub fn run() -> Result<()> {
             &mesh,
             msaa,
             voxel_filter,
+            !capture_linear && params.recipe == frontier_world::FbmRecipe::Alpine,
         ))?;
         gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();
@@ -2794,7 +2840,7 @@ pub fn run() -> Result<()> {
             if surface_layout == "quadtree" {
                 let probe = surface_compare::SurfaceCompareGpu::new(
                     &gpu.device,
-                    gpu.format,
+                    gpu.scene_format,
                     gpu.sample_count,
                     &data.data,
                 );
@@ -2804,7 +2850,7 @@ pub fn run() -> Result<()> {
             if gpu.surface_probe.is_none() {
                 let mut terrain = terrain::TerrainGpu::new_with_samples(
                     &gpu.device,
-                    gpu.format,
+                    gpu.scene_format,
                     &data.data,
                     gpu.sample_count,
                 );

@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 5;
+const REPRESENTATION_VERSION: u64 = 6;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,10 +42,54 @@ pub(crate) struct DiskCacheStats {
     pub writeback_encode_buffer_reserved_bytes: usize,
     pub writeback_peak_encode_buffer_reserved_bytes: usize,
 }
+/// Snapshot every product/sampling discriminator once. Shader reconstruction
+/// flags are conservative cache identity too; changing a preference never
+/// silently reuses products captured under a different appearance contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AppearanceConfig {
+    method: crate::appearance_method::Method,
+    mode: crate::adaptive_geometry::AppearanceMode,
+    intervals: usize,
+    prefilter: crate::appearance_map::MapPrefilter,
+    soft_surfaces: bool,
+    anisotropy: u32,
+    near_blend: u32,
+    shared_near: bool,
+}
+impl AppearanceConfig {
+    fn current(world: &World) -> Self {
+        Self {
+            method: crate::appearance_method::selected(),
+            mode: crate::adaptive_geometry::appearance_mode(world),
+            intervals: crate::appearance_map::map_intervals(),
+            prefilter: crate::appearance_map::map_prefilter(),
+            soft_surfaces: crate::appearance_method::map_filter_soft_surfaces(),
+            anisotropy: crate::appearance_method::map_anisotropy(),
+            near_blend: crate::appearance_method::near_blend(),
+            shared_near: crate::adaptive_geometry::near_profile_shared(),
+        }
+    }
+    fn supported(self) -> bool {
+        matches!(
+            self.method,
+            crate::appearance_method::Method::Baseline | crate::appearance_method::Method::Map
+        ) && !self.shared_near
+            && matches!(self.intervals, 2 | 4 | 8)
+            && matches!(
+                self.prefilter,
+                crate::appearance_map::MapPrefilter::Off
+                    | crate::appearance_map::MapPrefilter::Footprint
+                    | crate::appearance_map::MapPrefilter::NativeBox {
+                        radius_cells: 1 | 2 | 4
+                    }
+            )
+    }
+}
 /// Camera-independent lookup with a bounded, shared immutable dependency snapshot.
 #[derive(Clone)]
 pub(crate) struct DiskCacheKeyer {
     prefix_hash: u64,
+    appearance: AppearanceConfig,
     edits: Arc<[(Cell, u64)]>,
     world: World,
 }
@@ -58,7 +102,7 @@ impl DiskCacheKeyer {
         // Spatial corner integrals reach outside the tile by half their sample
         // footprint, and the finite microprobe adds its own neighbor halo.
         // i128 prevents overflow before unsupported coordinates are rejected.
-        let mode = crate::adaptive_geometry::appearance_mode(&self.world);
+        let mode = self.appearance.mode;
         let mut halo = 1_i128;
         if key.width_cells > 128 {
             halo = mode.probe_cells as i128;
@@ -66,6 +110,27 @@ impl DiskCacheKeyer {
                 let footprint = key.step_cells as i128 / if mode.half_footprint { 2 } else { 1 };
                 halo += footprint / 2;
             }
+        }
+        if self.appearance.method == crate::appearance_method::Method::Map
+            && key.width_cells > 128
+            && key.step_cells >= 16
+        {
+            // Map nodes snap down to a globally aligned grid, and the square
+            // map can extend the short axis to match its longer dimension.
+            // One full spacing on either side bounds alignment; footprint
+            // strata add spacing/4 plus a native radius-one filter and halo.
+            let mut spacing = 4_i128;
+            while spacing * (self.appearance.intervals as i128) < key.step_cells as i128 {
+                spacing *= 2;
+            }
+            let filter = match self.appearance.prefilter {
+                crate::appearance_map::MapPrefilter::Off => 0,
+                crate::appearance_map::MapPrefilter::Footprint => spacing / 4 + 1,
+                crate::appearance_map::MapPrefilter::NativeBox { radius_cells } => {
+                    i128::from(radius_cells).min(spacing / 2)
+                }
+            };
+            halo = halo.max(spacing + filter + 1);
         }
         let min = key.min.map(|v| v as i128 - halo);
         let max = key
@@ -125,12 +190,23 @@ impl DiskCache {
         max_entry_bytes: usize,
         world: &World,
     ) -> io::Result<Self> {
-        if crate::appearance_method::selected() != crate::appearance_method::Method::Baseline
-            || crate::adaptive_geometry::near_profile_shared()
-        {
-            return Err(io::Error::other(
-                "Derived disk cache requires baseline appearance; set FRONTIER_LOD_APPEARANCE=baseline or omit --adaptive-disk-cache",
-            ));
+        Self::new_with_appearance(
+            root,
+            budget_bytes,
+            max_entry_bytes,
+            world,
+            AppearanceConfig::current(world),
+        )
+    }
+    fn new_with_appearance(
+        root: PathBuf,
+        budget_bytes: u64,
+        max_entry_bytes: usize,
+        world: &World,
+        appearance: AppearanceConfig,
+    ) -> io::Result<Self> {
+        if !appearance.supported() {
+            return Err(io::Error::other("Derived disk cache supports baseline or map appearance with unshared near profiles; hierarchy, visibility and shared-near products are unsupported"));
         }
         if budget_bytes == 0 || max_entry_bytes < 1024 || max_entry_bytes as u64 > budget_bytes {
             return Err(io::Error::new(
@@ -138,7 +214,7 @@ impl DiskCache {
                 "invalid derived-cache budgets",
             ));
         }
-        let identity = source_identity(world)?;
+        let identity = source_identity_with_config(world, appearance)?;
         let mut edits: Vec<_> = world.edit_cells().take(MAX_EDITS + 1).collect();
         if edits.len() > MAX_EDITS {
             return Err(io::Error::other("derived-cache edit identity limit"));
@@ -146,6 +222,7 @@ impl DiskCache {
         edits.sort_by_key(|c| (c.x, c.y, c.z));
         let keyer = DiskCacheKeyer {
             prefix_hash: checksum(&identity),
+            appearance,
             edits: edits
                 .into_iter()
                 .map(|c| (c, world.material(c) as u64))
@@ -197,6 +274,19 @@ impl DiskCache {
         }
         this.make_room(0)?;
         Ok(this)
+    }
+    fn profile_representation_matches(&self, tile: &GeometryTile) -> bool {
+        tile.face_profiles.iter().all(|p| {
+            let tag = p[0][3];
+            if tag >= 0. {
+                return true;
+            }
+            match self.keyer.appearance.method {
+                crate::appearance_method::Method::Baseline => tag == -1.,
+                crate::appearance_method::Method::Map => matches!(tag, -1. | -2. | -4.),
+                _ => false,
+            }
+        })
     }
     pub fn stats(&self) -> DiskCacheStats {
         self.stats
@@ -303,7 +393,9 @@ impl DiskCache {
             if !b[16..].starts_with(&identity) {
                 return Err(io::Error::other("cache identity"));
             }
-            decode(&b[16 + identity.len()..], key).ok_or_else(|| io::Error::other("cache payload"))
+            decode(&b[16 + identity.len()..], key)
+                .filter(|tile| self.profile_representation_matches(tile))
+                .ok_or_else(|| io::Error::other("cache payload"))
         })();
         match result {
             Ok(tile) => {
@@ -333,10 +425,13 @@ impl DiskCache {
         result.is_ok()
     }
     fn store_inner(&mut self, tile: &GeometryTile) -> io::Result<()> {
-        if tile.gpu_profiles.is_some() || !tile.appearance.available {
+        if tile.gpu_profiles.is_some() || !tile.appearance.available || !validate(tile) {
             return Err(io::Error::other(
-                "deferred GPU profiles cannot be persisted as CPU colors",
+                "derived cache requires a valid completed CPU geometry/appearance payload",
             ));
+        }
+        if !self.profile_representation_matches(tile) {
+            return Err(io::Error::other("unsupported cached appearance descriptor"));
         }
         if !self.keyer.supported(tile.key) {
             return Err(io::Error::other("snapshot revision"));
@@ -391,19 +486,51 @@ impl DiskCache {
         Ok(())
     }
 }
+#[cfg(test)]
 fn source_identity(w: &World) -> io::Result<Vec<u8>> {
-    source_identity_with_mode(w, crate::adaptive_geometry::appearance_mode(w))
+    source_identity_with_config(w, AppearanceConfig::current(w))
 }
+#[cfg(test)]
 fn source_identity_with_mode(
     w: &World,
     mode: crate::adaptive_geometry::AppearanceMode,
 ) -> io::Result<Vec<u8>> {
+    let mut appearance = AppearanceConfig::current(w);
+    appearance.mode = mode;
+    source_identity_with_config(w, appearance)
+}
+fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());
     put(&mut b, VOXEL_SIZE.to_bits());
-    append_appearance_identity(&mut b, mode);
+    append_appearance_identity(&mut b, appearance.mode);
+    put(
+        &mut b,
+        match appearance.method {
+            crate::appearance_method::Method::Baseline => 0,
+            crate::appearance_method::Method::Map => 1,
+            crate::appearance_method::Method::Hierarchy => 2,
+            crate::appearance_method::Method::Visibility => 3,
+        },
+    );
+    put(&mut b, appearance.intervals as u64);
+    let (filter, radius) = match appearance.prefilter {
+        crate::appearance_map::MapPrefilter::Off => (0, 0),
+        crate::appearance_map::MapPrefilter::Footprint => (1, 1),
+        crate::appearance_map::MapPrefilter::NativeBox { radius_cells } => (2, radius_cells as u64),
+    };
+    for v in [
+        filter,
+        radius,
+        appearance.soft_surfaces as u64,
+        appearance.anisotropy as u64,
+        appearance.near_blend as u64,
+        appearance.shared_near as u64,
+    ] {
+        put(&mut b, v);
+    }
     match w.topology_base_cells() {
         Some(v) => {
             put(&mut b, 1);
@@ -783,6 +910,11 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
 }
 fn validate(t: &GeometryTile) -> bool {
     let bbox = |b: [[f64; 3]; 2]| (0..3).all(|a| b[0][a] <= b[1][a]);
+    let renderable_profile = |index: u32| {
+        t.face_profiles
+            .get(index as usize)
+            .is_some_and(|p| p[0][3] != -4.)
+    };
     bbox(t.bounds)
         && crate::spatial_appearance::valid_table(&t.face_profiles)
         && (t.proxy_triangles.is_empty()
@@ -793,7 +925,7 @@ fn validate(t: &GeometryTile) -> bool {
                 && t.face_profile_indices.is_empty()))
         && t.proxy_triangles
             .iter()
-            .all(|p| (p.profile_index as usize) < t.face_profiles.len())
+            .all(|p| renderable_profile(p.profile_index))
         && bbox(t.conservative_surface_bounds)
         && t.guaranteed_solid_box.is_none_or(|b| b.valid())
         && [
@@ -821,12 +953,12 @@ fn validate(t: &GeometryTile) -> bool {
         && t.face_profile_indices.len() == t.mesh.vertices.len()
         && t.face_profile_indices
             .iter()
-            .all(|v| (*v as usize) < t.face_profiles.len())
+            .all(|v| renderable_profile(*v))
         && t.native_quads.iter().all(|q| {
             q.axis_sign & !7 == 0
                 && q.axis_sign & 3 < 3
                 && q.material <= 4
-                && (q.profile_index as usize) < t.face_profiles.len()
+                && renderable_profile(q.profile_index)
                 && q.extent.iter().all(|v| *v >= 0.)
         })
         && t.native_bins.iter().all(|b| {
@@ -1420,5 +1552,262 @@ mod tests {
             println!("diskcache step={step} build_ms={build_ms:.3} write_ms={:.3} warm_read_ms={:.3} entry_bytes={} decoded_bytes={}",write_ms,restart.stats().read_ms,entry_bytes,restored.bytes);
             drop(restart);
         }
+    }
+    fn map_config(_w: &World) -> AppearanceConfig {
+        AppearanceConfig {
+            method: crate::appearance_method::Method::Map,
+            mode: crate::adaptive_geometry::AppearanceMode {
+                probe_cells: 1,
+                spatial_profiles: false,
+                half_footprint: false,
+            },
+            intervals: 2,
+            prefilter: crate::appearance_map::MapPrefilter::Off,
+            soft_surfaces: false,
+            anisotropy: 1,
+            near_blend: 0,
+            shared_near: false,
+        }
+    }
+    fn explicit_cache(dir: &Temp, w: &World, config: AppearanceConfig) -> DiskCache {
+        DiskCache::new_with_appearance(dir.0.clone(), 4 * 1024 * 1024, 1024 * 1024, w, config)
+            .unwrap()
+    }
+    fn map_tile(w: &World, config: AppearanceConfig, packed: bool) -> GeometryTile {
+        let mut tile = build(w, key(4), || false).unwrap();
+        if packed {
+            crate::adaptive_geometry::pack_proxy_triangles(&mut tile).unwrap();
+        }
+        let map = crate::appearance_map::build_map_with_config_and_predicate(
+            [-35, -33],
+            32,
+            config.intervals,
+            config.prefilter,
+            |rgb| !config.soft_surfaces || rgb == Material::Grass.color(),
+            |x, z| {
+                Ok(crate::appearance_hierarchy::AppearanceColumn {
+                    height: 5 + (x - z).rem_euclid(3),
+                    colors: [
+                        Material::Grass.color(),
+                        Material::Soil.color(),
+                        Material::Stone.color(),
+                    ],
+                })
+            },
+        )
+        .unwrap();
+        tile.face_profiles = map.profiles;
+        let at = tile.face_profiles.len() as u32;
+        let refs = (0..at).collect::<Vec<_>>();
+        tile.face_profiles
+            .extend(crate::spatial_appearance::map_header(
+                [
+                    map.origin_cells[0] as f32 * 0.0625,
+                    map.origin_cells[1] as f32 * 0.0625,
+                ],
+                map.spacing_cells as f32 * 0.0625,
+                map.dimension,
+                &refs,
+                at,
+            ));
+        tile.face_profile_indices.fill(at);
+        for q in &mut tile.native_quads {
+            q.profile_index = at;
+        }
+        for t in &mut tile.proxy_triangles {
+            t.profile_index = at;
+        }
+        assert!(validate(&tile));
+        tile
+    }
+    #[test]
+    fn detailed_map_restart_preserves_negative_alignment_relative_refs_and_filter_products() {
+        use crate::appearance_map::MapPrefilter;
+        let w = world();
+        for prefilter in [
+            MapPrefilter::Off,
+            MapPrefilter::NativeBox { radius_cells: 2 },
+            MapPrefilter::Footprint,
+        ] {
+            for packed in [false, true] {
+                let config = AppearanceConfig {
+                    prefilter,
+                    ..map_config(&w)
+                };
+                let tile = map_tile(&w, config, packed);
+                let dir = Temp::new();
+                let mut cold = explicit_cache(&dir, &w, config);
+                assert!(cold.store(&tile));
+                drop(cold);
+                let mut warm = explicit_cache(&dir, &w, config);
+                let restored = warm.load(tile.key).unwrap();
+                assert_eq!(bytes(&tile), bytes(&restored));
+                assert!(validate(&restored));
+                assert_eq!(warm.stats().hits, 1);
+                assert!(restored.bytes <= crate::build_memory::reservation(tile.key).unwrap() / 2);
+            }
+        }
+    }
+    #[test]
+    fn map_identity_invalidates_every_semantic_configuration_without_environment_mutation() {
+        use crate::appearance_map::MapPrefilter;
+        let w = world();
+        let base = map_config(&w);
+        let alternatives = [
+            AppearanceConfig {
+                method: crate::appearance_method::Method::Baseline,
+                ..base
+            },
+            AppearanceConfig {
+                intervals: 4,
+                ..base
+            },
+            AppearanceConfig {
+                intervals: 8,
+                ..base
+            },
+            AppearanceConfig {
+                prefilter: MapPrefilter::Footprint,
+                ..base
+            },
+            AppearanceConfig {
+                prefilter: MapPrefilter::NativeBox { radius_cells: 1 },
+                ..base
+            },
+            AppearanceConfig {
+                prefilter: MapPrefilter::NativeBox { radius_cells: 2 },
+                ..base
+            },
+            AppearanceConfig {
+                prefilter: MapPrefilter::NativeBox { radius_cells: 4 },
+                ..base
+            },
+            AppearanceConfig {
+                soft_surfaces: true,
+                ..base
+            },
+            AppearanceConfig {
+                anisotropy: 2,
+                ..base
+            },
+            AppearanceConfig {
+                near_blend: 1,
+                ..base
+            },
+            AppearanceConfig {
+                mode: crate::adaptive_geometry::AppearanceMode {
+                    probe_cells: 4,
+                    ..base.mode
+                },
+                ..base
+            },
+        ];
+        let original = source_identity_with_config(&w, base).unwrap();
+        let identities = alternatives
+            .into_iter()
+            .map(|c| source_identity_with_config(&w, c).unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(identities.len(), alternatives.len());
+        assert!(!identities.contains(&original));
+        let dir = Temp::new();
+        let tile = map_tile(&w, base, true);
+        assert!(explicit_cache(&dir, &w, base).store(&tile));
+        for config in alternatives {
+            assert!(explicit_cache(&dir, &w, config).load(tile.key).is_none());
+        }
+        assert!(explicit_cache(&dir, &w, base).load(tile.key).is_some());
+        for method in [
+            crate::appearance_method::Method::Hierarchy,
+            crate::appearance_method::Method::Visibility,
+        ] {
+            assert!(DiskCache::new_with_appearance(
+                dir.0.clone(),
+                4 * 1024 * 1024,
+                1024 * 1024,
+                &w,
+                AppearanceConfig { method, ..base }
+            )
+            .is_err());
+        }
+        assert!(DiskCache::new_with_appearance(
+            dir.0.clone(),
+            4 * 1024 * 1024,
+            1024 * 1024,
+            &w,
+            AppearanceConfig {
+                shared_near: true,
+                ..base
+            }
+        )
+        .is_err());
+    }
+    #[test]
+    fn map_halo_covers_alignment_filter_strata_neighbor_and_all_vertical_edits() {
+        let w = world();
+        let dir = Temp::new();
+        let config = AppearanceConfig {
+            prefilter: crate::appearance_map::MapPrefilter::Footprint,
+            ..map_config(&w)
+        };
+        let k = TileKey {
+            min: [-256, -512],
+            width_cells: 256,
+            step_cells: 32,
+            edge_steps: [32; 4],
+            source_revision: 0,
+        };
+        let original = explicit_cache(&dir, &w, config).key_bytes(k);
+        // spacing16 + stratum4 + filter1 + native-neighbor1 =22-cell halo.
+        for (delta, changes) in [
+            (-22, true),
+            (-23, false),
+            (256 + 21, true),
+            (256 + 22, false),
+        ] {
+            let mut edited = w.clone();
+            edited.set(
+                Cell {
+                    x: k.min[0] + delta,
+                    y: 500,
+                    z: k.min[1],
+                },
+                Material::Wood,
+            );
+            let identity = explicit_cache(&dir, &edited, config).key_bytes(k);
+            assert_eq!(identity != original, changes, "delta {delta}");
+        }
+    }
+    #[test]
+    fn map_corrupt_packs_targets_and_render_entrypoints_are_rejected() {
+        let w = world();
+        let config = map_config(&w);
+        let tile = map_tile(&w, config, true);
+        let header = tile
+            .face_profiles
+            .iter()
+            .position(|p| p[0][3] == -2.)
+            .unwrap();
+        for corruption in 0..5 {
+            let mut bad = map_tile(&w, config, true);
+            match corruption {
+                0 => bad.face_profiles[header][1][0] = 11.,
+                1 => bad.face_profiles[header][1][1] = 100.,
+                2 => bad.face_profiles[header + 1][1][0] = f32::MAX,
+                3 => bad.face_profiles[header + 1][1][0] = 0., // header instead of raw node
+                _ => bad.proxy_triangles[0].profile_index = header as u32 + 1, // pack is not renderable
+            }
+            assert!(
+                decode(&bytes(&bad), bad.key).is_none(),
+                "corruption {corruption}"
+            );
+            let dir = Temp::new();
+            assert!(!explicit_cache(&dir, &w, config).store(&bad));
+        }
+        let dir = Temp::new();
+        let mut cache = explicit_cache(&dir, &w, config);
+        assert!(cache.store(&tile));
+        let mut bad = tile;
+        bad.face_profiles[header][0][3] = -3.;
+        assert!(!cache.store(&bad));
     }
 }

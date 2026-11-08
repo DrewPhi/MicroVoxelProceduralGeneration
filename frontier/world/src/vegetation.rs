@@ -6,9 +6,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-// Version 2: ecological patches, sparse colonies and a bounded larger model bank.
+// Version 3: per-record seeded growth, low spreading ground cover and habitat cohorts.
 // This intentionally changes canonical plant records/voxels; display AO does not.
-pub const VEGETATION_SOURCE_VERSION: u32 = 2;
+pub const VEGETATION_SOURCE_VERSION: u32 = 3;
 pub const TILE_SIZE_CELLS: i64 = 256;
 pub const MAX_PLANT_RADIUS_CELLS: i64 = 96;
 pub const MAX_PLANT_HEIGHT_CELLS: i64 = 176;
@@ -18,7 +18,8 @@ pub const fn variant_count(species: Species) -> u8 {
         Species::Edelweiss => 3,
     }
 }
-const MODEL_SLOTS: usize = 24;
+const MODEL_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MODEL_CACHE_ENTRIES: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Species {
     Grass,
@@ -207,16 +208,22 @@ fn model(mut cells: Cells, seed: u64) -> PlantModel {
 pub fn generate_grass(seed: u64, variant: u8) -> PlantModel {
     let mut rng = Rng(seed);
     let mut v = Cells::new();
-    let height = [3, 4, 5, 6, 6, 7, 8, 10][variant as usize % 8];
+    let height = [2, 3, 3, 4, 5, 6, 8, 10][variant as usize % 8];
     let base = [96u8, 128, 57];
     let fresh = [108u8, 142, 66];
     let dry = [147u8, 158, 90];
     for _ in 0..[5, 7, 9, 6, 10, 8, 7, 9][variant as usize % 8] {
         let a = rng.between(0., std::f64::consts::TAU);
         let dry_tip = rng.unit() < 0.30;
-        let lean = rng.between(1., if variant < 4 { 3. } else { 4. });
-        let bx = (rng.between(-1., 1.)).round() as i64;
-        let bz = (rng.between(-1., 1.)).round() as i64;
+        // Rhizome-like low strokes spread the carpet; rare mature tufts rise above it.
+        let lean = rng.between(2., if variant < 4 { 5. } else { 3. });
+        let spread = if variant < 4 {
+            rng.between(1., 3.5)
+        } else {
+            1.
+        };
+        let bx = (a.cos() * spread).round() as i64;
+        let bz = (a.sin() * spread).round() as i64;
         stroke(&mut v, [0, 0, 0], [bx, 0, bz], 0, Material::Leaf, base);
         let h = (height - (rng.unit() * 4.) as i64).max(2);
         let mut p = [bx, 0, bz];
@@ -274,7 +281,7 @@ pub fn generate_edelweiss(seed: u64, variant: u8) -> PlantModel {
             -3
         };
         let oz = if head == 0 { 0 } else { 2 };
-        let h = 5 + (variant % 2) as i64;
+        let h = 5 + (variant % 2) as i64 + (rng.unit() * 3.).floor() as i64;
         stroke(&mut v, [0, 0, 0], [ox, h, oz], 0, Material::Leaf, LEAF);
         let angle = rng.between(-0.3, 0.3);
         for k in 0..8 {
@@ -312,8 +319,12 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// The latter motivates light/space competition; this bounded prototype uses
 /// attractor competition rather than claiming its full biological simulation.
 pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
+    grow_rowan(seed, variant, &|| false).unwrap()
+}
+fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<PlantModel> {
     let mut rng = Rng(seed);
-    let h = [52., 65., 76., 84., 94., 104., 112., 88.][variant as usize % 8];
+    let h =
+        [52., 65., 76., 84., 94., 104., 112., 88.][variant as usize % 8] * rng.between(0.96, 1.04);
     // The attractor volume supplies asymmetric, layered crowns; growth still
     // follows the existing space-colonization algorithm, never an authored mesh.
     let width = rng.between(0.27, 0.39);
@@ -344,6 +355,9 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
         .collect();
     let mut parents: Vec<usize> = (0..nodes.len()).map(|i| i.saturating_sub(1)).collect();
     for _ in 0..110 {
+        if cancel() {
+            return None;
+        }
         let mut sums = vec![[0.; 3]; nodes.len()];
         let mut used = vec![false; nodes.len()];
         attract.retain(|p| {
@@ -439,29 +453,60 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
         let p = transform([0., y as f64, 0.], 0.);
         stroke(&mut v, p, p, radius, Material::Wood, BARK);
     }
+    // Keep the complete woody scaffold and every terminal spray. Neighboring
+    // intermediate growth competes for space instead of packing a continuous
+    // leaf sheet along each 2.5-cell branch step. Tip-first ordering also gives
+    // coherent young pigment precedence where successive sprays overlap.
+    let mut sprays = Vec::new();
     for i in 1..nodes.len() {
         if nodes[i][1] < h * 0.30 || mass[i] > 9 {
             continue;
         }
         let p = transform(nodes[i], 0.);
-        let rx = 2 + (rng.unit() * 3.) as i64;
-        let ry = 2;
-        let rz = 2 + (rng.unit() * 3.) as i64;
-        for x in -rx..=rx {
-            for y in -ry..=ry {
-                for z in -rz..=rz {
-                    if (x as f64 / rx as f64).powi(2)
-                        + (y as f64 / ry as f64).powi(2)
-                        + (z as f64 / rz as f64).powi(2)
-                        <= 1.
+        let rx = (2. + (rng.unit() * 3.).floor()) * 0.88;
+        let rz = (2. + (rng.unit() * 3.).floor()) * 0.88;
+        sprays.push((mass[i], i, p, rx, rz));
+    }
+    sprays.sort_by_key(|&(mass, i, _, _, _)| (mass != 1, i));
+    let mut centers: Vec<[i64; 3]> = Vec::new();
+    for (n, (mass, _, p, rx, rz)) in sprays.into_iter().enumerate() {
+        if n % 128 == 0 && cancel() {
+            return None;
+        }
+        if mass != 1
+            && centers
+                .iter()
+                .any(|q| (p[0] - q[0]).pow(2) + (p[1] - q[1]).pow(2) + (p[2] - q[2]).pow(2) < 13)
+        {
+            continue;
+        }
+        centers.push(p);
+        let ry = 1.8;
+        let young = (9 - mass) as f64 / 8.;
+        for x in -(rx.ceil() as i64)..=rx.ceil() as i64 {
+            for y in -2..=2 {
+                for z in -(rz.ceil() as i64)..=rz.ceil() as i64 {
+                    if (x as f64 / rx).powi(2) + (y as f64 / ry).powi(2) + (z as f64 / rz).powi(2)
+                        > 1.
                     {
-                        v.entry(Cell {
-                            x: p[0] + x,
-                            y: p[1] + y,
-                            z: p[2] + z,
-                        })
-                        .or_insert((Material::Leaf, [100, 137, 64]));
+                        continue;
                     }
+                    // Branch age and position within one connected spray supply
+                    // new-growth color. It is canonical pigment, not lighting
+                    // or disconnected per-voxel color noise.
+                    let freshness = 0.40 * young * (0.65 + 0.35 * (y as f64 / ry + 1.) * 0.5);
+                    let mature = [100u8, 137, 64];
+                    let new_growth = [143u8, 164, 76];
+                    let pigment = std::array::from_fn(|k| {
+                        (mature[k] as f64 + (new_growth[k] as f64 - mature[k] as f64) * freshness)
+                            .round() as u8
+                    });
+                    v.entry(Cell {
+                        x: p[0] + x,
+                        y: p[1] + y,
+                        z: p[2] + z,
+                    })
+                    .or_insert((Material::Leaf, pigment));
                 }
             }
         }
@@ -503,37 +548,190 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
             }
         }
     }
-    model(v, seed)
-}
-pub fn model_for(record: &PlantRecord) -> &'static PlantModel {
-    static MODELS: [OnceLock<PlantModel>; MODEL_SLOTS] = [const { OnceLock::new() }; MODEL_SLOTS];
-    let variant = record.variant as usize % variant_count(record.species) as usize;
-    let species = record.species;
-    MODELS[species as usize * 8 + variant].get_or_init(|| {
-        let seed = mix(0x726f77616e + species as u64 * 97 + variant as u64);
-        match species {
-            Species::Grass => generate_grass(seed, variant as u8),
-            Species::Edelweiss => generate_edelweiss(seed, variant as u8),
-            Species::Rowan => generate_rowan(seed, variant as u8),
-        }
-    })
+    if cancel() {
+        return None;
+    }
+    let grown = model(v, seed);
+    cache_wood_model((variant % variant_count(Species::Rowan), seed), &grown);
+    Some(grown)
 }
 
-/// Perform the bounded one-time model construction during explicit loading,
-/// before either display jobs or canonical walking queries need these models.
-pub fn prewarm_models() {
-    for species in [Species::Grass, Species::Edelweiss, Species::Rowan] {
-        for variant in 0..variant_count(species) {
-            model_for(&PlantRecord {
-                species,
-                variant,
-                seed: 0,
-                root: Cell::default(),
-                rotation: 0,
-            });
-        }
+const WOOD_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const WOOD_CACHE_ENTRIES: usize = 256;
+type WoodKey = (u8, u64);
+struct WoodOccupancy {
+    // Local canonical bounds are < 200 cells; six bytes per occupied wood cell
+    // retain exact identity without pigments, soft foliage or a tree-map index.
+    cells: Box<[[i16; 3]]>,
+}
+impl WoodOccupancy {
+    fn from_model(model: &PlantModel) -> Self {
+        let cells = model
+            .voxels
+            .iter()
+            .filter(|v| v.material == Material::Wood)
+            .map(|v| {
+                [v.cell.x, v.cell.y, v.cell.z]
+                    .map(|c| i16::try_from(c).expect("bounded local rowan cell"))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        // PlantModel's canonical BTreeMap traversal already orders x,y,z.
+        Self { cells }
+    }
+    fn contains(&self, c: Cell) -> bool {
+        let (Ok(x), Ok(y), Ok(z)) = (i16::try_from(c.x), i16::try_from(c.y), i16::try_from(c.z))
+        else {
+            return false;
+        };
+        self.cells.binary_search(&[x, y, z]).is_ok()
+    }
+    fn bytes(&self) -> usize {
+        self.cells.len() * std::mem::size_of::<[i16; 3]>() + std::mem::size_of::<Self>()
     }
 }
+#[derive(Default)]
+struct WoodCache {
+    entries: VecDeque<(WoodKey, Arc<WoodOccupancy>)>,
+    bytes: usize,
+}
+impl WoodCache {
+    fn get(&mut self, key: WoodKey) -> Option<Arc<WoodOccupancy>> {
+        let i = self.entries.iter().position(|e| e.0 == key)?;
+        let entry = self.entries.remove(i).unwrap();
+        let result = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(result)
+    }
+    fn insert(&mut self, key: WoodKey, wood: Arc<WoodOccupancy>) -> Arc<WoodOccupancy> {
+        if let Some(existing) = self.get(key) {
+            return existing;
+        }
+        let bytes = wood.bytes();
+        while self.bytes.saturating_add(bytes) > WOOD_CACHE_BYTES
+            || self.entries.len() >= WOOD_CACHE_ENTRIES
+        {
+            if let Some((_, old)) = self.entries.pop_front() {
+                self.bytes -= old.bytes();
+            } else {
+                break;
+            }
+        }
+        if bytes <= WOOD_CACHE_BYTES {
+            self.bytes += bytes;
+            self.entries.push_back((key, wood.clone()));
+        }
+        wood
+    }
+}
+fn wood_cache() -> &'static Mutex<WoodCache> {
+    static CACHE: OnceLock<Mutex<WoodCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(WoodCache::default()))
+}
+fn cache_wood_model(key: WoodKey, model: &PlantModel) -> Arc<WoodOccupancy> {
+    if let Some(wood) = wood_cache().lock().unwrap().get(key) {
+        return wood;
+    }
+    let wood = Arc::new(WoodOccupancy::from_model(model));
+    wood_cache().lock().unwrap().insert(key, wood)
+}
+fn wood_for_with(
+    record: &PlantRecord,
+    generate: impl FnOnce() -> Arc<PlantModel>,
+) -> Arc<WoodOccupancy> {
+    let key = (record.variant % variant_count(Species::Rowan), record.seed);
+    if let Some(wood) = wood_cache().lock().unwrap().get(key) {
+        return wood;
+    }
+    // First-ever cold queries still construct canonical growth. Display growth
+    // populates this much smaller cache before its full foliage model can evict.
+    cache_wood_model(key, &generate())
+}
+fn wood_for(record: &PlantRecord) -> Arc<WoodOccupancy> {
+    wood_for_with(record, || model_for(record))
+}
+
+type ModelKey = (Species, u8, u64);
+#[derive(Default)]
+struct ModelCache {
+    entries: VecDeque<(ModelKey, Arc<PlantModel>, usize)>,
+    bytes: usize,
+}
+fn model_cache(species: Species) -> &'static Mutex<ModelCache> {
+    static WOOD: OnceLock<Mutex<ModelCache>> = OnceLock::new();
+    static SOFT: OnceLock<Mutex<ModelCache>> = OnceLock::new();
+    // Carpet churn cannot evict the more expensive woody growth.
+    let cache = if species == Species::Rowan {
+        &WOOD
+    } else {
+        &SOFT
+    };
+    cache.get_or_init(|| Mutex::new(ModelCache::default()))
+}
+/// Cache generated content, never a finite bank of replacement shapes. The full
+/// seed is canonical identity; root/rotation only transform that local growth.
+pub fn model_for(record: &PlantRecord) -> Arc<PlantModel> {
+    model_for_cancellable(record, || false).unwrap()
+}
+pub fn model_for_cancellable(
+    record: &PlantRecord,
+    cancel: impl Fn() -> bool,
+) -> Option<Arc<PlantModel>> {
+    if cancel() {
+        return None;
+    }
+    let key = (
+        record.species,
+        record.variant % variant_count(record.species),
+        record.seed,
+    );
+    {
+        let mut cache = model_cache(record.species).lock().unwrap();
+        if let Some(i) = cache.entries.iter().position(|e| e.0 == key) {
+            let entry = cache.entries.remove(i).unwrap();
+            let result = entry.1.clone();
+            cache.entries.push_back(entry);
+            return Some(result);
+        }
+    }
+    // Growth runs outside the lock so streaming cannot block native queries.
+    let generated = match key.0 {
+        Species::Grass => generate_grass(key.2, key.1),
+        Species::Edelweiss => generate_edelweiss(key.2, key.1),
+        Species::Rowan => grow_rowan(key.2, key.1, &cancel)?,
+    };
+    if cancel() {
+        return None;
+    }
+    let generated = Arc::new(generated);
+    // Includes conservative BTreeMap allocation overhead, not just voxel payload.
+    let bytes = generated.voxels.capacity() * std::mem::size_of::<PlantVoxel>()
+        + generated.voxels.len() * 96;
+    let mut cache = model_cache(record.species).lock().unwrap();
+    let budget = if record.species == Species::Rowan {
+        MODEL_CACHE_BYTES
+    } else {
+        8 * 1024 * 1024
+    };
+    if let Some(entry) = cache.entries.iter().find(|e| e.0 == key) {
+        return Some(entry.1.clone());
+    }
+    while cache.bytes.saturating_add(bytes) > budget || cache.entries.len() >= MODEL_CACHE_ENTRIES {
+        if let Some((_, _, old)) = cache.entries.pop_front() {
+            cache.bytes -= old;
+        } else {
+            break;
+        }
+    }
+    if bytes <= budget {
+        cache.bytes += bytes;
+        cache.entries.push_back((key, generated.clone(), bytes));
+    }
+    Some(generated)
+}
+/// Per-record models are prepared on demand by the bounded streaming worker.
+/// Retained for callers that used the previous fixed-bank loading hook.
+pub fn prewarm_models() {}
 
 #[derive(Debug, Default)]
 pub(crate) struct TileCache(Mutex<VecDeque<((i64, i64, Species), Arc<Vec<PlantRecord>>)>>);
@@ -640,7 +838,7 @@ fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option
     let roll = |salt| (mix(seed ^ salt) >> 11) as f64 / ((1u64 << 53) as f64);
     let species = if roll(0x626c6f6f6d) < bloom_probability {
         Some(Species::Edelweiss)
-    } else if roll(0x6772617373) < (0.08 + 0.85 * meadow + 0.25 * (tuft - 0.5)).clamp(0.04, 0.94) {
+    } else if roll(0x6772617373) < (0.72 + 0.35 * meadow + 0.12 * (tuft - 0.5)).clamp(0.65, 0.98) {
         Some(Species::Grass)
     } else {
         None
@@ -677,7 +875,11 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
                 species: Species::Rowan,
                 seed,
                 root: Cell { x, y: y - 2, z },
-                variant: (seed % variant_count(Species::Rowan) as u64) as u8,
+                // Broad resource availability sets maturity; local seed varies individuals.
+                variant: ((patch_field(w.seed ^ 0x6d6174757265, x, z, 512) * 6.
+                    + (mix(seed ^ 77) % 3) as f64)
+                    .floor() as u8)
+                    .min(7),
                 rotation: ((seed >> 8) % 4) as u8,
             });
         }
@@ -728,7 +930,8 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
                     variant: if species == Species::Grass {
                         // Height cohorts follow the same ecological field, so short
                         // meadow mats and taller clumps coexist without a lattice.
-                        let tall = patch_field(w.seed ^ 0x686569676874, x, z, 64) > 0.57;
+                        let tall = patch_field(w.seed ^ 0x686569676874, x, z, 64) > 0.63
+                            && mix(seed ^ 0x74616c6c) % 5 == 0;
                         ((seed >> 24) % 4) as u8 + if tall { 4 } else { 0 }
                     } else {
                         ((seed >> 24) % variant_count(species) as u64) as u8
@@ -834,7 +1037,7 @@ impl World {
         }
         None
     }
-    /// Collision skips all soft foliage and queries only reusable rowan wood.
+    /// Collision retains exact canonical wood in a compact cache independent of foliage.
     pub fn blocking_material(&self, c: Cell) -> Material {
         if let Some(&m) = self.edits.get(&c) {
             return if m.is_blocking() { m } else { Material::Air };
@@ -843,9 +1046,28 @@ impl World {
         if terrain != Material::Air {
             return terrain;
         }
-        self.vegetation_species_voxel(c, Species::Rowan)
-            .filter(|v| v.material.is_blocking())
-            .map_or(Material::Air, |v| v.material)
+        let Some(cache) = &self.vegetation else {
+            return Material::Air;
+        };
+        let radius = MAX_PLANT_RADIUS_CELLS;
+        for tx in (c.x - radius).div_euclid(256)..=(c.x + radius).div_euclid(256) {
+            for tz in (c.z - radius).div_euclid(256)..=(c.z + radius).div_euclid(256) {
+                for record in cache.tile(self, tx, tz, Species::Rowan).iter() {
+                    let local = record.local_cell(c);
+                    if local.y < 0
+                        || local.y > MAX_PLANT_HEIGHT_CELLS
+                        || local.x.abs() > radius
+                        || local.z.abs() > radius
+                    {
+                        continue;
+                    }
+                    if wood_for(record).contains(local) {
+                        return Material::Wood;
+                    }
+                }
+            }
+        }
+        Material::Air
     }
 }
 
@@ -866,7 +1088,167 @@ mod tests {
         }
     }
     #[test]
-    fn model_bank_has_distinct_heights_full_crowns_and_native_grass() {
+    fn compact_wood_matches_seeded_rotated_canonical_models() {
+        for i in 0..8u64 {
+            let record = PlantRecord {
+                seed: mix(0x776f6f645f746573 ^ i),
+                ..record(Species::Rowan, i as u8)
+            };
+            let model = model_for(&record);
+            assert!(
+                model.min.x >= -MAX_PLANT_RADIUS_CELLS && model.max.x <= MAX_PLANT_RADIUS_CELLS
+            );
+            assert!(
+                model.min.z >= -MAX_PLANT_RADIUS_CELLS && model.max.z <= MAX_PLANT_RADIUS_CELLS
+            );
+            assert!(model.max.y <= MAX_PLANT_HEIGHT_CELLS);
+            let cells: Cells = model
+                .voxels
+                .iter()
+                .map(|v| (v.cell, (v.material, [0; 3])))
+                .collect();
+            assert_eq!(
+                self::model(cells, 0).voxels.len(),
+                model.voxels.len(),
+                "seeded crown remains rooted"
+            );
+            let wood = wood_for(&record);
+            assert!(wood.cells.windows(2).all(|p| p[0] < p[1]));
+            for rotation in 0..4 {
+                let rotated = PlantRecord { rotation, ..record };
+                for v in &model.voxels {
+                    let c = rotated.local_cell(rotated.world_cell(v.cell));
+                    assert_eq!(wood.contains(c), v.material == Material::Wood);
+                }
+            }
+            for j in 0..256 {
+                let h = mix(record.seed ^ j);
+                let c = Cell {
+                    x: (h % 193) as i64 - 96,
+                    y: ((h >> 16) % 177) as i64,
+                    z: ((h >> 32) % 193) as i64 - 96,
+                };
+                assert_eq!(
+                    wood.contains(c),
+                    model.voxel(c).is_some_and(|v| v.material == Material::Wood)
+                );
+            }
+            assert!(!wood.contains(Cell {
+                x: i64::MAX,
+                ..Cell::default()
+            }));
+        }
+    }
+    #[test]
+    fn compact_wood_survives_full_model_eviction_without_generation() {
+        let record = PlantRecord {
+            seed: 0xf473c12adead0201,
+            ..record(Species::Rowan, 5)
+        };
+        let expected = model_for(&record);
+        let key = (Species::Rowan, 5, record.seed);
+        {
+            let mut cache = model_cache(Species::Rowan).lock().unwrap();
+            if let Some(i) = cache.entries.iter().position(|e| e.0 == key) {
+                cache.bytes -= cache.entries.remove(i).unwrap().2;
+            }
+            assert!(!cache.entries.iter().any(|e| e.0 == key));
+        }
+        let wood = wood_for_with(&record, || {
+            panic!("wood hit must not regenerate full foliage")
+        });
+        assert_eq!(
+            wood.cells.len(),
+            expected
+                .voxels
+                .iter()
+                .filter(|v| v.material == Material::Wood)
+                .count()
+        );
+    }
+    #[test]
+    fn compact_wood_cache_enforces_entry_and_byte_bounds() {
+        let mut cache = WoodCache::default();
+        for seed in 0..300 {
+            cache.insert(
+                (0, seed),
+                Arc::new(WoodOccupancy {
+                    cells: vec![[0, 0, 0]].into_boxed_slice(),
+                }),
+            );
+            assert!(cache.entries.len() <= WOOD_CACHE_ENTRIES);
+        }
+        assert_eq!(cache.entries.len(), WOOD_CACHE_ENTRIES);
+        let held = cache.get((0, 299)).unwrap();
+        for seed in 300..400 {
+            cache.insert(
+                (0, seed),
+                Arc::new(WoodOccupancy {
+                    cells: vec![[0, 0, 0]; 40_000].into_boxed_slice(),
+                }),
+            );
+            assert!(cache.bytes <= WOOD_CACHE_BYTES && cache.entries.len() <= WOOD_CACHE_ENTRIES);
+        }
+        assert!(
+            cache.entries.len() < 100,
+            "byte budget must evict even below entry cap"
+        );
+        assert!(
+            held.contains(Cell::default()),
+            "eviction cannot mutate retained canonical content"
+        );
+        assert_eq!(
+            cache.bytes,
+            cache.entries.iter().map(|e| e.1.bytes()).sum::<usize>()
+        );
+    }
+    #[test]
+    fn compact_wood_collision_preserves_authoritative_edits() {
+        let mut w = World::new(37).with_vegetation();
+        let records = w.vegetation_records_species([-512, -512], [512, 512], Species::Rowan);
+        let c = records
+            .iter()
+            .find_map(|p| {
+                model_for(p)
+                    .voxels
+                    .iter()
+                    .filter(|v| v.material == Material::Wood)
+                    .map(|v| p.world_cell(v.cell))
+                    .find(|c| w.source(*c) == Material::Air)
+            })
+            .expect("test region has exposed canonical wood");
+        assert_eq!(w.blocking_material(c), Material::Wood);
+        for (edit, blocking) in [
+            (Material::Air, Material::Air),
+            (Material::Flower, Material::Air),
+            (Material::Stone, Material::Stone),
+        ] {
+            w.set(c, edit);
+            assert_eq!(w.blocking_material(c), blocking);
+        }
+    }
+    #[test]
+    fn record_seed_drives_growth_and_cache_reuse_is_content_exact() {
+        for species in [Species::Grass, Species::Edelweiss, Species::Rowan] {
+            let a = record(species, 2);
+            let b = PlantRecord {
+                seed: a.seed + 1,
+                ..a
+            };
+            let first = model_for(&a);
+            assert!(Arc::ptr_eq(&first, &model_for(&a)));
+            let second = model_for(&b);
+            assert_ne!(first.voxels, second.voxels, "seed must affect {species:?}");
+            assert_ne!(
+                first.voxels.iter().map(|v| v.cell).collect::<Vec<_>>(),
+                second.voxels.iter().map(|v| v.cell).collect::<Vec<_>>(),
+                "seed must change growth geometry, not only pigment: {species:?}"
+            );
+            assert!(model_for_cancellable(&b, || true).is_none());
+        }
+    }
+    #[test]
+    fn growth_cohorts_have_distinct_heights_full_crowns_and_native_grass() {
         let mut signatures = BTreeSet::new();
         let mut grass_heights = BTreeSet::new();
         for variant in 0..variant_count(Species::Rowan) {
@@ -891,7 +1273,7 @@ mod tests {
             assert!(m.max.x - m.min.x >= 2 && m.max.z - m.min.z >= 2);
         }
         assert!(
-            grass_heights.len() >= 6,
+            grass_heights.len() >= 5,
             "short/tall native tufts: {grass_heights:?}"
         );
     }
@@ -962,7 +1344,7 @@ mod tests {
         let area = 256. * 256. * 0.25;
         let density = grass as f64 / area;
         let blooms = flowers as f64 / area;
-        assert!((1.4..2.7).contains(&density), "grass density {density}");
+        assert!((3.1..3.95).contains(&density), "grass density {density}");
         assert!(
             (0.005..0.08).contains(&blooms),
             "edelweiss density {blooms}"

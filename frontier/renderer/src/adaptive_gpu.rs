@@ -758,7 +758,7 @@ impl AdaptiveGpu {
             crate::appearance_method::map_anisotropy() as f32,
             amplitude,
             crate::appearance_method::voxel_grain().unwrap_or(-1.),
-            0.,
+            if settings.beauty { 1. } else { 0. },
         ];
         if value != self.lighting {
             self.lighting = value;
@@ -1250,7 +1250,9 @@ impl AdaptiveGpu {
                 (c.origin.x * 16.) as i64 as u32,
                 (c.origin.y * 16.) as i64 as u32,
                 (c.origin.z * 16.) as i64 as u32,
-                (self.voxel_filter as u32) | ((c.exact as u32) << 1),
+                (self.voxel_filter as u32)
+                    | ((c.exact as u32) << 1)
+                    | (((self.lighting[11] > 0.5) as u32) << 2),
             ];
             bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
             let mut lighting = self.lighting;

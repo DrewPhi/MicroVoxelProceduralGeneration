@@ -7,10 +7,12 @@ struct AtmosphereUniform {
     sun: vec4<f32>,
     fog: vec4<f32>, // density, height falloff, exposure, enabled
     weather: vec4<f32>, // coverage, speed, overcast, elapsed seconds
-    beauty: vec4<f32>, // contract v2: enabled, reserved, reserved, reserved
+    beauty: vec4<f32>, // contract v2: enabled, shadowed air enabled, debug mode, reserved
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS
+@group(0) @binding(3) var meadow_air:texture_2d<f32>;
+@group(0) @binding(4) var cloud_lighting:texture_2d<f32>;
 
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -78,41 +80,17 @@ fn alpine_clear_sky(ray: vec3<f32>) -> vec3<f32> {
     color += sun_color * smoothstep(0.999975, 0.999989, forward) * 3.0;
     return mix(color, vec3(0.48, 0.54, 0.61), atmosphere.weather.z * 0.72);
 }
-fn alpine_cloud_layer(ray: vec3<f32>, color: vec3<f32>, height: f32, scale: f32,
-                      weight: f32, shift: vec2<f32>) -> vec3<f32> {
-    let distance = (height - atmosphere.world_eye.y) / ray.y;
-    if distance <= 0.0 { return color; }
-    let wind = vec2(1.0, 0.32) * atmosphere.weather.w * atmosphere.weather.y;
-    let p = (atmosphere.world_eye.xz + ray.xz * distance) * scale + wind + shift;
-    let broad = noise(p);
-    // Three bounded bands break the bank into small lobes. The fine band shapes
-    // the edge, rather than painting a flat white texture over a giant mass.
-    let value = broad * 0.55 + noise(p * 2.13 + vec2(11.1, 5.7)) * 0.28
-        + noise(p * 5.07 + vec2(3.9, 18.2)) * 0.17;
-    let threshold = mix(0.87, 0.35, atmosphere.weather.x);
-    let density = smoothstep(threshold, threshold + 0.13, value);
-    // A density probe toward the sun approximates lit edges and shaded bodies.
-    // This lights the sheet only: it is not a volumetric shadow or sun shaft.
-    let toward_sun = noise(p + atmosphere.sun.xz * 0.23);
-    let edge_light = clamp((broad - toward_sun) * 4.0 + 0.48, 0.0, 1.0);
-    let thickness = smoothstep(threshold + 0.03, threshold + 0.25, value);
-    let warm = 1.0 - smoothstep(0.03, 0.45, atmosphere.sun.y);
-    let lit = mix(vec3(0.92, 0.95, 0.97), vec3(1.0, 0.83, 0.65), warm * 0.7);
-    let shadow = mix(vec3(0.39, 0.48, 0.59), vec3(0.36, 0.40, 0.47), atmosphere.weather.z);
-    let cloud = mix(shadow, lit, clamp(0.55 + edge_light * 0.52 - thickness * 0.30, 0.0, 1.0));
-    let fade = smoothstep(0.025, 0.18, ray.y);
-    let alpha = (1.0 - exp(-density * 2.5)) * fade * weight;
-    return mix(color, cloud, alpha);
-}
-fn alpine_sky(ray: vec3<f32>) -> vec3<f32> {
-    var color = alpine_clear_sky(ray);
-    if ray.y > 0.025 && atmosphere.weather.x > 0.001 {
-        // Far thin bank first, then lower broken cumulus. Both remain anchored
-        // in the world during movement; no temporal history or geometry blur.
-        color = alpine_cloud_layer(ray, color, 3400.0, 0.00065, 0.22, vec2(17.4, 8.1));
-        color = alpine_cloud_layer(ray, color, 1900.0, 0.00135, 0.92, vec2(0.0));
-    }
-    return color;
+// Only low-frequency cloud scattering/transmittance is reconstructed here.
+// The sky gradient and solar disc remain analytic at native pixel resolution.
+fn alpine_sky(ray:vec3<f32>,uv:vec2<f32>)->vec3<f32> {
+    let size=vec2<i32>(textureDimensions(cloud_lighting));
+    let p=uv*vec2<f32>(size)-.5;let base=vec2<i32>(floor(p));let f=fract(p);
+    var clouds=vec4(0.);
+    for(var y=0i;y<2i;y+=1i) {for(var x=0i;x<2i;x+=1i) {
+        let weight=mix(1.-f.x,f.x,f32(x))*mix(1.-f.y,f.y,f32(y));
+        clouds+=textureLoad(cloud_lighting,clamp(base+vec2(x,y),vec2(0),size-vec2(1)),0)*weight;
+    }}
+    return clouds.rgb+alpine_clear_sky(ray)*clouds.a;
 }
 fn bounded_height_integral(start: f32, end: f32, distance: f32, falloff: f32) -> f32 {
     // Density rho*exp(-k*max(y,0)). Cap LOCAL density at sea-level rho,
@@ -156,14 +134,37 @@ fn fog_transmittance(distance: f32, direction_y: f32) -> f32 {
     }
     return exp(-min(start_density*distance*integral,80.0));
 }
+// Bilateral reconstruction operates on scattering only; native scene colour
+// and depth never pass through a spatial blur. Reject across terrain/sky edges.
+fn meadow_scattering(uv:vec2<f32>,distance:f32)->vec3<f32> {
+    if atmosphere.beauty.z>2.5 {return vec3(0.);}
+    let size=vec2<i32>(textureDimensions(meadow_air));
+    let p=uv*vec2<f32>(size)-.5;let base=vec2<i32>(floor(p));let f=fract(p);
+    var light=vec3(0.);var total=0.;
+    for(var y=0i;y<2i;y+=1i) {for(var x=0i;x<2i;x+=1i) {
+        let value=textureLoad(meadow_air,clamp(base+vec2(x,y),vec2(0),size-vec2(1)),0);
+        let spatial=mix(1.-f.x,f.x,f32(x))*mix(1.-f.y,f.y,f32(y));
+        let weight=spatial*exp(-abs(value.a-distance)/max(1.,distance*.025));
+        light+=value.rgb*weight;total+=weight;
+    }}
+    return light/max(total,.00001);
+}
 fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
-    if atmosphere.fog.w < 0.5 { return color*atmosphere.fog.z; }
+    if atmosphere.fog.w < 0.5 {
+        if atmosphere.beauty.x>.5 {return beauty_finish(color);}
+        return color*atmosphere.fog.z;
+    }
     let position = reconstruct(uv,depth);
     let offset = position-atmosphere.relative_eye.xyz;
     let distance = length(offset);
     let ray = offset/max(distance,0.0001);
     if atmosphere.beauty.x > 0.5 {
-        if depth >= 1.0 { return beauty_finish(alpine_sky(ray)); }
+        // Air/visibility diagnostics contain this pass only: no scene colour,
+        // sky, exposure, tone mapping, or analytical global height-fog terms.
+        if atmosphere.beauty.z>.5 && atmosphere.beauty.z<2.5 {
+            return meadow_scattering(uv,select(distance,4000.,depth>=1.));
+        }
+        if depth >= 1.0 { return beauty_finish(alpine_sky(ray,uv)+meadow_scattering(uv,4000.)); }
         let end_height = atmosphere.world_eye.y + offset.y;
         let integrated = bounded_height_integral(atmosphere.world_eye.y, end_height, distance, atmosphere.fog.y);
         // Clean air includes a weak altitude-independent Rayleigh contribution.
@@ -171,7 +172,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         let optical_depth = atmosphere.fog.x * (integrated * 0.78 + distance * 0.22);
         let transmittance = exp(-optical_depth);
         let haze = alpine_clear_sky(vec3(ray.x, max(ray.y, 0.04), ray.z));
-        return beauty_finish(mix(haze, color, transmittance));
+        return beauty_finish(mix(haze, color, transmittance)+meadow_scattering(uv,distance));
     }
     if depth >= 1.0 { return sky(ray)*atmosphere.fog.z; }
     let transmittance = fog_transmittance(distance,ray.y);
