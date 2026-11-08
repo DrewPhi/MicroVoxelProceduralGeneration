@@ -15,7 +15,7 @@ supersampled images, coverage/depth data and matched GPU comparisons. See the
 [reference checkpoint](frontier/REFERENCE_CHECKPOINT.md) for measured results and scope.
 
 The default playtest launches the experimental adaptive renderer with Regional
-terrain, voxel appearance filtering and 4×MSAA. Press **Esc** for live light and
+terrain, detailed appearance maps, voxel appearance filtering and 4×MSAA. Press **Esc** for live light and
 atmosphere controls plus image-quality and loading settings. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
 Use `--terrain-recipe legacy` for the original spiky terrain.

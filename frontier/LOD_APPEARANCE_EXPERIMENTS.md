@@ -1,7 +1,14 @@
 # Three appearance LOD experiments
 
-The working default remains the Alpine tuning at commit `17246bc`. These
-selectable, appearance-only candidates use the same canonical terrain, native
+**Default update (2026-11-08):** the viewer now starts with detailed appearance
+maps (`map`), following the user’s visual preference. No environment variable is
+needed. `FRONTIER_LOD_APPEARANCE=baseline` retains the previous appearance. Map
+density, filtering, lighting, voxel size and geometric error settings are unchanged.
+The persistent derived disk cache still requires explicit baseline mode; its
+codec has not been extended to appearance maps.
+
+The historical comparisons below used the Alpine tuning at commit `17246bc`.
+These selectable, appearance-only candidates use the same canonical terrain, native
 faces, geometric error policy, camera and lighting. They are original Rust/WGSL
 implementations (tier G), not ports of proprietary engine code or complete
 reproductions of the cited research systems.
@@ -9,7 +16,8 @@ reproductions of the cited research systems.
 From `frontier/`:
 
 ```sh
-./run.sh --preset alpine
+./run.sh --preset alpine # detailed appearance maps
+FRONTIER_LOD_APPEARANCE=baseline ./run.sh --preset alpine
 FRONTIER_LOD_APPEARANCE=hierarchy ./run.sh --preset alpine
 FRONTIER_LOD_APPEARANCE=visibility ./run.sh --preset alpine
 FRONTIER_LOD_APPEARANCE=map ./run.sh --preset alpine
@@ -58,7 +66,7 @@ alone do not guarantee antialiasing or cross-level filtering consistency.
 All formats retain unnormalized color-times-area and area. New GPU descriptors
 use validated relative references, preserving correctness when profile tables
 move within pooled storage. Memory admission includes profiles, node tables and
-the additional source workspace. No candidate is automatically promoted.
+the additional source workspace. The measured comparisons below predate the user-selected promotion of maps.
 
 ## References and adaptation
 
@@ -132,7 +140,7 @@ The circled handoff is not eliminated. These experiments operate on selected
 proxy bands and retain native face shading and the smallest proxy cells. They do
 not constitute a unified native-to-far appearance replacement. Their modest
 visual change must not be interpreted as proving the research directions
-ineffective or the current engine optimal. No candidate is promoted by default.
+ineffective or the current engine optimal. No candidate was promoted at the time of that comparison.
 
 ### Iteration and protected checks
 
@@ -234,3 +242,29 @@ are excluded from the evidence.
 [Full grain trial](reference/gallery/lod-methods/map-grain-trial.png) ·
 [Filtering diagnostic crop](reference/gallery/lod-methods/smear-diagnostic.png) ·
 [Trial metadata](reference/gallery/lod-methods/grain-trial-manifest.json)
+
+## User-selected default and matched beauty frame (2026-11-08)
+
+The application now initializes `map` before creating terrain or render products.
+Explicit `FRONTIER_LOD_APPEARANCE=baseline|hierarchy|visibility|map` still wins.
+Low-level format tests retain their baseline fixtures independently of the
+application’s preferred startup policy. The persistent cache remains baseline-only
+and reports the required override; ordinary in-memory streaming supports maps.
+
+[Updated same-camera frame](reference/gallery/appearance-default/player-view.png) ·
+[Before/after](reference/gallery/appearance-default/before-after.png) ·
+[Capture metadata and provenance](reference/gallery/appearance-default/manifest.json).
+The actual capture reports `method: map`, two intervals, prefilter off and
+voxel filtering on. Camera, lighting, sampling and vegetation placement match
+the previous beauty frame exactly. Rocky slopes regain detailed variation;
+regular grassy-hill map patterns remain visible and were not retuned in this pass.
+435 Rust tests pass. The fixed spiky check was captured first and repeated after
+promotion; the changed appearance is intentional. No new frame-time claim is made.
+
+```sh
+./run.sh --preset alpine
+# Previous appearance, including compatibility with the persistent disk cache:
+FRONTIER_LOD_APPEARANCE=baseline ./run.sh --preset alpine
+# Exact featured camera:
+./run.sh --preset alpine --eye -43.625,31.0625,-289.5625 --target -43.625,31.3625,-259.5625
+```

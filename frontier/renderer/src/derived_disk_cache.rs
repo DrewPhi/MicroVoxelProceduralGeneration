@@ -129,7 +129,7 @@ impl DiskCache {
             || crate::adaptive_geometry::near_profile_shared()
         {
             return Err(io::Error::other(
-                "LOD appearance experiments require derived disk cache disabled",
+                "Derived disk cache requires baseline appearance; set FRONTIER_LOD_APPEARANCE=baseline or omit --adaptive-disk-cache",
             ));
         }
         if budget_bytes == 0 || max_entry_bytes < 1024 || max_entry_bytes as u64 > budget_bytes {

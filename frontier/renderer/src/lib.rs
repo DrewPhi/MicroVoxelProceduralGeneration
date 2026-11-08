@@ -2299,6 +2299,7 @@ fn capture_pose(
 /// Runs the interactive fixture or captures it without a window using `--capture PATH`.
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
+    appearance_method::initialize_application();
     let Some(options::Options {
         atmosphere: atmosphere_option,
         visual,

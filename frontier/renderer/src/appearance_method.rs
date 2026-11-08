@@ -16,19 +16,53 @@ impl Method {
         }
     }
 }
-pub(crate) fn selected() -> Method {
-    static VALUE: std::sync::OnceLock<Method> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(
-        || match std::env::var("FRONTIER_LOD_APPEARANCE").as_deref() {
-            Ok("hierarchy") => Method::Hierarchy,
-            Ok("visibility") => Method::Visibility,
-            Ok("map") => Method::Map,
-            Ok("baseline") | Err(_) => Method::Baseline,
-            Ok(value) => panic!(
-                "unknown FRONTIER_LOD_APPEARANCE={value}; use baseline|hierarchy|visibility|map"
-            ),
-        },
+static VALUE: std::sync::OnceLock<Method> = std::sync::OnceLock::new();
+
+fn resolve(value: Option<&str>, default: Method) -> Method {
+    match value {
+        Some("hierarchy") => Method::Hierarchy,
+        Some("visibility") => Method::Visibility,
+        Some("map") => Method::Map,
+        Some("baseline") => Method::Baseline,
+        None => default,
+        Some(value) => {
+            panic!("unknown FRONTIER_LOD_APPEARANCE={value}; use baseline|hierarchy|visibility|map")
+        }
+    }
+}
+
+fn from_environment(default: Method) -> Method {
+    resolve(
+        std::env::var("FRONTIER_LOD_APPEARANCE").ok().as_deref(),
+        default,
     )
+}
+
+/// Application policy is selected once, before creating any terrain products.
+/// Keep baseline file-format fixtures independent of the viewer's preferred look.
+pub(crate) fn initialize_application() {
+    VALUE.get_or_init(|| from_environment(Method::Map));
+}
+
+pub(crate) fn selected() -> Method {
+    *VALUE.get_or_init(|| from_environment(Method::Baseline))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn application_preference_preserves_explicit_method_overrides() {
+        assert_eq!(resolve(None, Method::Map), Method::Map);
+        for (value, expected) in [
+            ("baseline", Method::Baseline),
+            ("map", Method::Map),
+            ("hierarchy", Method::Hierarchy),
+            ("visibility", Method::Visibility),
+        ] {
+            assert_eq!(resolve(Some(value), Method::Map), expected);
+        }
+    }
 }
 
 /// Optional display-only voxel grain amplitude; None retains the original shader.
