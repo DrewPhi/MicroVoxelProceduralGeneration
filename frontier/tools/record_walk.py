@@ -7,6 +7,8 @@ import argparse
 import ctypes as C
 import ctypes.util
 import json
+import hashlib
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -137,12 +139,21 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary',type=Path,default=ROOT/'target/release/frontier')
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--settle-seconds',type=float,default=0.,help='Wait before recording and inputs; does not lock interactive input')
     parser.add_argument('game_args',nargs=argparse.REMAINDER,help='Optional game arguments after --')
-    args=parser.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
+    args=parser.parse_args()
+    if not math.isfinite(args.settle_seconds) or not 0 <= args.settle_seconds <= 120:
+        parser.error('--settle-seconds must be between 0 and 120')
+    out=args.output.resolve()
     binary=args.binary.resolve();extra=args.game_args
     if extra[:1]==['--']:extra=extra[1:]
-    command=[str(binary),'--preset','alpine','--width','1280','--height','720','--seconds','28','--report',str(out/'game.json')]+extra
+    if '--adaptive-wait-quality' in extra or '--benchmark-input-lock' in extra:
+        parser.error('These benchmark flags lock player input; use --settle-seconds for a walking recording')
+    out.mkdir(parents=True,exist_ok=False)
+    binary_hash=hashlib.sha256(binary.read_bytes()).hexdigest()
+    command=[str(binary),'--preset','alpine','--width','1280','--height','720','--seconds',str(28+args.settle_seconds),'--report',str(out/'game.json')]+extra
     events=[];app=rec=x=window=None;started=time.monotonic();failure=None
+    movement=None
     def note(action):events.append({'seconds_from_launch':round(time.monotonic()-started,4),'action':action})
     try:
         with (out/'game.log').open('w') as log,(out/'record.log').open('w') as rlog:
@@ -154,7 +165,13 @@ def main():
                 if window and 'fps' in x.title(window).lower():break
                 time.sleep(.15)
             else:raise RuntimeError('No rendered Frontier window for child PID')
-            x.focus(window,app.pid);x.click(window);note('record_start')
+            x.focus(window,app.pid);x.click(window)
+            if args.settle_seconds:
+                note('settle_begin')
+                time.sleep(args.settle_seconds)
+                if app.poll() is not None:raise RuntimeError('Game exited during settling')
+                note('settle_end')
+            note('record_start')
             rec=subprocess.Popen(['ffmpeg','-y','-f','x11grab','-framerate','20','-window_id',str(window),'-video_size','1280x720','-i',os.environ['DISPLAY'],'-t','20','-an','-c:v','libx264','-preset','ultrafast','-crf','25','-threads','2','-pix_fmt','yuv420p',str(out/'walking.mp4')],stdout=rlog,stderr=subprocess.STDOUT)
             time.sleep(1)
             for key,duration in [('w',3),(None,2),('w',3)]:
@@ -174,6 +191,15 @@ def main():
             note('stop_after_turn');rec.wait(timeout=15)
             if rec.returncode:raise RuntimeError('ffmpeg failed; see record.log')
             note('record_end');app.wait(timeout=15)
+            report=json.loads((out/'game.json').read_text())
+            observations=report['frame_observations']['frames']
+            first=observations[0]['eye']
+            displacement=max(math.dist(first,frame['eye']) for frame in observations)
+            yaw_range=max(frame['yaw'] for frame in observations)-min(frame['yaw'] for frame in observations)
+            movement={'max_displacement_m':displacement,'yaw_range_radians':yaw_range,
+                      'walk_verified':displacement>1.,'turn_verified':yaw_range>0.2}
+            if not movement['walk_verified'] or not movement['turn_verified']:
+                raise RuntimeError(f'Walking/turn inputs did not move the camera: {movement}')
     except Exception as error:
         failure=str(error);raise
     finally:
@@ -185,5 +211,5 @@ def main():
                 try:process.wait(timeout=4)
                 except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5)
         if x:x.close(x.d)
-        (out/'manifest.json').write_text(json.dumps({'command':command,'failure':failure,'events':events,'scope':'Actual X11 inputs and 20 FPS child-window recording; includes normal startup. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support.'},indent=2)+'\n')
+        (out/'manifest.json').write_text(json.dumps({'command':command,'binary_sha256':binary_hash,'settle_seconds':args.settle_seconds,'movement':movement,'failure':failure,'events':events,'scope':'Actual X11 inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support.'},indent=2)+'\n')
 if __name__=='__main__':main()

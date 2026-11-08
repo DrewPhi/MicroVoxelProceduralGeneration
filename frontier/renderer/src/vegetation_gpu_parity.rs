@@ -56,6 +56,9 @@ fn frozen_batch(model: PlantModel, species: u8, seed: u64) -> VegetationBatch {
 }
 fn frozen_frame() -> VegetationFrame {
     VegetationFrame {
+        shadow_transitions: Vec::new(),
+        shadow_inspection: Vec::new(),
+        shadow_coverage: Vec::new(),
         origin: ORIGIN,
         stats: Default::default(),
         shadow_batches: Vec::new(),
@@ -123,12 +126,19 @@ fn frozen_native_gpu_parity() {
             )
             .await
             .unwrap();
-        let frame = frozen_frame();
+        let mut frame = frozen_frame();
+        // A distinct cached revision wholly outside the frustum must be culled
+        // by the actual compute pipeline while preserving the frozen pixels.
+        let mut outside = frame.batches[0].clone();
+        outside.key.edit_id += 1;
+        outside.instances.truncate(1);
+        outside.instances[0].root_cell[0] += 16 * 100_000;
+        frame.batches.push(outside);
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("parity camera"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -221,13 +231,19 @@ fn frozen_native_gpu_parity() {
             })
             .collect();
         let mut baseline: Option<(Vec<u8>, Vec<u8>)> = None;
-        for mode in ["expanded", "compact", "compact-indexed"] {
+        for mode in ["expanded", "compact", "compact-indexed", "pooled"] {
             let mut plants = VegetationGpu::new_with_mode(
                 &device,
                 wgpu::TextureFormat::Rgba8Unorm,
                 1,
                 &camera_layout,
                 mode,
+            );
+            plants.set_indirect_supported(
+                adapter
+                    .get_downlevel_capabilities()
+                    .flags
+                    .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
             );
             let sun = Vec3::new(-0.4, 0.8, -0.2).normalize();
             queue.write_buffer(
@@ -239,6 +255,7 @@ fn frozen_native_gpu_parity() {
                 .update(&device, &queue, &frame, ORIGIN, eye.to_array())
                 .unwrap();
             let mut encoder = device.create_command_encoder(&Default::default());
+            plants.encode_culling(&mut encoder, &camera);
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("frozen native parity render"),
@@ -286,7 +303,36 @@ fn frozen_native_gpu_parity() {
                     },
                 );
             }
+            let commands = if plants.cull.encoded.get() {
+                let bytes = (plants.color_draws.len() * 16) as u64;
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frozen cull command readback"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&plants.cull.output, 0, &buffer, 0, bytes);
+                Some(buffer)
+            } else {
+                None
+            };
             queue.submit(Some(encoder.finish()));
+            if let Some(commands) = commands {
+                let bytes = readback(&device, &commands);
+                let counts: Vec<_> = bytes
+                    .chunks_exact(16)
+                    .map(|c| u32::from_le_bytes(c[4..8].try_into().unwrap()))
+                    .collect();
+                assert_eq!(
+                    counts.last(),
+                    Some(&0),
+                    "wholly outside cluster must be rejected"
+                );
+                assert!(
+                    counts[..counts.len() - 1].iter().any(|count| *count > 0),
+                    "visible content must survive culling"
+                );
+            }
             let rgba = readback(&device, &buffers[0]);
             let depths = readback(&device, &buffers[1]);
             let covered = rgba.chunks_exact(4).filter(|p| p[3] != 0).count();

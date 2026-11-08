@@ -1,0 +1,245 @@
+{
+  "motion-before": {
+    "video_frames": 400,
+    "gray_abs_change_mean": 3.620784948482317,
+    "largest_changes": [
+      {
+        "seconds": 10.65,
+        "mean_abs_gray_delta": 19.577986111111112
+      },
+      {
+        "seconds": 9.85,
+        "mean_abs_gray_delta": 18.190833333333334
+      },
+      {
+        "seconds": 9.2,
+        "mean_abs_gray_delta": 16.547847222222224
+      },
+      {
+        "seconds": 2.0,
+        "mean_abs_gray_delta": 13.972708333333333
+      },
+      {
+        "seconds": 0.1,
+        "mean_abs_gray_delta": 13.751458333333334
+      },
+      {
+        "seconds": 2.8,
+        "mean_abs_gray_delta": 11.380416666666667
+      }
+    ],
+    "movement": null,
+    "recording_clock_events": [
+      {
+        "seconds_from_launch": 0.8185,
+        "action": "record_start"
+      },
+      {
+        "seconds_from_launch": 1.903,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 4.9929,
+        "action": "hold_None"
+      },
+      {
+        "seconds_from_launch": 7.0734,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 10.1542,
+        "action": "mouse_turn"
+      },
+      {
+        "seconds_from_launch": 11.8446,
+        "action": "walk_after_turn"
+      },
+      {
+        "seconds_from_launch": 14.8448,
+        "action": "stop_after_turn"
+      },
+      {
+        "seconds_from_launch": 21.1759,
+        "action": "record_end"
+      }
+    ],
+    "quality_ready_frames": 0,
+    "observed_frames": 1684,
+    "color_coarsening_events": 36,
+    "plant_pending_end": 0,
+    "scope": "Recording overhead and ordinary terrain loading; not performance evidence.20FPS may miss one-presented-frame transients. Largest gray changes include intentional mouse turns, movement and load-in; not an artifact detector."
+  },
+  "motion-corrected": {
+    "video_frames": 400,
+    "gray_abs_change_mean": 3.525327903091061,
+    "largest_changes": [
+      {
+        "seconds": 10.7,
+        "mean_abs_gray_delta": 20.385347222222222
+      },
+      {
+        "seconds": 9.9,
+        "mean_abs_gray_delta": 18.07298611111111
+      },
+      {
+        "seconds": 9.25,
+        "mean_abs_gray_delta": 16.43284722222222
+      },
+      {
+        "seconds": 12.55,
+        "mean_abs_gray_delta": 7.293611111111111
+      },
+      {
+        "seconds": 12.0,
+        "mean_abs_gray_delta": 6.7475
+      },
+      {
+        "seconds": 13.15,
+        "mean_abs_gray_delta": 6.554444444444444
+      }
+    ],
+    "movement": {
+      "max_displacement_m": 22.266904205972455,
+      "yaw_range_radians": 1.2799997,
+      "walk_verified": true,
+      "turn_verified": true
+    },
+    "recording_clock_events": [
+      {
+        "seconds_from_launch": 0.7711,
+        "action": "record_start"
+      },
+      {
+        "seconds_from_launch": 1.8543,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 4.9352,
+        "action": "hold_None"
+      },
+      {
+        "seconds_from_launch": 7.0157,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 10.0962,
+        "action": "mouse_turn"
+      },
+      {
+        "seconds_from_launch": 11.7835,
+        "action": "walk_after_turn"
+      },
+      {
+        "seconds_from_launch": 14.7837,
+        "action": "stop_after_turn"
+      },
+      {
+        "seconds_from_launch": 21.1147,
+        "action": "record_end"
+      }
+    ],
+    "quality_ready_frames": 0,
+    "observed_frames": 1684,
+    "color_coarsening_events": 55,
+    "plant_pending_end": 0,
+    "scope": "Recording overhead and ordinary terrain loading; not performance evidence.20FPS may miss one-presented-frame transients. Largest gray changes include intentional mouse turns, movement and load-in; not an artifact detector."
+  },
+  "motion-settled-final": {
+    "video_frames": 400,
+    "gray_abs_change_mean": 3.5064743455861875,
+    "largest_changes": [
+      {
+        "seconds": 10.75,
+        "mean_abs_gray_delta": 20.226875
+      },
+      {
+        "seconds": 9.95,
+        "mean_abs_gray_delta": 18.099930555555556
+      },
+      {
+        "seconds": 9.4,
+        "mean_abs_gray_delta": 16.445069444444446
+      },
+      {
+        "seconds": 12.4,
+        "mean_abs_gray_delta": 7.530347222222222
+      },
+      {
+        "seconds": 2.0,
+        "mean_abs_gray_delta": 7.408819444444444
+      },
+      {
+        "seconds": 12.95,
+        "mean_abs_gray_delta": 7.008125
+      }
+    ],
+    "movement": {
+      "max_displacement_m": 22.308435446051803,
+      "yaw_range_radians": 1.2799997,
+      "walk_verified": true,
+      "turn_verified": true
+    },
+    "recording_clock_events": [
+      {
+        "seconds_from_launch": 0.7791,
+        "action": "settle_begin"
+      },
+      {
+        "seconds_from_launch": 25.7794,
+        "action": "settle_end"
+      },
+      {
+        "seconds_from_launch": 25.7794,
+        "action": "record_start"
+      },
+      {
+        "seconds_from_launch": 26.8622,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 29.9432,
+        "action": "hold_None"
+      },
+      {
+        "seconds_from_launch": 32.0278,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 35.1114,
+        "action": "mouse_turn"
+      },
+      {
+        "seconds_from_launch": 36.8002,
+        "action": "walk_after_turn"
+      },
+      {
+        "seconds_from_launch": 39.8004,
+        "action": "stop_after_turn"
+      },
+      {
+        "seconds_from_launch": 46.0316,
+        "action": "record_end"
+      }
+    ],
+    "quality_ready_frames": 0,
+    "observed_frames": 3159,
+    "color_coarsening_events": 45,
+    "plant_pending_end": 0,
+    "scope": "Recording overhead and ordinary terrain loading; not performance evidence.20FPS may miss one-presented-frame transients. Largest gray changes include intentional mouse turns, movement and load-in; not an artifact detector."
+  },
+  "disqualified_static_attempt": {
+    "path": "motion-settled",
+    "reason": "adaptive-wait-quality locks manual input; zero displacement/yaw; not walking evidence."
+  },
+  "root_visual_review": {
+    "reviewed": [
+      "motion-contact-final.png",
+      "motion-corrected/largest-transients.png",
+      "motion-settled-final/largest-transients.png",
+      "alpine-final.png",
+      "secondary-seed31.png"
+    ],
+    "finding": "Close tree silhouettes retain detailed foliage through the inspected turn, unlike the coarse near-canopy blocks in the baseline. Largest changes correspond to intentional turning, movement and loading. No unexplained screen-wide geometry spike in inspected samples. Distant and startup LOD changes remain; coarsening event counts are not lower.",
+    "limits": "20 FPS recording and selected timestamped stills cannot certify absence of single-presented-frame spikes or globally invisible transitions. The delayed run preloads vegetation, not globally settled terrain."
+  }
+}

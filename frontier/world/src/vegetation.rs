@@ -1,6 +1,8 @@
 //! Seeded native vegetation. Placement reads only the immutable terrain source;
 //! camera demand, edits and tile request order never influence plant identity.
 use crate::{Cell, Material, World};
+#[path = "plant_recipe.rs"]
+pub mod plant_recipe;
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::{
@@ -309,52 +311,7 @@ fn model(cells: Cells, seed: u64) -> PlantModel {
 }
 /// Pure bounded native model generation; no authored arrangements or asset files.
 pub fn generate_grass(seed: u64, variant: u8) -> PlantModel {
-    let mut rng = Rng(seed);
-    let mut v = Cells::new();
-    let height = [2, 3, 3, 4, 5, 6, 8, 10][variant as usize % 8];
-    let base = [96u8, 128, 57];
-    let fresh = [108u8, 142, 66];
-    let dry = [147u8, 158, 90];
-    for _ in 0..[5, 7, 9, 6, 10, 8, 7, 9][variant as usize % 8] {
-        let a = rng.between(0., std::f64::consts::TAU);
-        let dry_tip = rng.unit() < 0.30;
-        // Rhizome-like low strokes spread the carpet; rare mature tufts rise above it.
-        let lean = rng.between(2., if variant < 4 { 5. } else { 3. });
-        let spread = if variant < 4 {
-            rng.between(1., 3.5)
-        } else {
-            1.
-        };
-        let bx = (a.cos() * spread).round() as i64;
-        let bz = (a.sin() * spread).round() as i64;
-        stroke(&mut v, [0, 0, 0], [bx, 0, bz], 0, Material::Leaf, base);
-        let h = (height - (rng.unit() * 4.) as i64).max(2);
-        let mut p = [bx, 0, bz];
-        for y in 1..h {
-            let t = y as f64 / h as f64;
-            let bend = 0.35 * t + 0.65 * t * t;
-            let q = [
-                bx + (a.cos() * lean * bend).round() as i64,
-                y,
-                bz + (a.sin() * lean * bend).round() as i64,
-            ];
-            // Whole native voxels carry pigment; these are static leaf colors,
-            // not view-dependent highlights or sub-voxel texture detail.
-            let growth = (t / 0.65).min(1.);
-            let dry_amount = if dry_tip {
-                ((t - 0.65) / 0.35).max(0.)
-            } else {
-                0.
-            };
-            let color = std::array::from_fn(|i| {
-                let green = base[i] as f64 + (fresh[i] as f64 - base[i] as f64) * growth;
-                (green + (dry[i] as f64 - green) * dry_amount).round() as u8
-            });
-            stroke(&mut v, p, q, 0, Material::Leaf, color);
-            p = q;
-        }
-    }
-    model(v, seed)
+    plant_recipe::grass_recipe(seed, variant).materialize()
 }
 pub fn generate_edelweiss(seed: u64, variant: u8) -> PlantModel {
     let mut rng = Rng(seed);
@@ -425,6 +382,13 @@ pub fn generate_rowan(seed: u64, variant: u8) -> PlantModel {
     grow_rowan(seed, variant, &|| false).unwrap()
 }
 fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<PlantModel> {
+    build_rowan_recipe(seed, variant, cancel)?.materialize_cancellable(cancel)
+}
+pub(super) fn build_rowan_recipe(
+    seed: u64,
+    variant: u8,
+    cancel: &impl Fn() -> bool,
+) -> Option<plant_recipe::RowanRecipe> {
     let mut rng = Rng(seed);
     let h =
         [52., 65., 76., 84., 94., 104., 112., 88.][variant as usize % 8] * rng.between(0.96, 1.04);
@@ -505,7 +469,8 @@ fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<Plan
     for i in (1..nodes.len()).rev() {
         mass[parents[i]] += mass[i];
     }
-    let mut v = Cells::new();
+    let mut wood = Vec::new();
+    let mut foliage = Vec::new();
     // Trunk character has an independent DNA stream: crown growth cannot
     // accidentally change the lean, curl or fork of a seeded tree.
     let mut dna = Rng(mix(seed ^ 0x7472756e6b646e62));
@@ -539,14 +504,11 @@ fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<Plan
     for i in 1..nodes.len() {
         let r = ((mass[i] as f64).sqrt() * 0.16).floor().min(3.) as i64;
         for sign in if fork { &[-1., 1.][..] } else { &[0.][..] } {
-            stroke(
-                &mut v,
+            wood.push(plant_recipe::WoodyStroke::new(
                 transform(nodes[parents[i]], *sign),
                 transform(nodes[i], *sign),
                 r,
-                Material::Wood,
-                BARK,
-            );
+            ));
         }
     }
     // The split begins above this single filled bole, never at ground level.
@@ -554,7 +516,7 @@ fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<Plan
         let t = y as f64 / base_height;
         let radius = (2. + (base_radius - 2.) * (1. - t).powf(1.2)).round() as i64;
         let p = transform([0., y as f64, 0.], 0.);
-        stroke(&mut v, p, p, radius, Material::Wood, BARK);
+        wood.push(plant_recipe::WoodyStroke::new(p, p, radius));
     }
     // Keep the complete woody scaffold and every terminal spray. Neighboring
     // intermediate growth competes for space instead of packing a continuous
@@ -584,79 +546,20 @@ fn grow_rowan(seed: u64, variant: u8, cancel: &impl Fn() -> bool) -> Option<Plan
             continue;
         }
         centers.push(p);
-        let ry = 1.8;
-        let young = (9 - mass) as f64 / 8.;
-        for x in -(rx.ceil() as i64)..=rx.ceil() as i64 {
-            for y in -2..=2 {
-                for z in -(rz.ceil() as i64)..=rz.ceil() as i64 {
-                    if (x as f64 / rx).powi(2) + (y as f64 / ry).powi(2) + (z as f64 / rz).powi(2)
-                        > 1.
-                    {
-                        continue;
-                    }
-                    // Branch age and position within one connected spray supply
-                    // new-growth color. It is canonical pigment, not lighting
-                    // or disconnected per-voxel color noise.
-                    let freshness = 0.40 * young * (0.65 + 0.35 * (y as f64 / ry + 1.) * 0.5);
-                    let mature = [100u8, 137, 64];
-                    let new_growth = [143u8, 164, 76];
-                    let pigment = std::array::from_fn(|k| {
-                        (mature[k] as f64 + (new_growth[k] as f64 - mature[k] as f64) * freshness)
-                            .round() as u8
-                    });
-                    v.entry(Cell {
-                        x: p[0] + x,
-                        y: p[1] + y,
-                        z: p[2] + z,
-                    })
-                    .or_insert((Material::Leaf, pigment));
-                }
-            }
-        }
+        foliage.push(plant_recipe::FoliageSpray {
+            center: p.map(|x| i16::try_from(x).expect("bounded rowan spray")),
+            mass: mass as u16,
+            rx,
+            rz,
+        });
     }
-    let mut exposed: Vec<_> = v
-        .iter()
-        .filter_map(|(p, (m, _))| {
-            (*m == Material::Leaf && !v.contains_key(&Cell { y: p.y + 1, ..*p })).then_some(*p)
-        })
-        .collect();
-    // Seeded ordering chooses a bounded number of well-separated sprays.
-    exposed.sort_by_key(|p| hash(seed ^ 0x626c6f73736f6d, p.x ^ p.y.rotate_left(13), p.z));
-    let mut centers: Vec<Cell> = Vec::new();
-    let cap = (h * 0.6 * 2.) as usize;
-    for p in exposed {
-        if centers.len() >= cap {
-            break;
-        }
-        if centers
-            .iter()
-            .any(|q| (p.x - q.x).pow(2) + (p.y - q.y).pow(2) + (p.z - q.z).pow(2) < 20)
-        {
-            continue;
-        }
-        centers.push(p);
-        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)] {
-            for dy in [0, 1, -1] {
-                let q = Cell {
-                    x: p.x + dx,
-                    y: p.y + dy,
-                    z: p.z + dz,
-                };
-                if v.get(&q).is_some_and(|(m, _)| *m == Material::Leaf)
-                    && !v.contains_key(&Cell { y: q.y + 1, ..q })
-                {
-                    v.insert(q, (Material::Flower, WHITE));
-                    break;
-                }
-            }
-        }
-    }
-    if cancel() {
-        return None;
-    }
-    let grown = model(v, seed);
-    cache_wood_model((variant % variant_count(Species::Rowan), seed), &grown);
-    Some(grown)
+    Some(plant_recipe::RowanRecipe {
+        seed,
+        variant,
+        height: h,
+        wood,
+        foliage,
+    })
 }
 
 const WOOD_CACHE_BYTES: usize = 16 * 1024 * 1024;

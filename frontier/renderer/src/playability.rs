@@ -67,3 +67,159 @@ impl FrameTrace {
         format!("{{\"capacity\":3600,\"scope\":\"last presented frames, including startup/warmup; prepare_ms is main-thread wall time before surface acquisition; GPU timestamps are separate asynchronous samples\",\"frames\":[{rows}]}}")
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ShadowState {
+    selected: Option<crate::vegetation::MeshKey>,
+    requested: crate::vegetation::MeshKey,
+    reason: crate::vegetation::ShadowReason,
+}
+struct ShadowEvent {
+    seconds: f64,
+    root: [i64; 3],
+    from: Option<u8>,
+    to: Option<u8>,
+    reason: &'static str,
+    gpu: bool,
+}
+/// Last 4096 actual stream/admission changes, rather than a log of every frame.
+#[derive(Default)]
+pub(crate) struct ShadowTrace {
+    previous: std::collections::BTreeMap<[i64; 3], ShadowState>,
+    gpu: std::collections::BTreeSet<[i64; 3]>,
+    events: VecDeque<ShadowEvent>,
+    dropped: u64,
+}
+impl ShadowTrace {
+    fn push(&mut self, e: ShadowEvent) {
+        if self.events.len() == 4096 {
+            self.events.pop_front();
+            self.dropped += 1;
+        }
+        self.events.push_back(e);
+    }
+    pub fn observe(
+        &mut self,
+        seconds: f64,
+        inspections: &[crate::vegetation::ShadowInspection],
+        gpu: &[[i64; 3]],
+    ) {
+        let next: std::collections::BTreeMap<_, _> = inspections
+            .iter()
+            .map(|x| {
+                (
+                    x.root_cell,
+                    ShadowState {
+                        selected: x.selected,
+                        requested: x.requested,
+                        reason: x.reason,
+                    },
+                )
+            })
+            .collect();
+        for (root, state) in &next {
+            let old = self.previous.get(root).copied();
+            if old != Some(*state) {
+                self.push(ShadowEvent {
+                    seconds,
+                    root: *root,
+                    from: old.and_then(|s| s.selected.map(|k| k.lod)),
+                    to: state.selected.map(|k| k.lod),
+                    reason: state.reason.as_str(),
+                    gpu: false,
+                });
+            }
+        }
+        let removed: Vec<_> = self
+            .previous
+            .iter()
+            .filter(|(root, _)| !next.contains_key(*root))
+            .map(|(r, s)| (*r, s.selected.map(|k| k.lod)))
+            .collect();
+        for (root, from) in removed {
+            self.push(ShadowEvent {
+                seconds,
+                root,
+                from,
+                to: None,
+                reason: "left_stream_demand",
+                gpu: false,
+            });
+        }
+        self.previous = next;
+        let next: std::collections::BTreeSet<_> = gpu.iter().copied().collect();
+        let entered: Vec<_> = next.difference(&self.gpu).copied().collect();
+        let removed: Vec<_> = self.gpu.difference(&next).copied().collect();
+        for root in entered {
+            self.push(ShadowEvent {
+                seconds,
+                root,
+                from: None,
+                to: None,
+                reason: "gpu_admitted",
+                gpu: true,
+            });
+        }
+        for root in removed {
+            self.push(ShadowEvent {
+                seconds,
+                root,
+                from: None,
+                to: None,
+                reason: "gpu_removed",
+                gpu: true,
+            });
+        }
+        self.gpu = next;
+    }
+    pub fn json(&self) -> String {
+        let lod = |x: Option<u8>| x.map_or("null".into(), |x| x.to_string());
+        let events=self.events.iter().map(|e|format!("{{\"seconds\":{},\"root\":{:?},\"from_lod\":{},\"to_lod\":{},\"reason\":\"{}\",\"gpu_admission\":{}}}",e.seconds,e.root,lod(e.from),lod(e.to),e.reason,e.gpu)).collect::<Vec<_>>().join(",");
+        format!("{{\"capacity\":4096,\"dropped\":{},\"scope\":\"monotonic seconds since viewer visual start; stream reason/LOD changes and actual GPU caster membership; does not infer shadow texel visibility\",\"events\":[{events}]}}",self.dropped)
+    }
+}
+
+#[cfg(test)]
+mod shadow_trace_tests {
+    use super::*;
+    fn inspection(lod: u8) -> crate::vegetation::ShadowInspection {
+        let key = crate::vegetation::MeshKey {
+            species: 2,
+            variant: 0,
+            seed: 7,
+            tile: [0, 0],
+            lod,
+            edit_id: 0,
+        };
+        crate::vegetation::ShadowInspection {
+            root_cell: [1, 2, 3],
+            selected: Some(key),
+            requested: key,
+            reason: crate::vegetation::ShadowReason::Admitted,
+            triangles: 100,
+        }
+    }
+    #[test]
+    fn records_changes_and_actual_admission_without_per_frame_duplicates() {
+        let mut trace = ShadowTrace::default();
+        let root = [1, 2, 3];
+        trace.observe(0., &[inspection(2)], &[root]);
+        assert_eq!(trace.events.len(), 2);
+        trace.observe(1., &[inspection(2)], &[root]);
+        assert_eq!(trace.events.len(), 2);
+        trace.observe(2., &[inspection(4)], &[root]);
+        assert_eq!(trace.events.len(), 3);
+        trace.observe(3., &[], &[]);
+        assert_eq!(trace.events.len(), 5);
+        assert!(trace.json().contains("gpu_removed"));
+    }
+    #[test]
+    fn event_ring_is_bounded() {
+        let mut trace = ShadowTrace::default();
+        for i in 0..5000 {
+            trace.observe(i as f64, &[inspection(if i % 2 == 0 { 2 } else { 4 })], &[]);
+        }
+        assert_eq!(trace.events.len(), 4096);
+        assert_eq!(trace.dropped, 904);
+    }
+}

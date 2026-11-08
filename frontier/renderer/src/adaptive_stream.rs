@@ -1848,33 +1848,58 @@ fn complete_key_guard(
     height: u32,
     volume_owner: bool,
 ) -> bool {
-    if keys.clone().next().is_none() {
-        return false;
+    PartitionGuard::new(keys, volume_owner).covers(camera, width, height)
+}
+/// Immutable published-partition facts. Camera containment is evaluated afresh.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PartitionGuard {
+    min: [i64; 2],
+    max: [i64; 2],
+    complete: bool,
+}
+impl PartitionGuard {
+    pub(crate) fn new(keys: impl Iterator<Item = TileKey>, volume_owner: bool) -> Self {
+        let mut min = [i64::MAX; 2];
+        let mut max = [i64::MIN; 2];
+        let mut area = 0i128;
+        let mut any = false;
+        for key in keys {
+            any = true;
+            for a in 0..2 {
+                min[a] = min[a].min(key.min[a]);
+                max[a] = max[a].max(key.min[a] + key.width_cells as i64);
+            }
+            area += (key.width_cells as i128).pow(2);
+        }
+        if !any {
+            return Self::default();
+        }
+        let mut expected = (max[0] - min[0]) as i128 * (max[1] - min[1]) as i128;
+        if volume_owner {
+            let dx = (max[0].min(128) - min[0].max(-128)).max(0) as i128;
+            let dz = (max[1].min(128) - min[1].max(-128)).max(0) as i128;
+            expected -= dx * dz;
+        }
+        Self {
+            min,
+            max,
+            complete: area == expected,
+        }
     }
-    let min = [0, 1].map(|a| keys.clone().map(|k| k.min[a]).min().unwrap());
-    let max = [0, 1].map(|a| {
-        keys.clone()
-            .map(|k| k.min[a] + k.width_cells as i64)
-            .max()
-            .unwrap()
-    });
-    let area: i128 = keys.clone().map(|k| (k.width_cells as i128).pow(2)).sum();
-    let mut expected = (max[0] - min[0]) as i128 * (max[1] - min[1]) as i128;
-    if volume_owner {
-        let dx = (max[0].min(128) - min[0].max(-128)).max(0) as i128;
-        let dz = (max[1].min(128) - min[1].max(-128)).max(0) as i128;
-        expected -= dx * dz;
+    pub(crate) fn covers(&self, camera: &Camera, width: u32, height: u32) -> bool {
+        let Some(extents) = frustum_horizontal_extents(camera, width, height) else {
+            return false;
+        };
+        let far = extents.map(|v| v / VOXEL_SIZE);
+        let cell = [
+            camera.position.x / VOXEL_SIZE,
+            camera.position.z / VOXEL_SIZE,
+        ];
+        self.complete
+            && (0..2).all(|a| {
+                cell[a] - far[a] >= self.min[a] as f64 && cell[a] + far[a] <= self.max[a] as f64
+            })
     }
-    let Some(extents) = frustum_horizontal_extents(camera, width, height) else {
-        return false;
-    };
-    let far = extents.map(|v| v / VOXEL_SIZE);
-    let cell = [
-        camera.position.x / VOXEL_SIZE,
-        camera.position.z / VOXEL_SIZE,
-    ];
-    area == expected
-        && (0..2).all(|a| cell[a] - far[a] >= min[a] as f64 && cell[a] + far[a] <= max[a] as f64)
 }
 /// Current-view constants reused by every GPU-visible cluster. Same conservative
 /// f32 projection contract as the scalar helpers, without rebuilding trig/bases.
@@ -2245,6 +2270,62 @@ fn diagnostic_boxes_disjoint(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_partition_guard_matches_original_scans_during_camera_changes() {
+        let keys: Vec<_> = (-2..2)
+            .flat_map(|x| {
+                (-2..2).map(move |z| TileKey {
+                    min: [x * 32768, z * 32768],
+                    width_cells: 32768,
+                    step_cells: 512,
+                    edge_steps: [512; 4],
+                    source_revision: 9,
+                })
+            })
+            .collect();
+        for volume in [false, true] {
+            let guard = PartitionGuard::new(keys.iter().copied(), volume);
+            for position in [
+                DVec3::ZERO,
+                DVec3::new(-77., 14., 90.),
+                DVec3::new(9000., 0., 0.),
+            ] {
+                for yaw in [-2.1, 0., 1.9] {
+                    let mut camera = Camera::fixture();
+                    camera.position = position;
+                    camera.yaw = yaw;
+                    camera.far = 300.;
+                    let min = [0, 1].map(|a| keys.iter().map(|k| k.min[a]).min().unwrap());
+                    let max = [0, 1].map(|a| {
+                        keys.iter()
+                            .map(|k| k.min[a] + k.width_cells as i64)
+                            .max()
+                            .unwrap()
+                    });
+                    let area: i128 = keys.iter().map(|k| (k.width_cells as i128).pow(2)).sum();
+                    let mut expected = (max[0] - min[0]) as i128 * (max[1] - min[1]) as i128;
+                    if volume {
+                        expected -= (max[0].min(128) - min[0].max(-128)).max(0) as i128
+                            * (max[1].min(128) - min[1].max(-128)).max(0) as i128;
+                    }
+                    let extents = frustum_horizontal_extents(&camera, 1280, 720).unwrap();
+                    let far = extents.map(|v| v / VOXEL_SIZE);
+                    let cell = [position.x / VOXEL_SIZE, position.z / VOXEL_SIZE];
+                    let original = area == expected
+                        && (0..2).all(|a| {
+                            cell[a] - far[a] >= min[a] as f64 && cell[a] + far[a] <= max[a] as f64
+                        });
+                    assert_eq!(guard.covers(&camera, 1280, 720), original);
+                }
+            }
+        }
+        assert!(!PartitionGuard::new(std::iter::empty(), false).covers(
+            &Camera::fixture(),
+            1280,
+            720
+        ));
+    }
 
     #[test]
     fn view_constants_match_scalar_visibility_and_error_queries() {

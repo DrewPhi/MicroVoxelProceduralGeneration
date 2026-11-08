@@ -55,23 +55,25 @@ struct ShadowOut {
     @location(0) local:vec3<f32>,
     @location(1) @interpolate(flat) ground:u32,
     @location(2) normal:vec3<f32>,
+    @location(3) @interpolate(flat) progress:f32,
+    @location(4) @interpolate(flat) role:u32,
 };
 @vertex fn vs_shadow(@builtin(vertex_index) vertex:u32, @location(3) root:vec3<f32>,
-    @location(4) turn:u32)->ShadowOut {
+    @location(4) turn:u32,@location(9) progress:f32,@location(10) role:u32)->ShadowOut {
     let quad=quads[vertex/6u];
     let native=native_vertex(quad,triangle_corner(quad.face,vertex));
-    return shadow_vertex(native.position,native.normal,root,turn);
+    return shadow_vertex(native.position,native.normal,root,turn,progress,role);
 }
 @vertex fn vs_shadow_compact_indexed(@builtin(vertex_index) vertex:u32, @location(3) root:vec3<f32>,
-    @location(4) turn:u32)->ShadowOut {
+    @location(4) turn:u32,@location(9) progress:f32,@location(10) role:u32)->ShadowOut {
     let native=native_vertex(quads[vertex/4u],vertex%4u);
-    return shadow_vertex(native.position,native.normal,root,turn);
+    return shadow_vertex(native.position,native.normal,root,turn,progress,role);
 }
 @vertex fn vs_shadow_expanded(@location(0) position:vec3<f32>, @location(1) normal:vec3<f32>,
-    @location(3) root:vec3<f32>, @location(4) turn:u32)->ShadowOut {
-    return shadow_vertex(position,normal,root,turn);
+    @location(3) root:vec3<f32>, @location(4) turn:u32,@location(9) progress:f32,@location(10) role:u32)->ShadowOut {
+    return shadow_vertex(position,normal,root,turn,progress,role);
 }
-fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32)->ShadowOut {
+fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32,progress:f32,role:u32)->ShadowOut {
     let pivot=vec3<f32>(0.03125,0.,0.03125);
     let local=root+pivot+rotate(position-pivot,turn);
     var out:ShadowOut;
@@ -79,9 +81,24 @@ fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32)->S
     out.local=local;
     out.ground=turn&4u;
     out.normal=rotate(normal,turn);
+    out.progress=progress;out.role=role;
     return out;
 }
 @fragment fn fs_shadow(i:ShadowOut) {
+    let role=i.role&3u;
+    let entry_coverage=i.role>>2u;
+    if role!=0u || entry_coverage<65536u {
+        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*16.-i.normal*0.01)))+camera.paint_origin.xyz;
+        var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u;
+        h=(h^(h>>16u))*2246822519u;
+        let threshold=f32(h&65535u)/65536.;
+        if (role==1u && threshold<i.progress) || (role==2u && threshold>=i.progress) {discard;}
+        // Entry/exit mask is independent of complementary replacement masks.
+        // Both representations share the same mask during overlapping fades.
+        h=(h^1752568183u)*3266489917u;
+        h=h^(h>>16u);
+        if (h&65535u)>=entry_coverage {discard;}
+    }
     if i.ground!=0u {
         // Fade per native voxel rather than per 8m tile. The pattern belongs to
         // canonical cells, so neither camera motion nor floating-origin rebases

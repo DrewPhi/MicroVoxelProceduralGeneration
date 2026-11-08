@@ -13,6 +13,8 @@ impl Gpu {
             self.vegetation.take();
             self.vegetation_stream.take();
             self.vegetation_stats = Default::default();
+            self.vegetation_inspection.clear();
+            self.vegetation_caster_roots.clear();
             return Ok(());
         }
         if self.vegetation_stream.is_none() {
@@ -43,6 +45,8 @@ impl Gpu {
             width as f32 / height.max(1) as f32,
         );
         self.vegetation_stats = frame.stats;
+        self.vegetation_inspection
+            .clone_from(&frame.shadow_inspection);
         if self.vegetation.is_none() || self.vegetation_samples != self.sample_count {
             self.vegetation = Some(vegetation_gpu::VegetationGpu::new(
                 &self.device,
@@ -50,6 +54,10 @@ impl Gpu {
                 self.sample_count,
                 &self.native_layout,
             ));
+            self.vegetation
+                .as_mut()
+                .unwrap()
+                .set_indirect_supported(self.vegetation_indirect_supported);
             self.vegetation_samples = self.sample_count;
         }
         let plants = self.vegetation.as_mut().unwrap();
@@ -67,6 +75,7 @@ impl Gpu {
             origin,
             (camera.position - self.origin).as_vec3().to_array(),
         )?;
+        self.vegetation_caster_roots = plants.shadow_caster_roots();
         Ok(())
     }
     pub(super) fn settle_vegetation(
@@ -79,7 +88,10 @@ impl Gpu {
         let started = Instant::now();
         loop {
             self.update_vegetation(world, camera, width, height)?;
-            if self.vegetation_stats.pending_jobs == 0 {
+            if self.vegetation_stats.pending_jobs == 0
+                && self.vegetation_stats.shadow_transition_pairs == 0
+                && self.vegetation_stats.shadow_fading_casters == 0
+            {
                 if self.vegetation_stats.coverage_unresolved > 0
                     || self.vegetation_stats.reference_budget_exceeded
                 {
@@ -117,6 +129,14 @@ impl Gpu {
         json.pop();
         let j = s.jobs;
         json.push_str(&format!(",\"gpu_representation\":\"{}\",\"tree_lod_changes\":{},\"tree_refinements\":{},\"tree_coarsenings\":{},\"tree_lod_histogram\":{:?},\"demanded_by_species\":{:?},\"ready_by_species\":{:?},\"shadow_admitted\":{},\"shadow_removed\":{},\"shadow_budget_rejected\":{},\"shadow_stream_budget_rejected\":{},\"tree_shadow_triangle_budget\":150000,\"total_shadow_triangle_budget\":200000,\"explicit_shadow_instances\":{},\"explicit_shadow_triangles\":{},\"shadow_lod_histogram\":{:?},\"shadow_lod_changes\":{},\"selected_cpu_geometry_bytes\":{},\"total_cpu_geometry_bytes\":{},\"cpu_cache_geometry_bytes\":{},\"selected_cpu_meshes\":{},\"selected_mesh_evictions\":{},\"selected_mesh_evicted_bytes\":{},\"ground_assembly_cache\":{},\"jobs\":{{\"workers\":{},\"started\":{:?},\"completed\":{:?},\"cancelled\":{:?},\"worker_wall_nanos\":{:?},\"max_job_nanos\":{:?},\"assembly_nanos\":{:?},\"mesh_nanos\":{:?},\"scope\":\"cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly\"}}}}", self.vegetation.as_ref().map_or("disabled", |v|v.representation()),s.tree_lod_changes,s.tree_refinements,s.tree_coarsenings,s.tree_lod_histogram,s.demanded_by_species,s.ready_by_species,g.shadow_admitted,g.shadow_removed,g.shadow_budget_rejected,s.shadow_budget_rejected,s.explicit_shadow_instances,s.explicit_shadow_triangles,s.shadow_lod_histogram,s.shadow_lod_changes,s.selected_cpu_geometry_bytes,s.total_cpu_geometry_bytes,s.cpu_cache_geometry_bytes,s.selected_cpu_meshes,s.selected_mesh_evictions,s.selected_mesh_evicted_bytes,vegetation::ground_cache_json(),j.workers,j.started,j.completed,j.cancelled,j.cpu_nanos,j.max_job_nanos,j.assembly_nanos,j.mesh_nanos));
+        json.pop();
+        json.push_str(&format!(",\"shadow_transition_pairs\":{},\"shadow_transition_triangles\":{},\"shadow_fading_casters\":{},\"prediction_horizon_ms\":{},\"prediction_lead_m\":{},\"predicted_tiles\":{},\"pooled_reserved_bytes\":{},\"pooled_used_bytes\":{},\"cull_clusters_submitted\":{},\"gpu_frustum_culling\":{}}}", s.shadow_transition_pairs,s.shadow_transition_triangles,s.shadow_fading_casters,s.prediction_horizon_ms,s.prediction_lead_m,s.predicted_tiles,g.pooled_reserved_bytes,g.pooled_used_bytes,g.cull_clusters,g.cull_enabled));
+        json.pop();
+        json.push_str(&format!(",\"shadow_lifecycle_enabled\":{},\"near_shadow_cache_reused\":{},\"far_shadow_cache_reused\":{},\"shadow_cascades_enabled\":{}}}",
+            s.shadow_lifecycle_enabled,
+            self.adaptive.as_ref().is_some_and(|a| a.near_shadow_cache_reused()),
+            self.adaptive.as_ref().is_some_and(|a| a.shadow_cache_reused()),
+            self.adaptive.as_ref().is_some_and(|a| a.shadow_cascades_active())));
         json
     }
 }

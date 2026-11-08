@@ -5,7 +5,7 @@ use frontier_world::{
     Cell, Material, World, VOXEL_SIZE,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -14,6 +14,10 @@ use std::{
     thread,
     time::Instant,
 };
+#[path = "shadow_lifecycle.rs"]
+mod shadow_lifecycle;
+use shadow_lifecycle::ShadowLifecycle;
+pub use shadow_lifecycle::{ShadowCoverage, ShadowInspection, ShadowReason, ShadowTransition};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -101,9 +105,17 @@ pub struct VegetationStats {
     pub explicit_shadow_instances: usize,
     pub explicit_shadow_triangles: usize,
     pub shadow_budget_rejected: usize,
+    pub shadow_transition_pairs: usize,
+    pub shadow_transition_triangles: usize,
+    pub shadow_fading_casters: usize,
+    /// The CPU lifecycle exclusively owns tree admission/range in this mode.
+    pub shadow_lifecycle_enabled: bool,
     /// Color demand and resident render candidates before budget admission.
     pub demanded_by_species: [usize; 3],
     pub ready_by_species: [usize; 3],
+    pub prediction_horizon_ms: f64,
+    pub prediction_lead_m: f64,
+    pub predicted_tiles: usize,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VegetationJobStats {
@@ -179,6 +191,10 @@ pub struct VegetationFrame {
     pub batches: Vec<VegetationBatch>,
     /// Independent tree shadow geometry; GPU selection prefers these per root.
     pub shadow_batches: Vec<VegetationBatch>,
+    pub shadow_transitions: Vec<ShadowTransition>,
+    pub shadow_coverage: Vec<ShadowCoverage>,
+    /// Bounded per-tree admission/replacement decisions, independent of eye visibility.
+    pub shadow_inspection: Vec<ShadowInspection>,
     pub stats: VegetationStats,
 }
 #[derive(Clone, Debug)]
@@ -511,6 +527,57 @@ impl StableFrameKey {
 }
 
 type GroundGroups = BTreeMap<(u8, i64, i64), Vec<PlantRecord>>;
+#[derive(Default)]
+struct StreamingPrediction {
+    previous: Option<([f64; 3], Instant)>,
+    velocity: [f64; 2],
+    latencies: VecDeque<f64>,
+}
+impl StreamingPrediction {
+    fn observe_latency(&mut self, start: Instant, now: Instant) {
+        self.latencies
+            .push_back(now.saturating_duration_since(start).as_secs_f64());
+        if self.latencies.len() > 64 {
+            self.latencies.pop_front();
+        }
+    }
+    fn horizon(&self) -> f64 {
+        let mut sorted: Vec<_> = self.latencies.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        // Includes queue, canonical work and result publication, plus one
+        // conservative scheduling margin. Upload is budgeted separately by GPU.
+        sorted
+            .get((sorted.len().saturating_sub(1) * 95).div_ceil(100))
+            .copied()
+            .unwrap_or(0.25)
+            + 0.1
+    }
+    fn update(&mut self, camera: [f64; 3], now: Instant) -> [f64; 2] {
+        if let Some((previous, time)) = self.previous {
+            let dt = now.saturating_duration_since(time).as_secs_f64();
+            let delta = [camera[0] - previous[0], camera[2] - previous[2]];
+            if dt > 0.00001 && dt < 2. && delta[0].hypot(delta[1]) < 256. {
+                self.velocity = delta.map(|d| d / dt);
+            } else {
+                self.velocity = [0.; 2];
+            }
+        }
+        self.previous = Some((camera, now));
+        self.velocity.map(|v| v * self.horizon())
+    }
+    fn time_to_need(&self, delta: [f64; 2], radius: f64) -> f64 {
+        let speed = self.velocity[0].hypot(self.velocity[1]);
+        if speed < 0.01 {
+            return f64::INFINITY;
+        }
+        let along = (delta[0] * self.velocity[0] + delta[1] * self.velocity[1]) / speed;
+        let across2 = (delta[0] * delta[0] + delta[1] * delta[1] - along * along).max(0.);
+        if across2 > radius * radius {
+            return f64::INFINITY;
+        }
+        ((along - (radius * radius - across2).sqrt()) / speed).max(0.)
+    }
+}
 pub struct VegetationStream {
     world: World,
     edits: Vec<Cell>,
@@ -526,11 +593,17 @@ pub struct VegetationStream {
     mesh_costs: BTreeMap<MeshKey, (usize, u64)>,
     pending_tiles: BTreeSet<Tile>,
     pending_meshes: BTreeSet<MeshKey>,
+    tile_started: BTreeMap<Tile, Instant>,
+    mesh_started: BTreeMap<MeshKey, Instant>,
+    prediction: StreamingPrediction,
+    prediction_enabled: bool,
     tick: u64,
     center: Option<[i64; 2]>,
     stable_frame: Option<(StableFrameKey, VegetationFrame)>,
     previous_lods: BTreeMap<MeshKey, u8>,
     shadow_lods: BTreeMap<MeshKey, u8>,
+    shadow_lifecycle: ShadowLifecycle,
+    shadow_transitions_enabled: bool,
     grouped_ground: Option<(Vec<Tile>, GroundGroups)>,
     #[cfg(test)]
     regroup_builds: usize,
@@ -708,11 +781,21 @@ impl VegetationStream {
             mesh_costs: BTreeMap::new(),
             pending_tiles: BTreeSet::new(),
             pending_meshes: BTreeSet::new(),
+            tile_started: BTreeMap::new(),
+            mesh_started: BTreeMap::new(),
+            prediction: StreamingPrediction::default(),
+            prediction_enabled: std::env::var("FRONTIER_VEGETATION_PREDICTION").as_deref()
+                != Ok("off"),
             tick: 0,
             center: None,
             stable_frame: None,
             previous_lods: BTreeMap::new(),
             shadow_lods: BTreeMap::new(),
+            shadow_lifecycle: ShadowLifecycle::default(),
+            shadow_transitions_enabled: !matches!(
+                std::env::var("FRONTIER_SHADOW_TRANSITIONS").as_deref(),
+                Ok("off" | "0")
+            ),
             grouped_ground: None,
             #[cfg(test)]
             regroup_builds: 0,
@@ -723,6 +806,7 @@ impl VegetationStream {
         self.stable_frame = None;
         self.previous_lods.clear();
         self.shadow_lods.clear();
+        self.shadow_lifecycle.clear();
         self.grouped_ground = None;
         self.edits = world.edit_cells().collect();
         self.world = world;
@@ -737,6 +821,9 @@ impl VegetationStream {
         self.pending_tiles.clear();
         self.pending_meshes.clear();
         self.center = None;
+        self.tile_started.clear();
+        self.mesh_started.clear();
+        self.prediction = StreamingPrediction::default();
     }
     pub fn update(
         &mut self,
@@ -774,6 +861,12 @@ impl VegetationStream {
         world_revision: u64,
         view: Option<CullView>,
     ) -> VegetationFrame {
+        let now = Instant::now();
+        let mut lead = self.prediction.update(camera, now);
+        if !self.prediction_enabled {
+            lead = [0.; 2];
+            self.prediction.velocity = [0.; 2];
+        }
         let key = StableFrameKey::new(
             camera,
             viewport_height,
@@ -797,6 +890,8 @@ impl VegetationStream {
             self.epoch.fetch_add(1, Ordering::Relaxed);
             self.pending_tiles.clear();
             self.pending_meshes.clear();
+            self.tile_started.clear();
+            self.mesh_started.clear();
         }
         let mut drained = false;
         while let Ok((generation, done)) = self.rx.try_recv() {
@@ -816,6 +911,9 @@ impl VegetationStream {
                     }
                     if current_generation {
                         self.pending_tiles.remove(&t);
+                        if let Some(start) = self.tile_started.remove(&t) {
+                            self.prediction.observe_latency(start, now);
+                        }
                     }
                     if r == self.world.revision() {
                         self.tiles.insert(t, (p, self.tick.wrapping_add(1)));
@@ -824,6 +922,9 @@ impl VegetationStream {
                 Done::Mesh(k, r, m) => {
                     if current_generation {
                         self.pending_meshes.remove(&k);
+                        if let Some(start) = self.mesh_started.remove(&k) {
+                            self.prediction.observe_latency(start, now);
+                        }
                     }
                     if r == self.world.revision() {
                         self.mesh_costs
@@ -844,6 +945,8 @@ impl VegetationStream {
                     cached.stats.shadow_lod_changes = 0;
                     cached.stats.tree_refinements = 0;
                     cached.stats.tree_coarsenings = 0;
+                    cached.stats.prediction_horizon_ms = self.prediction.horizon() * 1000.;
+                    cached.stats.prediction_lead_m = lead[0].hypot(lead[1]);
                     return cached;
                 }
             }
@@ -856,6 +959,9 @@ impl VegetationStream {
             self.regroup_builds += 1;
         }
         let mut stats = VegetationStats {
+            shadow_lifecycle_enabled: self.shadow_transitions_enabled,
+            prediction_horizon_ms: self.prediction.horizon() * 1000.,
+            prediction_lead_m: lead[0].hypot(lead[1]),
             reference: self.config.reference,
             jobs: self.job_counters.snapshot(self.workers.len()),
             mesh_budget_bytes: if self.config.reference {
@@ -878,6 +984,9 @@ impl VegetationStream {
                 origin: [c.x, c.y, c.z],
                 batches: Vec::new(),
                 shadow_batches: Vec::new(),
+                shadow_transitions: Vec::new(),
+                shadow_coverage: Vec::new(),
+                shadow_inspection: Vec::new(),
                 stats,
             };
         }
@@ -889,7 +998,16 @@ impl VegetationStream {
         let mut demand = Vec::new();
         for s in 0..3u8 {
             let radius = radii[s as usize].clamp(0., 512.);
-            let n = (radius / 32.).ceil() as i64 + 1;
+            // Predict placement only. Mesh generation still follows final
+            // budget admission below, preventing speculative variant churn.
+            // Bound enumeration by the existing tile budget even at aircraft speed.
+            let bounded_lead = lead.map(|v| {
+                v.clamp(
+                    -(self.config.max_tiles as f64).sqrt() * 32.,
+                    (self.config.max_tiles as f64).sqrt() * 32.,
+                )
+            });
+            let n = ((radius + bounded_lead[0].hypot(bounded_lead[1])) / 32.).ceil() as i64 + 1;
             for dz in -n..=n {
                 for dx in -n..=n {
                     let t = Tile {
@@ -900,14 +1018,38 @@ impl VegetationStream {
                     let x = (t.x as f64 + 0.5) * 32.;
                     let z = (t.z as f64 + 0.5) * 32.;
                     let d = ((x - camera[0]).powi(2) + (z - camera[2]).powi(2)).sqrt();
-                    if d <= radius + 23. {
-                        demand.push((d, t));
+                    let delta = [x - camera[0], z - camera[2]];
+                    let lead2 = bounded_lead[0].powi(2) + bounded_lead[1].powi(2);
+                    let along = if lead2 > 0. {
+                        ((delta[0] * bounded_lead[0] + delta[1] * bounded_lead[1]) / lead2)
+                            .clamp(0., 1.)
+                    } else {
+                        0.
+                    };
+                    let swept = (delta[0] - bounded_lead[0] * along)
+                        .hypot(delta[1] - bounded_lead[1] * along);
+                    if swept <= radius + 23. {
+                        let deadline = if d <= radius + 23. {
+                            0.
+                        } else {
+                            self.prediction
+                                .time_to_need([x - camera[0], z - camera[2]], radius + 23.)
+                        };
+                        demand.push((deadline, d, t));
                     }
                 }
             }
         }
-        demand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        demand.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+        });
         demand.truncate(self.config.max_tiles);
+        stats.predicted_tiles = demand
+            .iter()
+            .filter(|(deadline, _, _)| *deadline > 0.)
+            .count();
         let epoch = self.epoch.load(Ordering::Relaxed);
         let mut submitted = 0;
         // (coverage/refinement, fair class, distance, key, source, ground).
@@ -916,7 +1058,7 @@ impl VegetationStream {
         let mut offscreen = Vec::new();
         let mut group_key: Vec<_> = demand
             .iter()
-            .map(|(_, t)| *t)
+            .map(|(_, _, t)| *t)
             .filter(|t| t.species != 2 && self.tiles.contains_key(t))
             .collect();
         group_key.sort_unstable();
@@ -926,7 +1068,7 @@ impl VegetationStream {
             .filter(|(key, _)| key == &group_key);
         let ground_reused = previous.is_some();
         let mut ground = previous.map_or_else(BTreeMap::new, |(_, groups)| groups);
-        for (_, t) in demand {
+        for (_, _, t) in demand {
             if let Some((records, used)) = self.tiles.get_mut(&t) {
                 *used = self.tick;
                 for p in records.iter() {
@@ -968,6 +1110,7 @@ impl VegetationStream {
                         .is_ok()
                 {
                     self.pending_tiles.insert(t);
+                    self.tile_started.insert(t, now);
                     submitted += 1;
                 }
             }
@@ -1052,6 +1195,8 @@ impl VegetationStream {
         // fine requests, and their actual costs replace speculative estimates.
         let mut remaining_tree_coarse = 0usize;
         let mut tree_reservations = BTreeMap::new();
+        let mut tree_current_costs = Vec::new();
+        let tree_budget = self.config.max_triangles.saturating_mul(65) / 100;
         let mut tree_coverage_ready = true;
         for (_, p) in plants
             .iter()
@@ -1074,10 +1219,40 @@ impl VegetationStream {
                 let (mesh, used) = self.meshes.get_mut(&current).unwrap();
                 *used = self.tick;
                 let cost = mesh.indices.len() / 3;
-                tree_reservations.insert(tree_identity(key), cost);
-                remaining_tree_coarse = remaining_tree_coarse.saturating_add(cost);
+                // Only detail previously displayed by this stream owns
+                // a retention reservation. A new candidate's finest cached
+                // mesh must compete for residual room after retained owners.
+                if self.previous_lods.get(&tree_identity(key)) == Some(&current.lod) {
+                    tree_current_costs.push((tree_identity(key), cost));
+                }
+                // First preserve the cheapest already resident representation
+                // for every feasible tree. Four direct lookups avoid scanning
+                // the cache or requiring historical LOD8 meshes to be rebuilt.
+                let baseline = [1, 2, 4, 8]
+                    .into_iter()
+                    .filter_map(|lod| {
+                        self.meshes
+                            .get(&MeshKey { lod, ..key })
+                            .map(|(m, _)| m.indices.len() / 3)
+                    })
+                    .min()
+                    .unwrap();
+                let room = tree_budget.saturating_sub(remaining_tree_coarse);
+                let reserved = if baseline <= room { baseline } else { 0 };
+                tree_reservations.insert(tree_identity(key), reserved);
+                remaining_tree_coarse = remaining_tree_coarse.saturating_add(reserved);
             } else {
                 tree_coverage_ready = false;
+            }
+        }
+        // Spend only the residual allocation retaining current detail, nearest
+        // first. Near refinement cannot consume a farther tree's cheap cover.
+        for (identity, current) in tree_current_costs {
+            let baseline = tree_reservations[&identity];
+            let extra = current.saturating_sub(baseline);
+            if extra <= tree_budget.saturating_sub(remaining_tree_coarse) {
+                tree_reservations.insert(identity, current);
+                remaining_tree_coarse = remaining_tree_coarse.saturating_add(extra);
             }
         }
         // Shadow quality is independent of color refinement: a native color
@@ -1411,10 +1586,20 @@ impl VegetationStream {
             let cost = current
                 .and_then(|key| self.meshes.get(&key))
                 .map_or(0, |(m, _)| m.indices.len() / 3);
-            shadow_reservations.insert(identity, cost);
-            shadow_remaining = shadow_remaining.saturating_add(cost);
+            // Candidates are nearest first. Reserve feasible coverage before
+            // refinement, without allowing unadmitted far baselines to consume
+            // the nearest tree's allocation. The lifecycle separately charges
+            // real old/new overlap and defers a handoff when no room remains.
+            let reserved = if cost <= TREE_SHADOW_TRIANGLE_BUDGET.saturating_sub(shadow_remaining) {
+                cost
+            } else {
+                0
+            };
+            shadow_reservations.insert(identity, reserved);
+            shadow_remaining = shadow_remaining.saturating_add(reserved);
         }
         let mut shadow_batches = Vec::new();
+        let mut shadow_inspection = Vec::new();
         let mut shadow_used = 0usize;
         for (distance, p, offscreen) in shadow_plants {
             let identity = MeshKey {
@@ -1494,6 +1679,25 @@ impl VegetationStream {
                     .map(|_| key)
             });
             let selected = retain_current_mesh(candidate, current, target);
+            shadow_inspection.push(ShadowInspection {
+                root_cell: [p.root.x, p.root.y, p.root.z],
+                selected,
+                requested: request,
+                reason: if !request_affordable {
+                    ShadowReason::BudgetRejected
+                } else if selected.is_none_or(|k| k != request)
+                    && !self.meshes.contains_key(&request)
+                {
+                    ShadowReason::ReplacementPending
+                } else if previous.is_some_and(|lod| selected.is_some_and(|k| k.lod == lod)) {
+                    ShadowReason::Retained
+                } else {
+                    ShadowReason::Admitted
+                },
+                triangles: selected
+                    .and_then(|k| self.meshes.get(&k))
+                    .map_or(0, |(m, _)| m.indices.len() / 3),
+            });
             if let Some(selected) = selected {
                 let (mesh, used) = self.meshes.get_mut(&selected).unwrap();
                 *used = self.tick;
@@ -1519,9 +1723,76 @@ impl VegetationStream {
                 });
             }
         }
+        let (shadow_batches, shadow_transitions, shadow_coverage) =
+            if self.shadow_transitions_enabled {
+                self.shadow_lifecycle.apply(
+                    shadow_batches,
+                    TREE_SHADOW_TRIANGLE_BUDGET,
+                    Instant::now(),
+                    &mut shadow_inspection,
+                )
+            } else {
+                (shadow_batches, Vec::new(), Vec::new())
+            };
+        stats.shadow_transition_pairs = shadow_transitions.len();
+        let shadow_total: usize = shadow_batches
+            .iter()
+            .map(|b| b.mesh.indices.len() / 3 * b.instances.len())
+            .sum();
+        stats.shadow_transition_triangles = shadow_transitions
+            .iter()
+            .filter_map(|t| {
+                shadow_batches
+                    .iter()
+                    .find(|b| b.key == t.from && b.instances[0].root_cell == t.root_cell)
+            })
+            .map(|b| b.mesh.indices.len() / 3)
+            .sum();
+        stats.shadow_fading_casters = shadow_coverage
+            .iter()
+            .map(|c| c.root_cell)
+            .collect::<BTreeSet<_>>()
+            .len();
+        stats.explicit_shadow_triangles = shadow_total;
+        if self.shadow_transitions_enabled {
+            let primary: BTreeMap<_, _> = shadow_batches
+                .iter()
+                .map(|b| (tree_identity(b.key), b.key.lod))
+                .collect();
+            stats.explicit_shadow_instances = primary.len();
+            stats.shadow_lod_changes = primary
+                .iter()
+                .filter(|entry| {
+                    self.shadow_lods
+                        .get(entry.0)
+                        .is_some_and(|old| old != entry.1)
+                })
+                .count();
+            stats.shadow_lod_histogram = [0; 4];
+            for lod in primary.values() {
+                stats.shadow_lod_histogram[lod.ilog2() as usize] += 1;
+            }
+        }
+        // Every outgoing mesh remains an admitted, cache-protected owner until
+        // its complementary native-cell coverage has fully transferred.
+        for batch in &shadow_batches {
+            if let Some((_, used)) = self.meshes.get_mut(&batch.key) {
+                *used = self.tick;
+            }
+        }
         mesh_requests.sort_by(|a, b| {
+            let deadline = |p: &PlantRecord| {
+                self.prediction.time_to_need(
+                    [
+                        p.root.x as f64 * VOXEL_SIZE - camera[0],
+                        p.root.z as f64 * VOXEL_SIZE - camera[2],
+                    ],
+                    8.,
+                )
+            };
             a.0.cmp(&b.0)
                 .then(((a.1 + self.tick as u8 % 3) % 3).cmp(&((b.1 + self.tick as u8 % 3) % 3)))
+                .then(deadline(&a.4).total_cmp(&deadline(&b.4)))
                 .then(a.2.total_cmp(&b.2))
                 .then(a.3.cmp(&b.3))
         });
@@ -1542,6 +1813,7 @@ impl VegetationStream {
                 break;
             }
             self.pending_meshes.insert(key);
+            self.mesh_started.insert(key, now);
             submitted += 1;
         }
         evict(&mut self.tiles, self.config.max_tiles, |v| v.1);
@@ -1555,10 +1827,16 @@ impl VegetationStream {
             .copied()
             .collect();
         stats.selected_cpu_meshes = selected.len();
-        stats.selected_cpu_geometry_bytes = selected
+        let selected_geometry: BTreeMap<_, _> = batches
+            .values()
+            .chain(shadow_batches.iter())
+            .map(|b| (b.key, &b.mesh))
+            .collect();
+        stats.selected_cpu_geometry_bytes = selected_geometry.values().map(|m| mesh_bytes(m)).sum();
+        let retained_outside_cache: usize = selected_geometry
             .iter()
-            .filter_map(|key| self.meshes.get(key))
-            .map(|(m, _)| mesh_bytes(m))
+            .filter(|(key, _)| !self.meshes.contains_key(key))
+            .map(|(_, m)| mesh_bytes(m))
             .sum();
         let mut bytes: usize = self.meshes.values().map(|(m, _)| mesh_bytes(m)).sum();
         while bytes > stats.mesh_budget_bytes || self.meshes.len() > self.config.max_meshes {
@@ -1578,7 +1856,8 @@ impl VegetationStream {
             }
         }
         stats.cpu_cache_geometry_bytes = bytes;
-        stats.total_cpu_geometry_bytes = bytes + stats.selected_mesh_evicted_bytes;
+        stats.total_cpu_geometry_bytes =
+            bytes + stats.selected_mesh_evicted_bytes + retained_outside_cache;
         stats.resident_tiles = self.tiles.len();
         stats.resident_meshes = self.meshes.len();
         stats.pending_jobs = stats.missing_tiles + stats.missing_meshes;
@@ -1600,6 +1879,9 @@ impl VegetationStream {
             origin: [c.x, c.y, c.z],
             batches: batches.into_values().collect(),
             shadow_batches,
+            shadow_transitions,
+            shadow_coverage,
+            shadow_inspection,
             stats,
         };
         let mut color_lods: BTreeMap<_, _> = frame
@@ -1634,6 +1916,8 @@ impl VegetationStream {
                 stats.pending_jobs, stats.triangles, bytes);
         }
         if frame.stats.pending_jobs == 0
+            && frame.shadow_transitions.is_empty()
+            && frame.shadow_coverage.is_empty()
             && self.pending_tiles.is_empty()
             && self.pending_meshes.is_empty()
             && frame
@@ -1663,6 +1947,212 @@ impl Drop for VegetationStream {
 #[cfg(test)]
 mod streaming_stability_tests {
     use super::*;
+    #[test]
+    fn newly_visible_far_detail_cannot_reserve_away_the_nearest_color_tree() {
+        // Exercise both retained far detail and newly visible cached detail.
+        // Their combined cost exceeds the unchanged 65% tree allocation.
+        for (retained_far, fine_costs) in [
+            (false, [300, 250, 250]),
+            (true, [300, 250, 250]),
+            (true, [350, 300, 250]),
+        ] {
+            let mut stream = VegetationStream::new(
+                World::new(7),
+                VegetationConfig {
+                    grass_radius_m: 0.,
+                    flower_radius_m: 0.,
+                    tree_radius_m: 100.,
+                    max_triangles: 1_000,
+                    ..Default::default()
+                },
+            );
+            for species in 0..3 {
+                for x in -5..=5 {
+                    for z in -5..=5 {
+                        stream.tiles.insert(Tile { species, x, z }, (vec![], 0));
+                    }
+                }
+            }
+            for (i, z) in [16, 640, 1120].into_iter().enumerate() {
+                let tree = PlantRecord {
+                    species: Species::Rowan,
+                    variant: 0,
+                    seed: i as u64 + 1,
+                    root: Cell { x: 0, y: 0, z },
+                    rotation: 0,
+                };
+                stream
+                    .tiles
+                    .get_mut(&Tile {
+                        species: 2,
+                        x: 0,
+                        z: 0,
+                    })
+                    .unwrap()
+                    .0
+                    .push(tree);
+                let identity = MeshKey {
+                    species: 2,
+                    variant: 0,
+                    seed: tree.seed,
+                    tile: [0; 2],
+                    lod: 0,
+                    edit_id: 0,
+                };
+                for (lod, cost) in [(2, fine_costs[i]), (4, 2_000), (8, 30)] {
+                    let key = MeshKey { lod, ..identity };
+                    stream.meshes.insert(
+                        key,
+                        (
+                            Arc::new(VegetationMesh {
+                                vertices: vec![],
+                                indices: vec![0; cost * 3],
+                            }),
+                            0,
+                        ),
+                    );
+                    stream.mesh_costs.insert(key, (cost, 0));
+                }
+                // Exclude generation from this admission/representation test.
+                for lod in [1] {
+                    stream
+                        .mesh_costs
+                        .insert(MeshKey { lod, ..identity }, (2_000, 0));
+                }
+                if i == 0 || retained_far {
+                    stream.previous_lods.insert(identity, 2);
+                }
+            }
+            let frame = stream.update([0.; 3], 1080, 1., 0);
+            let lods: BTreeMap<_, _> = frame
+                .batches
+                .iter()
+                .map(|b| (b.key.seed, b.key.lod))
+                .collect();
+            if fine_costs[0] == 300 {
+                assert_eq!(lods, BTreeMap::from([(1, 2), (2, 2), (3, 8)]));
+                assert_eq!(frame.stats.triangles_by_species[2], 580);
+            } else {
+                assert_eq!(
+                    lods.len(),
+                    3,
+                    "near detail must preserve every feasible far baseline"
+                );
+                assert_eq!(lods[&1], 2, "near resident detail remains protected");
+                assert_eq!(frame.stats.coverage_unresolved, 0);
+            }
+            assert!(frame.stats.triangles_by_species[2] <= 650);
+            assert_eq!(
+                frame.stats.pending_jobs, 0,
+                "unaffordable variants are not queued"
+            );
+        }
+    }
+    #[test]
+    fn shadow_baselines_keep_nearest_coverage_without_a_fixed_overlap_reservation() {
+        for count in [3, 4] {
+            let mut stream = VegetationStream::new(
+                World::new(7),
+                VegetationConfig {
+                    grass_radius_m: 0.,
+                    flower_radius_m: 0.,
+                    tree_radius_m: 100.,
+                    ..Default::default()
+                },
+            );
+            stream.shadow_transitions_enabled = true;
+            for species in 0..3 {
+                for x in -5..=5 {
+                    for z in -5..=5 {
+                        stream.tiles.insert(Tile { species, x, z }, (vec![], 0));
+                    }
+                }
+            }
+            for (i, z) in [16, 640, 1120, 1280].into_iter().take(count).enumerate() {
+                let tree = PlantRecord {
+                    species: Species::Rowan,
+                    variant: 0,
+                    seed: i as u64 + 1,
+                    root: Cell { x: 0, y: 0, z },
+                    rotation: 0,
+                };
+                stream
+                    .tiles
+                    .get_mut(&Tile {
+                        species: 2,
+                        x: 0,
+                        z: 0,
+                    })
+                    .unwrap()
+                    .0
+                    .push(tree);
+                let identity = MeshKey {
+                    species: 2,
+                    variant: 0,
+                    seed: tree.seed,
+                    tile: [0; 2],
+                    lod: 0,
+                    edit_id: 0,
+                };
+                let baseline = MeshKey { lod: 8, ..identity };
+                stream.meshes.insert(
+                    baseline,
+                    (
+                        Arc::new(VegetationMesh {
+                            vertices: vec![],
+                            indices: vec![0; 49_000 * 3],
+                        }),
+                        0,
+                    ),
+                );
+                stream.mesh_costs.insert(baseline, (49_000, 0));
+                // Known unaffordable refinements isolate feasible baseline
+                // admission from asynchronous generation and color refinement.
+                for lod in [1, 2, 4] {
+                    stream
+                        .mesh_costs
+                        .insert(MeshKey { lod, ..identity }, (2_000_000, 0));
+                }
+                stream.shadow_lods.insert(identity, 8);
+                stream.previous_lods.insert(identity, 8);
+            }
+            let frame = stream.update([0.; 3], 1080, 1., 0);
+            let admitted: BTreeSet<_> = frame.shadow_batches.iter().map(|b| b.key.seed).collect();
+            assert_eq!(admitted,BTreeSet::from([1,2,3]),"all feasible baselines survive; excess far coverage cannot reserve against nearer roots");
+            assert_eq!(frame.stats.explicit_shadow_triangles, 147_000);
+            assert_eq!(
+                frame.stats.pending_jobs, 0,
+                "rejected refinements do not queue"
+            );
+        }
+    }
+    #[test]
+    fn prediction_tracks_measured_latency_velocity_turns_and_stops() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut prediction = StreamingPrediction::default();
+        for ms in 1..=64 {
+            prediction.observe_latency(now, now + Duration::from_millis(ms));
+        }
+        assert!((prediction.horizon() - 0.161).abs() < 1e-9);
+        assert_eq!(prediction.update([0.; 3], now), [0.; 2]);
+        let lead = prediction.update([10., 0., 0.], now + Duration::from_secs(1));
+        assert!((lead[0] - 1.61).abs() < 1e-9);
+        assert!((prediction.time_to_need([20., 0.], 5.) - 1.5).abs() < 1e-9);
+        assert!(prediction.time_to_need([0., 20.], 5.).is_infinite());
+        let lead = prediction.update([10., 0., 10.], now + Duration::from_secs(2));
+        assert_eq!(lead[0], 0.);
+        assert!(lead[1] > 0.);
+        assert_eq!(
+            prediction.update([10., 0., 10.], now + Duration::from_secs(3)),
+            [0.; 2]
+        );
+        assert_eq!(
+            prediction.update([1e6, 0., 0.], now + Duration::from_secs(4)),
+            [0.; 2]
+        );
+        assert_eq!(prediction.latencies.len(), 64);
+    }
     #[test]
     fn budget_boundary_has_separate_refine_and_retain_thresholds() {
         assert!(!tree_lod_admitted(1, Some(4), 1_000, 1_099));
@@ -1937,6 +2427,9 @@ mod streaming_stability_tests {
                 ..Default::default()
             },
         );
+        // This regression isolates request/readiness selection. Temporal
+        // ownership handoff is covered independently by shadow_lifecycle tests.
+        stream.shadow_transitions_enabled = false;
         for species in 0..3 {
             for x in -3..=3 {
                 for z in -3..=3 {

@@ -17,6 +17,44 @@ pub(super) struct ShadowResources {
     binds: Vec<wgpu::BindGroup>,
     empty_bind: Option<wgpu::BindGroup>,
     keys: Vec<TileKey>,
+    near_keys: Vec<TileKey>,
+    near_terrain_uniform: wgpu::Buffer,
+    near_binds: Vec<wgpu::BindGroup>,
+    near_empty_bind: Option<wgpu::BindGroup>,
+    far_depth_uniform: wgpu::Buffer,
+    far_depth_bind: wgpu::BindGroup,
+    cached: Option<ShadowCacheKey>,
+    redraw: bool,
+    cascades: bool,
+    cache_enabled: bool,
+}
+#[derive(PartialEq, Eq)]
+struct ShadowCacheKey {
+    revision: u64,
+    center: [u64; 3],
+    sun: [u32; 3],
+    keys: Vec<TileKey>,
+}
+/// Exact draw inputs consumed by the plant depth shader. Texture and uniform
+/// resource identity are scoped by the owning NearShadowResources instance;
+/// replacing that resource necessarily creates an empty cache.
+#[derive(PartialEq, Eq)]
+struct NearShadowCacheKey {
+    projection: [u32; 20],
+    eye: [u32; 3],
+    paint_origin: [u32; 3],
+    casters: Vec<(crate::vegetation::MeshKey, Vec<u8>)>,
+}
+fn reuse_near_depth(cache: &mut Option<NearShadowCacheKey>, next: NearShadowCacheKey) -> bool {
+    if cache.as_ref() == Some(&next) {
+        return true;
+    }
+    *cache = Some(next);
+    false
+}
+pub(crate) fn shadow_cascades_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FRONTIER_SHADOW_CASCADES").as_deref() == Ok("1"))
 }
 pub(crate) fn sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -42,6 +80,17 @@ pub(crate) fn sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 impl ShadowResources {
+    pub(super) fn allocated_bytes(&self) -> u64 {
+        SIZE as u64 * SIZE as u64 * 4
+            + CAMERA_UNIFORM_BYTES
+            + near_size() as u64 * near_size() as u64 * 4
+            + if self.cascades {
+                CAMERA_UNIFORM_BYTES
+            } else {
+                UNIFORM_STRIDE
+            }
+            + 240 // near/far sampling transforms and empty profile table
+    }
     pub(super) fn new(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -94,6 +143,29 @@ impl ShadowResources {
             contents: &[0u8; 80],
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let near_terrain_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("near terrain shadow transforms"),
+            size: if shadow_cascades_enabled() {
+                CAMERA_UNIFORM_BYTES
+            } else {
+                UNIFORM_STRIDE
+            },
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let far_depth_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("far vegetation shadow transform"),
+            contents: &[0u8; 80],
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let far_depth_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("far vegetation shadow depth"),
+            layout: &near_depth_layout(device),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: far_depth_uniform.as_entire_binding(),
+            }],
+        });
         Self {
             near: NearShadowResources::new(device),
             zero_table,
@@ -105,6 +177,16 @@ impl ShadowResources {
             binds: vec![],
             empty_bind: None,
             keys: vec![],
+            near_keys: vec![],
+            near_terrain_uniform,
+            near_binds: vec![],
+            near_empty_bind: None,
+            far_depth_uniform,
+            far_depth_bind,
+            cached: None,
+            redraw: true,
+            cascades: shadow_cascades_enabled(),
+            cache_enabled: std::env::var("FRONTIER_SHADOW_CACHE").as_deref() != Ok("off"),
         }
     }
 }
@@ -130,6 +212,9 @@ impl LightFrame {
         let forward = camera.direction().as_dvec3();
         let mut center =
             camera.position + DVec3::new(forward.x, 0., forward.z).normalize_or_zero() * 300.;
+        if shadow_cascades_enabled() {
+            center = camera.position;
+        }
         let texel = (HALF_EXTENT * 2. / SIZE as f32) as f64;
         for axis in [right.as_dvec3(), light_up.as_dvec3()] {
             let distance = center.dot(axis);
@@ -187,12 +272,14 @@ impl AdaptiveGpu {
         let mut near_uniform = [0f32; 20];
         near_uniform[..16].copy_from_slice(&matrix.to_cols_array());
         near_uniform[16] = if self.near_shadows_active() { 1. } else { 0. };
+        self.shadows.near.uniform_key = near_uniform.map(f32::to_bits);
         queue.write_buffer(
             &self.shadows.near.uniform,
             0,
             bytemuck::cast_slice(&near_uniform),
         );
         if self.lighting[5] < 0.5 {
+            self.shadows.cached = None;
             return;
         }
         while self.shadows.binds.len() < self.profile_tables.len() {
@@ -224,6 +311,72 @@ impl AdaptiveGpu {
                 .copied(),
         );
         self.shadows.keys.sort();
+        let cache_key = ShadowCacheKey {
+            revision: self.residency_revision,
+            center: light_frame.center.to_array().map(f64::to_bits),
+            sun: light_frame.sun.to_array().map(f32::to_bits),
+            keys: self.shadows.keys.clone(),
+        };
+        // Cascades receive changing plant depths after terrain: rebuild instead
+        // of retaining those depths after a caster moves or is replaced.
+        self.shadows.redraw = !self.shadows.cache_enabled
+            || self.shadows.cascades
+            || self.shadows.cached.as_ref() != Some(&cache_key);
+        self.shadows.cached = Some(cache_key);
+        if self.shadows.cascades {
+            let mut far_uniform = [0f32; 20];
+            far_uniform[..16].copy_from_slice(&light_frame.matrix(camera.position).to_cols_array());
+            far_uniform[16] = 1.;
+            queue.write_buffer(
+                &self.shadows.far_depth_uniform,
+                0,
+                bytemuck::cast_slice(&far_uniform),
+            );
+            self.shadows.near_keys = owners
+                .iter()
+                .copied()
+                .filter(|key| {
+                    self.clusters.get(key).is_some_and(|c| {
+                        intersects_light_bounds(
+                            matrix * Mat4::from_translation((c.origin - camera.position).as_vec3()),
+                            c.bounds,
+                        )
+                    })
+                })
+                .collect();
+            self.shadows.near_keys.sort();
+            while self.shadows.near_binds.len() < self.profile_tables.len() {
+                let i = self.shadows.near_binds.len();
+                self.shadows.near_binds.push(profile_bind(
+                    device,
+                    &self.layout,
+                    &self.shadows.near_terrain_uniform,
+                    &self.profile_tables[i].buffer,
+                ));
+            }
+            if self.shadows.near_empty_bind.is_none() {
+                self.shadows.near_empty_bind = Some(profile_bind(
+                    device,
+                    &self.layout,
+                    &self.shadows.near_terrain_uniform,
+                    &self.shadows.zero_table,
+                ));
+            }
+            let mut near_bytes = vec![0u8; self.shadows.near_keys.len() * UNIFORM_STRIDE as usize];
+            for (i, key) in self.shadows.near_keys.iter().enumerate() {
+                let c = &self.clusters[key];
+                let transform =
+                    matrix * Mat4::from_translation((c.origin - camera.position).as_vec3());
+                near_bytes[i * UNIFORM_STRIDE as usize..i * UNIFORM_STRIDE as usize + 64]
+                    .copy_from_slice(bytemuck::cast_slice(&transform.to_cols_array()));
+            }
+            if !near_bytes.is_empty() {
+                queue.write_buffer(&self.shadows.near_terrain_uniform, 0, &near_bytes);
+            }
+        }
+        if !self.shadows.redraw {
+            return;
+        }
         let mut bytes = vec![0u8; self.shadows.keys.len() * UNIFORM_STRIDE as usize];
         for (i, key) in self.shadows.keys.iter().enumerate() {
             let c = &self.clusters[key];
@@ -239,11 +392,23 @@ impl AdaptiveGpu {
         if self.lighting[5] < 0.5 {
             return;
         }
+        if self.shadows.redraw {
+            self.draw_shadow_map(encoder, false);
+        }
+        if self.shadows.cascades && self.near_shadows_active() {
+            self.draw_shadow_map(encoder, true);
+        }
+    }
+    fn draw_shadow_map(&self, encoder: &mut wgpu::CommandEncoder, near: bool) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bounded Alpine terrain shadow depth"),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.shadows.view,
+                view: if near {
+                    &self.shadows.near.view
+                } else {
+                    &self.shadows.view
+                },
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.),
                     store: wgpu::StoreOp::Store,
@@ -253,7 +418,12 @@ impl AdaptiveGpu {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        for (i, key) in self.shadows.keys.iter().enumerate() {
+        let keys = if near {
+            &self.shadows.near_keys
+        } else {
+            &self.shadows.keys
+        };
+        for (i, key) in keys.iter().enumerate() {
             let c = &self.clusters[key];
             let kind = if c.native_quads {
                 2
@@ -270,8 +440,20 @@ impl AdaptiveGpu {
             };
             pass.set_pipeline(&self.shadows.pipelines[kind]);
             let bind = c.profile.as_ref().map_or_else(
-                || self.shadows.empty_bind.as_ref().unwrap(),
-                |p| &self.shadows.binds[p.table.page],
+                || {
+                    if near {
+                        self.shadows.near_empty_bind.as_ref().unwrap()
+                    } else {
+                        self.shadows.empty_bind.as_ref().unwrap()
+                    }
+                },
+                |p| {
+                    if near {
+                        &self.shadows.near_binds[p.table.page]
+                    } else {
+                        &self.shadows.binds[p.table.page]
+                    }
+                },
             );
             pass.set_bind_group(0, bind, &[(i as u64 * UNIFORM_STRIDE) as u32]);
             pass.set_vertex_buffer(
@@ -361,6 +543,9 @@ pub(super) struct NearShadowResources {
     pub bind: wgpu::BindGroup,
     pub depth_bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    uniform_key: [u32; 20],
+    cached: std::cell::RefCell<Option<NearShadowCacheKey>>,
+    reused: std::cell::Cell<bool>,
 }
 impl NearShadowResources {
     fn new(device: &wgpu::Device) -> Self {
@@ -423,6 +608,9 @@ impl NearShadowResources {
             bind,
             depth_bind,
             uniform,
+            uniform_key: [0; 20],
+            cached: std::cell::RefCell::new(None),
+            reused: std::cell::Cell::new(false),
         }
     }
 }
@@ -452,6 +640,48 @@ impl AdaptiveGpu {
     /// Published terrain depth uses the same bounded owner set as surface shadows.
     pub(crate) fn far_shadow_bind(&self) -> &wgpu::BindGroup {
         &self.shadows.sampling_bind
+    }
+    pub(crate) fn far_shadow_view(&self) -> &wgpu::TextureView {
+        &self.shadows.view
+    }
+    pub(crate) fn far_shadow_depth_bind(&self) -> &wgpu::BindGroup {
+        &self.shadows.far_depth_bind
+    }
+    pub(crate) fn shadow_cascades_active(&self) -> bool {
+        self.shadows.cascades && self.near_shadows_active()
+    }
+    pub(crate) fn shadow_cache_reused(&self) -> bool {
+        self.shadows_active() && !self.shadows.redraw
+    }
+    /// Called immediately before the near vegetation pass. An unchanged map
+    /// retains its existing depth attachment; cascades always rebuild because
+    /// terrain has already cleared and populated the same attachment this frame.
+    pub(crate) fn reuse_near_plant_shadow(
+        &self,
+        camera: &Camera,
+        origin: DVec3,
+        casters: Vec<(crate::vegetation::MeshKey, Vec<u8>)>,
+    ) -> bool {
+        if self.shadows.cascades || !self.shadows.cache_enabled {
+            self.shadows.near.cached.borrow_mut().take();
+            self.shadows.near.reused.set(false);
+            return false;
+        }
+        let next = NearShadowCacheKey {
+            projection: self.shadows.near.uniform_key,
+            eye: (camera.position - origin)
+                .as_vec3()
+                .to_array()
+                .map(f32::to_bits),
+            paint_origin: origin.to_array().map(|v| (v * 16.) as i64 as u32),
+            casters,
+        };
+        let reused = reuse_near_depth(&mut self.shadows.near.cached.borrow_mut(), next);
+        self.shadows.near.reused.set(reused);
+        reused
+    }
+    pub(crate) fn near_shadow_cache_reused(&self) -> bool {
+        self.near_shadows_active() && self.shadows.near.reused.get()
     }
     /// Eye-relative input for the atmosphere pass; terrain's draw uniforms instead
     /// use each cluster origin. Both map to the identical world-snapped light map.
@@ -493,6 +723,85 @@ impl AdaptiveGpu {
 #[cfg(test)]
 mod near_tests {
     use super::*;
+    #[test]
+    fn near_depth_reuse_requires_exact_shader_inputs_and_caster_bytes() {
+        let key = || NearShadowCacheKey {
+            projection: [0; 20],
+            eye: [0; 3],
+            paint_origin: [0; 3],
+            casters: vec![(
+                crate::vegetation::MeshKey {
+                    species: 2,
+                    variant: 0,
+                    seed: 9,
+                    tile: [0; 2],
+                    lod: 4,
+                    edit_id: 0,
+                },
+                vec![0; 32],
+            )],
+        };
+        let mut cache = None;
+        assert!(!reuse_near_depth(&mut cache, key()));
+        assert!(reuse_near_depth(&mut cache, key()));
+        // Eye affects ground distance fades independently of the snapped map.
+        let mut eye = key();
+        eye.eye[0] = 1;
+        assert!(!reuse_near_depth(&mut cache, eye));
+        let mut projection = key();
+        projection.projection[5] = 1;
+        assert!(!reuse_near_depth(&mut cache, projection));
+        let mut origin = key();
+        origin.paint_origin[1] = 1;
+        assert!(!reuse_near_depth(&mut cache, origin));
+        let mut phase = key();
+        phase.casters[0].1[31] = 1;
+        assert!(!reuse_near_depth(&mut cache, phase));
+        let mut lod = key();
+        lod.casters[0].0.lod = 2;
+        assert!(!reuse_near_depth(&mut cache, lod));
+        let mut edited = key();
+        edited.casters[0].0.edit_id = 1;
+        assert!(!reuse_near_depth(&mut cache, edited));
+        let mut removed = key();
+        removed.casters.clear();
+        assert!(!reuse_near_depth(&mut cache, removed));
+        // Replacing the owning texture/map starts with an empty cache.
+        cache = None;
+        assert!(!reuse_near_depth(&mut cache, key()));
+    }
+    #[test]
+    fn cached_depth_requires_same_world_light_and_ownership_revisions() {
+        let key = || ShadowCacheKey {
+            revision: 7,
+            center: [0; 3],
+            sun: [0, 1, 0],
+            keys: vec![TileKey {
+                min: [0; 2],
+                width_cells: 512,
+                step_cells: 8,
+                edge_steps: [8; 4],
+                source_revision: 2,
+            }],
+        };
+        let original = key();
+        assert!(original == key());
+        let mut edited = key();
+        edited.revision += 1;
+        assert!(original != edited);
+        let mut source = key();
+        source.keys[0].source_revision += 1;
+        assert!(original != source);
+        let mut light = key();
+        light.sun[0] = 1;
+        assert!(original != light);
+        let mut camera = key();
+        camera.center[0] = 1;
+        assert!(original != camera);
+        let mut ownership = key();
+        ownership.keys.clear();
+        assert!(original != ownership);
+    }
     #[test]
     fn atmosphere_and_cluster_shadow_coordinates_agree() {
         let mut camera = Camera::fixture();

@@ -17,6 +17,9 @@ pub struct AdaptiveView {
     published_pose: Option<(Camera, u32, u32)>,
     candidate_preparation: Option<crate::adaptive_stream::PreparationCycle>,
     pub owners: HashSet<TileKey>,
+    owner_guard: crate::adaptive_stream::PartitionGuard,
+    retain_keys: HashSet<TileKey>,
+    retain_dirty: bool,
     pub stats: DrawStats,
     pub quality_ready: bool,
     pub refinement_ready: bool,
@@ -31,6 +34,7 @@ pub struct AdaptiveView {
     upload_cpu_ms: f64,
     publication_cpu_ms: f64,
     gpu_prepare_cpu_ms: f64,
+    gpu_prepare_stage_ms: [f64; 4],
     pub max_upload_frame_bytes: u64,
     pub published_epoch: u64,
     pub pixel_error: f64,
@@ -111,6 +115,9 @@ impl AdaptiveView {
             published_pose: None,
             candidate_preparation: None,
             owners: HashSet::new(),
+            owner_guard: Default::default(),
+            retain_keys: HashSet::new(),
+            retain_dirty: true,
             stats: DrawStats::default(),
             quality_ready: false,
             refinement_ready: false,
@@ -125,6 +132,7 @@ impl AdaptiveView {
             upload_cpu_ms: 0.,
             publication_cpu_ms: 0.,
             gpu_prepare_cpu_ms: 0.,
+            gpu_prepare_stage_ms: [0.; 4],
             max_upload_frame_bytes: 0,
             published_epoch: 0,
             pixel_error,
@@ -252,6 +260,7 @@ impl AdaptiveView {
                         height,
                     )
                     .is_some();
+                    self.retain_dirty = true;
                     queue_upload_target(
                         &mut self.pending,
                         &mut self.deferred,
@@ -270,11 +279,15 @@ impl AdaptiveView {
         );
         adaptive.set_voxel_filter(gpu.voxel_filter);
         adaptive.set_native_bins(self.native_bins);
-        let mut keep = self.owners.clone();
-        if let Some(frame) = &self.pending {
-            keep.extend(frame.tiles.iter().map(|t| t.key));
+        if self.retain_dirty {
+            self.retain_keys.clear();
+            self.retain_keys.extend(self.owners.iter().copied());
+            if let Some(frame) = &self.pending {
+                self.retain_keys.extend(frame.tiles.iter().map(|t| t.key));
+            }
+            adaptive.retain(&self.retain_keys);
+            self.retain_dirty = false;
         }
-        adaptive.retain(&keep);
         let mut uploaded = 0;
         self.gpu_resource_limited = false;
         if let Some(frame) = &self.pending {
@@ -328,7 +341,12 @@ impl AdaptiveView {
                     width,
                     height,
                 ) {
+                    self.owner_guard = crate::adaptive_stream::PartitionGuard::new(
+                        keys.iter().copied(),
+                        self.topology_supported,
+                    );
                     self.owners = keys;
+                    self.retain_dirty = true;
                     if let Some(transaction) = frame.publication_transaction {
                         self.worker.record_transaction_publication(transaction);
                     }
@@ -361,11 +379,13 @@ impl AdaptiveView {
                     self.published_pose = Some((camera, width, height));
                 }
                 self.pending = None;
+                self.retain_dirty = true;
             }
             self.publication_cpu_ms += publication_started.elapsed().as_secs_f64() * 1000.;
         }
         if self.pending.is_none() {
             self.pending = self.deferred.take();
+            self.retain_dirty |= self.pending.is_some();
         }
         self.deferred_arc_bytes = self
             .deferred
@@ -384,13 +404,7 @@ impl AdaptiveView {
         self.upload_bytes += uploaded;
         self.max_upload_frame_bytes = self.max_upload_frame_bytes.max(uploaded);
         if !self.owners.is_empty() {
-            self.coverage_ready = crate::adaptive_stream::published_partition_covers(
-                &self.owners,
-                self.topology_supported,
-                &camera,
-                width,
-                height,
-            );
+            self.coverage_ready = self.owner_guard.covers(&camera, width, height);
         } else {
             self.coverage_ready =
                 self.coverage_ready && self.published_pose == Some((camera, width, height));
@@ -406,6 +420,14 @@ impl AdaptiveView {
             self.pixel_error,
         );
         self.gpu_prepare_cpu_ms += gpu_prepare_started.elapsed().as_secs_f64() * 1000.;
+        for (total, value) in self.gpu_prepare_stage_ms.iter_mut().zip([
+            self.stats.prepare_shadow_ms,
+            self.stats.prepare_order_ms,
+            self.stats.prepare_occlusion_ms,
+            self.stats.prepare_visibility_uniform_ms,
+        ]) {
+            *total += value;
+        }
         self.quality_ready = self.coverage_ready && self.stats.current_quality_ready;
         if self.quality_ready && self.first_quality_ms.is_none() {
             self.first_quality_ms = Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
@@ -671,6 +693,9 @@ impl AdaptiveView {
         json.push_str(&format!(",\"exclusive_cpu_profile\":{{\"enabled\":{},\"source_lock_ms\":{},\"source_lookup_ms\":{},\"source_generate_ms\":{},\"appearance_ms\":{},\"certificate_ms\":{},\"native_mesh_ms\":{},\"proxy_ms\":{},\"cache_snapshot_ms\":{},\"cache_admission_ms\":{},\"cache_eviction_ms\":{},\"lru_metadata_bytes\":{}}}}}", c.profile_enabled, c.source_lock_ms, c.source_lookup_ms, c.source_generate_ms, c.appearance_exclusive_ms, c.certificate_exclusive_ms, c.native_mesh_exclusive_ms, c.proxy_exclusive_ms, c.cache_snapshot_ms, c.cache_admission_ms, c.cache_eviction_ms, c.lru_metadata_bytes));
         json.pop();
         json.push_str(&format!(",\"presentation_cpu_ms\":{{\"upload_enqueue\":{},\"publication_check\":{},\"gpu_visibility_uniforms_bundles\":{}}}}}", self.upload_cpu_ms, self.publication_cpu_ms, self.gpu_prepare_cpu_ms));
+        json.pop();
+        json.push_str(&format!(",\"terrain_prepare_stages_cpu_ms\":{{\"reuse_enabled\":{},\"shadows\":{},\"resident_accounting_and_order\":{},\"occluder_build\":{},\"visibility_error_uniforms_upload\":{}}}}}",
+            self.stats.prepare_reuse_enabled, self.gpu_prepare_stage_ms[0], self.gpu_prepare_stage_ms[1], self.gpu_prepare_stage_ms[2], self.gpu_prepare_stage_ms[3]));
         json.pop();
         json.push_str(&format!(
             ",\"prepared_view_cache\":{{\"hits\":{},\"misses\":{}}}}}",

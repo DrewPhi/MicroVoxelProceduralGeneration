@@ -100,4 +100,8 @@ runtime into this branch by default.
 
 [Vegetation streaming and compact rendering results](frontier/VEGETATION_STREAMING_CHECKPOINT.md).
 
+The [next vegetation checkpoint](frontier/VEGETATION_NEXT_CHECKPOINT.md) adds
+shadow handoffs, nearest-first detail retention, predictive streaming and GPU
+experiments, with matched captures, walking recordings and laptop measurements.
+
 [MIT license](LICENSE)

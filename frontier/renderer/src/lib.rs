@@ -35,7 +35,9 @@ mod spatial_appearance;
 mod surface_compare;
 mod terrain;
 mod vegetation;
+mod vegetation_generation_lab;
 mod vegetation_gpu;
+pub mod vegetation_lab;
 mod vegetation_mesher;
 mod vegetation_scene;
 mod viewer_visual;
@@ -240,8 +242,11 @@ struct Gpu {
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_stats: vegetation::VegetationStats,
+    vegetation_inspection: Vec<vegetation::ShadowInspection>,
+    vegetation_caster_roots: Vec<[i64; 3]>,
     vegetation_revision: u64,
     vegetation_samples: u32,
+    vegetation_indirect_supported: bool,
     summary_contention: Option<gpu_summary_probe::GpuSummaryProbe>,
     summary_contention_startup_ms: f64,
     draw_encode_cpu_ms: std::cell::Cell<f64>,
@@ -333,7 +338,7 @@ impl Gpu {
             label: Some("camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -475,8 +480,14 @@ impl Gpu {
             vegetation: None,
             vegetation_stream: None,
             vegetation_stats: Default::default(),
+            vegetation_inspection: Vec::new(),
+            vegetation_caster_roots: Vec::new(),
             vegetation_revision: 0,
             vegetation_samples: sample_count,
+            vegetation_indirect_supported: adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
             summary_contention: None,
             summary_contention_startup_ms: 0.,
             draw_encode_cpu_ms: std::cell::Cell::new(0.),
@@ -738,19 +749,38 @@ impl Gpu {
                 self.voxel_filter,
             );
         }
+        if let Some(plants) = &self.vegetation {
+            plants.encode_culling(encoder, &self.bind_group);
+        }
         if let Some(adaptive) = &self.adaptive {
             adaptive.draw_shadows(encoder);
+            if adaptive.shadow_cascades_active() {
+                if let Some(plants) = &self.vegetation {
+                    plants.draw_far_shadows(
+                        encoder,
+                        &self.bind_group,
+                        adaptive.far_shadow_view(),
+                        adaptive.far_shadow_depth_bind(),
+                    );
+                }
+            }
             if let Some(t) = &plant_timings {
                 t.shadow_start(encoder);
             }
             if adaptive.near_shadows_active() {
                 if let Some(vegetation) = &self.vegetation {
-                    vegetation.draw_shadows(
-                        encoder,
-                        &self.bind_group,
-                        adaptive.near_shadow_view(),
-                        adaptive.near_shadow_depth_bind(),
-                    );
+                    if !adaptive.reuse_near_plant_shadow(
+                        camera,
+                        self.origin,
+                        vegetation.shadow_depth_signature(),
+                    ) {
+                        vegetation.draw_shadows(
+                            encoder,
+                            &self.bind_group,
+                            adaptive.near_shadow_view(),
+                            adaptive.near_shadow_depth_bind(),
+                        );
+                    }
                 }
             }
             if let Some(t) = &plant_timings {
@@ -1365,6 +1395,7 @@ struct Viewer {
     camera: Camera,
     walking: walking::WalkingCamera,
     frame_trace: playability::FrameTrace,
+    shadow_trace: playability::ShadowTrace,
     keys: HashSet<KeyCode>,
     grabbed: bool,
     minimized: bool,
@@ -1906,6 +1937,13 @@ impl Viewer {
             gpu.update_vegetation(&self.world, self.camera, width, height)?;
         }
         let vegetation_ms = plants_started.elapsed().as_secs_f64() * 1000.;
+        if let Some(gpu) = &self.gpu {
+            self.shadow_trace.observe(
+                self.visual_started.elapsed().as_secs_f64(),
+                &gpu.vegetation_inspection,
+                &gpu.vegetation_caster_roots,
+            );
+        }
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             if !pages.contains(self.camera.position, self.camera.far) {
                 return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
@@ -3165,6 +3203,7 @@ pub fn run() -> Result<()> {
         camera,
         walking: Default::default(),
         frame_trace: Default::default(),
+        shadow_trace: Default::default(),
         terrain_data,
         hybrid_initial,
         page_initial,
@@ -3274,6 +3313,11 @@ pub fn run() -> Result<()> {
             committed_memory_bytes: None,
         };
         let mut json = report.to_json();
+        json.pop();
+        json.push_str(&format!(
+            ",\"shadow_inspector\":{}}}",
+            viewer.shadow_trace.json()
+        ));
         json.pop();
         json.push_str(&format!(
             ",\"process_memory\":{}}}",

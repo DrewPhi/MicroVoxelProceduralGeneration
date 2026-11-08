@@ -205,6 +205,11 @@ pub struct GpuProfileStats {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DrawStats {
     pub gpu_profiles: GpuProfileStats,
+    pub prepare_shadow_ms: f64,
+    pub prepare_order_ms: f64,
+    pub prepare_occlusion_ms: f64,
+    pub prepare_visibility_uniform_ms: f64,
+    pub prepare_reuse_enabled: bool,
     pub prepared_view_hits: u64,
     pub prepared_view_misses: u64,
     pub bundle_enabled: bool,
@@ -372,6 +377,39 @@ macro_rules! encode_cluster_draws {
     }};
 }
 
+/// Same local f32 transform as `look_to_rh`, with the view basis prepared once.
+/// Keep the eye subtraction and dot products local to each cluster: rebasing or
+/// factoring the translation through a global f32 position loses precision.
+struct LocalViewTransform {
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+impl LocalViewTransform {
+    fn new(direction: Vec3) -> Self {
+        let forward = direction.normalize();
+        let right = forward.cross(Vec3::Y).normalize();
+        Self {
+            forward,
+            right,
+            up: right.cross(forward),
+        }
+    }
+    fn matrix(&self, eye: Vec3) -> Mat4 {
+        let [r, u, f] = [self.right, self.up, self.forward];
+        Mat4::from_cols(
+            glam::Vec4::new(r.x, u.x, -f.x, 0.),
+            glam::Vec4::new(r.y, u.y, -f.y, 0.),
+            glam::Vec4::new(r.z, u.z, -f.z, 0.),
+            glam::Vec4::new(-eye.dot(r), -eye.dot(u), eye.dot(f), 1.),
+        )
+    }
+}
+
+fn sort_draw_order(order: &mut [(f64, TileKey)]) {
+    order.sort_by(|(da, ka), (db, kb)| da.total_cmp(db).then_with(|| ka.cmp(kb)));
+}
+
 struct PreparedView {
     camera: Camera,
     width: u32,
@@ -404,6 +442,10 @@ pub struct AdaptiveGpu {
     near_beauty: bool,
     shadows: ShadowResources,
     prepared_view: Option<PreparedView>,
+    resident_stats: Option<DrawStats>,
+    draw_order: Vec<(f64, TileKey)>,
+    prepare_reuse_enabled: bool,
+    pub(super) residency_revision: u64,
     prepared_view_hits: u64,
     prepared_view_misses: u64,
     prepared_view_enabled: bool,
@@ -681,6 +723,11 @@ impl AdaptiveGpu {
             near_detail: false,
             shadows,
             prepared_view: None,
+            resident_stats: None,
+            draw_order: vec![],
+            prepare_reuse_enabled: std::env::var("FRONTIER_TERRAIN_PREPARE_REUSE").as_deref()
+                != Ok("0"),
+            residency_revision: 0,
             prepared_view_hits: 0,
             prepared_view_misses: 0,
             prepared_view_enabled: std::env::var_os("FRONTIER_PREPARED_VIEW_CACHE")
@@ -790,7 +837,7 @@ impl AdaptiveGpu {
         self.clusters.contains_key(key)
     }
     fn allocated_bytes(&self) -> u64 {
-        (2048 * 2048 * 4 + CAMERA_UNIFORM_BYTES)
+        (self.shadows.allocated_bytes() + CAMERA_UNIFORM_BYTES)
             + self
                 .gpu_profiles
                 .as_ref()
@@ -864,6 +911,7 @@ impl AdaptiveGpu {
             return Ok(());
         }
         self.prepared_view = None;
+        self.resident_stats = None;
         self.invalidate_bundle();
         if self.slots.is_empty() {
             return Err(CLUSTER_CAPACITY_ERROR.into());
@@ -975,6 +1023,7 @@ impl AdaptiveGpu {
             bounds[0] = bounds[0].min(p);
             bounds[1] = bounds[1].max(p);
         }
+        self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
@@ -1020,6 +1069,8 @@ impl AdaptiveGpu {
             .copied()
             .collect();
         if !removed.is_empty() {
+            self.residency_revision = self.residency_revision.wrapping_add(1);
+            self.resident_stats = None;
             self.prepared_view = None;
             self.invalidate_bundle();
         }
@@ -1061,10 +1112,17 @@ impl AdaptiveGpu {
             self.prepared_view_hits += 1;
             self.prepare_bundle(device);
             let mut stats = self.prepared_view.as_ref().unwrap().stats;
+            stats.prepare_shadow_ms = 0.;
+            stats.prepare_order_ms = 0.;
+            stats.prepare_occlusion_ms = 0.;
+            stats.prepare_visibility_uniform_ms = 0.;
             self.update_command_stats(&mut stats);
             return stats;
         }
+        let shadow_started = std::time::Instant::now();
         self.prepare_shadows(device, queue, camera, owners);
+        let shadow_ms = shadow_started.elapsed().as_secs_f64() * 1000.;
+        let order_started = std::time::Instant::now();
         self.prepared_view_misses += 1;
         self.visible.clear();
         self.camera_upload.clear();
@@ -1076,19 +1134,54 @@ impl AdaptiveGpu {
             camera.far,
         );
         let direction = camera.direction();
+        let view_transform = LocalViewTransform::new(direction);
         let queries = crate::adaptive_stream::CameraQueries::new(camera, width, height);
-        let mut stats = DrawStats {
-            resident_clusters: self.clusters.len(),
-            cluster_capacity: MAX_CLUSTERS,
-            available_cluster_slots: self.slots.len(),
-            allocated_bytes: self.allocated_bytes(),
-            current_max_error_px: Some(0.),
-            current_quality_ready: width > 0
-                && height > 0
-                && pixel_error.is_finite()
-                && pixel_error >= 0.,
-            ..Default::default()
-        };
+        if self.resident_stats.is_none() || !self.prepare_reuse_enabled {
+            let mut stats = DrawStats {
+                resident_clusters: self.clusters.len(),
+                cluster_capacity: MAX_CLUSTERS,
+                available_cluster_slots: self.slots.len(),
+                allocated_bytes: self.allocated_bytes(),
+                ..Default::default()
+            };
+            for c in self.clusters.values() {
+                let profile_bytes = c.profile.as_ref().map_or(0, |p| {
+                    p.indices
+                        .as_ref()
+                        .map_or(0, |i| i.range.end - i.range.start)
+                        + p.table.range.end
+                        - p.table.range.start
+                });
+                stats.resident_profile_bytes += profile_bytes - c.position_reserved_bytes;
+                stats.resident_proxy_position_bytes += c.position_bytes;
+                stats.resident_proxy_position_reserved_bytes += c.position_reserved_bytes;
+                stats.resident_indexed_proxy_clusters += u64::from(c.indexed_proxy);
+                stats.resident_derived_proxy_clusters += u64::from(c.derived_proxy);
+                if c.indexed_proxy {
+                    stats.resident_indexed_proxy_record_padding_bytes += c.vertices.range.end
+                        - c.vertices.range.start
+                        - c.count as u64 * if c.derived_proxy { 20 } else { 40 };
+                }
+                stats.resident_bytes += profile_bytes;
+                if c.proxy_triangles {
+                    stats.resident_proxy_triangle_bytes +=
+                        c.vertices.range.end - c.vertices.range.start;
+                }
+                if c.native_quads {
+                    stats.resident_native_quad_bytes +=
+                        c.vertices.range.end - c.vertices.range.start;
+                }
+                stats.resident_bytes += c.vertices.range.end - c.vertices.range.start
+                    + c.indices
+                        .as_ref()
+                        .map_or(0, |i| i.range.end - i.range.start);
+            }
+            self.resident_stats = Some(stats);
+        }
+        let mut stats = self.resident_stats.unwrap();
+        stats.current_max_error_px = Some(0.);
+        stats.current_quality_ready =
+            width > 0 && height > 0 && pixel_error.is_finite() && pixel_error >= 0.;
         let forward = camera.direction().as_dvec3();
         let mut bound_vertex_page = None;
         // Rebuild from CURRENT pose and published resident geometry every frame.
@@ -1099,17 +1192,24 @@ impl AdaptiveGpu {
             0.025,
             frontier_world::VOXEL_SIZE * 2.,
         );
-        let mut draw_order: Vec<_> = self
-            .clusters
-            .iter()
-            .map(|(&key, c)| {
+        let mut draw_order = if self.prepare_reuse_enabled {
+            std::mem::take(&mut self.draw_order)
+        } else {
+            Vec::new()
+        };
+        draw_order.clear();
+        draw_order.extend(self.clusters.iter().filter_map(|(&key, c)| {
+            (!self.prepare_reuse_enabled || owners.contains(&key)).then(|| {
                 (
                     nearest_depth(c.origin, c.bounds, camera.position, forward),
                     key,
                 )
             })
-            .collect();
-        draw_order.sort_by(|(da, ka), (db, kb)| da.total_cmp(db).then_with(|| ka.cmp(kb)));
+        }));
+        sort_draw_order(&mut draw_order);
+        stats.prepare_shadow_ms = shadow_ms;
+        stats.prepare_order_ms = order_started.elapsed().as_secs_f64() * 1000.;
+        let occlusion_started = std::time::Instant::now();
         // Every box belongs to the complete currently published heightfield.
         // Build the same proof set as CPU selection, independent of draw order.
         if let Some(set) = &mut occlusion {
@@ -1121,46 +1221,17 @@ impl AdaptiveGpu {
                 }
             }
         }
+        stats.prepare_occlusion_ms = occlusion_started.elapsed().as_secs_f64() * 1000.;
+        let visible_started = std::time::Instant::now();
         // Uniform offsets and draw indices use this same stable depth order.
-        for (_, key) in draw_order {
+        for &(_, key) in &draw_order {
             let c = &self.clusters[&key];
-            let profile_bytes = c.profile.as_ref().map_or(0, |p| {
-                p.indices
-                    .as_ref()
-                    .map_or(0, |i| i.range.end - i.range.start)
-                    + p.table.range.end
-                    - p.table.range.start
-            });
-            stats.resident_profile_bytes += profile_bytes - c.position_reserved_bytes;
-            stats.resident_proxy_position_bytes += c.position_bytes;
-            stats.resident_proxy_position_reserved_bytes += c.position_reserved_bytes;
-            stats.resident_indexed_proxy_clusters += u64::from(c.indexed_proxy);
-            stats.resident_derived_proxy_clusters += u64::from(c.derived_proxy);
-            if c.indexed_proxy {
-                stats.resident_indexed_proxy_record_padding_bytes += c.vertices.range.end
-                    - c.vertices.range.start
-                    - c.count as u64 * if c.derived_proxy { 20 } else { 40 };
-            }
-            stats.resident_bytes += profile_bytes;
-            if c.proxy_triangles {
-                stats.resident_proxy_triangle_bytes +=
-                    c.vertices.range.end - c.vertices.range.start;
-            }
-            if c.native_quads {
-                stats.resident_native_quad_bytes += c.vertices.range.end - c.vertices.range.start;
-            }
-            stats.resident_bytes += c.vertices.range.end - c.vertices.range.start
-                + c.indices
-                    .as_ref()
-                    .map_or(0, |i| i.range.end - i.range.start);
             if !owners.contains(&key) {
                 continue;
             }
             if !queries.visible([c.canonical_bounds.min, c.canonical_bounds.max]) {
                 continue;
             }
-            let matrix = projection
-                * Mat4::look_to_rh((camera.position - c.origin).as_vec3(), direction, Vec3::Y);
             if occlusion
                 .as_ref()
                 .is_some_and(|set| set.occludes(c.canonical_bounds))
@@ -1239,11 +1310,16 @@ impl AdaptiveGpu {
                 } else {
                     (None, c.count)
                 };
+            let local_eye = (camera.position - c.origin).as_vec3();
+            let matrix = projection
+                * if self.prepare_reuse_enabled {
+                    view_transform.matrix(local_eye)
+                } else {
+                    Mat4::look_to_rh(local_eye, direction, Vec3::Y)
+                };
             let mut bytes = [0u8; 208];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
-            bytes[64..80].copy_from_slice(bytemuck::cast_slice(
-                &(camera.position - c.origin).as_vec3().extend(1.).to_array(),
-            ));
+            bytes[64..80].copy_from_slice(bytemuck::cast_slice(&local_eye.extend(1.).to_array()));
             let paint = [
                 (c.origin.x * 16.) as i64 as u32,
                 (c.origin.y * 16.) as i64 as u32,
@@ -1304,10 +1380,12 @@ impl AdaptiveGpu {
                 c.count as u64 / 3
             };
         }
+        self.draw_order = draw_order;
         stats.occluder_boxes = occlusion.as_ref().map_or(0, |set| set.len());
         if !self.camera_upload.is_empty() {
             queue.write_buffer(&self.uniform, 0, &self.camera_upload);
         }
+        stats.prepare_visibility_uniform_ms = visible_started.elapsed().as_secs_f64() * 1000.;
         self.prepare_bundle(device);
         self.update_command_stats(&mut stats);
         if self.prepared_view_enabled {
@@ -1323,6 +1401,7 @@ impl AdaptiveGpu {
         stats
     }
     fn update_command_stats(&self, stats: &mut DrawStats) {
+        stats.prepare_reuse_enabled = self.prepare_reuse_enabled;
         stats.gpu_profiles = self.gpu_profile_stats;
         stats.indexed_proxy_enabled = self.indexed_proxy_enabled;
         stats.indexed_proxy_mode = self.indexed_proxy_mode;
@@ -1450,6 +1529,7 @@ impl AdaptiveGpu {
         let bounds = tile
             .bounds
             .map(|b| (DVec3::from_array(b) - origin).as_vec3());
+        self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
@@ -1678,6 +1758,7 @@ impl AdaptiveGpu {
                 bounds[1] = bounds[1].max(p);
             }
         }
+        self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
@@ -2248,6 +2329,61 @@ mod tests {
             100
         ));
     }
+    #[test]
+    fn owner_filter_before_sort_preserves_current_draw_and_occluder_order() {
+        use super::{sort_draw_order, HashSet, TileKey};
+        let make = |i| TileKey {
+            min: [i, -i],
+            width_cells: 128,
+            step_cells: 8,
+            edge_steps: [8; 4],
+            source_revision: 3,
+        };
+        let residents: Vec<_> = (0..97)
+            .map(|i| (((i * 17) % 13) as f64 - 6., make(i)))
+            .collect();
+        for epoch in 0..8 {
+            let owners: HashSet<_> = (0..97).filter(|i| (i + epoch) % 3 != 0).map(make).collect();
+            let mut original = residents.clone();
+            sort_draw_order(&mut original);
+            original.retain(|(_, key)| owners.contains(key));
+            let mut optimized: Vec<_> = residents
+                .iter()
+                .copied()
+                .filter(|(_, key)| owners.contains(key))
+                .collect();
+            sort_draw_order(&mut optimized);
+            assert_eq!(optimized, original);
+            assert!(optimized.iter().all(|(_, key)| owners.contains(key)));
+        }
+    }
+
+    #[test]
+    fn reusable_local_view_transform_matches_per_cluster_matrix_bits() {
+        use super::{Camera, Mat4, Vec3};
+        for yaw in [-3.1_f32, -1.7, 0., 0.3, 1.9, 3.1] {
+            for pitch in [-1.4_f32, -0.3, 0., 0.8, 1.4] {
+                let mut camera = Camera::fixture();
+                camera.yaw = yaw;
+                camera.pitch = pitch;
+                let direction = camera.direction();
+                let reusable = super::LocalViewTransform::new(direction);
+                for eye in [
+                    Vec3::ZERO,
+                    Vec3::new(-0.0625, 2., 55.),
+                    Vec3::new(99999.25, -312.0625, -12345.5),
+                ] {
+                    assert_eq!(
+                        reusable.matrix(eye).to_cols_array().map(f32::to_bits),
+                        Mat4::look_to_rh(eye, direction, Vec3::Y)
+                            .to_cols_array()
+                            .map(f32::to_bits)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn prepared_view_requires_identical_projection_pose_and_ownership() {
         use super::{Camera, DrawStats, HashSet, PreparedView, TileKey};
