@@ -172,6 +172,7 @@ struct BrickCacheMetrics {
 struct Gpu {
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
+    alpine_appearance: bool,
     terrain_amplitude: f32,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -389,6 +390,7 @@ impl Gpu {
         Ok(Self {
             visual_settings: None,
             regional_appearance: false,
+            alpine_appearance: false,
             terrain_amplitude: 1000.,
             device,
             queue,
@@ -654,6 +656,9 @@ impl Gpu {
                 self.volume_owner,
                 self.voxel_filter,
             );
+        }
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.draw_shadows(encoder);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
@@ -997,7 +1002,15 @@ impl Gpu {
             let metadata_path = path.with_extension("capture.json");
             let mut metadata = std::fs::read_to_string(&metadata_path)?;
             metadata.pop();
-            metadata.push_str(&format!(",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{}}}", settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some()));
+            let shadows_active = self.adaptive.as_ref().is_some_and(|a| a.shadows_active());
+            metadata.push_str(&format!(
+                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"gpu_timing_scope\":\"terrain_pass_only\"}}}}",
+                settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some(),
+                settings.atmosphere, settings.render_scale, settings.exposure,
+                settings.fog_density, settings.fog_height_falloff, settings.sun_elevation,
+                settings.sun_azimuth, settings.cloud_coverage, settings.cloud_speed,
+                settings.overcast, settings.terrain_shadows, shadows_active
+            ));
             std::fs::write(metadata_path, metadata)?;
         }
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
@@ -2168,6 +2181,7 @@ fn capture_pose(
 pub fn run() -> Result<()> {
     let Some(options::Options {
         atmosphere: atmosphere_option,
+        visual,
         render_scale,
         capture,
         capture_on_exit,
@@ -2237,7 +2251,7 @@ pub fn run() -> Result<()> {
                 && !benchmark_input_lock
                 && !adaptive_wait_quality,
         ),
-        ..Default::default()
+        ..visual
     };
     if capture_linear {
         visual_settings.atmosphere = false;
@@ -2294,6 +2308,12 @@ pub fn run() -> Result<()> {
                 camera.yaw = direction.x.atan2(direction.z) as f32;
                 camera.pitch = direction.y.asin() as f32;
             }
+        }
+        if camera_preset == "alpine" {
+            let target = DVec3::new(0., 650., 3300.);
+            let direction = (target - camera.position).normalize();
+            camera.yaw = direction.x.atan2(direction.z) as f32;
+            camera.pitch = direction.y.asin() as f32;
         }
         if camera_preset == "aerial" {
             camera.position.y += 300.;
@@ -2946,11 +2966,11 @@ pub fn run() -> Result<()> {
         let visual = &viewer.visual_settings;
         json.pop();
         json.push_str(&format!(
-            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"menu_enabled\":{},\"gpu_timing_scope\":\"terrain_pass_only\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
+            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"menu_enabled\":{},\"gpu_timing_scope\":\"terrain_pass_only\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,
-            visual.overcast, viewer.visual_menu_enabled, viewer.visual_menu_enabled,
+            visual.overcast, visual.terrain_shadows, visual.terrain_shadows && scene.starts_with("adaptive") && viewer.world.fbm_terrain().is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine) && visual.sun_elevation > 0., viewer.visual_menu_enabled, viewer.visual_menu_enabled,
             viewer.camera.fov_y, viewer.camera.far
         ));
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {

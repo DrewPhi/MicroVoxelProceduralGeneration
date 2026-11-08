@@ -15,6 +15,7 @@ fn held_out_worlds_parameters_and_closed_voxel_faces_stay_enclosed() {
         FbmRecipe::Legacy,
         FbmRecipe::Regional,
         FbmRecipe::RegionalUnwarped,
+        FbmRecipe::Alpine,
     ] {
         for parameters in [
             FbmParams::default(),
@@ -80,6 +81,57 @@ fn held_out_worlds_parameters_and_closed_voxel_faces_stay_enclosed() {
                                     .sum::<f64>();
                             assert!((h - predicted).abs() <= bound.remainder_m,
                                 "recipe={recipe:?} params={parameters:?} column={col:?} bound={bound:?} h={h} affine={predicted}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn alpine_meadow_mountain_flanks_and_crest_enclose_native_columns() {
+    for seed in [0, 7, 91] {
+        let t = FbmTerrain::new(
+            seed,
+            FbmParams {
+                recipe: FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for z in [-250., 1400., 2300., 3300., 4300., 5300.] {
+            for x in [-2000., 0., 1700.] {
+                for size in [16, 256, 2048] {
+                    let min = [(x / VOXEL_SIZE) as i64, (z / VOXEL_SIZE) as i64];
+                    let b = bound_native_height(
+                        &t,
+                        ColumnBox {
+                            min,
+                            size_cells: [size; 2],
+                        },
+                        BoundBudget::default(),
+                    )
+                    .unwrap();
+                    for dz in [0, size / 3, size - 1] {
+                        for dx in [0, size / 3, size - 1] {
+                            let p = [
+                                (min[0] + dx as i64) as f64 * VOXEL_SIZE,
+                                (min[1] + dz as i64) as f64 * VOXEL_SIZE,
+                            ];
+                            let h = t.height_m(p[0], p[1]);
+                            assert!(
+                                h >= b.height_range[0] && h <= b.height_range[1],
+                                "seed={seed} p={p:?} h={h} b={b:?}"
+                            );
+                            let predicted = b.center_height_m
+                                + (0..2)
+                                    .map(|a| {
+                                        b.coefficients[a] * (p[a] - b.center_xz[a])
+                                            / b.half_extent_m[a]
+                                    })
+                                    .sum::<f64>();
+                            assert!((h - predicted).abs() <= b.remainder_m);
                         }
                     }
                 }

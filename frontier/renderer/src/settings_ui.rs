@@ -212,6 +212,7 @@ impl SettingsUi {
                             );
                             ui.separator();
                             ui.heading("Light & atmosphere");
+                            ui.checkbox(&mut self.settings.terrain_shadows, "Bounded Alpine terrain shadows");
                             let mut clear_air = !self.settings.atmosphere;
                             if ui
                                 .checkbox(&mut clear_air, "Clear air · disable atmosphere")

@@ -11,6 +11,8 @@ pub struct VisualSettings {
     pub upload_mib: usize,
     pub voxel_filter: bool,
     pub atmosphere: bool,
+    /// Bounded directional shadow map; enabled only for the Alpine adaptive scene.
+    pub terrain_shadows: bool,
     pub fog_density: f32,
     pub fog_height_falloff: f32,
     /// Degrees above the horizon.
@@ -39,6 +41,7 @@ impl Default for VisualSettings {
             upload_mib: 8,
             voxel_filter: true,
             atmosphere: false,
+            terrain_shadows: false,
             fog_density: 0.000035,
             fog_height_falloff: 0.0012,
             sun_elevation: 35.,

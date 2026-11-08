@@ -259,6 +259,7 @@ impl AdaptiveView {
         adaptive.set_visual_lighting(
             &gpu.visual_settings.clone().unwrap_or_default(),
             gpu.regional_appearance,
+            gpu.alpine_appearance,
             gpu.terrain_amplitude,
         );
         adaptive.set_voxel_filter(gpu.voxel_filter);

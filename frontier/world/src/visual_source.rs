@@ -127,6 +127,7 @@ pub fn generate_visual(world: &World, request: VisualRequest) -> Result<VisualPa
         FbmRecipe::Legacy => 3 + retained,
         FbmRecipe::Regional => 11 + p.octaves,
         FbmRecipe::RegionalUnwarped => 9 + p.octaves,
+        FbmRecipe::Alpine => 6 + p.octaves,
     };
     let mut heights_m =
         Vec::with_capacity(usize::try_from(count).map_err(|_| "allocation overflow")?);
@@ -175,6 +176,7 @@ mod tests {
             FbmRecipe::Legacy,
             FbmRecipe::Regional,
             FbmRecipe::RegionalUnwarped,
+            FbmRecipe::Alpine,
         ] {
             for seed in [7, 113, 997] {
                 for roughness in [0.0, 0.5, 1.0] {

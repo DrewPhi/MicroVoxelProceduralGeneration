@@ -9,14 +9,14 @@ fn legacy_terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
     let ambient=mix(vec3<f32>(0.12,0.105,0.085),vec3<f32>(0.28,0.33,0.40),sky);
     return ambient+vec3<f32>(0.78,0.70,0.58)*max(dot(n,sun),0.);
 }
-fn terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
+fn terrain_lighting(normal:vec3<f32>, visibility:f32) -> vec3<f32> {
     let n=normalize(normal);
     if camera.sun.w > 0.5 {
         let sky=0.5+0.5*n.y;
         let overcast=camera.sky.x;
         let ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
         let direct=vec3(0.83,0.75,0.60)*max(dot(n,camera.sun.xyz),0.);
-        return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast);
+        return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
     }
     return legacy_terrain_lighting(normal);
 }
@@ -45,8 +45,27 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
                      1.+broad*0.15+local*0.08+speckle,
                      1.+broad*0.07+local*0.06+speckle);
 }
-struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var shadow_depth: texture_depth_2d;
+@group(1) @binding(1) var shadow_sampler: sampler_comparison;
+// Finite map of published terrain, not a full-world or volume visibility oracle.
+fn terrain_shadow(local:vec3<f32>) -> f32 {
+    if camera.sky.y < 0.5 { return 1.; }
+    let clip = camera.shadow_projection*vec4<f32>(local,1.);
+    let p = clip.xyz/clip.w;
+    let uv = p.xy*vec2<f32>(0.5,-0.5)+0.5;
+    if any(uv<vec2<f32>(0.002)) || any(uv>vec2<f32>(0.998)) || p.z<=0. || p.z>=1. { return 1.; }
+    let texel = 1./vec2<f32>(textureDimensions(shadow_depth));
+    let depth = p.z-0.000025;
+    let a = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(-0.65,-0.65)*texel,depth);
+    let b = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(0.65,-0.65)*texel,depth);
+    let c = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(-0.65,0.65)*texel,depth);
+    let d = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(0.65,0.65)*texel,depth);
+    // Fade at the finite boundary to avoid a visible moving square.
+    let edge = min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+    return mix(1.,(a+b+c+d)*0.25,smoothstep(0.002,0.04,edge));
+}
 struct FaceProfile {top:vec4<f32>,px:vec4<f32>,nx:vec4<f32>,pz:vec4<f32>,nz:vec4<f32>};
 @group(0) @binding(1) var<storage,read> face_profiles:array<FaceProfile>;
 struct VertexOut {
@@ -114,7 +133,8 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
-    let light = terrain_lighting(in.normal);
+    let visibility = terrain_shadow(in.local);
+    let light = terrain_lighting(in.normal,visibility);
     var tint=vec3<f32>(1.);
     let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));
     if camera.eye.w>0. {
@@ -145,11 +165,11 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     let top=max(v.y,0.);
     let area=top*profile.top.w+dot(w,vec4<f32>(profile.px.w,profile.nx.w,profile.pz.w,profile.nz.w));
     if area>0.000001 && blend>0. {
-        let filtered=top*profile.top.rgb*terrain_lighting(vec3<f32>(0.,1.,0.))
-            +w.x*profile.px.rgb*terrain_lighting(vec3<f32>(1.,0.,0.))
-            +w.y*profile.nx.rgb*terrain_lighting(vec3<f32>(-1.,0.,0.))
-            +w.z*profile.pz.rgb*terrain_lighting(vec3<f32>(0.,0.,1.))
-            +w.w*profile.nz.rgb*terrain_lighting(vec3<f32>(0.,0.,-1.));
+        let filtered=top*profile.top.rgb*terrain_lighting(vec3<f32>(0.,1.,0.),visibility)
+            +w.x*profile.px.rgb*terrain_lighting(vec3<f32>(1.,0.,0.),visibility)
+            +w.y*profile.nx.rgb*terrain_lighting(vec3<f32>(-1.,0.,0.),visibility)
+            +w.z*profile.pz.rgb*terrain_lighting(vec3<f32>(0.,0.,1.),visibility)
+            +w.w*profile.nz.rgb*terrain_lighting(vec3<f32>(0.,0.,-1.),visibility);
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         return vec4<f32>(mix(resolved,filtered/area*terrain_tint(cell,0.),blend),1.);
     }

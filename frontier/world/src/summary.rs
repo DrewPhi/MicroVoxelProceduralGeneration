@@ -73,6 +73,12 @@ pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     let p = terrain.params();
     match p.recipe {
         FbmRecipe::Legacy => [-0.7325 * p.amplitude - VOXEL_SIZE, 1.13 * p.amplitude],
+        // |meadow|<=54, all four peak weights sum to2520, crest<=3200,
+        // foothills<=480, envelope in[0,1], fine relief<=7.95.
+        FbmRecipe::Alpine => [
+            -63.0 * p.amplitude / 1000.0 - VOXEL_SIZE,
+            3743.0 * p.amplitude / 1000.0,
+        ],
         _ => [
             -103.5 * p.amplitude / 1000.0 - VOXEL_SIZE,
             423.5 * p.amplitude / 1000.0,
@@ -99,6 +105,18 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
     };
     let n = 16.0;
     match p.recipe {
+        FbmRecipe::Alpine => {
+            // Work in authored scene meters then scale to physical meters.
+            // smooth(1-d²) has |gradient|<=3|gradient d| on its active support.
+            let envelope_slope = 4.0 * (1.0 + 340.0 * n / 1800.0) / 1900.0;
+            let meadow = n * (42.0 / 750.0 + 12.0 / 240.0);
+            let peaks = 4.0 * (650.0 / 1100.0 + 470.0 / 850.0 + 800.0 / 1000.0 + 600.0 / 1000.0);
+            let ridge = n * (100.0 / 850.0 + 55.0 / 180.0 + 25.0 / 480.0) + peaks;
+            let foothills = 4.0 * (190.0 / 900.0 + 290.0 / 1100.0);
+            let detail = 7.95 * n * weighted_frequency(1.0 / 45.0, p.octaves, 0.65 * p.roughness);
+            p.amplitude / 1000.0 * 1800.0 / p.horizontal_scale
+                * (meadow + 3207.5 * envelope_slope + ridge + detail + foothills)
+        }
         FbmRecipe::Legacy => {
             let warp = 1.0 + 2.0_f64.sqrt() * 0.32 * 0.55 * n;
             p.amplitude / p.horizontal_scale
@@ -180,6 +198,11 @@ pub fn conservative_grid_error_at(
         return GeometryError::Uncertified;
     }
     let p = terrain.params();
+    // The older floating-point operation-count certificate predates Alpine's
+    // spatial masks. Its affine bounds independently certify Alpine regions.
+    if p.recipe == FbmRecipe::Alpine {
+        return GeometryError::Uncertified;
+    }
     if p.validate().is_err() {
         return GeometryError::Uncertified;
     }
@@ -370,6 +393,7 @@ mod tests {
             FbmRecipe::Legacy,
             FbmRecipe::Regional,
             FbmRecipe::RegionalUnwarped,
+            FbmRecipe::Alpine,
         ] {
             for seed in [0, 7, 113] {
                 let t = FbmTerrain::new(

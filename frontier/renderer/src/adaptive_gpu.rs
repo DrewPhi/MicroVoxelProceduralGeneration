@@ -12,8 +12,11 @@ use std::{
     ops::Range,
 };
 use wgpu::util::DeviceExt;
+#[path = "adaptive_shadow.rs"]
+mod adaptive_shadow;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
+use adaptive_shadow::ShadowResources;
 
 const PAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -397,6 +400,7 @@ pub struct AdaptiveGpu {
     gpu_profiles: Option<GpuOrderedProfiles>,
     gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
+    shadows: ShadowResources,
     prepared_view: Option<PreparedView>,
     prepared_view_hits: u64,
     prepared_view_misses: u64,
@@ -455,7 +459,7 @@ impl AdaptiveGpu {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(144),
+                        min_binding_size: std::num::NonZeroU64::new(208),
                     },
                     count: None,
                 },
@@ -497,9 +501,16 @@ impl AdaptiveGpu {
             label: Some("adaptive canonical shading"),
             source: wgpu::ShaderSource::Wgsl(include_str!("adaptive.wgsl").into()),
         });
+        let shadows_layout = adaptive_shadow::sampling_layout(device);
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Alpine shadow caster pipeline"),
+                bind_group_layouts: &[&layout],
+                push_constant_ranges: &[],
+            });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("adaptive cluster pipeline"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[&layout, &shadows_layout],
             push_constant_ranges: &[],
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3];
@@ -510,7 +521,7 @@ impl AdaptiveGpu {
         let indexed_proxy_attributes =
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
         let derived_proxy_attributes = wgpu::vertex_attr_array![0=>Uint32x3,1=>Uint32,2=>Uint32];
-        let make_pipeline = |step_mode, kind| {
+        let make_pipeline = |step_mode, kind, shadow| {
             let native = kind == 1;
             let proxy = kind == 2;
             let indexed_proxy = kind == 3;
@@ -548,9 +559,18 @@ impl AdaptiveGpu {
                 },
             ];
 
+            let color_targets = [Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("adaptive clusters"),
-                layout: Some(&pipeline_layout),
+                layout: Some(if shadow {
+                    &shadow_pipeline_layout
+                } else {
+                    &pipeline_layout
+                }),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some(if native {
@@ -577,16 +597,16 @@ impl AdaptiveGpu {
                         &mesh_buffers
                     },
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
+                fragment: if shadow {
+                    None
+                } else {
+                    Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &color_targets,
+                    })
+                },
                 primitive: wgpu::PrimitiveState {
                     cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
@@ -596,22 +616,39 @@ impl AdaptiveGpu {
                     depth_write_enabled: true,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil: Default::default(),
-                    bias: Default::default(),
+                    bias: if shadow {
+                        wgpu::DepthBiasState {
+                            constant: 2,
+                            slope_scale: 2.,
+                            clamp: 0.,
+                        }
+                    } else {
+                        Default::default()
+                    },
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: sample_count,
+                    count: if shadow { 1 } else { sample_count },
                     ..Default::default()
                 },
                 multiview: None,
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0);
-        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0);
-        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1);
-        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2);
-        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3);
-        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4);
+        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false);
+        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false);
+        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false);
+        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false);
+        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false);
+        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false);
+        let shadow_pipelines = [
+            make_pipeline(wgpu::VertexStepMode::Instance, 0, true),
+            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true),
+            make_pipeline(wgpu::VertexStepMode::Instance, 1, true),
+            make_pipeline(wgpu::VertexStepMode::Instance, 2, true),
+            make_pipeline(wgpu::VertexStepMode::Instance, 3, true),
+            make_pipeline(wgpu::VertexStepMode::Instance, 4, true),
+        ];
+        let shadows = ShadowResources::new(device, &shadows_layout, shadow_pipelines);
         let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
             Ok("1") => 1,
             Ok("2") => 2,
@@ -634,6 +671,7 @@ impl AdaptiveGpu {
                 ..Default::default()
             },
             lighting: [0.; 12],
+            shadows,
             prepared_view: None,
             prepared_view_hits: 0,
             prepared_view_misses: 0,
@@ -684,6 +722,7 @@ impl AdaptiveGpu {
         &mut self,
         settings: &crate::settings::VisualSettings,
         regional: bool,
+        alpine: bool,
         amplitude: f32,
     ) {
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
@@ -693,7 +732,11 @@ impl AdaptiveGpu {
             sun.z,
             if regional { 1. } else { 0. },
             settings.overcast,
-            0.,
+            if alpine && settings.terrain_shadows && sun.y > 0. {
+                1.
+            } else {
+                0.
+            },
             0.,
             0.,
             if regional { 1. } else { 0. },
@@ -705,6 +748,9 @@ impl AdaptiveGpu {
             self.lighting = value;
             self.prepared_view = None;
         }
+    }
+    pub(super) fn shadows_active(&self) -> bool {
+        self.lighting[5] > 0.5
     }
     pub fn set_native_bins(&mut self, enabled: bool) {
         if self.native_bins_enabled != enabled {
@@ -723,9 +769,11 @@ impl AdaptiveGpu {
         self.clusters.contains_key(key)
     }
     fn allocated_bytes(&self) -> u64 {
-        self.gpu_profiles
-            .as_ref()
-            .map_or(0, |builder| builder.resident_bytes())
+        (2048 * 2048 * 4 + CAMERA_UNIFORM_BYTES)
+            + self
+                .gpu_profiles
+                .as_ref()
+                .map_or(0, |builder| builder.resident_bytes())
             + self
                 .vertices
                 .iter()
@@ -981,6 +1029,7 @@ impl AdaptiveGpu {
         owners: &HashSet<TileKey>,
         pixel_error: f64,
     ) -> DrawStats {
+        self.prepare_shadows(device, queue, camera, owners);
         // Reuse only identical current demand and immutable resident content.
         // Upload/removal/filter changes invalidate this snapshot immediately.
         if self.prepared_view_enabled
@@ -1165,7 +1214,7 @@ impl AdaptiveGpu {
                 } else {
                     (None, c.count)
                 };
-            let mut bytes = [0u8; 144];
+            let mut bytes = [0u8; 208];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(
                 &(camera.position - c.origin).as_vec3().extend(1.).to_array(),
@@ -1178,10 +1227,13 @@ impl AdaptiveGpu {
             ];
             bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
             bytes[96..144].copy_from_slice(bytemuck::cast_slice(&self.lighting));
+            bytes[144..208].copy_from_slice(bytemuck::cast_slice(
+                &adaptive_shadow::light_matrix(camera, self.lighting, c.origin).to_cols_array(),
+            ));
             let offset = self.camera_upload.len();
             self.camera_upload
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
-            self.camera_upload[offset..offset + 144].copy_from_slice(&bytes);
+            self.camera_upload[offset..offset + 208].copy_from_slice(&bytes);
             self.visible.push(DrawItem { key, bin_mask });
             if packed_first_instance_stride(
                 self.coalesce_vertex_pages,
@@ -1260,6 +1312,7 @@ impl AdaptiveGpu {
         stats.prepared_view_misses = self.prepared_view_misses;
     }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        pass.set_bind_group(1, &self.shadows.sampling_bind, &[]);
         if let Some(bundle) = &self.bundle {
             pass.execute_bundles(std::iter::once(bundle));
         } else {
@@ -1304,6 +1357,7 @@ impl AdaptiveGpu {
                 sample_count: self.sample_count,
                 multiview: None,
             });
+        encoder.set_bind_group(1, &self.shadows.sampling_bind, &[]);
         encode_cluster_draws!(&*self, &mut encoder);
         let bundle = encoder.finish(&wgpu::RenderBundleDescriptor {
             label: Some("adaptive stable draw commands"),
@@ -1703,7 +1757,7 @@ fn profile_bind(
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: uniform,
                     offset: 0,
-                    size: std::num::NonZeroU64::new(144),
+                    size: std::num::NonZeroU64::new(208),
                 }),
             },
             wgpu::BindGroupEntry {
@@ -1876,7 +1930,7 @@ mod tests {
         for i in [0, super::MAX_CLUSTERS - 1] {
             let offset = i as u64 * super::UNIFORM_STRIDE;
             assert_eq!(offset % 256, 0);
-            assert!(offset + 144 <= super::CAMERA_UNIFORM_BYTES);
+            assert!(offset + 208 <= super::CAMERA_UNIFORM_BYTES);
             assert!(offset <= u32::MAX as u64);
         }
         assert_eq!(super::MAX_BYTES, 512 * 1024 * 1024);

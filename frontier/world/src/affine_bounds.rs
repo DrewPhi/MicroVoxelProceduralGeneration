@@ -799,9 +799,29 @@ fn noise_impl<const RETAIN: bool>(x: Aa, z: Aa, seed: u64, c: &mut Context) -> A
         ..reference
     }
 }
+impl crate::alpine::Value for Aa {
+    fn point(v: f64) -> Self {
+        Self::point(v)
+    }
+    fn add(self, b: Self) -> Self {
+        self.add(b)
+    }
+    fn scale(self, k: f64) -> Self {
+        self.scale(k)
+    }
+    fn mul(self, b: Self) -> Self {
+        self.mul(b)
+    }
+    fn clamp01(self) -> Self {
+        self.clamp(0.0, 1.0)
+    }
+}
 fn elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let p = t.params();
     let seed = t.seed();
+    if p.recipe == FbmRecipe::Alpine {
+        return crate::alpine::elevation(x, z, p, true, |x, z, salt| noise(x, z, seed ^ salt, c));
+    }
     let (wx, wz) = if p.recipe == FbmRecipe::Legacy {
         (
             x.add(

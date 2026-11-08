@@ -19,6 +19,8 @@ terrain, voxel appearance filtering and 4×MSAA. Press **Esc** for live light an
 atmosphere controls plus image-quality and loading settings. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
 Use `--terrain-recipe legacy` for the original spiky terrain.
+Use `--preset alpine` for the [vegetation-free Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
+with a winding path, foothills, mountain backdrop and bounded terrain shadows.
 See the [terrain comparison](frontier/REGIONAL_TERRAIN_CHECKPOINT.md) and
 [basic lighting/painting pass](frontier/BEAUTY_CHECKPOINT.md).
 `--scene hybrid` combines moving exact native terrain chunks with a GPU proxy;

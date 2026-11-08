@@ -10,12 +10,14 @@ use std::{
 };
 
 pub mod affine_bounds;
+mod alpine;
 pub mod summary;
 pub mod terrain;
 pub mod visual_source;
 pub mod volume_summary;
 pub use terrain::{
-    FbmError, FbmParams, FbmRecipe, FbmTerrain, FBM_SOURCE_VERSION, REGIONAL_APPEARANCE_VERSION,
+    FbmError, FbmParams, FbmRecipe, FbmTerrain, ALPINE_APPEARANCE_VERSION,
+    ALPINE_FBM_SOURCE_VERSION, FBM_SOURCE_VERSION, REGIONAL_APPEARANCE_VERSION,
     REGIONAL_FBM_SOURCE_VERSION,
 };
 
@@ -271,6 +273,12 @@ impl World {
                 let [x, _, z] = c.center_m();
                 terrain.surface_material(x, z, h as f64 * VOXEL_SIZE)
             } else if c.y >= h - 12 {
+                if terrain.params().recipe == FbmRecipe::Alpine {
+                    let [x, _, z] = c.center_m();
+                    if terrain.surface_material(x, z, h as f64 * VOXEL_SIZE) == Material::Stone {
+                        return Material::Stone;
+                    }
+                }
                 Material::Soil
             } else {
                 Material::Stone

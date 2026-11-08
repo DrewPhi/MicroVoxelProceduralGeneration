@@ -12,6 +12,8 @@ pub struct Landscape {
     pub min: [i64; 2],
     pub size: usize,
     pub cache_identity: u64,
+    /// Horizontal grid spacing; native vertical quantization always remains 6.25 cm.
+    pub sample_stride: usize,
     heights: Vec<i32>,
     levels: Vec<(usize, Vec<i32>)>,
     terrain: FbmTerrain,
@@ -26,13 +28,33 @@ impl Landscape {
         threads: usize,
         cache: Option<&Path>,
     ) -> io::Result<Self> {
+        Self::build_sampled(terrain, min, size, 1, threads, cache)
+    }
+    /// Explicit artistic approximation: x/z are grid coordinates with spacing
+    /// `sample_stride * VOXEL_SIZE`. Heights retain native vertical quantization.
+    /// A stride above one is never an exact voxel oracle or a certified bound.
+    pub fn build_sampled(
+        terrain: FbmTerrain,
+        min: [i64; 2],
+        size: usize,
+        sample_stride: usize,
+        threads: usize,
+        cache: Option<&Path>,
+    ) -> io::Result<Self> {
+        if !sample_stride.is_power_of_two() || sample_stride > 256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sample stride must be a power of two in 1..256 native cells",
+            ));
+        }
         if !size.is_power_of_two() || size < BLOCK || size > 32768 || threads == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "size must be power of two in16..32768 cells; threads>0",
             ));
         }
-        let identity = format!(
+        let spacing = VOXEL_SIZE * sample_stride as f64;
+        let mut identity = format!(
             "native-landscape-v1:{:?}:{:?}:{}:{min:?}:{size}:{}:{}",
             terrain.params(),
             terrain.seed(),
@@ -40,6 +62,12 @@ impl Landscape {
             include_str!("../../world/src/terrain.rs"),
             include_str!("../../world/src/lib.rs")
         );
+        if terrain.params().recipe == frontier_world::FbmRecipe::Alpine {
+            identity.push_str(include_str!("../../world/src/alpine.rs"));
+        }
+        if sample_stride != 1 {
+            identity.push_str(&format!(":sample-stride:{sample_stride}"));
+        }
         let hash = identity.bytes().fold(0xcbf29ce484222325u64, |h, b| {
             (h ^ b as u64).wrapping_mul(0x100000001b3)
         });
@@ -76,10 +104,9 @@ impl Landscape {
                         for (i, v) in out.iter_mut().enumerate() {
                             let x = min[0] + (i % size) as i64;
                             let z = min[1] + (part * rows + i / size) as i64;
-                            *v = (terrain.height_m(
-                                (x as f64 + 0.5) * VOXEL_SIZE,
-                                (z as f64 + 0.5) * VOXEL_SIZE,
-                            ) / VOXEL_SIZE) as i32;
+                            *v = (terrain
+                                .height_m((x as f64 + 0.5) * spacing, (z as f64 + 0.5) * spacing)
+                                / VOXEL_SIZE) as i32;
                         }
                     });
                 }
@@ -129,6 +156,7 @@ impl Landscape {
             min,
             size,
             cache_identity: hash,
+            sample_stride,
             heights,
             levels,
             terrain,
@@ -137,32 +165,48 @@ impl Landscape {
     pub fn memory_bytes(&self) -> usize {
         self.heights.len() * 4 + self.levels.iter().map(|(_, v)| v.len() * 4).sum::<usize>()
     }
+    fn spacing(&self) -> f64 {
+        VOXEL_SIZE * self.sample_stride as f64
+    }
     fn height(&self, x: i64, z: i64) -> i64 {
         let a = x - self.min[0];
         let b = z - self.min[1];
         if a >= 0 && b >= 0 && a < self.size as i64 && b < self.size as i64 {
             self.heights[b as usize * self.size + a as usize] as i64
         } else {
-            (self
-                .terrain
-                .height_m((x as f64 + 0.5) * VOXEL_SIZE, (z as f64 + 0.5) * VOXEL_SIZE)
-                / VOXEL_SIZE) as i64
+            (self.terrain.height_m(
+                (x as f64 + 0.5) * self.spacing(),
+                (z as f64 + 0.5) * self.spacing(),
+            ) / VOXEL_SIZE) as i64
         }
     }
     fn hit(&self, x: i64, z: i64, y: i64, t: f64, face: usize, h: i64) -> Hit {
-        let material = if y == h - 1 {
+        let surface = || {
             self.terrain.surface_material(
-                (x as f64 + 0.5) * VOXEL_SIZE,
-                (z as f64 + 0.5) * VOXEL_SIZE,
+                (x as f64 + 0.5) * self.spacing(),
+                (z as f64 + 0.5) * self.spacing(),
                 h as f64 * VOXEL_SIZE,
             )
+        };
+        let material = if y == h - 1 {
+            surface()
         } else if y >= h - 12 {
-            Material::Soil
+            if self.terrain.params().recipe == frontier_world::FbmRecipe::Alpine
+                && surface() == Material::Stone
+            {
+                Material::Stone
+            } else {
+                Material::Soil
+            }
         } else {
             Material::Stone
         };
         Hit {
-            cell: [x, y, z],
+            cell: [
+                x * self.sample_stride as i64 + (self.sample_stride / 2) as i64,
+                y,
+                z * self.sample_stride as i64 + (self.sample_stride / 2) as i64,
+            ],
             distance: t,
             face,
             material: material_id(material),
@@ -200,8 +244,8 @@ impl Landscape {
         let mut lo = near;
         let mut hi = far;
         for (axis, p, m) in [(0, x, self.min[0]), (2, z, self.min[1])] {
-            let a = (m + (p * span) as i64) as f64 * VOXEL_SIZE;
-            let b = a + span as f64 * VOXEL_SIZE;
+            let a = (m + (p * span) as i64) as f64 * self.spacing();
+            let b = a + span as f64 * self.spacing();
             if d[axis] == 0. {
                 if o[axis] < a || o[axis] >= b {
                     return None;
@@ -273,10 +317,10 @@ impl Landscape {
         lo: f64,
         hi: f64,
     ) -> Option<Hit> {
-        let ox = o[0] / VOXEL_SIZE;
-        let oz = o[2] / VOXEL_SIZE;
-        let dx = d[0] / VOXEL_SIZE;
-        let dz = d[2] / VOXEL_SIZE;
+        let ox = o[0] / self.spacing();
+        let oz = o[2] / self.spacing();
+        let dx = d[0] / self.spacing();
+        let dz = d[2] / self.spacing();
         let mut x = forward_index(ox, dx, lo).0;
         let mut z = forward_index(oz, dz, lo).0;
         let mut t = lo;
@@ -327,8 +371,21 @@ impl Landscape {
                 }
             }
             if d[1] < 0. {
-                let tt = (top - o[1]) / d[1];
-                if tt >= t && tt <= end && tt < tx.min(tz) {
+                let mut tt = (top - o[1]) / d[1];
+                // Anisotropic sampled columns can round a simultaneous top/side
+                // crossing a few ulps apart. Close the sampled target's cracks;
+                // retain the exact oracle's historical native tie semantics.
+                let epsilon = if self.sample_stride > 1 {
+                    8. * f64::EPSILON * t.abs().max(end.abs()).max(1.)
+                } else {
+                    0.
+                };
+                if tt < t && t - tt <= epsilon {
+                    tt = t;
+                }
+                let owns_top =
+                    tt < tx.min(tz) || (self.sample_stride > 1 && tt <= tx.min(tz) + epsilon);
+                if tt >= t && tt <= end + epsilon && owns_top {
                     let hit = self.hit(x, z, h - 1, tt, 3, h);
                     if candidate.is_none_or(|old| {
                         tt < old.distance || (tt == old.distance && hit.face < old.face)
@@ -353,6 +410,65 @@ impl Landscape {
             t = next;
         }
         None
+    }
+}
+
+/// Explicitly partitioned offline artistic target. The native square owns every
+/// ray segment inside its footprint; the sampled far surface owns only outside.
+/// This is an approximate heightfield target, never a full-scene native oracle.
+pub struct MultiScaleLandscape {
+    pub far: Landscape,
+    pub near: Option<Landscape>,
+}
+impl MultiScaleLandscape {
+    pub fn memory_bytes(&self) -> usize {
+        self.far.memory_bytes() + self.near.as_ref().map_or(0, Landscape::memory_bytes)
+    }
+    pub fn ray(&self, o: [f64; 3], d: [f64; 3], near: f64, far: f64) -> Option<Hit> {
+        let Some(native) = &self.near else {
+            return self.far.ray(o, d, near, far);
+        };
+        let length = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if !length.is_finite() || length == 0. {
+            return None;
+        }
+        let d = d.map(|v| v / length);
+        let mut enter = near;
+        let mut exit = far;
+        for (axis, index) in [(0, 0), (2, 1)] {
+            let a = native.min[index] as f64 * VOXEL_SIZE;
+            let b = a + native.size as f64 * VOXEL_SIZE;
+            if d[axis] == 0. {
+                if o[axis] < a || o[axis] >= b {
+                    return self.far.ray(o, d, near, far);
+                }
+            } else {
+                let t0 = (a - o[axis]) / d[axis];
+                let t1 = (b - o[axis]) / d[axis];
+                enter = enter.max(t0.min(t1));
+                exit = exit.min(t0.max(t1));
+            }
+        }
+        if enter > exit {
+            return self.far.ray(o, d, near, far);
+        }
+        if enter > near {
+            if let Some(hit) = self.far.ray(o, d, near, enter) {
+                if hit.distance < enter {
+                    return Some(hit);
+                }
+            }
+        }
+        if let Some(hit) = native.ray(o, d, enter, exit) {
+            if hit.distance < exit || exit == far {
+                return Some(hit);
+            }
+        }
+        if exit < far {
+            self.far.ray(o, d, exit, far)
+        } else {
+            None
+        }
     }
 }
 
@@ -479,5 +595,174 @@ mod tests {
         assert_eq!(a.heights, b.heights);
         assert!(Landscape::build(make(8), [0, 0], 16, 1, Some(&path)).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+    fn flat(stride: usize, min: [i64; 2], size: usize) -> Landscape {
+        let terrain = FbmTerrain::new(
+            7,
+            FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Landscape::build_sampled(terrain, min, size, stride, 1, None).unwrap()
+    }
+    fn set_height(scene: &mut Landscape, height: i32) {
+        scene.heights.fill(height);
+        for (_, level) in &mut scene.levels {
+            level.fill(height);
+        }
+    }
+    #[test]
+    fn sampled_grid_matches_native_height_and_world_footprint() {
+        let scene = flat(16, [-16, -16], 32);
+        for x in [-15.5, -0.5, 0.5, 15.5] {
+            let hit = scene.ray([x, 2., 0.5], [0., -1., 0.], 0., 10.).unwrap();
+            assert_eq!(hit.distance, 2.);
+            assert_eq!(hit.cell[0], (x.floor() as i64) * 16 + 8);
+            assert_eq!(hit.cell[1], -1);
+        }
+        assert!(scene.ray([16.5, 2., 0.5], [0., -1., 0.], 0., 10.).is_none());
+        assert!(
+            scene
+                .ray([-16., -1., 0.5], [1., 0., 0.], 0., 100.)
+                .is_none(),
+            "no artificial crop wall"
+        );
+    }
+    #[test]
+    fn hybrid_ownership_excludes_coarse_occluder_inside_native_square() {
+        let mut far = flat(16, [-16, -16], 32);
+        set_height(&mut far, 16);
+        let near = flat(1, [-16, -16], 32);
+        let scene = MultiScaleLandscape {
+            far,
+            near: Some(near),
+        };
+        let hit = scene.ray([0.5, 2., 0.5], [0., -1., 0.], 0., 10.).unwrap();
+        assert_eq!(
+            hit.distance, 2.,
+            "coarse 1m top must not occlude owned native surface"
+        );
+        let outside = scene.ray([1.5, 2., 0.5], [0., -1., 0.], 0., 10.).unwrap();
+        assert_eq!(outside.distance, 1.);
+        let before_entry = scene.ray([-3., 2., 0.5], [1., -1., 0.], 0., 10.).unwrap();
+        assert!((before_entry.distance - 2f64.sqrt()).abs() < 1e-12);
+        let after_exit = scene.ray([0.5, 3., 0.5], [1., -1., 0.], 0., 10.).unwrap();
+        assert!((after_exit.distance - 2. * 2f64.sqrt()).abs() < 1e-12);
+    }
+    #[test]
+    fn sampled_cache_rejects_other_stride() {
+        let path =
+            std::env::temp_dir().join(format!("frontier-sampled-cache-{}.bin", std::process::id()));
+        let terrain = FbmTerrain::new(7, FbmParams::default()).unwrap();
+        Landscape::build_sampled(terrain.clone(), [0, 0], 16, 8, 1, Some(&path)).unwrap();
+        assert!(Landscape::build_sampled(terrain, [0, 0], 16, 16, 1, Some(&path)).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn sampled_oblique_rays_match_independent_column_boxes() {
+        let mut scene = flat(16, [-16, -16], 32);
+        for z in 0..32 {
+            for x in 0..32 {
+                scene.heights[z * 32 + x] = if (x / 3 + z / 2) % 2 == 0 { 16 } else { 0 };
+            }
+        }
+        // All cells are at most 1m; conservative hierarchy suffices for this test.
+        for (_, level) in &mut scene.levels {
+            level.fill(16);
+        }
+        for i in 0..100 {
+            let o = [
+                (i % 7) as f64 * 0.41 - 1.3,
+                2.,
+                (i % 11) as f64 * 0.27 - 1.2,
+            ];
+            let d = crate::normalized([
+                (i % 9) as f64 * 0.17 - 0.6,
+                -1.,
+                (i % 13) as f64 * 0.11 - 0.6,
+            ]);
+            let mut expected = f64::INFINITY;
+            for z in 0..32 {
+                for x in 0..32 {
+                    let a = [x as f64 - 16., -10., z as f64 - 16.];
+                    let b = [
+                        a[0] + 1.,
+                        scene.heights[z * 32 + x] as f64 * VOXEL_SIZE,
+                        a[2] + 1.,
+                    ];
+                    let mut lo = 0f64;
+                    let mut hi = 5f64;
+                    for axis in 0..3 {
+                        if d[axis] == 0. {
+                            if o[axis] < a[axis] || o[axis] >= b[axis] {
+                                hi = -1.;
+                            }
+                        } else {
+                            let t0 = (a[axis] - o[axis]) / d[axis];
+                            let t1 = (b[axis] - o[axis]) / d[axis];
+                            lo = lo.max(t0.min(t1));
+                            hi = hi.min(t0.max(t1));
+                        }
+                    }
+                    if lo <= hi {
+                        expected = expected.min(lo);
+                    }
+                }
+            }
+            let hit = scene.ray(o, d, 0., 5.).unwrap_or_else(|| {
+                panic!("miss ray {i}, origin {o:?} direction {d:?} expected {expected}")
+            });
+            assert!(
+                (hit.distance - expected).abs() < 1e-10,
+                "ray {i}: {hit:?}, expected {expected}"
+            );
+        }
+    }
+    #[test]
+    fn alpine_reference_subsurface_material_matches_native_world() {
+        let params = FbmParams {
+            recipe: FbmRecipe::Alpine,
+            ..Default::default()
+        };
+        let world = World::fbm(7, params).unwrap();
+        let terrain = world.fbm_terrain().unwrap().clone();
+        let scene = Landscape::build(terrain.clone(), [0, 0], 16, 1, None).unwrap();
+        let mut stone_columns = 0;
+        let mut covered_columns = 0;
+        for z in 0..16 {
+            for x in -8..8 {
+                let cx = x * 4096 + 1;
+                let cz = z * 4096 + 1;
+                let h = (terrain.height_m(
+                    (cx as f64 + 0.5) * VOXEL_SIZE,
+                    (cz as f64 + 0.5) * VOXEL_SIZE,
+                ) / VOXEL_SIZE) as i64;
+                let material = terrain.surface_material(
+                    (cx as f64 + 0.5) * VOXEL_SIZE,
+                    (cz as f64 + 0.5) * VOXEL_SIZE,
+                    h as f64 * VOXEL_SIZE,
+                );
+                stone_columns += usize::from(material == Material::Stone);
+                covered_columns += usize::from(material != Material::Stone);
+                for dy in [1, 2, 11, 12, 13, 24] {
+                    let cell = frontier_world::Cell {
+                        x: cx,
+                        y: h - dy,
+                        z: cz,
+                    };
+                    assert_eq!(
+                        scene.hit(cx, cz, cell.y, 1., 0, h).material,
+                        material_id(world.material(cell)),
+                        "{cell:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            stone_columns > 0 && covered_columns > 0,
+            "both exposed and covered landforms must be checked"
+        );
     }
 }

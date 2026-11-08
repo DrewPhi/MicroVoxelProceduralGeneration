@@ -8,6 +8,9 @@ pub const FBM_SOURCE_VERSION: u32 = 1;
 pub const REGIONAL_FBM_SOURCE_VERSION: u32 = 2;
 /// Regional material painting version. Elevation/source v2 remains unchanged.
 pub const REGIONAL_APPEARANCE_VERSION: u32 = 3;
+/// Authored Austrian meadow and connected mountain backdrop.
+pub const ALPINE_FBM_SOURCE_VERSION: u32 = 3;
+pub const ALPINE_APPEARANCE_VERSION: u32 = 1;
 
 /// Explicit source identity: the legacy recipe retains existing worlds exactly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -18,6 +21,8 @@ pub enum FbmRecipe {
     Regional,
     /// Same regional bands without warp, for matched source comparisons.
     RegionalUnwarped,
+    /// Rolling meadow at origin with a connected range several kilometers north.
+    Alpine,
 }
 
 /// Physical source settings, not display/LOD settings. Changing them changes the world.
@@ -102,12 +107,14 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
+            FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
         }
     }
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::Legacy => 0,
+            FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,
         }
     }
@@ -128,6 +135,9 @@ impl FbmTerrain {
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
             FbmRecipe::Legacy => self.legacy_elevation(x, z),
+            FbmRecipe::Alpine => crate::alpine::elevation(x, z, self.params, true, |x, z, salt| {
+                noise(x, z, self.seed ^ salt)
+            }),
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => self.regional_elevation(x, z),
         }
     }
@@ -332,6 +342,47 @@ impl FbmTerrain {
     /// and continuous moisture, never a display normal or an independent patch map.
     /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
+        if self.params.recipe == FbmRecipe::Alpine {
+            let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
+            let sx = x * 1800.0 / self.params.horizontal_scale;
+            let sz = z * 1800.0 / self.params.horizontal_scale;
+            if (-550.0..1500.0).contains(&sz) && (sx - alpine_path_center_m(sz)).abs() < 1.45 {
+                return Material::Soil;
+            }
+            let f = crate::alpine::elevation(
+                Field {
+                    v: x / self.params.horizontal_scale,
+                    dx: 1.0 / self.params.horizontal_scale,
+                    dz: 0.0,
+                },
+                Field {
+                    v: z / self.params.horizontal_scale,
+                    dx: 0.0,
+                    dz: 1.0 / self.params.horizontal_scale,
+                },
+                self.params,
+                false,
+                |x: Field, z: Field, salt| {
+                    let [v, dx, dz] = noise_gradient(x.v, z.v, self.seed ^ salt);
+                    Field {
+                        v,
+                        dx: dx * x.dx + dz * z.dx,
+                        dz: dx * x.dz + dz * z.dz,
+                    }
+                },
+            );
+            let relative = if self.params.amplitude > 0.0 {
+                height / self.params.amplitude
+            } else {
+                0.0
+            };
+            // Coherent turf retention breaks the constant slope/elevation
+            // contour only inside its transition belt. Two meter-scale bands
+            // produce connected rock/turf tongues rather than random cells.
+            let cover = 0.75 * noise(sx / 120.0 + 3.7, sz / 120.0 - 8.1, self.seed ^ 0xac01)
+                + 0.25 * noise(sx / 28.0 - 17.2, sz / 28.0 + 4.8, self.seed ^ 0xac02);
+            return alpine_cover_material(f.dx.hypot(f.dz), relative, cover);
+        }
         if self.params.recipe != FbmRecipe::Legacy {
             let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
             let slope = self.regional_cover_slope(x, z);
@@ -353,6 +404,40 @@ impl FbmTerrain {
     }
     pub fn surface_color(&self, x: f64, z: f64, height: f64) -> [f32; 3] {
         self.surface_material(x, z, height).color()
+    }
+}
+
+/// Center of the authored 2.9m walking path, in default-scale scene meters.
+/// Cover is evaluated at native column centers; this is independent of display LOD.
+pub fn alpine_path_center_m(z: f64) -> f64 {
+    16.0 + 60.0 * (z / 310.0).sin() + 0.055 * z
+}
+
+impl crate::alpine::Value for Field {
+    fn point(v: f64) -> Self {
+        Self::constant(v)
+    }
+    fn add(self, b: Self) -> Self {
+        self.add(b)
+    }
+    fn scale(self, k: f64) -> Self {
+        self.scale(k)
+    }
+    fn mul(self, b: Self) -> Self {
+        self.mul(b)
+    }
+    fn clamp01(self) -> Self {
+        self.unit_clamp()
+    }
+}
+
+// A bounded spatial cover signal changes only the rock transition zone;
+// neither gentle lowland nor clearly exposed cliffs depend on that signal.
+fn alpine_cover_material(slope: f64, relative_height: f64, cover: f64) -> Material {
+    if slope > 0.68 + 0.20 * cover || relative_height > 0.93 + 0.14 * cover {
+        Material::Stone
+    } else {
+        Material::Grass
     }
 }
 
@@ -1016,6 +1101,73 @@ mod tests {
                     assert_eq!(column.material(y), world.material(Cell { x, y, z }));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod alpine_derivative_tests {
+    use super::*;
+    #[test]
+    fn alpine_cover_transition_keeps_meadow_and_exposed_cliffs_coherent() {
+        for cover in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            assert_eq!(alpine_cover_material(0.25, 0.1, cover), Material::Grass);
+            assert_eq!(alpine_cover_material(0.9, 0.6, cover), Material::Stone);
+            assert_eq!(alpine_cover_material(0.1, 1.1, cover), Material::Stone);
+        }
+        assert_eq!(alpine_cover_material(0.68, 0.6, -0.5), Material::Stone);
+        assert_eq!(alpine_cover_material(0.68, 0.6, 0.5), Material::Grass);
+        assert_eq!(alpine_cover_material(0.1, 0.93, -0.5), Material::Stone);
+        assert_eq!(alpine_cover_material(0.1, 0.93, 0.5), Material::Grass);
+    }
+    #[test]
+    fn alpine_analytic_macro_slope_matches_centered_derivative() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Alpine,
+            ..Default::default()
+        };
+        let seed = 7;
+        let value = |x: f64, z: f64| {
+            crate::alpine::elevation(
+                x / p.horizontal_scale,
+                z / p.horizontal_scale,
+                p,
+                false,
+                |x, z, salt| noise(x, z, seed ^ salt),
+            )
+        };
+        for (x, z) in [
+            (0., 0.),
+            (-800., 1600.),
+            (1200., 2600.),
+            (-250., 3300.),
+            (1500., 4600.),
+        ] {
+            let f = crate::alpine::elevation(
+                Field {
+                    v: x / p.horizontal_scale,
+                    dx: 1.0 / p.horizontal_scale,
+                    dz: 0.,
+                },
+                Field {
+                    v: z / p.horizontal_scale,
+                    dx: 0.,
+                    dz: 1.0 / p.horizontal_scale,
+                },
+                p,
+                false,
+                |x: Field, z: Field, salt| {
+                    let [v, dx, dz] = noise_gradient(x.v, z.v, seed ^ salt);
+                    Field {
+                        v,
+                        dx: dx * x.dx + dz * z.dx,
+                        dz: dx * x.dz + dz * z.dz,
+                    }
+                },
+            );
+            let e = 0.001;
+            assert!((f.dx - (value(x + e, z) - value(x - e, z)) / (2. * e)).abs() < 1e-6);
+            assert!((f.dz - (value(x, z + e) - value(x, z - e)) / (2. * e)).abs() < 1e-6);
         }
     }
 }

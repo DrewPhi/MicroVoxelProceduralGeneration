@@ -77,3 +77,38 @@ bound. The current source uses all configured octaves at every display sample;
 proper footprint filtering and geometric-error measurement remain renderer work.
 Cache/save identities must include source kind, parameters, seed and version,
 plus the existing independent-world/edit revision identity requirements.
+
+## Alpine Meadow source
+
+`FbmRecipe::Alpine` is a separate source version 3 / appearance version 1; Legacy
+and both Regional recipes retain their existing definitions. At default physical
+parameters (scale 1800, amplitude 1000, octaves 8, roughness 0.5), a quiet roughly
+1 km meadow surrounds the origin. One connected curved range occupies the +z
+backdrop, centered around 3300 m, with broad connected peaks around 800–1400 m, a lower saddle and
+smaller slope detail. This authored spatial composition is a pre-vegetation
+visual target, not geological erosion. Changing scale/amplitude changes the
+whole canonical scene, including relative path width and placement.
+
+Grass covers rolling ground; steep faces and high summits expose Stone. Exposed
+Rock exposure thresholds have coherent 120 m and 28 m cover variation within
+a modest slope/elevation transition belt; gentle meadow and exposed cliffs
+retain stable cover without cell-level randomness. Stone stays Stone through
+the subsurface band as well, avoiding brown soil
+staircase faces on bare rock. Two overlapping foothills soften the mountain feet. A 2.9 m
+Soil walking path curves from z=-550 to 1500 m. Materials retain the existing
+canonical enum and palette; there is no separate snow material. Native cells
+remain authoritative at 0.0625 m. The source costs six macro noise evaluations
+plus one per detail octave. Cover uses the same macro composition with analytic
+noise derivatives, excluding small hummocks from its slope test.
+
+The height composition is shared between canonical f64 evaluation, analytic
+cover derivatives, and outward-rounded affine bounds. Conservative global
+height/slope envelopes are supplied too. The older standalone grid floating
+point certificate explicitly returns `Uncertified` for Alpine; use the
+region-qualified affine bounds instead. Tests include held-out extreme source
+parameters and native-column enclosure on meadow, mountain flanks and crest.
+
+Run `cargo run -p frontier-world --example alpine_probe -- 7 --json` to obtain
+three source-grounded camera candidates and empirical 25 m sampled scene ranges.
+For seed 7, the meadow camera stands on the winding path near z=-250 and looks toward
+[0,650,3300]; the probe computes its exact source-grounded eye height.
