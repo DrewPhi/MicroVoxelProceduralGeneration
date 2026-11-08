@@ -11,7 +11,7 @@ The Alpine preset enables procedural vegetation, walking and the
 the preset: `--vegetation off` disables plants and `--walk off` starts in flight.
 Vegetation currently requires `--scene adaptive`. Existing comparison scenes
 retain their previous defaults. The current combined art checkpoint is documented
-in [Cozy Meadow](COZY_SCENE.md); older captures below retain their original settings.
+in [Cozy Meadow](COZY_SCENE.md). The [streaming and compact rendering checkpoint](VEGETATION_STREAMING_CHECKPOINT.md) supersedes the original worker, mesh-storage and shadow selection details below; older captures retain their original settings.
 
 Use WASD to move, Shift for faster movement, and Space to jump while walking.
 F toggles walking/flight. Esc opens settings, including vegetation and walking

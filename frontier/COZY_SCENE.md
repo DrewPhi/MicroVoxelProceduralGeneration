@@ -271,3 +271,5 @@ The [playability checkpoint](PLAYABILITY_CHECKPOINT.md) records appearance reuse
 nearby streaming priority, bounded caches, camera step easing, frame observability
 and the measured window-server/culling stall fixes. Historical pictures/timings
 above retain their original settings; the new checkpoint identifies new defaults.
+
+The [vegetation streaming checkpoint](VEGETATION_STREAMING_CHECKPOINT.md) adds bounded parallel plant work, exact faster native filtering/meshing, compact GPU quads and independent heading-stable shadow geometry. It keeps the same procedural species, scale and pigment rules.

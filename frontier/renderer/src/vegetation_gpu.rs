@@ -57,10 +57,123 @@ fn cache_instance_upload(cache: &mut Vec<u8>, instances: &[Instance]) -> bool {
     true
 }
 
+/// Scalar-only layout matches WGSL's 44-byte storage-array stride. Keep the
+/// material floats unchanged; quantizing RGB changes canonical voxel pigments.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct Quad {
+    origin: [i32; 3],
+    extent: [u32; 2],
+    face: u32,
+    color: [f32; 3],
+    ao: f32,
+    transmission: f32,
+}
+fn pack_quads(mesh: &crate::vegetation::VegetationMesh) -> Result<Vec<Quad>, String> {
+    if mesh.vertices.len() % 4 != 0 || mesh.indices.len() != mesh.vertices.len() / 4 * 6 {
+        return Err("vegetation mesh is not a complete quad stream".into());
+    }
+    let mut packed = Vec::with_capacity(mesh.vertices.len() / 4);
+    for (index, vertices) in mesh.vertices.chunks_exact(4).enumerate() {
+        let first = &vertices[0];
+        let axis = (0..3)
+            .find(|&d| first.normal[d].abs() == 1.)
+            .ok_or("vegetation quad has no axis normal")?;
+        let positive = first.normal[axis] > 0.;
+        let mut normal = [0.; 3];
+        normal[axis] = if positive { 1. } else { -1. };
+        let mut cells = [[0i32; 3]; 4];
+        for (corner, vertex) in vertices.iter().enumerate() {
+            if vertex.normal != normal
+                || vertex.color.map(f32::to_bits) != first.color.map(f32::to_bits)
+                || vertex.ao.to_bits() != first.ao.to_bits()
+                || vertex.transmission.to_bits() != first.transmission.to_bits()
+            {
+                return Err("vegetation quad has varying face material or normal".into());
+            }
+            for d in 0..3 {
+                let cell = vertex.position[d] as f64 * 16.;
+                if !cell.is_finite()
+                    || cell.fract() != 0.
+                    || cell < i32::MIN as f64
+                    || cell > i32::MAX as f64
+                {
+                    return Err("vegetation quad is outside the native i32 lattice".into());
+                }
+                cells[corner][d] = cell as i32;
+            }
+        }
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        let width = cells[1][u] as i64 - cells[0][u] as i64;
+        let height = cells[3][v] as i64 - cells[0][v] as i64;
+        if width <= 0 || height <= 0 || width > u32::MAX as i64 || height > u32::MAX as i64 {
+            return Err("vegetation quad has invalid extents".into());
+        }
+        let quad = Quad {
+            origin: cells[0],
+            extent: [width as u32, height as u32],
+            face: (axis as u32) * 2 + u32::from(positive),
+            color: first.color,
+            ao: first.ao,
+            transmission: first.transmission,
+        };
+        let corners = if positive {
+            [0, 1, 2, 0, 2, 3]
+        } else {
+            [0, 2, 1, 0, 3, 2]
+        };
+        for (offset, corner) in corners.into_iter().enumerate() {
+            if mesh.indices[index * 6 + offset] as usize != index * 4 + corner {
+                return Err("vegetation quad has noncanonical winding".into());
+            }
+        }
+        for corner in 0..4 {
+            let mut expected = cells[0];
+            if corner == 1 || corner == 2 {
+                expected[u] = cells[1][u];
+            }
+            if corner == 2 || corner == 3 {
+                expected[v] = cells[3][v];
+            }
+            if cells[corner] != expected {
+                return Err("vegetation quad is not an axis-aligned rectangle".into());
+            }
+        }
+        packed.push(quad);
+    }
+    Ok(packed)
+}
+fn quad_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("packed native vegetation quads"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+enum Geometry {
+    Compact {
+        _quads: wgpu::Buffer,
+        bind: wgpu::BindGroup,
+        indices: Option<wgpu::Buffer>,
+    },
+    Expanded {
+        vertices: wgpu::Buffer,
+        indices: wgpu::Buffer,
+    },
+}
 struct Template {
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    geometry: Geometry,
+    vertex_count: u32,
     instances: wgpu::Buffer,
     instance_capacity: u64,
     last_instance_bytes: Vec<u8>,
@@ -81,6 +194,9 @@ pub struct VegetationGpuStats {
     pub instances: usize,
     pub shadow_instances: usize,
     pub shadow_triangles: usize,
+    pub shadow_admitted: usize,
+    pub shadow_removed: usize,
+    pub shadow_budget_rejected: usize,
     pub resident_bytes: u64,
     pub uploaded_bytes: u64,
     pub cache_budget_bytes: u64,
@@ -88,13 +204,17 @@ pub struct VegetationGpuStats {
 
 pub struct VegetationGpu {
     pipeline: wgpu::RenderPipeline,
+    expanded: bool,
+    compact_indexed: bool,
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_enabled: bool,
     lighting_uniform: wgpu::Buffer,
     lighting_bind: wgpu::BindGroup,
+    quad_layout: wgpu::BindGroupLayout,
     templates: HashMap<MeshKey, Template>,
     active: Vec<MeshKey>,
     shadow_active: Vec<MeshKey>,
+    previous_casters: HashSet<CasterKey>,
     scratch: Vec<Instance>,
     stats: VegetationGpuStats,
 }
@@ -104,6 +224,16 @@ impl VegetationGpu {
         format: wgpu::TextureFormat,
         sample_count: u32,
         camera_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let mode = std::env::var("FRONTIER_VEGETATION_GPU").unwrap_or_default();
+        Self::new_with_mode(device, format, sample_count, camera_layout, &mode)
+    }
+    fn new_with_mode(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        camera_layout: &wgpu::BindGroupLayout,
+        mode: &str,
     ) -> Self {
         let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vegetation lighting"),
@@ -131,42 +261,55 @@ impl VegetationGpu {
                 resource: lighting_uniform.as_entire_binding(),
             }],
         });
+        // A/B switch retains the identical expanded content and shading path.
+        let expanded = mode == "expanded";
+        let compact_indexed = mode == "compact-indexed";
+        let quad_layout = quad_layout(device);
+        let sampling_layout = crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(device);
+        let mut color_layouts = vec![camera_layout, &lighting_layout, &sampling_layout];
+        if !expanded {
+            color_layouts.push(&quad_layout);
+        }
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("instanced voxel vegetation"),
-            bind_group_layouts: &[
-                camera_layout,
-                &lighting_layout,
-                &crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(device),
-            ],
+            bind_group_layouts: &color_layouts,
             push_constant_ranges: &[],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("instanced voxel vegetation"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let vertex_attributes =
-            wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,7=>Float32,8=>Float32];
         let instance_attributes =
             wgpu::vertex_attr_array![3=>Float32x3,4=>Uint32,5=>Float32,6=>Uint32];
+        let vertex_attributes =
+            wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,7=>Float32,8=>Float32];
+        let mut buffers = Vec::new();
+        if expanded {
+            buffers.push(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<VegetationVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &vertex_attributes,
+            });
+        }
+        buffers.push(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Instance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &instance_attributes,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("instanced voxel vegetation"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(if expanded {
+                    "vs_expanded"
+                } else if compact_indexed {
+                    "vs_compact_indexed"
+                } else {
+                    "vs_main"
+                }),
                 compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<VegetationVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &vertex_attributes,
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Instance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &instance_attributes,
-                    },
-                ],
+                buffers: &buffers,
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -200,12 +343,14 @@ impl VegetationGpu {
             label: Some("instanced plant shadow depth"),
             source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
         });
+        let depth_layout = crate::adaptive_gpu::adaptive_shadow::near_depth_layout(device);
+        let mut shadow_layouts = vec![camera_layout, &depth_layout];
+        if !expanded {
+            shadow_layouts.push(&quad_layout);
+        }
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("instanced plant shadow depth"),
-            bind_group_layouts: &[
-                camera_layout,
-                &crate::adaptive_gpu::adaptive_shadow::near_depth_layout(device),
-            ],
+            bind_group_layouts: &shadow_layouts,
             push_constant_ranges: &[],
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -213,20 +358,15 @@ impl VegetationGpu {
             layout: Some(&shadow_layout),
             vertex: wgpu::VertexState {
                 module: &shadow_shader,
-                entry_point: Some("vs_shadow"),
+                entry_point: Some(if expanded {
+                    "vs_shadow_expanded"
+                } else if compact_indexed {
+                    "vs_shadow_compact_indexed"
+                } else {
+                    "vs_shadow"
+                }),
                 compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<VegetationVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &vertex_attributes,
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Instance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &instance_attributes,
-                    },
-                ],
+                buffers: &buffers,
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shadow_shader,
@@ -255,13 +395,17 @@ impl VegetationGpu {
         });
         Self {
             shadow_pipeline,
+            expanded,
+            compact_indexed,
             shadow_enabled: false,
             pipeline,
             lighting_uniform,
             lighting_bind,
+            quad_layout,
             templates: HashMap::new(),
             active: vec![],
             shadow_active: vec![],
+            previous_casters: HashSet::new(),
             scratch: vec![],
             stats: Default::default(),
         }
@@ -306,6 +450,9 @@ impl VegetationGpu {
         self.stats.instances = 0;
         self.stats.shadow_instances = 0;
         self.stats.shadow_triangles = 0;
+        self.stats.shadow_admitted = 0;
+        self.stats.shadow_removed = 0;
+        self.stats.shadow_budget_rejected = 0;
         self.stats.uploaded_bytes = 0;
         let cache_budget = if frame.stats.reference {
             1024 * 1024 * 1024
@@ -323,6 +470,7 @@ impl VegetationGpu {
             })
             .map(|entry| entry.batch.key)
             .collect();
+        let mut new_quads = HashMap::new();
         let mut needed = 0u64;
         for entry in &batches {
             let batch = entry.batch;
@@ -334,8 +482,20 @@ impl VegetationGpu {
             {
                 return Err("vegetation draw exceeds u32 counts".into());
             }
-            let geometry = (batch.mesh.vertices.len() * std::mem::size_of::<VegetationVertex>()
-                + batch.mesh.indices.len() * 4) as u64;
+            let geometry = if self.expanded {
+                (batch.mesh.vertices.len() * std::mem::size_of::<VegetationVertex>()
+                    + batch.mesh.indices.len() * 4) as u64
+            } else {
+                (batch.mesh.vertices.len() / 4 * std::mem::size_of::<Quad>()
+                    + if self.compact_indexed {
+                        batch.mesh.indices.len() * 4
+                    } else {
+                        0
+                    }) as u64
+            };
+            if !self.expanded && !self.templates.contains_key(&batch.key) {
+                new_quads.insert(batch.key, pack_quads(&batch.mesh)?);
+            }
             let instances = ((batch.instances.len() * std::mem::size_of::<Instance>()) as u64)
                 .next_power_of_two()
                 .max(32);
@@ -345,7 +505,10 @@ impl VegetationGpu {
                 .map_or(geometry + instances, |t| {
                     t.geometry_bytes + t.instance_capacity.max(instances)
                 });
-            if geometry > device.limits().max_buffer_size
+            if (!self.expanded
+                && (batch.mesh.vertices.len() / 4 * std::mem::size_of::<Quad>()) as u64
+                    > device.limits().max_storage_buffer_binding_size as u64)
+                || geometry > device.limits().max_buffer_size
                 || instances > device.limits().max_buffer_size
             {
                 return Err("vegetation exceeds device buffer limit".into());
@@ -391,11 +554,28 @@ impl VegetationGpu {
         // Allocate globally by root distance, before grouping by template. A
         // high-resolution variant must not consume the budget simply because
         // its mesh key sorts before the tree beside the camera.
-        let (shadow_selection, shadow_triangles) = if self.shadow_enabled {
-            select_shadow_casters(frame, origin, camera_local, 200_000)
+        let (shadow_selection, shadow_triangles, rejected) = if self.shadow_enabled {
+            select_shadow_casters_stable(
+                frame,
+                origin,
+                camera_local,
+                200_000,
+                &self.previous_casters,
+            )
         } else {
-            (HashSet::new(), 0)
+            (HashSet::new(), 0, 0)
         };
+        self.stats.shadow_budget_rejected = rejected;
+        let casters: HashSet<_> = shadow_selection
+            .iter()
+            .map(|&(batch_index, instance_index)| {
+                let batch = frame_batch(frame, batch_index);
+                caster_key(batch, &batch.instances[instance_index])
+            })
+            .collect();
+        self.stats.shadow_admitted = casters.difference(&self.previous_casters).count();
+        self.stats.shadow_removed = self.previous_casters.difference(&casters).count();
+        self.previous_casters = casters;
         for entry in &batches {
             let batch = entry.batch;
             let batch_index = entry.index;
@@ -421,27 +601,75 @@ impl VegetationGpu {
             let bytes = bytemuck::cast_slice(&self.scratch);
             let capacity = (bytes.len() as u64).next_power_of_two().max(32);
             let template = self.templates.entry(batch.key).or_insert_with(|| {
-                let vertex_bytes = bytemuck::cast_slice(&batch.mesh.vertices);
-                let index_bytes = bytemuck::cast_slice(&batch.mesh.indices);
-                self.stats.uploaded_bytes += (vertex_bytes.len() + index_bytes.len()) as u64;
+                let (geometry, geometry_bytes) = if self.expanded {
+                    let vertices = bytemuck::cast_slice(&batch.mesh.vertices);
+                    let indices = bytemuck::cast_slice(&batch.mesh.indices);
+                    (
+                        Geometry::Expanded {
+                            vertices: device.create_buffer_init(
+                                &wgpu::util::BufferInitDescriptor {
+                                    label: Some("A/B expanded vegetation vertices"),
+                                    contents: vertices,
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                },
+                            ),
+                            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("A/B expanded vegetation indices"),
+                                contents: indices,
+                                usage: wgpu::BufferUsages::INDEX,
+                            }),
+                        },
+                        (vertices.len() + indices.len()) as u64,
+                    )
+                } else {
+                    let quads = new_quads
+                        .remove(&batch.key)
+                        .expect("new template was packed before allocation");
+                    let bytes = bytemuck::cast_slice(&quads);
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("cached vegetation packed quads"),
+                        contents: bytes,
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("cached vegetation packed quads"),
+                        layout: &self.quad_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        }],
+                    });
+                    let indices = self.compact_indexed.then(|| {
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("indexed compact vegetation topology"),
+                            contents: bytemuck::cast_slice(&batch.mesh.indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        })
+                    });
+                    (
+                        Geometry::Compact {
+                            _quads: buffer,
+                            bind,
+                            indices,
+                        },
+                        bytes.len() as u64
+                            + if self.compact_indexed {
+                                batch.mesh.indices.len() as u64 * 4
+                            } else {
+                                0
+                            },
+                    )
+                };
+                self.stats.uploaded_bytes += geometry_bytes;
                 Template {
-                    vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("cached vegetation template vertices"),
-                        contents: vertex_bytes,
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                    indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("cached vegetation template indices"),
-                        contents: index_bytes,
-                        usage: wgpu::BufferUsages::INDEX,
-                    }),
-                    index_count: batch.mesh.indices.len() as u32,
+                    geometry,
+                    vertex_count: batch.mesh.indices.len() as u32,
                     instances: instance_buffer(device, capacity),
                     instance_capacity: capacity,
                     last_instance_bytes: Vec::new(),
                     instance_count: 0,
                     shadow_count: 0,
-                    geometry_bytes: (vertex_bytes.len() + index_bytes.len()) as u64,
+                    geometry_bytes,
                 }
             });
             if capacity > template.instance_capacity {
@@ -475,6 +703,15 @@ impl VegetationGpu {
     pub fn stats(&self) -> VegetationGpuStats {
         self.stats
     }
+    pub fn representation(&self) -> &'static str {
+        if self.expanded {
+            "expanded"
+        } else if self.compact_indexed {
+            "compact-indexed"
+        } else {
+            "compact"
+        }
+    }
     pub fn draw<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
@@ -490,10 +727,24 @@ impl VegetationGpu {
         pass.set_bind_group(2, near_shadow, &[]);
         for key in &self.active {
             let template = &self.templates[key];
-            pass.set_vertex_buffer(0, template.vertices.slice(..));
-            pass.set_vertex_buffer(1, template.instances.slice(..));
-            pass.set_index_buffer(template.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..template.index_count, 0, 0..template.instance_count);
+            match &template.geometry {
+                Geometry::Compact { bind, indices, .. } => {
+                    pass.set_bind_group(3, bind, &[]);
+                    pass.set_vertex_buffer(0, template.instances.slice(..));
+                    if let Some(indices) = indices {
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..template.vertex_count, 0, 0..template.instance_count);
+                    } else {
+                        pass.draw(0..template.vertex_count, 0..template.instance_count);
+                    }
+                }
+                Geometry::Expanded { vertices, indices } => {
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_vertex_buffer(1, template.instances.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..template.vertex_count, 0, 0..template.instance_count);
+                }
+            }
         }
     }
     pub(crate) fn draw_shadows(
@@ -525,10 +776,24 @@ impl VegetationGpu {
             if t.shadow_count == 0 {
                 continue;
             }
-            pass.set_vertex_buffer(0, t.vertices.slice(..));
-            pass.set_vertex_buffer(1, t.instances.slice(..));
-            pass.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..t.index_count, 0, 0..t.shadow_count);
+            match &t.geometry {
+                Geometry::Compact { bind, indices, .. } => {
+                    pass.set_bind_group(2, bind, &[]);
+                    pass.set_vertex_buffer(0, t.instances.slice(..));
+                    if let Some(indices) = indices {
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..t.vertex_count, 0, 0..t.shadow_count);
+                    } else {
+                        pass.draw(0..t.vertex_count, 0..t.shadow_count);
+                    }
+                }
+                Geometry::Expanded { vertices, indices } => {
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_vertex_buffer(1, t.instances.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..t.vertex_count, 0, 0..t.shadow_count);
+                }
+            }
         }
     }
 }
@@ -562,15 +827,62 @@ fn frame_batch(frame: &VegetationFrame, index: usize) -> &crate::vegetation::Veg
         &frame.shadow_batches[index - frame.batches.len()]
     }
 }
+/// Geometry LOD and color/frustum membership are deliberately absent: the same
+/// canonical plant keeps its caster priority while either display choice changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CasterKey {
+    species: u8,
+    seed: u64,
+    tile: [i64; 2],
+    root: [i64; 3],
+}
+fn caster_key(
+    batch: &crate::vegetation::VegetationBatch,
+    instance: &VegetationInstance,
+) -> CasterKey {
+    CasterKey {
+        species: batch.key.species,
+        seed: batch.key.seed,
+        tile: batch.key.tile,
+        root: instance.root_cell,
+    }
+}
+
 /// Stable distance priority within tree and close ground-cover allocations.
 /// Color plants and bounded near offscreen trees share this allocation.
 /// Unstreamed trees and partly fading plants remain outside its coverage.
+#[cfg(test)]
 fn select_shadow_casters(
     frame: &VegetationFrame,
     origin: [i64; 3],
     eye: [f32; 3],
     triangle_budget: usize,
 ) -> (HashSet<(usize, usize)>, usize) {
+    let (selected, triangles, _) =
+        select_shadow_casters_stable(frame, origin, eye, triangle_budget, &HashSet::new());
+    (selected, triangles)
+}
+fn select_shadow_casters_stable(
+    frame: &VegetationFrame,
+    origin: [i64; 3],
+    eye: [f32; 3],
+    triangle_budget: usize,
+    previous: &HashSet<CasterKey>,
+) -> (HashSet<(usize, usize)>, usize, usize) {
+    // Streamed explicit caster geometry is independent of the color LOD. Use
+    // color geometry only until that root's bounded shadow template is ready.
+    let explicit: HashMap<_, _> = frame
+        .shadow_batches
+        .iter()
+        .filter(|batch| !batch.mesh.indices.is_empty())
+        .flat_map(|batch| {
+            batch
+                .instances
+                .iter()
+                .filter(|instance| instance.fade > 0.99)
+                .map(move |instance| (caster_key(batch, instance), batch.key))
+        })
+        .collect();
     let mut candidates = Vec::new();
     for entry in frame_batches(frame) {
         let batch = entry.batch;
@@ -582,6 +894,11 @@ fn select_shadow_casters(
             if instance.fade <= 0.99 {
                 continue;
             }
+            let identity = caster_key(batch, instance);
+            if entry.color && explicit.get(&identity).is_some_and(|key| *key != batch.key) {
+                continue;
+            }
+            let retained = previous.contains(&identity);
             let p = pack(instance, origin).root;
             let distance = if batch.key.species == 2 {
                 (0..3)
@@ -599,44 +916,57 @@ fn select_shadow_casters(
             // The 96m map resolves close grass/flower contact shadows. Keep
             // their work local; reserve most depth triangles for tree canopies.
             let radius = if batch.key.species == 2 {
-                90.
+                if retained {
+                    96.
+                } else {
+                    90.
+                }
             } else {
                 18. + 32f32.sqrt()
             };
             if distance < radius * radius {
-                candidates.push((distance, batch_index, index, batch.mesh.indices.len() / 3));
+                // A challenger must become at least 10% nearer to displace a
+                // retained caster. This changes admission only, never geometry
+                // or the bounded depth budget. Canonical ties survive turning.
+                let priority = distance * if retained { 0.81 } else { 1. };
+                candidates.push((
+                    priority,
+                    batch_index,
+                    index,
+                    batch.mesh.indices.len() / 3,
+                    identity,
+                ));
             }
         }
     }
-    candidates.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then_with(|| (a.1, a.2).cmp(&(b.1, b.2)))
-    });
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.4.cmp(&b.4)));
+    let eligible = candidates.len();
     let mut selected = HashSet::new();
     let mut triangles = 0;
     // Give nearby ground cover a quarter of the existing cap before trees.
     // Unused space is borrowed, so sparse meadows do not waste tree coverage.
     // Do not add a second depth pass, map, or unbounded caster generation.
     let ground_reserve = triangle_budget / 4;
-    for &(_, batch, index, cost) in &candidates {
+    for &(_, batch, index, cost, _) in &candidates {
         if frame_batch(frame, batch).key.species != 2 && cost <= ground_reserve - triangles {
             selected.insert((batch, index));
             triangles += cost;
         }
     }
-    for &(_, batch, index, cost) in &candidates {
+    for &(_, batch, index, cost, _) in &candidates {
         if frame_batch(frame, batch).key.species == 2 && cost <= triangle_budget - triangles {
             selected.insert((batch, index));
             triangles += cost;
         }
     }
-    for (_, batch, index, cost) in candidates {
+    for (_, batch, index, cost, _) in candidates {
         if !selected.contains(&(batch, index)) && cost <= triangle_budget - triangles {
             selected.insert((batch, index));
             triangles += cost;
         }
     }
-    (selected, triangles)
+    let rejected = eligible - selected.len();
+    (selected, triangles, rejected)
 }
 
 fn instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
@@ -843,6 +1173,207 @@ mod tests {
             &[pack(&a, [16, 0, 0]), rebased[1]]
         ));
     }
+    fn test_quad(
+        axis: usize,
+        positive: bool,
+        origin: [i32; 3],
+        extent: [u32; 2],
+    ) -> crate::vegetation::VegetationMesh {
+        let mut mesh = crate::vegetation::VegetationMesh::default();
+        let mut normal = [0.; 3];
+        normal[axis] = if positive { 1. } else { -1. };
+        for [a, b] in [[0, 0], [1, 0], [1, 1], [0, 1]] {
+            let mut p = origin;
+            p[(axis + 1) % 3] += a * extent[0] as i32;
+            p[(axis + 2) % 3] += b * extent[1] as i32;
+            mesh.vertices.push(VegetationVertex {
+                position: p.map(|v| v as f32 * 0.0625),
+                normal,
+                color: [f32::from_bits(0x3e912345), 0.124781, 0.943287],
+                ao: 143. / 255.,
+                transmission: 0.35,
+            });
+        }
+        mesh.indices = if positive {
+            vec![0, 1, 2, 0, 2, 3]
+        } else {
+            vec![0, 2, 1, 0, 3, 2]
+        };
+        mesh
+    }
+    #[test]
+    fn packed_quad_preserves_every_face_corner_and_float_material() {
+        assert_eq!(std::mem::size_of::<Quad>(), 44);
+        for axis in 0..3 {
+            for positive in [false, true] {
+                for origin in [[-302, -139, -35], [0; 3], [300, 121, 55]] {
+                    for extent in [[1, 1], [8, 24], [300, 129]] {
+                        let mesh = test_quad(axis, positive, origin, extent);
+                        let quads = pack_quads(&mesh).unwrap();
+                        let q = quads[0];
+                        assert_eq!(q.origin, origin);
+                        assert_eq!(q.extent, extent);
+                        assert_eq!(q.face, axis as u32 * 2 + u32::from(positive));
+                        for (vertex, &index) in mesh.indices.iter().enumerate() {
+                            let corner = if positive {
+                                [0, 1, 2, 0, 2, 3][vertex]
+                            } else {
+                                [0, 2, 1, 0, 3, 2][vertex]
+                            };
+                            let mut cells = q.origin;
+                            if corner == 1 || corner == 2 {
+                                cells[(axis + 1) % 3] += q.extent[0] as i32;
+                            }
+                            if corner == 2 || corner == 3 {
+                                cells[(axis + 2) % 3] += q.extent[1] as i32;
+                            }
+                            // Indexed pulling uses the original topology: the
+                            // index names one of four shared corners per quad.
+                            assert_eq!(index / 4, 0);
+                            assert_eq!(index % 4, corner as u32);
+                            let original = &mesh.vertices[index as usize];
+                            assert_eq!(
+                                cells.map(|v| (v as f32 * 0.0625).to_bits()),
+                                original.position.map(f32::to_bits)
+                            );
+                            assert_eq!(q.color.map(f32::to_bits), original.color.map(f32::to_bits));
+                            assert_eq!(q.ao.to_bits(), original.ao.to_bits());
+                            assert_eq!(q.transmission.to_bits(), original.transmission.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn indexed_quad_stream_addresses_all_faces_without_crossing_material_records() {
+        let mut mesh = crate::vegetation::VegetationMesh::default();
+        for axis in 0..3 {
+            for positive in [false, true] {
+                let mut face = test_quad(axis, positive, [-11, 7, -43], [3, 8]);
+                let base = mesh.vertices.len() as u32;
+                for vertex in &mut face.vertices {
+                    vertex.color[0] = base as f32 / 100.;
+                }
+                mesh.indices.extend(face.indices.iter().map(|i| base + i));
+                mesh.vertices.extend(face.vertices);
+            }
+        }
+        let quads = pack_quads(&mesh).unwrap();
+        assert_eq!(quads.len(), 6);
+        assert_eq!(quads.len() * 44 + mesh.indices.len() * 4, 6 * 68);
+        for &index in &mesh.indices {
+            let q = quads[(index / 4) as usize];
+            let corner = index % 4;
+            let axis = (q.face / 2) as usize;
+            let mut cells = q.origin;
+            if corner == 1 || corner == 2 {
+                cells[(axis + 1) % 3] += q.extent[0] as i32;
+            }
+            if corner == 2 || corner == 3 {
+                cells[(axis + 2) % 3] += q.extent[1] as i32;
+            }
+            assert_eq!(
+                cells.map(|v| v as f32 * 0.0625),
+                mesh.vertices[index as usize].position
+            );
+            assert_eq!(
+                q.color.map(f32::to_bits),
+                mesh.vertices[index as usize].color.map(f32::to_bits)
+            );
+        }
+    }
+    #[test]
+    fn packed_quad_rejects_non_native_nonrectangular_or_varying_material_meshes() {
+        let original = test_quad(1, true, [-4; 3], [2, 3]);
+        for defect in 0..6 {
+            let mut mesh = original.clone();
+            match defect {
+                0 => mesh.vertices[0].position[0] += 0.01,
+                1 => mesh.vertices[2].position[1] += 0.0625,
+                2 => mesh.vertices[3].color[0] += 0.01,
+                3 => mesh.vertices[1].ao = 1.,
+                4 => mesh.indices.swap(1, 2),
+                _ => mesh.vertices[2].transmission = 0.,
+            }
+            assert!(pack_quads(&mesh).is_err(), "defect {defect}");
+        }
+    }
+    #[test]
+    fn color_and_shadow_share_identical_native_decoder() {
+        let end = "    return out;\n}";
+        assert_eq!(
+            SHADER
+                .split(end)
+                .next()
+                .unwrap()
+                .replace("@group(3)", "@group(2)"),
+            SHADOW_SHADER.split(end).next().unwrap()
+        );
+    }
+    #[test]
+    fn explicit_shadow_lod_wins_without_drawing_duplicate_canonical_roots() {
+        let color = batch(0, vec![5], 40);
+        let mut explicit = batch(0, vec![5], 4);
+        explicit.key.lod = 2;
+        let mut frame = VegetationFrame {
+            origin: [0; 3],
+            stats: Default::default(),
+            batches: vec![color],
+            shadow_batches: vec![explicit],
+        };
+        let (selected, cost) = select_shadow_casters(&frame, [0; 3], [0.; 3], 40);
+        assert_eq!(selected, HashSet::from([(1, 0)]));
+        assert_eq!(cost, 4);
+        // Same-key explicit geometry shares the color template and draw prefix.
+        frame.batches[0].key.lod = 2;
+        let (selected, cost) = select_shadow_casters(&frame, [0; 3], [0.; 3], 40);
+        assert_eq!(selected, HashSet::from([(0, 0)]));
+        assert_eq!(cost, 40);
+        frame.shadow_batches.clear();
+        let (selected, cost) = select_shadow_casters(&frame, [0; 3], [0.; 3], 40);
+        assert_eq!(selected, HashSet::from([(0, 0)]));
+        assert_eq!(cost, 40);
+    }
+    #[test]
+    fn caster_admission_hysteresis_survives_lod_membership_and_near_ties() {
+        let mut frame = VegetationFrame {
+            origin: [0; 3],
+            stats: Default::default(),
+            shadow_batches: vec![],
+            batches: vec![batch(0, vec![10], 4), batch(1, vec![11], 4)],
+        };
+        let previous = HashSet::from([caster_key(
+            &frame.batches[0],
+            &frame.batches[0].instances[0],
+        )]);
+        // Challenger becomes slightly nearer, but cannot steal the incumbent's cap.
+        frame.batches[1].instances[0].root_cell[0] = 152;
+        frame.batches[0].key.lod = 4;
+        let old = frame.batches.remove(0);
+        frame.shadow_batches.push(old);
+        let (selected, cost, rejected) =
+            select_shadow_casters_stable(&frame, [0; 3], [0.; 3], 4, &previous);
+        assert_eq!(cost, 4);
+        assert_eq!(selected, HashSet::from([(1, 0)]));
+        assert_eq!(rejected, 1);
+        // A meaningfully nearer caster can take priority within the same cap.
+        frame.batches[0].instances[0].root_cell[0] = 128;
+        let (selected, cost, _) =
+            select_shadow_casters_stable(&frame, [0; 3], [0.; 3], 4, &previous);
+        assert_eq!(selected, HashSet::from([(0, 0)]));
+        assert_eq!(cost, 4);
+        frame.shadow_batches[0].instances[0].root_cell[0] = 95 * 16;
+        let retained = HashSet::from([caster_key(
+            &frame.shadow_batches[0],
+            &frame.shadow_batches[0].instances[0],
+        )]);
+        let (selected, _, _) = select_shadow_casters_stable(&frame, [0; 3], [0.; 3], 8, &retained);
+        assert!(selected.contains(&(1, 0)));
+        let (selected, _, _) =
+            select_shadow_casters_stable(&frame, [0; 3], [0.; 3], 8, &HashSet::new());
+        assert!(!selected.contains(&(1, 0)));
+    }
     #[test]
     fn vegetation_material_vertex_layout_matches_shader() {
         assert_eq!(std::mem::size_of::<VegetationVertex>(), 44);
@@ -853,6 +1384,21 @@ mod tests {
     fn vegetation_shader_validates() {
         for source in [SHADER, SHADOW_SHADER] {
             let module = naga::front::wgsl::parse_str(source).unwrap();
+            let (_, quad_type) = module
+                .types
+                .iter()
+                .find(|(_, ty)| ty.name.as_deref() == Some("Quad"))
+                .unwrap();
+            match &quad_type.inner {
+                naga::TypeInner::Struct { members, span } => {
+                    assert_eq!(*span, std::mem::size_of::<Quad>() as u32);
+                    assert_eq!(
+                        members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+                        vec![0, 12, 20, 24, 36, 40]
+                    );
+                }
+                _ => panic!("Quad must remain a scalar-layout struct"),
+            }
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::empty(),
@@ -886,3 +1432,7 @@ mod tests {
         assert!(packed.root.into_iter().all(f32::is_finite));
     }
 }
+
+#[cfg(test)]
+#[path = "vegetation_gpu_parity.rs"]
+mod parity;

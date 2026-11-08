@@ -1,8 +1,10 @@
 //! Seeded native vegetation. Placement reads only the immutable terrain source;
 //! camera demand, edits and tile request order never influence plant identity.
 use crate::{Cell, Material, World};
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -137,11 +139,98 @@ fn srgb_to_linear(c: f32) -> f32 {
         ((c + 0.055) / 1.055).powf(2.4)
     }
 }
-fn model(mut cells: Cells, seed: u64) -> PlantModel {
-    // Retain only the rooted face-connected component after voxel rasterization.
-    let root = Cell::default();
+// A padded index volume makes the ordinary bounded plant flood six array
+// accesses per cell. Sparse/very widely separated inputs fall back to binary
+// search in canonical cell order; neither path allocates the coordinate gap.
+fn rooted_component(cells: &[(Cell, (Material, [u8; 3]))]) -> Vec<bool> {
+    let mut seen = vec![false; cells.len()];
+    let Ok(root) = cells.binary_search_by_key(&Cell::default(), |v| v.0) else {
+        return seen;
+    };
+    let mut min = [i64::MAX; 3];
+    let mut max = [i64::MIN; 3];
+    for &(c, _) in cells {
+        for (d, value) in [c.x, c.y, c.z].into_iter().enumerate() {
+            min[d] = min[d].min(value);
+            max[d] = max[d].max(value);
+        }
+    }
+    let size = (0..3)
+        .map(|d| max[d].checked_sub(min[d])?.checked_add(3)?.try_into().ok())
+        .collect::<Option<Vec<usize>>>();
+    if let Some(size) = size {
+        if let Some(volume) = size[0]
+            .checked_mul(size[1])
+            .and_then(|v| v.checked_mul(size[2]))
+        {
+            if volume <= 8 * 1024 * 1024 && volume <= cells.len().saturating_mul(64) {
+                let yz = size[1] * size[2];
+                let address = |c: Cell| {
+                    (c.x - min[0] + 1) as usize * yz
+                        + (c.y - min[1] + 1) as usize * size[2]
+                        + (c.z - min[2] + 1) as usize
+                };
+                let mut occupied = vec![0u32; volume];
+                for (i, &(c, _)) in cells.iter().enumerate() {
+                    occupied[address(c)] = i as u32 + 1;
+                }
+                let mut queue = Vec::with_capacity(cells.len());
+                let start = address(Cell::default());
+                queue.push(start);
+                occupied[start] = 0;
+                seen[root] = true;
+                let mut head = 0;
+                while head < queue.len() {
+                    let p = queue[head];
+                    head += 1;
+                    // The empty one-cell border makes each neighbor in bounds.
+                    for q in [p + yz, p - yz, p + size[2], p - size[2], p + 1, p - 1] {
+                        let id = occupied[q];
+                        if id != 0 {
+                            occupied[q] = 0; // Mark on enqueue, never enqueue twice.
+                            seen[id as usize - 1] = true;
+                            queue.push(q);
+                        }
+                    }
+                }
+                return seen;
+            }
+        }
+    }
+    let mut queue = Vec::with_capacity(cells.len());
+    queue.push(root);
+    seen[root] = true;
+    let mut head = 0;
+    while head < queue.len() {
+        let c = cells[queue[head]].0;
+        head += 1;
+        for (x, y, z) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let (Some(x), Some(y), Some(z)) =
+                (c.x.checked_add(x), c.y.checked_add(y), c.z.checked_add(z))
+            else {
+                continue;
+            };
+            if let Ok(i) = cells.binary_search_by_key(&Cell { x, y, z }, |v| v.0) {
+                if !seen[i] {
+                    seen[i] = true;
+                    queue.push(i);
+                }
+            }
+        }
+    }
+    seen
+}
+#[cfg(test)]
+fn rooted_component_reference(cells: &Cells) -> Vec<bool> {
     let mut seen = BTreeSet::new();
-    let mut queue = VecDeque::from([root]);
+    let mut queue = VecDeque::from([Cell::default()]);
     while let Some(c) = queue.pop_front() {
         if !cells.contains_key(&c) || !seen.insert(c) {
             continue;
@@ -161,7 +250,19 @@ fn model(mut cells: Cells, seed: u64) -> PlantModel {
             });
         }
     }
-    cells.retain(|c, _| seen.contains(c));
+    cells.keys().map(|c| seen.contains(c)).collect()
+}
+fn model(cells: Cells, seed: u64) -> PlantModel {
+    // Retain only the rooted face-connected component after voxel rasterization.
+    let cells: Vec<_> = cells.into_iter().collect();
+    let connected = rooted_component(&cells);
+    // Every generated plant in the world test suite checks the old filter on
+    // the actual pre-filter rasterization, including discarded crown voxels.
+    #[cfg(test)]
+    assert_eq!(
+        connected,
+        rooted_component_reference(&cells.iter().copied().collect())
+    );
     let mut min = Cell {
         x: i64::MAX,
         y: i64::MAX,
@@ -174,7 +275,9 @@ fn model(mut cells: Cells, seed: u64) -> PlantModel {
     };
     let voxels: Vec<_> = cells
         .into_iter()
-        .map(|(cell, (material, rgb))| {
+        .zip(connected)
+        .filter(|(_, keep)| *keep)
+        .map(|((cell, (material, rgb)), _)| {
             min.x = min.x.min(cell.x);
             min.y = min.y.min(cell.y);
             min.z = min.z.min(cell.z);
@@ -1073,6 +1176,102 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rooted_component_preserves_sparse_disconnected_and_absent_roots() {
+        for cells in [
+            vec![],
+            vec![Cell { x: 1, y: 0, z: 0 }],
+            vec![
+                Cell::default(),
+                Cell { x: 1, y: 0, z: 0 },
+                Cell { x: 2, y: 0, z: 0 },
+                Cell { x: 2, y: 1, z: 1 },
+                Cell { x: 0, y: 2, z: 0 },
+            ],
+            vec![
+                Cell::default(),
+                Cell { x: 0, y: -1, z: 0 },
+                Cell {
+                    x: 1_000_000_000_000,
+                    y: 0,
+                    z: -1_000_000_000_000,
+                },
+            ],
+        ] {
+            let cells: Cells = cells
+                .into_iter()
+                .map(|c| (c, (Material::Leaf, [127; 3])))
+                .collect();
+            let sorted: Vec<_> = cells.iter().map(|(&c, &paint)| (c, paint)).collect();
+            assert_eq!(
+                rooted_component(&sorted),
+                rooted_component_reference(&cells)
+            );
+        }
+    }
+    #[test]
+    fn generated_models_check_original_component_filter_on_every_candidate() {
+        // model() compares each pre-filter rasterization with the original
+        // BTreeMap/BTreeSet filter under cfg(test). The pigment/voxel/index
+        // construction below that comparison remains the original arithmetic.
+        for seed in [0, 17, 97, u64::MAX] {
+            for variant in [0, 3, 7] {
+                for model in [
+                    generate_grass(seed, variant),
+                    generate_edelweiss(seed, variant),
+                    generate_rowan(seed, variant),
+                ] {
+                    assert!(model.voxels.windows(2).all(|v| v[0].cell < v[1].cell));
+                    for v in &model.voxels {
+                        assert_eq!(model.voxel(v.cell), Some(*v));
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "CPU-only release rooted-filter benchmark; --release --ignored --nocapture"]
+    fn rooted_component_microbenchmark() {
+        use std::{hint::black_box, time::Instant};
+        for variant in [0, 3, 7] {
+            let plant = generate_rowan(123, variant);
+            let cells: Cells = plant
+                .voxels
+                .iter()
+                .map(|v| (v.cell, (v.material, [127; 3])))
+                .collect();
+            let sorted: Vec<_> = cells.iter().map(|(&c, &p)| (c, p)).collect();
+            assert_eq!(
+                rooted_component(&sorted),
+                rooted_component_reference(&cells)
+            );
+            let mut old = Vec::new();
+            let mut new = Vec::new();
+            for i in 0..15 {
+                let mut reference = || {
+                    let t = Instant::now();
+                    black_box(rooted_component_reference(&cells));
+                    old.push(t.elapsed());
+                };
+                let mut indexed = || {
+                    let t = Instant::now();
+                    black_box(rooted_component(&sorted));
+                    new.push(t.elapsed());
+                };
+                if i % 2 == 0 {
+                    reference();
+                    indexed();
+                } else {
+                    indexed();
+                    reference();
+                }
+            }
+            old.sort();
+            new.sort();
+            eprintln!("rowan rooted filter seed=123 variant={variant} cells={} reference_us={} indexed_us={} speedup={:.2}",cells.len(),old[7].as_micros(),new[7].as_micros(),old[7].as_secs_f64()/new[7].as_secs_f64());
+        }
+    }
+
     use super::*;
     fn record(species: Species, variant: u8) -> PlantRecord {
         PlantRecord {

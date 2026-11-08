@@ -36,6 +36,7 @@ mod surface_compare;
 mod terrain;
 mod vegetation;
 mod vegetation_gpu;
+mod vegetation_mesher;
 mod vegetation_scene;
 mod viewer_visual;
 pub mod volume;
@@ -308,7 +309,8 @@ impl Gpu {
                     label: Some("Frontier device"),
                     required_features: adapter.features()
                         & (wgpu::Features::TIMESTAMP_QUERY
-                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
@@ -674,6 +676,7 @@ impl Gpu {
         width: u32,
         height: u32,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+        plant_timings: Option<gpu_probe::VegetationTiming<'_>>,
     ) {
         let _encode_timer = EncodeTimer(
             &self.draw_encode_cpu_ms,
@@ -737,6 +740,9 @@ impl Gpu {
         }
         if let Some(adaptive) = &self.adaptive {
             adaptive.draw_shadows(encoder);
+            if let Some(t) = &plant_timings {
+                t.shadow_start(encoder);
+            }
             if adaptive.near_shadows_active() {
                 if let Some(vegetation) = &self.vegetation {
                     vegetation.draw_shadows(
@@ -747,6 +753,12 @@ impl Gpu {
                     );
                 }
             }
+            if let Some(t) = &plant_timings {
+                t.shadow_end(encoder);
+            }
+        } else if let Some(t) = &plant_timings {
+            t.shadow_start(encoder);
+            t.shadow_end(encoder);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
@@ -774,11 +786,30 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        // Dense opaque vegetation occludes expensive terrain shading here.
+        // Keep terrain-first as a diagnostic A/B; it was slower on the laptop.
+        static PLANTS_FIRST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let plants_first = *PLANTS_FIRST.get_or_init(|| {
+            std::env::var("FRONTIER_VEGETATION_DRAW_ORDER").as_deref() != Ok("after")
+        });
+        if !plants_first {
+            if let Some(adaptive) = &self.adaptive {
+                adaptive.draw(&mut pass);
+            }
+        }
+        if let Some(t) = &plant_timings {
+            t.color_start(&mut pass);
+        }
         if let (Some(vegetation), Some(adaptive)) = (&self.vegetation, &self.adaptive) {
             vegetation.draw(&mut pass, &self.bind_group, adaptive.near_shadow_bind());
         }
+        if let Some(t) = &plant_timings {
+            t.color_end(&mut pass);
+        }
         if let Some(adaptive) = &self.adaptive {
-            adaptive.draw(&mut pass);
+            if plants_first {
+                adaptive.draw(&mut pass);
+            }
             if !self.volume_owner {
                 return;
             }
@@ -900,6 +931,7 @@ impl Gpu {
                 rw,
                 rh,
                 None,
+                None,
             );
             atmosphere.encode_with_shadows(
                 &mut encoder,
@@ -915,6 +947,7 @@ impl Gpu {
                 camera,
                 width,
                 height,
+                None,
                 None,
             );
         }
@@ -1921,6 +1954,8 @@ impl Viewer {
             if let Some(probe) = &mut self.gpu_probe {
                 probe.stats = frontier_runtime::FrameStats::new(10000);
                 probe.full_stats = frontier_runtime::FrameStats::new(10000);
+                probe.plant_color_stats = frontier_runtime::FrameStats::new(10000);
+                probe.plant_shadow_stats = frontier_runtime::FrameStats::new(10000);
             }
             eprintln!(
                 "adaptive route starts after {} publication",
@@ -2042,6 +2077,11 @@ impl Viewer {
                 width,
                 height,
                 timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
+                timing.and_then(|slot| {
+                    self.gpu_probe
+                        .as_ref()
+                        .and_then(|p| p.vegetation_writes(slot))
+                }),
             );
             atmosphere.encode_with_shadows(
                 &mut encoder,
@@ -2058,6 +2098,11 @@ impl Viewer {
                 config.width,
                 config.height,
                 timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
+                timing.and_then(|slot| {
+                    self.gpu_probe
+                        .as_ref()
+                        .and_then(|p| p.vegetation_writes(slot))
+                }),
             );
         }
         if let Some(ui) = &self.settings_ui {
@@ -2090,6 +2135,27 @@ impl Viewer {
             native_clusters: self.adaptive_view.as_ref().map_or(0, |v| v.native_clusters),
             plant_pending: gpu.vegetation_stats.pending_jobs,
             plant_triangles: gpu.vegetation_stats.triangles,
+            plant_tree_lods: gpu.vegetation_stats.tree_lod_histogram,
+            plant_lod_changes: gpu.vegetation_stats.tree_lod_changes,
+            plant_coarsenings: gpu.vegetation_stats.tree_coarsenings,
+            plant_demand: gpu.vegetation_stats.demanded_by_species,
+            plant_ready: gpu.vegetation_stats.ready_by_species,
+            shadow_admitted: gpu
+                .vegetation
+                .as_ref()
+                .map_or(0, |v| v.stats().shadow_admitted),
+            shadow_removed: gpu
+                .vegetation
+                .as_ref()
+                .map_or(0, |v| v.stats().shadow_removed),
+            shadow_triangles: gpu
+                .vegetation
+                .as_ref()
+                .map_or(0, |v| v.stats().shadow_triangles),
+            shadow_lod_changes: gpu.vegetation_stats.shadow_lod_changes,
+            shadow_lods: gpu.vegetation_stats.shadow_lod_histogram,
+            plant_selected_mesh_evictions: gpu.vegetation_stats.selected_mesh_evictions,
+            plant_cpu_bytes: gpu.vegetation_stats.total_cpu_geometry_bytes,
         });
         self.draw_encode_frames.pending_ms = Some(gpu.last_draw_encode_cpu_ms.get());
         if let Some(ui) = &mut self.settings_ui {
@@ -3209,6 +3275,11 @@ pub fn run() -> Result<()> {
         };
         let mut json = report.to_json();
         json.pop();
+        json.push_str(&format!(
+            ",\"process_memory\":{}}}",
+            playability::process_memory_json()
+        ));
+        json.pop();
         json.push_str(&format!(",\"benchmark_interrupted\":{},\"benchmark_failed\":{},\"benchmark_requested_seconds\":{},\"benchmark_requested_frames\":{}}}",viewer.error.as_deref().is_some_and(|e|e.starts_with("benchmark interrupted")),viewer.error.is_some(),seconds.map_or("null".into(),|v|v.to_string()),frame_limit.map_or("null".into(),|v|v.to_string())));
         if let Some(view) = &viewer.adaptive_view {
             json.pop();
@@ -3346,6 +3417,12 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"gpu_full_render\":{{\"supported\":{},\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps\"}}}}",
             full.is_some(),full.as_ref().map_or(0,|s|s.sample_count),number(full.as_ref().and_then(|s|s.p50_ms)),number(full.as_ref().and_then(|s|s.p95_ms)),number(full.as_ref().and_then(|s|s.p99_ms))));
+        if let Some(probe) = &viewer.gpu_probe {
+            let color = probe.plant_color_stats.summary();
+            let shadow = probe.plant_shadow_stats.summary();
+            json.pop();
+            json.push_str(&format!(",\"vegetation_gpu_timing\":{{\"supported\":{},\"color_samples\":{},\"color_p50_ms\":{},\"color_p95_ms\":{},\"shadow_samples\":{},\"shadow_p50_ms\":{},\"shadow_p95_ms\":{},\"scope\":\"asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation\"}}}}", probe.vegetation_supported,color.sample_count,number(color.p50_ms),number(color.p95_ms),shadow.sample_count,number(shadow.p50_ms),number(shadow.p95_ms)));
+        }
         if let Some(gpu) = &viewer.gpu {
             let m = &gpu.brick_cache_metrics;
             json.pop();

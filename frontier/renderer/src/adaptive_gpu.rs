@@ -1182,7 +1182,7 @@ impl AdaptiveGpu {
                 _ => {}
             }
             let error = c.best_error_m.map_or(f64::INFINITY, |e| {
-                queries.vertical_error(e,c.proxy_bounds,c.origin)
+                queries.vertical_error(e, c.proxy_bounds, c.origin)
             });
             let error = crate::adaptive_stream::weighted_near_detail_error(
                 error,

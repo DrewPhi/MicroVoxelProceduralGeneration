@@ -98,4 +98,6 @@ branch's working tree. They remain available on GitHub:
 Consult those as references under the Frontier reuse policy; do not restore an old
 runtime into this branch by default.
 
+[Vegetation streaming and compact rendering results](frontier/VEGETATION_STREAMING_CHECKPOINT.md).
+
 [MIT license](LICENSE)

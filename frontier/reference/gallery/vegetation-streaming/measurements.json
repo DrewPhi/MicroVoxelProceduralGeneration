@@ -1,0 +1,4427 @@
+{
+  "schema": "vegetation_checkpoint_v1",
+  "baseline_commit": "9f0c8ac",
+  "final_manifest": {
+    "binary_sha256": "f949e63d6350244eac1fa5172adb049905bbe12deba02b05dfe9fa4eb7d38a20",
+    "runs": [
+      {
+        "name": "final-convergence",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--seconds",
+          "12",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-convergence.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 12.782047105021775
+      },
+      {
+        "name": "final-720",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--seconds",
+          "8",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-720.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 17.676497858017683
+      },
+      {
+        "name": "final-1080",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--seconds",
+          "8",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-1080.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 17.28416471602395
+      },
+      {
+        "name": "final-walk",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--seconds",
+          "18",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-walk.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 27.522551252041012
+      },
+      {
+        "name": "final-turn",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--route",
+          "walk-turn-return",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "6",
+          "--seconds",
+          "16",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-turn.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 25.963861220050603
+      },
+      {
+        "name": "final-laptop",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--render-scale",
+          "0.75",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "6",
+          "--seconds",
+          "18",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-laptop.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 30.174539476982318
+      },
+      {
+        "name": "final-cold",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "6",
+          "--seconds",
+          "20",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-cold.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 20.343093848088756
+      },
+      {
+        "name": "baseline-cold-walk",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/baseline-frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "6",
+          "--seconds",
+          "20",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/baseline-cold-walk.json"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 20.348930448992178
+      },
+      {
+        "name": "final-pretty",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/final-pretty.png"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 27.032037287950516
+      },
+      {
+        "name": "primary-final",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--scene",
+          "hybrid",
+          "--terrain-recipe",
+          "legacy",
+          "--view-levels",
+          "11",
+          "--voxel-filter",
+          "on",
+          "--msaa",
+          "1",
+          "--capture-linear",
+          "--capture-far",
+          "300",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/primary-final.png",
+          "--eye",
+          "0.0,94.8875,0.0",
+          "--target",
+          "-8.731370115810932e-08,94.83756238296628,-0.9987523555755615",
+          "--fov-y",
+          "60",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--seed",
+          "7"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 0.8690455430187285
+      },
+      {
+        "name": "secondary-seed31",
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--seed",
+          "31",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/secondary-seed31.png"
+        ],
+        "explicit_environment": {},
+        "returncode": 0,
+        "elapsed_seconds": 30.970642262953334
+      }
+    ],
+    "scope": "Sequential actual Radeon760M runs; no builds/recordings concurrent with timings. 1080p angular error matches720p. Cold vegetation is process-cold; terrain derived disk cache is explicitly reused."
+  },
+  "tests": {
+    "passed": 486,
+    "ignored": 14,
+    "failed": 0,
+    "explicit_frozen_gpu_parity": "pass, exact RGBA8 and Depth32 across expanded/compact/compact-indexed"
+  },
+  "hardware": "Ryzen5 7640U / Radeon760M integrated, RADV Vulkan Mesa25.2.8",
+  "native_voxel_m": 0.0625,
+  "source_version": 3,
+  "scope": "Sequential local runs, detailed appearance,4xMSAA,60degFOV,6kmclip.720p pixelerror3;1080p4.5 same angular bound. Process-cold vegetation, explicitly reused terrain disk cache. More loaded content is not an equal-quality FPS win.",
+  "runs": {
+    "baseline-720": {
+      "frames": {
+        "sample_count": 318,
+        "accepted_frames": 318,
+        "missed_budget_frames": 72,
+        "rejected_inputs": 0,
+        "p50_ms": 15.450692,
+        "p95_ms": 17.598567,
+        "p99_ms": 18.153049
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 236,
+        "p50_ms": 14.74910347925949,
+        "p95_ms": 15.684761240592957,
+        "p99_ms": 16.05229956796646,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 239,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 984236,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 41,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          649548
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 144458040,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 16,
+        "shadow_triangles": 199784,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 74808,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.009347975,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 600141268,
+        "source_cache_bytes": 95617760,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 264241152,
+        "first_coverage_ms": 174.124002,
+        "first_quality_ms": 7521.158517
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 2.896485,
+          "95": 4.13961695,
+          "99": 4.732924579999998
+        },
+        "terrain_ms": {
+          "50": 2.5296005,
+          "95": 3.6696131499999995,
+          "99": 4.142039769999999
+        },
+        "vegetation_ms": {
+          "50": 0.33898150000000005,
+          "95": 0.51648715,
+          "99": 0.5805558399999998
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation"
+    },
+    "baseline-1080": {
+      "frames": {
+        "sample_count": 199,
+        "accepted_frames": 199,
+        "missed_budget_frames": 199,
+        "rejected_inputs": 0,
+        "p50_ms": 23.156436999999997,
+        "p95_ms": 25.507345,
+        "p99_ms": 26.90364
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 147,
+        "p50_ms": 21.859693688713072,
+        "p95_ms": 22.835026833766936,
+        "p99_ms": 23.337020628192903,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 237,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 984236,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 43,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          649548
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 157055040,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 16,
+        "shadow_triangles": 199784,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 74808,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.02409335,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 523031604,
+        "source_cache_bytes": 21395776,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289406976,
+        "first_coverage_ms": 318.075504,
+        "first_quality_ms": 8326.702458
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 3.953799,
+          "95": 5.6877706,
+          "99": 6.504675680000001
+        },
+        "terrain_ms": {
+          "50": 3.540609,
+          "95": 4.977748999999999,
+          "99": 5.735003040000001
+        },
+        "vegetation_ms": {
+          "50": 0.444061,
+          "95": 0.7050339,
+          "99": 0.8432394600000002
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation"
+    },
+    "baseline-walk": {
+      "frames": {
+        "sample_count": 810,
+        "accepted_frames": 810,
+        "missed_budget_frames": 558,
+        "rejected_inputs": 0,
+        "p50_ms": 20.159615,
+        "p95_ms": 30.91679,
+        "p99_ms": 35.046313000000005
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 779,
+        "p50_ms": 16.865925467250825,
+        "p95_ms": 20.319767810474396,
+        "p99_ms": 21.87796841091156,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 246,
+        "resident_templates": 278,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 132,
+        "triangles": 996382,
+        "budget_rejected": 0,
+        "culled_instances": 163,
+        "coverage_fallbacks": 51,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          26,
+          45,
+          61
+        ],
+        "triangles_by_species": [
+          331154,
+          17360,
+          647868
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 129,
+        "gpu_bytes": 268415664,
+        "uploaded_bytes_last_update": 1408,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 14,
+        "shadow_triangles": 197864,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 0,
+        "shadow_only_triangles": 0,
+        "retained_ground_detail": 62,
+        "canonical_voxel_m": 0.0625
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 18.007375818,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 6,
+        "native_clusters": 29,
+        "resident_clusters": 4576,
+        "visible_clusters": 3873,
+        "cpu_cache_bytes": 670368440,
+        "source_cache_bytes": 133979264,
+        "gpu_resident_bytes": 242042688,
+        "gpu_allocated_bytes": 306184192,
+        "first_coverage_ms": 149.903582,
+        "first_quality_ms": 7408.066849
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 13.609728,
+          "95": 25.4354381,
+          "99": 28.775911359999995
+        },
+        "terrain_ms": {
+          "50": 11.799648999999999,
+          "95": 23.629278399999993,
+          "99": 27.399361109999994
+        },
+        "vegetation_ms": {
+          "50": 1.117868,
+          "95": 2.5971578999999996,
+          "99": 5.96785852999998
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation"
+    },
+    "gpu-expanded": {
+      "frames": {
+        "sample_count": 322,
+        "accepted_frames": 322,
+        "missed_budget_frames": 57,
+        "rejected_inputs": 0,
+        "p50_ms": 15.298607,
+        "p95_ms": 18.389197,
+        "p99_ms": 19.688125
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 239,
+        "p50_ms": 14.64867265945816,
+        "p95_ms": 15.67462197586441,
+        "p99_ms": 16.693798423736574,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 239,
+        "color_p50_ms": 4.863560825798035,
+        "color_p95_ms": 5.423344421562195,
+        "shadow_samples": 239,
+        "shadow_p50_ms": 0.5367398122901916,
+        "shadow_p95_ms": 0.6499949985466004,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 245,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 979362,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 29,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          644674
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 171168360,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 22,
+        "shadow_triangles": 199286,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 79916,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          2,
+          13,
+          5,
+          28
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "explicit_shadow_instances": 12,
+        "explicit_shadow_triangles": 193288,
+        "shadow_lod_histogram": [
+          0,
+          2,
+          8,
+          2
+        ],
+        "shadow_lod_changes": 0,
+        "ground_assembly_cache": {
+          "hits": 49,
+          "misses": 120,
+          "accounted_bytes": 22540960,
+          "budget_bytes": 67108864,
+          "entries": 64,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            115,
+            169
+          ],
+          "completed": [
+            209,
+            115,
+            169
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            224853329,
+            4545850871,
+            903420454
+          ],
+          "max_job_nanos": [
+            20952622,
+            71141789,
+            26628006
+          ],
+          "assembly_nanos": [
+            0,
+            3860062447,
+            710291132
+          ],
+          "mesh_nanos": [
+            0,
+            684941864,
+            191981196
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.015597276,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 615482484,
+        "source_cache_bytes": 112335136,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 281018368,
+        "first_coverage_ms": 187.261605,
+        "first_quality_ms": 8718.693436000001
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 3.2710644999999996,
+          "95": 4.895197,
+          "99": 5.47167636
+        },
+        "terrain_ms": {
+          "50": 2.839474,
+          "95": 4.258022499999999,
+          "99": 4.87451492
+        },
+        "vegetation_ms": {
+          "50": 0.4185305,
+          "95": 0.60547265,
+          "99": 0.7028450500000006
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "gpu-compact": {
+      "frames": {
+        "sample_count": 386,
+        "accepted_frames": 386,
+        "missed_budget_frames": 0,
+        "rejected_inputs": 0,
+        "p50_ms": 12.972648,
+        "p95_ms": 15.405464,
+        "p99_ms": 16.281705
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 287,
+        "p50_ms": 12.521511026012421,
+        "p95_ms": 13.272377681957245,
+        "p99_ms": 13.581725446540833,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 287,
+        "color_p50_ms": 2.9808236017570495,
+        "color_p95_ms": 3.252700170604706,
+        "shadow_samples": 287,
+        "shadow_p50_ms": 0.2118825795249939,
+        "shadow_p95_ms": 0.21713255454254152,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 246,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 979362,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 29,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          644674
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 37826612,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 22,
+        "shadow_triangles": 199286,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 79916,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          2,
+          13,
+          5,
+          28
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "explicit_shadow_instances": 12,
+        "explicit_shadow_triangles": 191044,
+        "shadow_lod_histogram": [
+          0,
+          2,
+          8,
+          2
+        ],
+        "shadow_lod_changes": 0,
+        "ground_assembly_cache": {
+          "hits": 48,
+          "misses": 121,
+          "accounted_bytes": 22540960,
+          "budget_bytes": 67108864,
+          "entries": 64,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            115,
+            169
+          ],
+          "completed": [
+            209,
+            115,
+            169
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            260062048,
+            4793940789,
+            978634662
+          ],
+          "max_job_nanos": [
+            31676485,
+            76952523,
+            29152245
+          ],
+          "assembly_nanos": [
+            0,
+            4084339556,
+            775315780
+          ],
+          "mesh_nanos": [
+            0,
+            708734488,
+            200919323
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.007634614,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 281018368,
+        "first_coverage_ms": 201.105729,
+        "first_quality_ms": 8970.30101
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 2.9973865,
+          "95": 4.412671,
+          "99": 5.059165949999998
+        },
+        "terrain_ms": {
+          "50": 2.5794505,
+          "95": 3.850475,
+          "99": 4.497682449999999
+        },
+        "vegetation_ms": {
+          "50": 0.396564,
+          "95": 0.5645695000000001,
+          "99": 0.6391937499999997
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "gpu-compact-indexed": {
+      "frames": {
+        "sample_count": 382,
+        "accepted_frames": 382,
+        "missed_budget_frames": 6,
+        "rejected_inputs": 0,
+        "p50_ms": 13.061695,
+        "p95_ms": 15.659548999999998,
+        "p99_ms": 17.028528
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 284,
+        "p50_ms": 12.583188213432312,
+        "p95_ms": 13.508666633892059,
+        "p99_ms": 14.026771038677216,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 284,
+        "color_p50_ms": 3.0430618552093507,
+        "color_p95_ms": 3.36984274294281,
+        "shadow_samples": 284,
+        "shadow_p50_ms": 0.1951307508430481,
+        "shadow_p95_ms": 0.23256187043380738,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 243,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 981728,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          647040
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 55213268,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 22,
+        "shadow_triangles": 199286,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 79916,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          3,
+          12,
+          1,
+          32
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "explicit_shadow_instances": 12,
+        "explicit_shadow_triangles": 191044,
+        "shadow_lod_histogram": [
+          0,
+          2,
+          8,
+          2
+        ],
+        "shadow_lod_changes": 0,
+        "ground_assembly_cache": {
+          "hits": 49,
+          "misses": 120,
+          "accounted_bytes": 22541464,
+          "budget_bytes": 67108864,
+          "entries": 64,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            114,
+            169
+          ],
+          "completed": [
+            209,
+            114,
+            169
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            260343430,
+            4731282018,
+            982276095
+          ],
+          "max_job_nanos": [
+            24435025,
+            71974089,
+            27527990
+          ],
+          "assembly_nanos": [
+            0,
+            4022263805,
+            777956314
+          ],
+          "mesh_nanos": [
+            0,
+            708184708,
+            203212019
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.004270461,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289406976,
+        "first_coverage_ms": 186.64298000000002,
+        "first_quality_ms": 7692.238136
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 3.0834669999999997,
+          "95": 5.166202449999999,
+          "99": 5.7280299
+        },
+        "terrain_ms": {
+          "50": 2.6328795,
+          "95": 4.492339749999999,
+          "99": 5.06786909
+        },
+        "vegetation_ms": {
+          "50": 0.422092,
+          "95": 0.69778775,
+          "99": 0.7884274299999999
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "order-first": {
+      "frames": {
+        "sample_count": 379,
+        "accepted_frames": 379,
+        "missed_budget_frames": 11,
+        "rejected_inputs": 0,
+        "p50_ms": 12.934642,
+        "p95_ms": 16.280504,
+        "p99_ms": 17.32297
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 282,
+        "p50_ms": 12.381525050926209,
+        "p95_ms": 13.128263863918304,
+        "p99_ms": 13.781344725643159,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 282,
+        "color_p50_ms": 2.970924793899536,
+        "color_p95_ms": 3.1861737696189882,
+        "shadow_samples": 282,
+        "shadow_p50_ms": 0.21444745281600952,
+        "shadow_p95_ms": 0.22114016905975342,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 243,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 981728,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          647040
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 36237820,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 22,
+        "shadow_triangles": 199286,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 79916,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          3,
+          12,
+          1,
+          32
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "explicit_shadow_instances": 12,
+        "explicit_shadow_triangles": 191044,
+        "shadow_lod_histogram": [
+          0,
+          2,
+          8,
+          2
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 116571600,
+        "total_cpu_geometry_bytes": 165926600,
+        "cpu_cache_geometry_bytes": 165926600,
+        "selected_cpu_meshes": 126,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 49,
+          "misses": 120,
+          "accounted_bytes": 22540960,
+          "budget_bytes": 67108864,
+          "entries": 64,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            114,
+            169
+          ],
+          "completed": [
+            209,
+            114,
+            169
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            252233853,
+            4485422965,
+            941352082
+          ],
+          "max_job_nanos": [
+            24043191,
+            79429205,
+            28877950
+          ],
+          "assembly_nanos": [
+            0,
+            3809469706,
+            751301645
+          ],
+          "mesh_nanos": [
+            0,
+            675126884,
+            188949801
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.010158808,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289406976,
+        "first_coverage_ms": 233.62027,
+        "first_quality_ms": 8116.568122000001
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 2.707086,
+          "95": 4.4163483999999995,
+          "99": 5.183189959999991
+        },
+        "terrain_ms": {
+          "50": 2.325956,
+          "95": 3.884667199999999,
+          "99": 4.6328912199999985
+        },
+        "vegetation_ms": {
+          "50": 0.357383,
+          "95": 0.5821411999999999,
+          "99": 0.70552814
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "order-after": {
+      "frames": {
+        "sample_count": 336,
+        "accepted_frames": 336,
+        "missed_budget_frames": 52,
+        "rejected_inputs": 0,
+        "p50_ms": 14.681186,
+        "p95_ms": 18.186149,
+        "p99_ms": 18.754875000000002
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 249,
+        "p50_ms": 13.87856945383072,
+        "p95_ms": 14.772988861782075,
+        "p99_ms": 15.30808555212021,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 249,
+        "color_p50_ms": 3.0330828950614928,
+        "color_p95_ms": 3.297264844036102,
+        "shadow_samples": 249,
+        "shadow_p50_ms": 0.20675283294296265,
+        "shadow_p95_ms": 0.21761346828460693,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 246,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 979362,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 29,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          644674
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 37431724,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 22,
+        "shadow_triangles": 199286,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 4,
+        "shadow_only_triangles": 79916,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          2,
+          13,
+          5,
+          28
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "explicit_shadow_instances": 12,
+        "explicit_shadow_triangles": 191044,
+        "shadow_lod_histogram": [
+          0,
+          2,
+          8,
+          2
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 116335000,
+        "total_cpu_geometry_bytes": 166976000,
+        "cpu_cache_geometry_bytes": 166976000,
+        "selected_cpu_meshes": 126,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 49,
+          "misses": 120,
+          "accounted_bytes": 22540960,
+          "budget_bytes": 67108864,
+          "entries": 64,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            115,
+            169
+          ],
+          "completed": [
+            209,
+            115,
+            169
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            244137531,
+            4766210358,
+            973201834
+          ],
+          "max_job_nanos": [
+            22982915,
+            84741261,
+            26834575
+          ],
+          "assembly_nanos": [
+            0,
+            4073476790,
+            775489637
+          ],
+          "mesh_nanos": [
+            0,
+            691925010,
+            196626986
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 6.013482964,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 281018368,
+        "first_coverage_ms": 182.539461,
+        "first_quality_ms": 8504.393212
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 3.176076,
+          "95": 4.38298475,
+          "99": 4.692042999999998
+        },
+        "terrain_ms": {
+          "50": 2.7664505,
+          "95": 3.88638875,
+          "99": 4.175025349999999
+        },
+        "vegetation_ms": {
+          "50": 0.381129,
+          "95": 0.56664775,
+          "99": 0.6429921499999999
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-convergence": {
+      "frames": {
+        "sample_count": 833,
+        "accepted_frames": 833,
+        "missed_budget_frames": 211,
+        "rejected_inputs": 0,
+        "p50_ms": 13.913957,
+        "p95_ms": 24.983148,
+        "p99_ms": 29.012842
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 707,
+        "p50_ms": 12.880873819770812,
+        "p95_ms": 15.807594625545502,
+        "p99_ms": 16.981464993782044,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 707,
+        "color_p50_ms": 3.0583709426651002,
+        "color_p95_ms": 3.577437174934387,
+        "shadow_samples": 707,
+        "shadow_p50_ms": 0.2338843832244873,
+        "shadow_p95_ms": 0.323935481426239,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 235,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 982292,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          647604
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30582972,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 25,
+        "shadow_triangles": 199724,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          3,
+          0,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 38,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112481600,
+        "total_cpu_geometry_bytes": 166625400,
+        "cpu_cache_geometry_bytes": 166625400,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            161,
+            153
+          ],
+          "completed": [
+            209,
+            161,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            267534075,
+            4396564691,
+            598643292
+          ],
+          "max_job_nanos": [
+            30995628,
+            61816724,
+            31299576
+          ],
+          "assembly_nanos": [
+            0,
+            3378758544,
+            401762992
+          ],
+          "mesh_nanos": [
+            0,
+            1016409882,
+            195896031
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 955334656,
+        "peak_rss_bytes": 955334656,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 12.006422623,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 272629760,
+        "first_coverage_ms": 383.676856,
+        "first_quality_ms": 6536.661993
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 5.477012,
+          "95": 18.5510744,
+          "99": 24.058432959999983
+        },
+        "terrain_ms": {
+          "50": 4.427439,
+          "95": 17.8702764,
+          "99": 23.669189039999996
+        },
+        "vegetation_ms": {
+          "50": 0.567529,
+          "95": 2.9171937999999997,
+          "99": 5.5477730799999865
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          1.6566626650660263,
+          3.4909963985594237,
+          1.2112845138055222
+        ],
+        "p95": [
+          17.0,
+          34.0,
+          14.0
+        ],
+        "max": [
+          23,
+          41,
+          22
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-720": {
+      "frames": {
+        "sample_count": 493,
+        "accepted_frames": 493,
+        "missed_budget_frames": 50,
+        "rejected_inputs": 0,
+        "p50_ms": 13.917527000000002,
+        "p95_ms": 17.171916,
+        "p99_ms": 18.285603000000002
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 367,
+        "p50_ms": 13.221480977588653,
+        "p95_ms": 13.83793224262619,
+        "p99_ms": 14.174812318943024,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 367,
+        "color_p50_ms": 2.9925659122924806,
+        "color_p95_ms": 3.233583849357605,
+        "shadow_samples": 367,
+        "shadow_p50_ms": 0.23356377406311035,
+        "shadow_p95_ms": 0.2397355004196167,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 225,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 29,
+        "shadow_triangles": 199840,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 34,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112702000,
+        "total_cpu_geometry_bytes": 167772000,
+        "cpu_cache_geometry_bytes": 167772000,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            188559748,
+            4187385268,
+            626307550
+          ],
+          "max_job_nanos": [
+            18130061,
+            81251645,
+            23252071
+          ],
+          "assembly_nanos": [
+            0,
+            3238900471,
+            449422497
+          ],
+          "mesh_nanos": [
+            0,
+            947193025,
+            175866358
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 948887552,
+        "peak_rss_bytes": 948887552,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 8.017144825,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 306184192,
+        "first_coverage_ms": 153.09631100000001,
+        "first_quality_ms": 9361.862046
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 4.1401140000000005,
+          "95": 5.3466476,
+          "99": 5.708916759999998
+        },
+        "terrain_ms": {
+          "50": 3.5191570000000003,
+          "95": 4.611947,
+          "99": 5.03391292
+        },
+        "vegetation_ms": {
+          "50": 0.581777,
+          "95": 0.7601091999999999,
+          "99": 0.837426
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-1080": {
+      "frames": {
+        "sample_count": 300,
+        "accepted_frames": 300,
+        "missed_budget_frames": 300,
+        "rejected_inputs": 0,
+        "p50_ms": 21.824949,
+        "p95_ms": 26.234582999999997,
+        "p99_ms": 27.367269
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 222,
+        "p50_ms": 20.579982221076964,
+        "p95_ms": 21.58805757673645,
+        "p99_ms": 21.986975525779723,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 222,
+        "color_p50_ms": 5.320348728469849,
+        "color_p95_ms": 5.623083929100036,
+        "shadow_samples": 222,
+        "shadow_p50_ms": 0.23500651528930663,
+        "shadow_p95_ms": 0.2491133183898926,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 215,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 43,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 27,
+        "shadow_triangles": 199256,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 36,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112702000,
+        "total_cpu_geometry_bytes": 166383200,
+        "cpu_cache_geometry_bytes": 166383200,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            187,
+            153
+          ],
+          "completed": [
+            209,
+            187,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            219137547,
+            2836918771,
+            485968943
+          ],
+          "max_job_nanos": [
+            21080508,
+            45644555,
+            17410564
+          ],
+          "assembly_nanos": [
+            0,
+            2071383451,
+            354076558
+          ],
+          "mesh_nanos": [
+            0,
+            764346842,
+            130963924
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 956719104,
+        "peak_rss_bytes": 956719104,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "route": "Stationary",
+      "route_clock": "frame",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 8.050541758,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "cpu_cache_bytes": 522593684,
+        "source_cache_bytes": 20965376,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 306184192,
+        "first_coverage_ms": 315.656708,
+        "first_quality_ms": 8988.398004
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 5.4449585,
+          "95": 7.0398585,
+          "99": 7.8813339099999995
+        },
+        "terrain_ms": {
+          "50": 4.6055375000000005,
+          "95": 5.9474838,
+          "99": 6.57303647
+        },
+        "vegetation_ms": {
+          "50": 0.788367,
+          "95": 1.11659625,
+          "99": 1.3595302299999998
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0,
+          0,
+          0
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-walk": {
+      "frames": {
+        "sample_count": 864,
+        "accepted_frames": 864,
+        "missed_budget_frames": 517,
+        "rejected_inputs": 0,
+        "p50_ms": 18.126519000000002,
+        "p95_ms": 29.665899,
+        "p99_ms": 34.115895
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 831,
+        "p50_ms": 14.770624369216918,
+        "p95_ms": 18.006452482704162,
+        "p99_ms": 19.376816190719605,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 831,
+        "color_p50_ms": 2.4437231041603087,
+        "color_p95_ms": 2.980342688014984,
+        "shadow_samples": 831,
+        "shadow_p50_ms": 0.26782887818527223,
+        "shadow_p95_ms": 0.3533914481277466,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 246,
+        "resident_templates": 220,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 134,
+        "triangles": 996300,
+        "budget_rejected": 0,
+        "culled_instances": 163,
+        "coverage_fallbacks": 33,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          26,
+          46,
+          62
+        ],
+        "triangles_by_species": [
+          328930,
+          17492,
+          649878
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 131,
+        "gpu_bytes": 83040476,
+        "uploaded_bytes_last_update": 131976,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 35,
+        "shadow_triangles": 199806,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 28,
+        "shadow_only_triangles": 126244,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          15,
+          14,
+          33
+        ],
+        "demanded_by_species": [
+          26,
+          46,
+          62
+        ],
+        "ready_by_species": [
+          26,
+          46,
+          62
+        ],
+        "shadow_admitted": 1,
+        "shadow_removed": 1,
+        "shadow_budget_rejected": 27,
+        "shadow_stream_budget_rejected": 16,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 33,
+        "explicit_shadow_triangles": 148656,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          33
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112972000,
+        "total_cpu_geometry_bytes": 166588000,
+        "cpu_cache_geometry_bytes": 166588000,
+        "selected_cpu_meshes": 164,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 237,
+          "misses": 167,
+          "accounted_bytes": 64557008,
+          "budget_bytes": 67108864,
+          "entries": 167,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            246,
+            326,
+            402
+          ],
+          "completed": [
+            246,
+            326,
+            402
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            245602569,
+            5803744144,
+            1194695012
+          ],
+          "max_job_nanos": [
+            16307577,
+            63375714,
+            22644194
+          ],
+          "assembly_nanos": [
+            0,
+            4285605950,
+            690159920
+          ],
+          "mesh_nanos": [
+            0,
+            1515827683,
+            501914688
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 1436184576,
+        "peak_rss_bytes": 1436184576,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 3,
+      "route_elapsed_seconds": 18.004933366,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 6,
+        "native_clusters": 29,
+        "resident_clusters": 4567,
+        "visible_clusters": 3873,
+        "cpu_cache_bytes": 670564492,
+        "source_cache_bytes": 133881568,
+        "gpu_resident_bytes": 241781920,
+        "gpu_allocated_bytes": 297795584,
+        "first_coverage_ms": 157.559486,
+        "first_quality_ms": 8336.413013
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 12.024981,
+          "95": 24.39380245,
+          "99": 28.424986309999998
+        },
+        "terrain_ms": {
+          "50": 10.217909500000001,
+          "95": 22.281717599999997,
+          "99": 26.46368517
+        },
+        "vegetation_ms": {
+          "50": 1.283472,
+          "95": 3.0711899,
+          "99": 5.116447200000001
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.04861111111111111,
+          0.08680555555555555,
+          0.32523148148148145
+        ],
+        "p95": [
+          0.0,
+          1.0,
+          1.0
+        ],
+        "max": [
+          1,
+          2,
+          2
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-turn": {
+      "frames": {
+        "sample_count": 1231,
+        "accepted_frames": 1231,
+        "missed_budget_frames": 145,
+        "rejected_inputs": 0,
+        "p50_ms": 10.590727,
+        "p95_ms": 22.061243,
+        "p99_ms": 28.499976
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1010,
+        "p50_ms": 9.454002722248077,
+        "p95_ms": 13.671095250274659,
+        "p99_ms": 15.64436448625946,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 1010,
+        "color_p50_ms": 3.007834923603058,
+        "color_p95_ms": 3.6155495889930727,
+        "shadow_samples": 1010,
+        "shadow_p50_ms": 0.22146077822113036,
+        "shadow_p95_ms": 0.3723073886489868,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 222,
+        "resident_templates": 198,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 120,
+        "triangles": 904096,
+        "budget_rejected": 0,
+        "culled_instances": 162,
+        "coverage_fallbacks": 33,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          20,
+          43,
+          57
+        ],
+        "triangles_by_species": [
+          239524,
+          15648,
+          648924
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 117,
+        "gpu_bytes": 100002548,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 42,
+        "shadow_triangles": 196708,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 25,
+        "shadow_only_triangles": 109216,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          1,
+          14,
+          11,
+          31
+        ],
+        "demanded_by_species": [
+          20,
+          43,
+          57
+        ],
+        "ready_by_species": [
+          20,
+          43,
+          57
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 12,
+        "shadow_stream_budget_rejected": 9,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 33,
+        "explicit_shadow_triangles": 147096,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          33
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 104609600,
+        "total_cpu_geometry_bytes": 167727000,
+        "cpu_cache_geometry_bytes": 167727000,
+        "selected_cpu_meshes": 152,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 255,
+          "misses": 202,
+          "accounted_bytes": 58917760,
+          "budget_bytes": 67108864,
+          "entries": 202,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            222,
+            455,
+            457
+          ],
+          "completed": [
+            222,
+            455,
+            457
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            189496788,
+            10328995525,
+            1312784496
+          ],
+          "max_job_nanos": [
+            14513566,
+            84135704,
+            25750186
+          ],
+          "assembly_nanos": [
+            0,
+            7619227801,
+            827961983
+          ],
+          "mesh_nanos": [
+            0,
+            2706163063,
+            481851892
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 1305960448,
+        "peak_rss_bytes": 1305960448,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkTurnReturn",
+      "route_clock": "realtime",
+      "route_speed_mps": 6,
+      "route_elapsed_seconds": 16.005907363,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 64,
+        "native_clusters": 29,
+        "resident_clusters": 4696,
+        "visible_clusters": 251,
+        "cpu_cache_bytes": 622911052,
+        "source_cache_bytes": 86086816,
+        "gpu_resident_bytes": 246608896,
+        "gpu_allocated_bytes": 306184192,
+        "first_coverage_ms": 133.128483,
+        "first_quality_ms": 8258.943793
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 4.174551999999999,
+          "95": 18.394263000000002,
+          "99": 23.096453399999998
+        },
+        "terrain_ms": {
+          "50": 3.278139,
+          "95": 15.916958999999999,
+          "99": 21.986563000000004
+        },
+        "vegetation_ms": {
+          "50": 0.819238,
+          "95": 2.6150305,
+          "99": 4.742080500000008
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.038180341186027617,
+          0.09748172217709179,
+          0.2445166531275386
+        ],
+        "p95": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "max": [
+          3,
+          6,
+          11
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0,
+      "stationary_after_turn": {
+        "frames": 741,
+        "plant_lod_changes": 0,
+        "shadow_lod_changes": 0,
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "max_pending": 0
+      }
+    },
+    "final-laptop": {
+      "frames": {
+        "sample_count": 1168,
+        "accepted_frames": 1168,
+        "missed_budget_frames": 342,
+        "rejected_inputs": 0,
+        "p50_ms": 14.359231,
+        "p95_ms": 21.557840000000002,
+        "p99_ms": 24.635327
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1125,
+        "p50_ms": 11.24801136087799,
+        "p95_ms": 13.044103959056855,
+        "p99_ms": 13.82695137884903,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 1125,
+        "color_p50_ms": 2.122592952896118,
+        "color_p95_ms": 2.5492435943984986,
+        "shadow_samples": 1125,
+        "shadow_p50_ms": 0.29183448914337157,
+        "shadow_p95_ms": 0.3597234790649414,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 278,
+        "resident_templates": 222,
+        "pending_jobs": 1,
+        "missing_tiles": 0,
+        "missing_templates": 1,
+        "selected_instances": 146,
+        "triangles": 974908,
+        "budget_rejected": 0,
+        "culled_instances": 169,
+        "coverage_fallbacks": 46,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          23,
+          49,
+          74
+        ],
+        "triangles_by_species": [
+          304822,
+          21292,
+          648794
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 145,
+        "gpu_bytes": 121873208,
+        "uploaded_bytes_last_update": 56168,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 36,
+        "shadow_triangles": 199964,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 22,
+        "shadow_only_triangles": 106836,
+        "retained_ground_detail": 71,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          1,
+          29,
+          44
+        ],
+        "demanded_by_species": [
+          23,
+          50,
+          74
+        ],
+        "ready_by_species": [
+          23,
+          49,
+          74
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 19,
+        "shadow_stream_budget_rejected": 5,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 31,
+        "explicit_shadow_triangles": 149892,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          31
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 108809600,
+        "total_cpu_geometry_bytes": 167171800,
+        "cpu_cache_geometry_bytes": 167171800,
+        "selected_cpu_meshes": 170,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 394,
+          "misses": 269,
+          "accounted_bytes": 67008304,
+          "budget_bytes": 67108864,
+          "entries": 176,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            278,
+            436,
+            662
+          ],
+          "completed": [
+            278,
+            436,
+            662
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            282746398,
+            7915737124,
+            2033128496
+          ],
+          "max_job_nanos": [
+            13674155,
+            58924586,
+            28307652
+          ],
+          "assembly_nanos": [
+            0,
+            5772958995,
+            1033802636
+          ],
+          "mesh_nanos": [
+            0,
+            2139616374,
+            994763055
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 1503776768,
+        "peak_rss_bytes": 1503776768,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 6,
+      "route_elapsed_seconds": 18.002444779,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 0.75,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 36,
+        "native_clusters": 25,
+        "resident_clusters": 3397,
+        "visible_clusters": 2712,
+        "cpu_cache_bytes": 648908592,
+        "source_cache_bytes": 112047232,
+        "gpu_resident_bytes": 187009760,
+        "gpu_allocated_bytes": 230686720,
+        "first_coverage_ms": 129.666378,
+        "first_quality_ms": 6635.857859
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 9.3137895,
+          "95": 16.6791603,
+          "99": 20.236904779999968
+        },
+        "terrain_ms": {
+          "50": 7.1279675000000005,
+          "95": 13.755068949999986,
+          "99": 17.723803779999987
+        },
+        "vegetation_ms": {
+          "50": 1.549429,
+          "95": 3.5976439499999975,
+          "99": 5.962345379999994
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.07106164383561644,
+          0.0958904109589041,
+          0.24914383561643835
+        ],
+        "p95": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "max": [
+          1,
+          2,
+          3
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "final-cold": {
+      "frames": {
+        "sample_count": 1929,
+        "accepted_frames": 1929,
+        "missed_budget_frames": 18,
+        "rejected_inputs": 0,
+        "p50_ms": 9.849862,
+        "p95_ms": 13.16006,
+        "p99_ms": 16.076074
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1471,
+        "p50_ms": 9.018375024227142,
+        "p95_ms": 9.917523417308807,
+        "p99_ms": 10.308466213462829,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 1471,
+        "color_p50_ms": 2.4591924961967466,
+        "color_p95_ms": 2.9740908093681337,
+        "shadow_samples": 1471,
+        "shadow_p50_ms": 0.23071836775588989,
+        "shadow_p95_ms": 0.2610960857963562,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 286,
+        "resident_templates": 231,
+        "pending_jobs": 7,
+        "missing_tiles": 0,
+        "missing_templates": 7,
+        "selected_instances": 142,
+        "triangles": 949468,
+        "budget_rejected": 0,
+        "culled_instances": 173,
+        "coverage_fallbacks": 50,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          20,
+          47,
+          75
+        ],
+        "triangles_by_species": [
+          280290,
+          22484,
+          646694
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 142,
+        "gpu_bytes": 127287680,
+        "uploaded_bytes_last_update": 1568,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 37,
+        "shadow_triangles": 198134,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 21,
+        "shadow_only_triangles": 105404,
+        "retained_ground_detail": 67,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          10,
+          17,
+          48
+        ],
+        "demanded_by_species": [
+          21,
+          47,
+          75
+        ],
+        "ready_by_species": [
+          20,
+          47,
+          75
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 11,
+        "shadow_stream_budget_rejected": 0,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 28,
+        "explicit_shadow_triangles": 136352,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          28
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 106664400,
+        "total_cpu_geometry_bytes": 165755400,
+        "cpu_cache_geometry_bytes": 165755400,
+        "selected_cpu_meshes": 166,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 403,
+          "misses": 286,
+          "accounted_bytes": 66549312,
+          "budget_bytes": 67108864,
+          "entries": 180,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            287,
+            521,
+            690
+          ],
+          "completed": [
+            286,
+            511,
+            689
+          ],
+          "cancelled": [
+            1,
+            6,
+            1
+          ],
+          "worker_wall_nanos": [
+            398373128,
+            16138478367,
+            3373445170
+          ],
+          "max_job_nanos": [
+            22800953,
+            122631686,
+            45857185
+          ],
+          "assembly_nanos": [
+            0,
+            11821111333,
+            1611627466
+          ],
+          "mesh_nanos": [
+            0,
+            4277998472,
+            1755958367
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "process_memory": {
+        "rss_bytes": 1181855744,
+        "peak_rss_bytes": 1181855744,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 6,
+      "route_elapsed_seconds": 20.004084615,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 7,
+        "native_clusters": 22,
+        "resident_clusters": 532,
+        "visible_clusters": 219,
+        "cpu_cache_bytes": 584759824,
+        "source_cache_bytes": 134183040,
+        "gpu_resident_bytes": 39252416,
+        "gpu_allocated_bytes": 88080384,
+        "first_coverage_ms": 121.547678,
+        "first_quality_ms": null
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 5.017538999999999,
+          "95": 8.603904399999994,
+          "99": 12.085314000000002
+        },
+        "terrain_ms": {
+          "50": 1.708528,
+          "95": 3.9833996,
+          "99": 5.290618040000001
+        },
+        "vegetation_ms": {
+          "50": 2.670243,
+          "95": 5.250251399999999,
+          "99": 9.091839760000001
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation",
+      "missing_color_candidates": {
+        "order": [
+          "grass tiles",
+          "flower tiles",
+          "individual trees"
+        ],
+        "mean": [
+          0.20943494038361846,
+          0.5308449974079834,
+          0.6905132192846034
+        ],
+        "p95": [
+          1.0,
+          1.0,
+          2.0
+        ],
+        "max": [
+          9,
+          34,
+          14
+        ],
+        "scope": "all visible ranges; does not identify missing distance or certify native LOD; candidates before budget"
+      },
+      "selected_mesh_evictions": 0
+    },
+    "baseline-cold-walk": {
+      "frames": {
+        "sample_count": 1759,
+        "accepted_frames": 1759,
+        "missed_budget_frames": 10,
+        "rejected_inputs": 0,
+        "p50_ms": 11.030041,
+        "p95_ms": 14.172834,
+        "p99_ms": 15.716328
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1322,
+        "p50_ms": 10.293798344329835,
+        "p95_ms": 11.418254825569154,
+        "p99_ms": 11.739064367671967,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": null,
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 266,
+        "resident_templates": 184,
+        "pending_jobs": 57,
+        "missing_tiles": 1,
+        "missing_templates": 56,
+        "selected_instances": 92,
+        "triangles": 697198,
+        "budget_rejected": 0,
+        "culled_instances": 173,
+        "coverage_fallbacks": 68,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          1,
+          18,
+          73
+        ],
+        "triangles_by_species": [
+          46346,
+          4884,
+          645968
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 92,
+        "gpu_bytes": 268190432,
+        "uploaded_bytes_last_update": 928,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 11,
+        "shadow_triangles": 197136,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 0,
+        "shadow_only_triangles": 0,
+        "retained_ground_detail": 2,
+        "canonical_voxel_m": 0.0625
+      },
+      "process_memory": null,
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "route": "WalkStopResume",
+      "route_clock": "realtime",
+      "route_speed_mps": 6,
+      "route_elapsed_seconds": 20.003261523,
+      "camera_start": {
+        "position": [
+          -43.625,
+          31.0625,
+          -289.5625
+        ],
+        "yaw": 0,
+        "pitch": 0.009999666
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "visual": {
+        "atmosphere": true,
+        "render_scale": 1,
+        "exposure": 1.3,
+        "fog_density": 4.5e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 20,
+        "sun_azimuth": 22,
+        "cloud_coverage": 0.22,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": true,
+        "terrain_shadows_active": true,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+        "settings_may_have_changed": false
+      },
+      "source": {
+        "version": 4,
+        "native_voxel_m": 0.0625,
+        "horizontal_scale_m": 1800,
+        "amplitude_m": 1000,
+        "octaves": 8,
+        "roughness": 0.5
+      },
+      "terrain_recipe": "Alpine",
+      "appearance_version": 2,
+      "msaa_samples": 4,
+      "voxel_filter": true,
+      "terrain": {
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 15,
+        "native_clusters": 20,
+        "resident_clusters": 664,
+        "visible_clusters": 353,
+        "cpu_cache_bytes": 580961768,
+        "source_cache_bytes": 134122912,
+        "gpu_resident_bytes": 45897984,
+        "gpu_allocated_bytes": 88080384,
+        "first_coverage_ms": 132.842528,
+        "first_quality_ms": null
+      },
+      "observation_stage_percentiles_ms": {
+        "prepare_ms": {
+          "50": 4.793141,
+          "95": 8.407409599999998,
+          "99": 10.94116188000001
+        },
+        "terrain_ms": {
+          "50": 2.515894,
+          "95": 5.656072599999997,
+          "99": 7.341638700000001
+        },
+        "vegetation_ms": {
+          "50": 1.5850490000000002,
+          "95": 3.5956279999999956,
+          "99": 6.11997608
+        }
+      },
+      "observation_stage_scope": "last measured sample-count observations; excludes earlier startup/warmup approximately; CPU wall timings overlap GPU/presentation"
+    }
+  },
+  "primary_regression": {
+    "png": {
+      "baseline_sha256": "56eab7bb9f1c909d1e1408b0a2b9030e35a30f62b867c779d8754df5a4b473a4",
+      "final_sha256": "56eab7bb9f1c909d1e1408b0a2b9030e35a30f62b867c779d8754df5a4b473a4",
+      "equal": true
+    },
+    "linear_rgb.f32": {
+      "baseline_sha256": "f553d36160f597bfa85922bb8e2ab6c9783678d9b62de164a0fb417de2327f9f",
+      "final_sha256": "f553d36160f597bfa85922bb8e2ab6c9783678d9b62de164a0fb417de2327f9f",
+      "equal": true
+    }
+  },
+  "actual_input_recording": {
+    "manifest": {
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--width",
+        "1280",
+        "--height",
+        "720",
+        "--seconds",
+        "28",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-push/recording-final/game.json",
+        "--adaptive-disk-cache",
+        "output/cozy-scene/map-cache",
+        "--adaptive-disk-mib",
+        "1024"
+      ],
+      "failure": null,
+      "events": [
+        {
+          "seconds_from_launch": 0.7716,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 1.8539,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 4.9346,
+          "action": "hold_None"
+        },
+        {
+          "seconds_from_launch": 7.0151,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 10.0959,
+          "action": "mouse_turn"
+        },
+        {
+          "seconds_from_launch": 11.785,
+          "action": "walk_after_turn"
+        },
+        {
+          "seconds_from_launch": 14.7851,
+          "action": "stop_after_turn"
+        },
+        {
+          "seconds_from_launch": 21.1701,
+          "action": "record_end"
+        }
+      ],
+      "scope": "Actual X11 inputs and 20 FPS child-window recording; includes normal startup. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+    },
+    "yaw_span_radians": 1.279999727,
+    "last_after19s": {
+      "plant_lod_changes": 0,
+      "shadow_lod_changes": 0,
+      "shadow_admitted": 0,
+      "shadow_removed": 0,
+      "plant_selected_mesh_evictions": 0
+    },
+    "scope": "20FPS actualX11 W/stop/resume/mouse turn; recording adds overhead, not matched benchmark. Contact sheet/large transient changes inspected; cannot certify every presented frame."
+  }
+}

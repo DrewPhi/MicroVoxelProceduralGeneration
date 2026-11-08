@@ -1,0 +1,10 @@
+
+running 1 test
+frozen vegetation parity adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+expanded: 1080 identical covered pixels; 5104784 resident GPU bytes
+compact: 1080 identical covered pixels; 1123352 resident GPU bytes
+compact-indexed: 1080 identical covered pixels; 1735880 resident GPU bytes
+test vegetation_gpu::parity::frozen_native_gpu_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 369 filtered out; finished in 0.42s
+
