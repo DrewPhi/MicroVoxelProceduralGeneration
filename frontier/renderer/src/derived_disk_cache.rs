@@ -125,7 +125,9 @@ impl DiskCache {
         max_entry_bytes: usize,
         world: &World,
     ) -> io::Result<Self> {
-        if crate::appearance_method::selected() != crate::appearance_method::Method::Baseline {
+        if crate::appearance_method::selected() != crate::appearance_method::Method::Baseline
+            || crate::adaptive_geometry::near_profile_shared()
+        {
             return Err(io::Error::other(
                 "LOD appearance experiments require derived disk cache disabled",
             ));

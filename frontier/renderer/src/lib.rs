@@ -67,7 +67,15 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         return "\"render_appearance_version\":1".into();
     }
     let mode = adaptive_geometry::appearance_mode(world);
-    let version = if appearance_method::voxel_grain().is_some() {
+    let version = if appearance_method::debug_view() != 0 {
+        5
+    } else if adaptive_geometry::near_profile_shared()
+        || appearance_method::near_blend() != 0
+        || appearance_map::effective_filter_radius(16) > 0
+        || appearance_method::map_anisotropy() > 1
+    {
+        6
+    } else if appearance_method::voxel_grain().is_some() {
         4
     } else if appearance_method::selected() == appearance_method::Method::Baseline {
         ADAPTIVE_RENDER_APPEARANCE_VERSION
@@ -75,7 +83,7 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         3
     };
     format!(
-        "\"render_appearance_version\":{version},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{},\"method\":\"{}\",\"map_intervals\":{},\"visibility_grid\":{},\"visibility_spatial\":{},\"voxel_grain_amplitude\":{}}}",
+        "\"render_appearance_version\":{version},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{},\"method\":\"{}\",\"map_intervals\":{},\"visibility_grid\":{},\"visibility_spatial\":{},\"voxel_grain_amplitude\":{},\"debug_view\":{},\"near_profile_shared\":{},\"near_blend\":{},\"map_prefilter_radius_cells\":{},\"map_anisotropy_taps\":{},\"map_prefilter_mode\":{:?},\"map_filter_soft_surfaces\":{}}}",
         mode.spatial_profiles,
         mode.probe_cells,
         if mode.half_footprint { "half" } else { "full" },
@@ -85,6 +93,13 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         appearance_visibility::grid_side(),
         appearance_visibility::spatial_enabled(),
         appearance_method::voxel_grain().unwrap_or(0.055),
+        appearance_method::debug_view(),
+        adaptive_geometry::near_profile_shared(),
+        appearance_method::near_blend(),
+        appearance_map::effective_filter_radius(16),
+        appearance_method::map_anisotropy(),
+        match appearance_map::map_prefilter() {appearance_map::MapPrefilter::Off=>"off",appearance_map::MapPrefilter::NativeBox{..}=>"native-box",appearance_map::MapPrefilter::Footprint=>"footprint"},
+        appearance_method::map_filter_soft_surfaces(),
     )
 }
 
@@ -2676,6 +2691,15 @@ pub fn run() -> Result<()> {
         page_stream = Some(pages);
     }
     if let Some(path) = capture {
+        if std::env::var("FRONTIER_CAPTURE_DIAGNOSTICS").as_deref() == Ok("1")
+            && (appearance_method::debug_view() != 0
+                || !capture_linear
+                || msaa != 1
+                || visual_settings.atmosphere
+                || visual_settings.terrain_shadows)
+        {
+            return Err("diagnostic capture set requires normal view, --capture-linear --msaa 1, atmosphere/shadows off".into());
+        }
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let mut gpu = pollster::block_on(Gpu::new(
             &instance,
@@ -2770,7 +2794,51 @@ pub fn run() -> Result<()> {
             metadata.pop();
             metadata.push_str(&format!(",\"adaptive\":{}}}", view.json()));
         }
-        std::fs::write(metadata_path, metadata)?;
+        std::fs::write(metadata_path, &metadata)?;
+        if std::env::var("FRONTIER_CAPTURE_DIAGNOSTICS").as_deref() == Ok("1") {
+            let view = adaptive_view
+                .as_ref()
+                .ok_or("diagnostic set requires adaptive terrain")?;
+            let directory = path.parent().unwrap_or(Path::new("."));
+            for (name, mode) in [
+                ("lod", 1u32),
+                ("normals", 2),
+                ("flat", 3),
+                ("paint", 4),
+                ("blend", 5),
+                ("raw-light", 6),
+                ("material", 7),
+                ("profile", 8),
+            ] {
+                let adaptive = gpu
+                    .adaptive
+                    .as_mut()
+                    .ok_or("missing adaptive diagnostic renderer")?;
+                adaptive.set_debug_view(mode);
+                adaptive.prepare(
+                    &gpu.device,
+                    &gpu.queue,
+                    &camera,
+                    width,
+                    height,
+                    &view.owners,
+                    view.pixel_error,
+                );
+                let destination = directory.join(format!("{name}.png"));
+                gpu.capture(&camera, &destination, width, height)?;
+                let mut diagnostic =
+                    metadata.replace("\"debug_view\":0", &format!("\"debug_view\":{mode}"));
+                for version in [2, 3, 4, 6] {
+                    diagnostic = diagnostic.replace(
+                        &format!("\"render_appearance_version\":{version}"),
+                        "\"render_appearance_version\":5",
+                    );
+                }
+                diagnostic.pop();
+                diagnostic.push_str(",\"diagnostic_geometry_frozen\":true}");
+                std::fs::write(destination.with_extension("capture.json"), diagnostic)?;
+            }
+        }
         return Ok(());
     }
     let now = Instant::now();

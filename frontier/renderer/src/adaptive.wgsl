@@ -41,18 +41,20 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
     let broad=paint_field(cell,9u)-0.5; // 32m patches
     let local=paint_field(cell,6u)-0.5; // 4m patches
     let speckle=(paint_hash(cell)-0.5)*0.055*grain;
-    let original=vec3<f32>(1.+broad*0.24+local*0.10+speckle,
-                          1.+broad*0.15+local*0.08+speckle,
-                          1.+broad*0.07+local*0.06+speckle);
-    if camera.paint.z<0. {return original;}
-    // Stable integer-cell grain: every face of one voxel gets the same tint.
-    // Existing distance and footprint filters remove unresolved grain; proxy
-    // texels are not randomly tinted and enlarged into distant colored squares.
-    let brightness=(paint_hash(cell)-0.5)*camera.paint.z*grain;
-    let hue=(paint_hash(cell^vec3<u32>(761u,157u,1103u))-0.5)*camera.paint.z*0.15*grain;
-    return original+vec3<f32>(brightness-speckle+hue,brightness-speckle,brightness-speckle-hue);
+    return vec3<f32>(1.+broad*0.24+local*0.10+speckle,
+                     1.+broad*0.15+local*0.08+speckle,
+                     1.+broad*0.07+local*0.06+speckle);
 }
 struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32> };
+// Optional grain is a display override, independent of canonical tint parity.
+fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
+    let original=terrain_tint(cell,grain);
+    if camera.paint.z<0. {return original;}
+    let old_grain=(paint_hash(cell)-0.5)*0.055*grain;
+    let brightness=(paint_hash(cell)-0.5)*camera.paint.z*grain;
+    let hue=(paint_hash(cell^vec3<u32>(761u,157u,1103u))-0.5)*camera.paint.z*0.15*grain;
+    return original+vec3<f32>(brightness-old_grain+hue,brightness-old_grain,brightness-old_grain-hue);
+}
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
@@ -110,18 +112,49 @@ fn conditional_profile(id:u32,view:vec3<f32>)->FaceProfile {
         mix_profile(face_profiles[base+first],face_profiles[base+next],azimuth_fraction),
         mix_profile(face_profiles[base+4u+first],face_profiles[base+4u+next],azimuth_fraction),elevation);
 }
-fn appearance_profile(id:u32,local:vec3<f32>)->FaceProfile {
+fn map_sample(id:u32,p:FaceProfile,coordinate:vec2<f32>)->FaceProfile {
+    let dimension=u32(p.px.x);
+    let uv=clamp(coordinate,vec2(0.),vec2(f32(dimension-1u)));
+    let cell=min(vec2<u32>(floor(uv)),vec2<u32>(dimension-2u));
+    let fraction=uv-vec2<f32>(cell);
+    let node=cell.y*dimension+cell.x;
+    return mix_profile(
+        mix_profile(map_node(id,node),map_node(id,node+1u),fraction.x),
+        mix_profile(map_node(id,node+dimension),map_node(id,node+dimension+1u),fraction.x),fraction.y);
+}
+fn add_profile(a:FaceProfile,b:FaceProfile)->FaceProfile {
+    return FaceProfile(a.top+b.top,a.px+b.px,a.nx+b.nx,a.pz+b.pz,a.nz+b.nz);
+}
+fn scale_profile(a:FaceProfile,s:f32)->FaceProfile {
+    return FaceProfile(a.top*s,a.px*s,a.nx*s,a.pz*s,a.nz*s);
+}
+fn appearance_profile(id:u32,local:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>)->FaceProfile {
     let p=face_profiles[id];
     if p.top.w>=0. {return p;}
     if p.top.w == -2. {
-        let dimension=u32(p.px.x);
-        let uv=clamp((local.xz-p.top.xy)*p.top.z,vec2(0.),vec2(f32(dimension-1u)));
-        let cell=min(vec2<u32>(floor(uv)),vec2<u32>(dimension-2u));
-        let fraction=uv-vec2<f32>(cell);
-        let node=cell.y*dimension+cell.x;
-        return mix_profile(
-            mix_profile(map_node(id,node),map_node(id,node+1u),fraction.x),
-            mix_profile(map_node(id,node+dimension),map_node(id,node+dimension+1u),fraction.x),fraction.y);
+        let uv=(local.xz-p.top.xy)*p.top.z;
+        let a=dx.xz*p.top.z;let b=dy.xz*p.top.z;
+        let major=select(b,a,dot(a,a)>=dot(b,b));
+        let length_major=length(major);
+        if camera.paint.x<1.5 || length_major<0.75 {return map_sample(id,p,uv);}
+        // Fixed 2/4 taps only along the long pixel axis, not isotropic blur.
+        // Clamp to four map cells to bound horizon work and local map support.
+        var axis=major*min(1.,4./max(length_major,0.000001));
+        // No halo exists outside this map. Contract both halves symmetrically
+        // near its edge, converging to the shared bilinear edge value rather
+        // than clamping different half-footprints on adjacent patches.
+        let extent=vec2<f32>(p.px.x-1.);
+        let center=clamp(uv,vec2(0.),extent);
+        let room=max(vec2(0.),min(center,extent-center));
+        let support=select(min(vec2(1.),2.*room/max(abs(axis),vec2(0.000001))),vec2(1.),abs(axis)<vec2(0.000001));
+        axis*=min(support.x,support.y);
+        let taps=u32(camera.paint.x);
+        var total=scale_profile(p,0.);
+        for(var i=0u;i<4u;i=i+1u) {
+            if i>=taps {break;}
+            total=add_profile(total,map_sample(id,p,uv+axis*((f32(i)+0.5)/f32(taps)-0.5)));
+        }
+        return scale_profile(total,1./f32(taps));
     }
     if p.top.w == -3. {
         return conditional_profile(id,camera.eye.xyz-vec3(p.top.x,p.top.z,p.top.y));
@@ -214,7 +247,7 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         let distance=length((vec3<f32>(local_cell)+0.5)/16.-camera.eye.xyz);
-        tint=terrain_tint(cell,1.-smoothstep(12.,40.,distance));
+        tint=display_terrain_tint(cell,1.-smoothstep(12.,40.,distance));
     }
     // Evaluate footprint before branching. The smaller singular value retains
     // exact native face response while either tangent direction still resolves
@@ -226,26 +259,45 @@ const MATERIAL_COLORS:array<vec3<f32>,5> = array<vec3<f32>,5>(
     let smallest=dot(cross_area,cross_area)/max(largest,0.00000001);
     let footprint=sqrt(smallest)/0.0625;
     var blend=select(0.,1.,(camera.paint_origin.w&1u)!=0u);
-    if (camera.paint_origin.w&2u)!=0u {blend*=smoothstep(1.,2.,footprint);}
+    let minified=smoothstep(1.,2.,footprint);
+    if (camera.paint_origin.w&2u)!=0u {blend*=minified;}
+    else if (u32(camera.paint.w)&31u)<=4u && (u32(camera.paint.w)>>5u)<=7u && camera.sky.w>0.5 {
+        // Preserve a native-face component while near proxy geometry still
+        // resolves, converging to full area shading when native cells minify.
+        let near_weight=select(0.5+0.5*minified,minified,camera.sky.w>1.5);
+        blend*=near_weight;
+    }
+    let diagnostic=u32(camera.sky.z);
+    if diagnostic==1u {
+        let code=u32(camera.paint.w);
+        return vec4<f32>(select(0.,1.,(camera.paint_origin.w&2u)!=0u),f32(code&31u)/16.,f32(code>>5u)/24.,1.);
+    }
+    if diagnostic==2u {return vec4<f32>(normalize(in.normal)*0.5+0.5,1.);}
+    if diagnostic==3u {return vec4<f32>(0.45,0.45,0.45,1.);}
+    if diagnostic==4u {return vec4<f32>(tint,1.);}
+    if diagnostic==5u {return vec4<f32>(blend,blend,blend,1.);}
+    if diagnostic==6u {return vec4<f32>(light,1.);}
+    if diagnostic==7u {return vec4<f32>(in.color,1.);}
     let resolved=in.color*tint*light;
-    if blend<=0. {return vec4<f32>(resolved,1.);}
+    if blend<=0. && diagnostic!=8u {return vec4<f32>(resolved,1.);}
     // All three triangle vertices share this ID. Fetch only for unresolved
     // radiance, rather than exporting80bytes of repeated vertex varyings.
-    let profile=appearance_profile(in.profile_index,in.local);
+    let profile=appearance_profile(in.profile_index,in.local,dx,dy);
     // Source-derived canonical exposed face/material integrals. Self-occlusion
     // within the patch remains approximate; this is not a visibility oracle.
     let v=normalize(camera.eye.xyz-in.local);
     let w=vec4<f32>(max(v.x,0.),max(-v.x,0.),max(v.z,0.),max(-v.z,0.));
     let top=max(v.y,0.);
     let area=top*profile.top.w+dot(w,vec4<f32>(profile.px.w,profile.nx.w,profile.pz.w,profile.nz.w));
-    if area>0.000001 && blend>0. {
+    if area>0.000001 && (blend>0. || diagnostic==8u) {
         let filtered=top*profile.top.rgb*terrain_lighting(vec3<f32>(0.,1.,0.),visibility)
             +w.x*profile.px.rgb*terrain_lighting(vec3<f32>(1.,0.,0.),visibility)
             +w.y*profile.nx.rgb*terrain_lighting(vec3<f32>(-1.,0.,0.),visibility)
             +w.z*profile.pz.rgb*terrain_lighting(vec3<f32>(0.,0.,1.),visibility)
             +w.w*profile.nz.rgb*terrain_lighting(vec3<f32>(0.,0.,-1.),visibility);
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
-        return vec4<f32>(mix(resolved,filtered/area*terrain_tint(cell,0.),blend),1.);
+        if diagnostic==8u {return vec4<f32>(filtered/area,1.);}
+        return vec4<f32>(mix(resolved,filtered/area*display_terrain_tint(cell,0.),blend),1.);
     }
     return vec4<f32>(in.color * tint * light, 1.0);
 }

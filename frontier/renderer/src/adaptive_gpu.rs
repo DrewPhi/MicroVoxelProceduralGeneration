@@ -740,9 +740,9 @@ impl AdaptiveGpu {
             } else {
                 0.
             },
-            0.,
-            0.,
-            if regional { 1. } else { 0. },
+            crate::appearance_method::debug_view() as f32,
+            crate::appearance_method::near_blend() as f32,
+            crate::appearance_method::map_anisotropy() as f32,
             amplitude,
             crate::appearance_method::voxel_grain().unwrap_or(-1.),
             0.,
@@ -751,6 +751,11 @@ impl AdaptiveGpu {
             self.lighting = value;
             self.prepared_view = None;
         }
+    }
+    /// Headless diagnostics redraw the same immutable published owner set.
+    pub(crate) fn set_debug_view(&mut self, mode: u32) {
+        self.lighting[6] = mode as f32;
+        self.prepared_view = None;
     }
     pub(super) fn shadows_active(&self) -> bool {
         self.lighting[5] > 0.5
@@ -1235,7 +1240,9 @@ impl AdaptiveGpu {
                 (self.voxel_filter as u32) | ((c.exact as u32) << 1),
             ];
             bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
-            bytes[96..144].copy_from_slice(bytemuck::cast_slice(&self.lighting));
+            let mut lighting = self.lighting;
+            lighting[11] = ((key.width_cells.ilog2() << 5) | key.step_cells.ilog2()) as f32;
+            bytes[96..144].copy_from_slice(bytemuck::cast_slice(&lighting));
             bytes[144..208].copy_from_slice(bytemuck::cast_slice(
                 &adaptive_shadow::light_matrix(camera, self.lighting, c.origin).to_cols_array(),
             ));

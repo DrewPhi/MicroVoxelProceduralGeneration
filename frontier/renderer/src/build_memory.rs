@@ -126,13 +126,26 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
             Method::Visibility => 0,
             Method::Map => {
                 let n = g * crate::appearance_map::map_intervals() as u128 + 3;
-                (n * n * 5).min(300_000) * 256 + n * n * 256 + g * g * 8 * 80 * 2
+                let mut spacing = 4u128;
+                while spacing * (crate::appearance_map::map_intervals() as u128) < step {
+                    spacing *= 2;
+                }
+                let probes = crate::appearance_map::map_prefilter()
+                    .max_probe_columns(spacing as i64) as u128;
+                (n * n * probes).min(300_000) * 256 + n * n * 256 + g * g * 8 * 80 * 2
             }
         }
     } else {
         0
     };
-    usize::try_from((modeled + deferred_profiles + appearance_extra + 1024 * 1024) * 2).ok()
+    let near_extra =
+        if crate::adaptive_geometry::near_profile_shared() && w <= 128 && step > 1 && step <= 16 {
+            (w + 34).pow(2) * 64
+        } else {
+            0
+        };
+    usize::try_from((modeled + deferred_profiles + appearance_extra + near_extra + 1024 * 1024) * 2)
+        .ok()
 }
 
 #[cfg(test)]

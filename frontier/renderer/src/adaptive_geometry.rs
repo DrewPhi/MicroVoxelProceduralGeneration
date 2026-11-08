@@ -921,6 +921,7 @@ fn build_surface(
         return Ok(tile);
     }
     let defer_profiles = samples.gpu_profiles.enabled
+        && !near_profile_shared()
         && samples.gpu_job_allowed
         && appearance_mode(world).probe_cells == 1
         && !appearance_mode(world).spatial_profiles
@@ -1190,6 +1191,11 @@ pub(super) fn native_summary_reuse_enabled() -> bool {
     static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *REUSE
         .get_or_init(|| std::env::var_os("FRONTIER_NATIVE_SUMMARY_REUSE").is_some_and(|v| v == "1"))
+}
+/// Opt-in appearance-only experiment: share native one-metre profile support.
+pub(crate) fn near_profile_shared() -> bool {
+    static SHARED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHARED.get_or_init(|| std::env::var("FRONTIER_NEAR_APPEARANCE").as_deref() == Ok("shared"))
 }
 fn native_profiles(
     world: &World,
@@ -1903,6 +1909,7 @@ impl SourceSamples {
 enum SmallTileExperiment {
     AffineExactAppearance,
     AffineSampledAppearance,
+    SharedNearAppearance,
 }
 #[cfg(test)]
 thread_local! { static FORCE_SPARSE_WORKSPACE: std::cell::Cell<bool> = const {std::cell::Cell::new(false)}; }
@@ -2131,7 +2138,19 @@ impl Generator<'_> {
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
         let method = crate::appearance_method::selected();
-        let index = if self.key.width_cells > MAX_NATIVE_WIDTH
+        let shared_near = near_profile_shared();
+        #[cfg(test)]
+        let shared_near = self.experiment.map_or(shared_near, |mode| {
+            mode == SmallTileExperiment::SharedNearAppearance
+        });
+        let near_index = if shared_near {
+            self.shared_near_profile(x, z, s)?
+        } else {
+            None
+        };
+        let index = if let Some(index) = near_index {
+            index
+        } else if self.key.width_cells > MAX_NATIVE_WIDTH
             && s >= 16
             && method == crate::appearance_method::Method::Visibility
             && (!crate::appearance_visibility::spatial_enabled()
@@ -2169,6 +2188,47 @@ impl Generator<'_> {
             .resize(self.mesh.vertices.len(), index);
         self.face_profile_indices[start_vertex..].fill(index);
         Ok(())
+    }
+    /// Raw exact native integrals, shared by all patches inside a canonical
+    /// 16-cell block. Scale metadata by patch coverage, never the stored sums.
+    fn shared_near_profile(&mut self, x: i64, z: i64, s: i64) -> Result<Option<u32>, String> {
+        const BLOCK: i64 = 16;
+        if self.key.width_cells > MAX_NATIVE_WIDTH || !(1..=BLOCK).contains(&s) {
+            return Ok(None);
+        }
+        let global = [self.key.min[0] + x, self.key.min[1] + z];
+        let min = global.map(|v| v.div_euclid(BLOCK) * BLOCK);
+        if (0..2).any(|a| global[a] + s > min[a] + BLOCK) {
+            return Ok(None);
+        }
+        let local = [min[0] - self.key.min[0], min[1] - self.key.min[1]];
+        let memo = (local[0], local[1], -16);
+        let id = if let Some(&id) = self.spatial_nodes.get(&memo) {
+            id
+        } else {
+            let key = ProfileKey {
+                min,
+                size: BLOCK,
+                stride: 1,
+            };
+            let entry = if let Some(entry) = self.samples.pages.profile(key) {
+                for point in entry.extrema {
+                    self.height(point[0] - self.key.min[0], point[1] - self.key.min[1])?;
+                }
+                entry
+            } else {
+                let entry = self.compute_patch_profile(local[0], local[1], BLOCK, 1, key)?;
+                self.samples.pages.store_profile(entry);
+                entry
+            };
+            let id = self.face_profiles.len() as u32;
+            self.face_profiles.push(entry.value);
+            self.spatial_nodes.insert(memo, id);
+            id
+        };
+        let value = self.face_profiles[id as usize];
+        self.note_profile_mean(&[value], (s * s) as f64 / (BLOCK * BLOCK) as f64);
+        Ok(Some(id))
     }
     /// Shared corner integrals and a half-footprint halo; geometry is unchanged.
     /// Equal-resolution neighbours share boundary data. Cross-level appearance
@@ -2321,23 +2381,31 @@ impl Generator<'_> {
     }
     fn mapped_profile(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
         let origin = [self.key.min[0] + x, self.key.min[1] + z];
-        let map =
-            crate::appearance_map::build_map(origin, s, |gx, gz| self.appearance_column(gx, gz))?;
+        let soft_only = crate::appearance_method::map_filter_soft_surfaces();
+        let map = crate::appearance_map::build_map_with_config_and_predicate(
+            origin,
+            s,
+            crate::appearance_map::map_intervals(),
+            crate::appearance_map::map_prefilter(),
+            |rgb| !soft_only || rgb == Material::Grass.color() || rgb == Material::Soil.color(),
+            |gx, gz| self.appearance_column(gx, gz),
+        )?;
         self.note_profile_mean(&map.profiles, (s * s) as f64);
         // Maps store compact row-major node references. Raw profiles are shared
         // between adjacent maps using the existing per-tile world-aligned cache.
         let mut refs = Vec::with_capacity(map.profiles.len());
+        let kind = crate::appearance_map::effective_filter_cache_key(map.spacing_cells);
         for (i, value) in map.profiles.into_iter().enumerate() {
             let nx = map.origin_cells[0] + (i % map.dimension) as i64 * map.spacing_cells
                 - self.key.min[0];
             let nz = map.origin_cells[1] + (i / map.dimension) as i64 * map.spacing_cells
                 - self.key.min[1];
-            let id = if let Some(&id) = self.spatial_nodes.get(&(nx, nz, -1)) {
+            let id = if let Some(&id) = self.spatial_nodes.get(&(nx, nz, kind)) {
                 id
             } else {
                 let id = self.face_profiles.len() as u32;
                 self.face_profiles.push(value);
-                self.spatial_nodes.insert((nx, nz, -1), id);
+                self.spatial_nodes.insert((nx, nz, kind), id);
                 id
             };
             refs.push(id);
@@ -5934,6 +6002,110 @@ mod tests {
         assert!(cache.stats().peak_bytes <= total && cache.stats().resident_bytes <= total);
         assert!(cache.stats().evictions > 0);
     }
+    #[test]
+    fn shared_near_profiles_match_native_cache_and_preserve_proxy_geometry() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let k = TileKey {
+            min: [-16, -32],
+            width_cells: 16,
+            step_cells: 4,
+            edge_steps: [1; 4],
+            source_revision: 0,
+        };
+        let native = column_mesh::build(
+            &world,
+            Cell {
+                x: k.min[0],
+                y: 0,
+                z: k.min[1],
+            },
+            [16; 2],
+        )
+        .unwrap();
+        let profile_key = ProfileKey {
+            min: k.min,
+            size: 16,
+            stride: 1,
+        };
+        let entry = native_profile_entry::<true>(
+            world.fbm_terrain().unwrap(),
+            &native.heights,
+            profile_key,
+            [k.min[0] + 16, k.min[1] + 16],
+            true,
+        )
+        .unwrap();
+        // Exercise both a native-populated cache and the direct proxy painter.
+        for cached in [false, true] {
+            let mut samples = SourceSamples::new(8 * 1024 * 1024);
+            if cached {
+                samples.pages.store_profile(entry);
+            }
+            let mut g = Generator {
+                defer_profiles: false,
+                experiment: Some(SmallTileExperiment::SharedNearAppearance),
+                world: &world,
+                samples: &mut samples,
+                key: k,
+                heights: LocalColumns::new(k.width_cells),
+                mesh: Mesh {
+                    vertices: vec![],
+                    indices: vec![],
+                    origin: Cell::default(),
+                    exposed_native_faces: 0,
+                },
+                empirical_error_m: 0.,
+                affine_error: 0.,
+                affine_range: [f64::INFINITY, f64::NEG_INFINITY],
+                affine_complete: true,
+                affine_stats: AffineStats::default(),
+                face_profiles: vec![[[0.; 4]; 5]],
+                spatial_nodes: HashMap::new(),
+                face_profile_indices: vec![],
+                appearance: FaceAppearance::default(),
+            };
+            let first = g.shared_near_profile(0, 0, 4).unwrap().unwrap();
+            let second = g.shared_near_profile(4, 8, 4).unwrap().unwrap();
+            assert_eq!(first, second);
+            assert_eq!(g.face_profiles.len(), 2);
+            assert_eq!(
+                g.face_profiles[first as usize].map(|a| a.map(f32::to_bits)),
+                entry.value.map(|a| a.map(f32::to_bits))
+            );
+            for p in entry.extrema {
+                assert!(g.heights.get(&[p[0] - k.min[0], p[1] - k.min[1]]).is_some());
+            }
+            assert!(g.shared_near_profile(12, 0, 8).unwrap().is_none());
+            assert!(g.shared_near_profile(0, 0, 32).unwrap().is_none());
+            // Distant fine-step tiles must keep bounded sampled support.
+            let width = g.key.width_cells;
+            g.key.width_cells = 1024;
+            assert!(g.shared_near_profile(0, 0, 16).unwrap().is_none());
+            g.key.width_cells = width;
+            assert_eq!(
+                g.appearance.area_m2[0],
+                entry.value[0][3] as f64 * VOXEL_SIZE * VOXEL_SIZE / 8.
+            );
+        }
+        let baseline =
+            small_tile_experiment(&world, k, Some(SmallTileExperiment::AffineExactAppearance)).0;
+        let shared =
+            small_tile_experiment(&world, k, Some(SmallTileExperiment::SharedNearAppearance)).0;
+        let geometry_bits = |tile: &GeometryTile| {
+            proxy_primitive_bits(tile)
+                .into_iter()
+                .map(|tri| {
+                    tri.map(|mut v| {
+                        v[9] = 0;
+                        v
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(geometry_bits(&baseline), geometry_bits(&shared));
+        assert_eq!(baseline.empirical_error_m, shared.empirical_error_m);
+        assert_eq!(baseline.affine_error_m, shared.affine_error_m);
+    }
     fn small_tile_experiment(
         world: &World,
         key: TileKey,
@@ -5994,7 +6166,10 @@ mod tests {
         } else {
             None
         };
-        let local = if mode.is_none() || aa.is_none() {
+        let local = if mode.is_none()
+            || mode == Some(SmallTileExperiment::SharedNearAppearance)
+            || aa.is_none()
+        {
             Some(certify(&mut g, triangles, &mut || false).unwrap())
         } else {
             None
