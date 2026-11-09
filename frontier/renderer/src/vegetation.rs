@@ -116,6 +116,8 @@ pub struct VegetationStats {
     pub prediction_horizon_ms: f64,
     pub prediction_lead_m: f64,
     pub predicted_tiles: usize,
+    /// Ground patches: selected, missing mesh, budget rejected, retained, coarse fallback.
+    pub ground_decisions: [usize; 5],
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VegetationJobStats {
@@ -254,6 +256,13 @@ fn selected_stride(distance: f64, projection: f64, config: &VegetationConfig) ->
     }
     lod
 }
+// Keep the existing horizontal footprint policy while charging altitude from
+// canonical source bounds. An eye above/below a plant cannot demand near LOD
+// merely because its XZ projection lies over the root or ground patch.
+fn distance_with_vertical_bounds(horizontal: f64, eye_y: f64, low_y: f64, high_y: f64) -> f64 {
+    let vertical = (low_y - eye_y).max(eye_y - high_y).max(0.);
+    horizontal.hypot(vertical)
+}
 fn ground_stride(distance: f64, projection: f64, config: &VegetationConfig) -> u8 {
     selected_stride(distance, projection, config).max(if distance <= 8. {
         1
@@ -292,7 +301,6 @@ fn budget_allows(
                 <= (config.max_triangles.saturating_mul(65) / 100)
                     .saturating_sub(stats.triangles_by_species[2])
         }
-        1 => triangles <= (config.max_triangles / 10).saturating_sub(stats.triangles_by_species[1]),
         _ => true,
     }
 }
@@ -578,6 +586,17 @@ impl StreamingPrediction {
         ((along - (radius * radius - across2).sqrt()) / speed).max(0.)
     }
 }
+/// Bounded snapshot of ground admission decisions; no per-frame logging needed.
+#[derive(Clone, Copy, Debug)]
+pub struct GroundInspection {
+    pub key: MeshKey,
+    pub distance_m: f64,
+    pub target_lod: u8,
+    pub selected_lod: Option<u8>,
+    pub triangles: usize,
+    pub headroom: usize,
+    pub reason: &'static str,
+}
 pub struct VegetationStream {
     world: World,
     edits: Vec<Cell>,
@@ -605,6 +624,11 @@ pub struct VegetationStream {
     shadow_lifecycle: ShadowLifecycle,
     shadow_transitions_enabled: bool,
     grouped_ground: Option<(Vec<Tile>, GroundGroups)>,
+    cpu_cache_bytes: usize,
+    gpu_cache_bytes: usize,
+    native_detail_distance_m: f64,
+    background_paused: bool,
+    ground_inspection: Vec<GroundInspection>,
     #[cfg(test)]
     regroup_builds: usize,
 }
@@ -766,6 +790,7 @@ impl VegetationStream {
                     .expect("vegetation worker")
             })
             .collect();
+        let reference = config.reference;
         Self {
             edits: world.edit_cells().collect(),
             world,
@@ -797,8 +822,48 @@ impl VegetationStream {
                 Ok("off" | "0")
             ),
             grouped_ground: None,
+            cpu_cache_bytes: if reference { 768 } else { 160 } * 1024 * 1024,
+            gpu_cache_bytes: if reference { 1024 } else { 256 } * 1024 * 1024,
+            native_detail_distance_m: 0.,
+            background_paused: false,
+            ground_inspection: Vec::new(),
             #[cfg(test)]
             regroup_builds: 0,
+        }
+    }
+    /// Memory pressure suppresses new speculative work without cancelling valid
+    /// completions or changing existing display/cache ownership.
+    pub fn set_background_paused(&mut self, paused: bool) {
+        self.background_paused = paused;
+    }
+    pub fn ground_inspection(&self) -> &[GroundInspection] {
+        &self.ground_inspection
+    }
+    /// Set bounded development resources without changing canonical plants.
+    pub fn configure_resources(
+        &mut self,
+        cpu_cache_bytes: usize,
+        gpu_cache_bytes: usize,
+        max_triangles: usize,
+        native_detail_distance_m: f64,
+    ) {
+        let detail = if native_detail_distance_m.is_finite() {
+            native_detail_distance_m.clamp(0., 512.)
+        } else {
+            8.
+        };
+        if (
+            self.cpu_cache_bytes,
+            self.gpu_cache_bytes,
+            self.config.max_triangles,
+            self.native_detail_distance_m,
+        ) != (cpu_cache_bytes, gpu_cache_bytes, max_triangles, detail)
+        {
+            self.cpu_cache_bytes = cpu_cache_bytes;
+            self.gpu_cache_bytes = gpu_cache_bytes;
+            self.config.max_triangles = max_triangles;
+            self.native_detail_distance_m = detail;
+            self.stable_frame = None;
         }
     }
     /// Replace the immutable snapshot after edits; no stale plant mesh survives.
@@ -958,22 +1023,15 @@ impl VegetationStream {
         {
             self.regroup_builds += 1;
         }
+        self.ground_inspection.clear();
         let mut stats = VegetationStats {
             shadow_lifecycle_enabled: self.shadow_transitions_enabled,
             prediction_horizon_ms: self.prediction.horizon() * 1000.,
             prediction_lead_m: lead[0].hypot(lead[1]),
             reference: self.config.reference,
             jobs: self.job_counters.snapshot(self.workers.len()),
-            mesh_budget_bytes: if self.config.reference {
-                768 * 1024 * 1024
-            } else {
-                160 * 1024 * 1024
-            },
-            gpu_budget_bytes: if self.config.reference {
-                1024 * 1024 * 1024
-            } else {
-                256 * 1024 * 1024
-            },
+            mesh_budget_bytes: self.cpu_cache_bytes,
+            gpu_budget_bytes: self.gpu_cache_bytes,
             ..Default::default()
         };
         let mut batches: BTreeMap<MeshKey, VegetationBatch> = BTreeMap::new();
@@ -1086,9 +1144,18 @@ impl VegetationStream {
                     }
                     let dx = (p.root.x - c.x) as f64 * VOXEL_SIZE;
                     let dz = (p.root.z - c.z) as f64 * VOXEL_SIZE;
-                    let distance = (dx * dx + dz * dz).sqrt();
+                    let root_y = p.root.y as f64 * VOXEL_SIZE;
+                    let distance = distance_with_vertical_bounds(
+                        dx.hypot(dz),
+                        camera[1],
+                        root_y,
+                        root_y + (vegetation::MAX_PLANT_HEIGHT_CELLS + 8) as f64 * VOXEL_SIZE,
+                    );
                     if distance < radii[t.species as usize] {
-                        if view.as_ref().is_none_or(|v| v.plant_visible(p)) {
+                        if view.as_ref().is_none_or(|v| v.plant_visible(p))
+                            || (self.native_detail_distance_m > 0.
+                                && distance <= self.native_detail_distance_m)
+                        {
                             plants.push((distance, *p));
                         } else {
                             stats.culled_instances += 1;
@@ -1100,7 +1167,8 @@ impl VegetationStream {
                 }
             } else {
                 stats.missing_tiles += 1;
-                if submitted < self.workers.len()
+                if !self.background_paused
+                    && submitted < self.workers.len()
                     && !self.pending_tiles.contains(&t)
                     && self
                         .tx
@@ -1118,16 +1186,25 @@ impl VegetationStream {
         for (&(s, x, z), records) in &ground {
             let dx = (x as f64 + 0.5) * 8. - camera[0];
             let dz = (z as f64 + 0.5) * 8. - camera[2];
-            let distance = (dx * dx + dz * dz).sqrt();
+            // Placement records already contain canonical terrain height. Their
+            // conservative vertical union needs no noise/model evaluation and
+            // remains valid when a patch contains plants on different slopes.
+            let (low, high) = records
+                .iter()
+                .fold((i64::MAX, i64::MIN), |(low, high), plant| {
+                    (low.min(plant.root.y), high.max(plant.root.y))
+                });
+            let distance = distance_with_vertical_bounds(
+                dx.hypot(dz),
+                camera[1],
+                low as f64 * VOXEL_SIZE,
+                (high + 14) as f64 * VOXEL_SIZE,
+            );
             if distance > radii[s as usize] + 5.7 {
                 continue;
             }
-            if view
-                .as_ref()
-                .is_some_and(|v| !records.iter().any(|p| v.plant_visible(p)))
-            {
-                continue;
-            }
+            // Residency is all-heading. Exact GPU mesh bounds cull color draws;
+            // turning must not change ground admission, LOD history or cache age.
             let p = PlantRecord {
                 species: species(s),
                 variant: u8::MAX,
@@ -1150,8 +1227,7 @@ impl VegetationStream {
         plants.sort_by(|a, b| {
             let priority = |s| match s {
                 Species::Rowan => 0,
-                Species::Edelweiss => 1,
-                Species::Grass => 2,
+                Species::Edelweiss | Species::Grass => 1,
             };
             priority(a.1.species)
                 .cmp(&priority(b.1.species))
@@ -1160,9 +1236,33 @@ impl VegetationStream {
         });
         let edits = &self.edits;
         let projection = viewport_height as f64 / (2. * (fov_y as f64 * 0.5).tan().max(0.01));
+        // Worker meshes contain four vertices and six u32 indices per quad,
+        // with both vectors shrunk before publication. Charge the CPU payload
+        // during admission, before any selected mesh can be evicted by the LRU.
+        // Instance multiplicity is conservatively charged as distinct geometry.
+        let cpu_bytes_per_triangle =
+            2 * std::mem::size_of::<VegetationVertex>() + 3 * std::mem::size_of::<u32>();
+        let cpu_triangle_capacity = self.cpu_cache_bytes / cpu_bytes_per_triangle;
+        let needs_tree_shadows = !offscreen.is_empty()
+            || plants
+                .iter()
+                .any(|(distance, p)| p.species == Species::Rowan && *distance < 96.);
+        let shadow_triangle_budget = if needs_tree_shadows {
+            TREE_SHADOW_TRIANGLE_BUDGET.min(cpu_triangle_capacity / 4)
+        } else {
+            0
+        };
+        let mut selection_config = self.config.clone();
+        selection_config.max_triangles =
+            selection_config
+                .max_triangles
+                .min(cpu_triangle_capacity.saturating_sub(
+                    shadow_triangle_budget.max(self.shadow_lifecycle.geometry_triangles()),
+                ));
         let mut remaining_ground_coarse = 0usize;
         let mut ground_reservations = BTreeMap::new();
         let mut ground_coverage_ready = true;
+        let mut ground_current_costs = Vec::new();
         if !self.config.reference {
             for (_, p) in plants.iter().filter(|(_, p)| p.species != Species::Rowan) {
                 let key = ground_key(
@@ -1174,17 +1274,32 @@ impl VegetationStream {
                         self.world.revision().max(1)
                     },
                 );
-                let current = resident_coverage_key(
-                    &self.meshes,
-                    key,
-                    self.previous_lods.get(&tree_identity(key)).copied(),
-                );
-                if let Some(current) = current {
-                    let (mesh, used) = self.meshes.get_mut(&current).unwrap();
-                    *used = self.tick;
-                    let cost = mesh.indices.len() / 3;
-                    ground_reservations.insert(tree_identity(key), cost);
-                    remaining_ground_coarse += cost;
+                let identity = tree_identity(key);
+                let previous = self.previous_lods.get(&identity).copied();
+                let mut baseline = None;
+                for lod in [1, 2, 4, 8] {
+                    if let Some((mesh, _)) = self.meshes.get(&MeshKey { lod, ..key }) {
+                        let cost = mesh.indices.len() / 3;
+                        baseline = Some(baseline.map_or(cost, |old: usize| old.min(cost)));
+                        if previous == Some(lod) {
+                            ground_current_costs.push((identity, cost));
+                        }
+                    }
+                }
+                if let Some(cost) = baseline {
+                    // Admit feasible cheap cover first; an impossible far patch
+                    // cannot reserve away all affordable near geometry.
+                    let reserved = if cost
+                        <= selection_config
+                            .max_triangles
+                            .saturating_sub(remaining_ground_coarse)
+                    {
+                        cost
+                    } else {
+                        0
+                    };
+                    ground_reservations.insert(identity, reserved);
+                    remaining_ground_coarse = remaining_ground_coarse.saturating_add(reserved);
                 } else {
                     ground_coverage_ready = false;
                 }
@@ -1196,7 +1311,7 @@ impl VegetationStream {
         let mut remaining_tree_coarse = 0usize;
         let mut tree_reservations = BTreeMap::new();
         let mut tree_current_costs = Vec::new();
-        let tree_budget = self.config.max_triangles.saturating_mul(65) / 100;
+        let tree_budget = selection_config.max_triangles.saturating_mul(65) / 100;
         let mut tree_coverage_ready = true;
         for (_, p) in plants
             .iter()
@@ -1278,6 +1393,28 @@ impl VegetationStream {
         });
         shadow_plants.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.root.cmp(&b.1.root)));
         shadow_plants.truncate(self.config.max_instances.min(256));
+        // Retain affordable existing detail nearest first after cheap ground
+        // coverage and tree reservations. Heading never enters this allocation.
+        ground_current_costs.sort_by(|a, b| {
+            let distance = |key: MeshKey| {
+                ((key.tile[0] as f64 + 0.5) * 8. - camera[0])
+                    .hypot((key.tile[1] as f64 + 0.5) * 8. - camera[2])
+            };
+            distance(a.0).total_cmp(&distance(b.0)).then(a.0.cmp(&b.0))
+        });
+        for (identity, current) in ground_current_costs {
+            let baseline = ground_reservations[&identity];
+            let extra = current.saturating_sub(baseline);
+            if extra
+                <= selection_config
+                    .max_triangles
+                    .saturating_sub(remaining_ground_coarse)
+                    .saturating_sub(remaining_tree_coarse)
+            {
+                ground_reservations.insert(identity, current);
+                remaining_ground_coarse = remaining_ground_coarse.saturating_add(extra);
+            }
+        }
         for (distance, p) in plants {
             let s = species_id(p.species);
             let radius = radii[s as usize];
@@ -1328,16 +1465,10 @@ impl VegetationStream {
                         .copied()
                         .unwrap_or(0),
                 );
-                self.config
+                selection_config
                     .max_triangles
                     .saturating_sub(stats.triangles)
                     .saturating_sub(remaining_ground_coarse)
-                    .min(if s == 1 {
-                        (self.config.max_triangles / 10)
-                            .saturating_sub(stats.triangles_by_species[1])
-                    } else {
-                        usize::MAX
-                    })
             } else {
                 usize::MAX
             };
@@ -1349,7 +1480,7 @@ impl VegetationStream {
                         .unwrap_or(0),
                 );
                 tree_refinement_headroom(
-                    self.config.max_triangles,
+                    selection_config.max_triangles,
                     stats.triangles_by_species[2],
                     remaining_tree_coarse,
                 )
@@ -1362,8 +1493,26 @@ impl VegetationStream {
                 1
             } else {
                 hysteretic_stride(
-                    ground_stride(distance, projection, &self.config),
-                    ground_stride(distance * 0.9, projection, &self.config),
+                    ground_stride(
+                        distance * 8.
+                            / if self.native_detail_distance_m > 0. {
+                                self.native_detail_distance_m
+                            } else {
+                                8.
+                            },
+                        projection,
+                        &self.config,
+                    ),
+                    ground_stride(
+                        distance * 0.9 * 8.
+                            / if self.native_detail_distance_m > 0. {
+                                self.native_detail_distance_m
+                            } else {
+                                8.
+                            },
+                        projection,
+                        &self.config,
+                    ),
                     previous,
                 )
             };
@@ -1511,10 +1660,54 @@ impl VegetationStream {
                 });
                 retain_current_mesh(candidate, current, ground_target).unwrap_or(coarse_key)
             };
+            if s != 2 {
+                let mesh = self.meshes.get(&render_key).map(|(mesh, _)| mesh);
+                let triangles = mesh.map_or(0, |m| m.indices.len() / 3);
+                let admitted = mesh.is_some()
+                    && triangles <= ground_headroom
+                    && budget_allows(&selection_config, &stats, s as usize, triangles);
+                let reason = if mesh.is_none() {
+                    "missing_mesh"
+                } else if !admitted {
+                    "budget"
+                } else if render_key.lod > ground_target {
+                    "coarse_coverage"
+                } else if previous == Some(render_key.lod) {
+                    "retained_detail"
+                } else {
+                    "selected"
+                };
+                stats.ground_decisions[if mesh.is_none() {
+                    1
+                } else if !admitted {
+                    2
+                } else {
+                    0
+                }] += 1;
+                if admitted && previous == Some(render_key.lod) {
+                    stats.ground_decisions[3] += 1;
+                }
+                if admitted && render_key.lod > ground_target {
+                    stats.ground_decisions[4] += 1;
+                }
+                if self.ground_inspection.len() < 256 {
+                    self.ground_inspection.push(GroundInspection {
+                        key,
+                        distance_m: distance,
+                        target_lod: ground_target,
+                        selected_lod: admitted.then_some(render_key.lod),
+                        triangles,
+                        headroom: ground_headroom,
+                        reason,
+                    });
+                }
+            }
             if let Some((mesh, used)) = self.meshes.get_mut(&render_key) {
                 stats.ready_by_species[s as usize] += 1;
                 let tris = mesh.indices.len() / 3;
-                if !budget_allows(&self.config, &stats, s as usize, tris) {
+                if !budget_allows(&selection_config, &stats, s as usize, tris)
+                    || (s != 2 && tris > ground_headroom)
+                {
                     if s == 2 {
                         stats.coverage_unresolved += 1;
                     }
@@ -1590,7 +1783,7 @@ impl VegetationStream {
             // refinement, without allowing unadmitted far baselines to consume
             // the nearest tree's allocation. The lifecycle separately charges
             // real old/new overlap and defers a handoff when no room remains.
-            let reserved = if cost <= TREE_SHADOW_TRIANGLE_BUDGET.saturating_sub(shadow_remaining) {
+            let reserved = if cost <= shadow_triangle_budget.saturating_sub(shadow_remaining) {
                 cost
             } else {
                 0
@@ -1613,7 +1806,7 @@ impl VegetationStream {
             let previous = self.shadow_lods.get(&identity).copied();
             let target = shadow_stride(distance, previous, self.config.reference);
             shadow_remaining = shadow_remaining.saturating_sub(shadow_reservations[&identity]);
-            let room = TREE_SHADOW_TRIANGLE_BUDGET
+            let room = shadow_triangle_budget
                 .saturating_sub(shadow_used)
                 .saturating_sub(shadow_remaining);
             let mut request = MeshKey {
@@ -1727,7 +1920,7 @@ impl VegetationStream {
             if self.shadow_transitions_enabled {
                 self.shadow_lifecycle.apply(
                     shadow_batches,
-                    TREE_SHADOW_TRIANGLE_BUDGET,
+                    shadow_triangle_budget,
                     Instant::now(),
                     &mut shadow_inspection,
                 )
@@ -1798,7 +1991,7 @@ impl VegetationStream {
         });
         let mut requested = BTreeSet::new();
         for (_, _, _, key, p, ground) in mesh_requests {
-            if submitted >= self.workers.len() * 2 {
+            if self.background_paused || submitted >= self.workers.len() * 2 {
                 break;
             }
             if !requested.insert(key) || self.pending_meshes.contains(&key) {
@@ -3454,7 +3647,8 @@ mod tests {
             triangles_by_species: [0, 100_000, 0],
             ..Default::default()
         };
-        assert!(!budget_allows(&config, &flower_full, 1, 1));
+        assert!(budget_allows(&config, &flower_full, 1, 900_000));
+        assert!(!budget_allows(&config, &flower_full, 1, 900_001));
         assert!(budget_allows(&config, &flower_full, 0, 900_000));
         assert!(budget_allows(
             &config,
@@ -3855,5 +4049,309 @@ mod tests {
         let frame = stream.update([5000., 20., 5000.], 1080, 1., 1);
         assert!(frame.batches.is_empty());
         assert_ne!(frame.stats.pending_jobs, 0);
+    }
+}
+
+#[cfg(test)]
+mod flower_turn_tests {
+    use super::*;
+
+    fn flower_surround() -> (VegetationStream, World) {
+        let world = World::new(7);
+        let mut stream = VegetationStream::new(
+            world.clone(),
+            VegetationConfig {
+                grass_radius_m: 0.,
+                flower_radius_m: 8.,
+                tree_radius_m: 0.,
+                max_triangles: 100_000,
+                ..Default::default()
+            },
+        );
+        // Four exact source flowers surrounding a stationary eye. Include all
+        // placement tiles so this tests admission rather than worker timing.
+        for s in 0..3 {
+            for x in -3..=3 {
+                for z in -3..=3 {
+                    stream
+                        .tiles
+                        .insert(Tile { species: s, x, z }, (Vec::new(), 0));
+                }
+            }
+        }
+        for (i, (x, z)) in [(-64, -64), (-64, 64), (64, -64), (64, 64)]
+            .into_iter()
+            .enumerate()
+        {
+            let record = PlantRecord {
+                species: Species::Edelweiss,
+                variant: i as u8,
+                seed: 41 + i as u64,
+                root: Cell { x, y: 0, z },
+                rotation: i as u8,
+            };
+            stream
+                .tiles
+                .get_mut(&Tile {
+                    species: 1,
+                    x: x.div_euclid(512),
+                    z: z.div_euclid(512),
+                })
+                .unwrap()
+                .0
+                .push(record);
+            let tx = x.div_euclid(128);
+            let tz = z.div_euclid(128);
+            let patch = PlantRecord {
+                variant: u8::MAX,
+                root: Cell {
+                    x: tx * 128,
+                    y: 0,
+                    z: tz * 128,
+                },
+                seed: mix(world.seed() ^ mix(tx as u64) ^ (tz as u64).rotate_left(31) ^ 1),
+                ..record
+            };
+            let cells = ground_cells(&[record], patch.root, &BTreeSet::new(), || false).unwrap();
+            assert_eq!(cells.len(), vegetation::model_for(&record).voxels.len());
+            for lod in [1, 2, 4, 8] {
+                let mut mesh = mesh_ground_cells(
+                    cells.iter().map(|(c, (m, rgb))| (*c, *m, *rgb)),
+                    lod,
+                    || false,
+                );
+                // Match the immutable worker publication contract exactly.
+                mesh.vertices.shrink_to_fit();
+                mesh.indices.shrink_to_fit();
+                let mesh = Arc::new(mesh);
+                let key = ground_key(&patch, lod, 0);
+                stream.mesh_costs.insert(key, (mesh.indices.len() / 3, 0));
+                stream.meshes.insert(key, (mesh, 0));
+            }
+        }
+        (stream, world)
+    }
+    #[test]
+    fn exact_flowers_keep_native_residency_through_full_in_place_rotation() {
+        let (mut stream, world) = flower_surround();
+        let first = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert_eq!(first.batches.len(), 4);
+        assert!(first.batches.iter().all(|b| b.key.lod == 1));
+        for degree in (0..360).step_by(5) {
+            let yaw = (degree as f64).to_radians();
+            let frame = stream.update_view(
+                [0., 1.7, 0.],
+                1080,
+                1.,
+                world.revision(),
+                [yaw.sin(), 0., yaw.cos()],
+                16. / 9.,
+            );
+            assert_eq!(frame.batches.len(), 4, "heading {degree}");
+            for (a, b) in first.batches.iter().zip(&frame.batches) {
+                assert_eq!(a.key, b.key, "heading {degree}");
+                assert!(Arc::ptr_eq(&a.mesh, &b.mesh));
+            }
+            assert_eq!(frame.stats.rejected_by_species[1], 0);
+            assert_eq!(frame.stats.selected_mesh_evictions, 0);
+        }
+    }
+    #[test]
+    fn configured_near_tree_color_residency_survives_a_full_turn() {
+        let (mut stream, world) = flower_surround();
+        stream.config.tree_radius_m = 40.;
+        let tree = PlantRecord {
+            species: Species::Rowan,
+            variant: 0,
+            seed: 941,
+            root: Cell {
+                x: 0,
+                y: 0,
+                z: -384,
+            },
+            rotation: 0,
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 0,
+                z: -1,
+            })
+            .unwrap()
+            .0
+            .push(tree);
+        for lod in [1, 2, 4, 8] {
+            let key = MeshKey {
+                species: 2,
+                variant: 0,
+                seed: tree.seed,
+                tile: [0; 2],
+                lod,
+                edit_id: 0,
+            };
+            let mesh = Arc::new(VegetationMesh {
+                vertices: Vec::new(),
+                indices: vec![0; 36],
+            });
+            stream.mesh_costs.insert(key, (12, 0));
+            stream.meshes.insert(key, (mesh, 0));
+        }
+        // Zero retains the frozen view-dependent tree admission profile.
+        let old = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert!(old.batches.iter().all(|b| b.key.species != 2));
+        stream.configure_resources(160 * 1024 * 1024, 256 * 1024 * 1024, 100_000, 32.);
+        for degree in (0..360).step_by(10) {
+            let yaw = (degree as f64).to_radians();
+            let frame = stream.update_view(
+                [0., 1.7, 0.],
+                1080,
+                1.,
+                world.revision(),
+                [yaw.sin(), 0., yaw.cos()],
+                16. / 9.,
+            );
+            assert!(
+                frame
+                    .batches
+                    .iter()
+                    .any(|b| b.key.species == 2 && b.key.seed == tree.seed && b.key.lod == 1),
+                "heading {degree}"
+            );
+        }
+    }
+    #[test]
+    fn high_altitude_camera_does_not_request_native_ground_below_its_xz_position() {
+        let (mut stream, world) = flower_surround();
+        // Preserve real canonical placement but remove every display mesh, so
+        // any false near demand would submit expensive ground generation.
+        stream.meshes.clear();
+        stream.mesh_costs.clear();
+        let frame = stream.update_view(
+            [0., 500., 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., -1., 0.],
+            16. / 9.,
+        );
+        assert_eq!(frame.stats.demanded_by_species[0], 0);
+        assert_eq!(frame.stats.demanded_by_species[1], 0);
+        assert_eq!(frame.stats.missing_meshes, 0);
+        assert!(stream.pending_meshes.is_empty());
+        assert!(frame.batches.is_empty());
+        // XZ-aligned source coverage stays warm, and descending immediately
+        // restores normal native-ground demand from those same source records.
+        let grounded = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert_eq!(grounded.stats.demanded_by_species[1], 4);
+        assert!(grounded.stats.missing_meshes > 0);
+    }
+    #[test]
+    fn cpu_cache_admission_settles_without_selected_flower_eviction_or_regeneration() {
+        let (mut stream, world) = flower_surround();
+        let native_bytes: usize = stream
+            .meshes
+            .iter()
+            .filter(|(key, _)| key.lod == 1)
+            .map(|(_, (mesh, _))| mesh_bytes(mesh))
+            .sum();
+        let baseline_bytes: usize = stream
+            .meshes
+            .iter()
+            .filter(|(key, _)| key.lod == 8)
+            .map(|(_, (mesh, _))| mesh_bytes(mesh))
+            .sum();
+        let cpu_budget = (native_bytes / 2).max(baseline_bytes);
+        assert!(
+            cpu_budget < native_bytes,
+            "fixture must exert actual native-mesh pressure"
+        );
+        stream.configure_resources(cpu_budget, 256 * 1024 * 1024, 1_000_000, 8.);
+        let mut selected = None;
+        for tick in 0..80 {
+            // Alternate headings to exercise the live selector rather than only
+            // its settled-frame shortcut. Source geometry stays in all headings.
+            let angle = (tick as f64 * 17.).to_radians();
+            let frame = stream.update_view(
+                [0., 1.7, 0.],
+                1080,
+                1.,
+                world.revision(),
+                [angle.sin(), 0., angle.cos()],
+                16. / 9.,
+            );
+            assert_eq!(
+                frame.batches.len(),
+                4,
+                "CPU admission preserves cheap flower cover"
+            );
+            assert!(frame.stats.selected_cpu_geometry_bytes <= cpu_budget);
+            assert!(frame.stats.total_cpu_geometry_bytes <= cpu_budget);
+            assert_eq!(frame.stats.selected_mesh_evictions, 0);
+            assert_eq!(
+                frame.stats.pending_jobs, 0,
+                "unaffordable known refinement must not be resubmitted"
+            );
+            let keys: Vec<_> = frame.batches.iter().map(|batch| batch.key).collect();
+            if let Some(previous) = &selected {
+                assert_eq!(previous, &keys);
+            }
+            selected = Some(keys);
+        }
+        assert!(stream.pending_meshes.is_empty());
+        assert_eq!(
+            stream.job_counters.snapshot(stream.workers.len()).started[2],
+            0
+        );
+    }
+    #[test]
+    fn flower_capacity_keeps_cheap_coverage_before_native_refinement() {
+        let (mut stream, world) = flower_surround();
+        let baseline: usize = stream
+            .meshes
+            .iter()
+            .filter(|(k, _)| k.lod == 8)
+            .map(|(_, (m, _))| m.indices.len() / 3)
+            .sum();
+        stream.config.max_triangles = baseline;
+        for degree in (0..360).step_by(30) {
+            let yaw = (degree as f64).to_radians();
+            let frame = stream.update_view(
+                [0., 1.7, 0.],
+                1080,
+                1.,
+                world.revision(),
+                [yaw.sin(), 0., yaw.cos()],
+                16. / 9.,
+            );
+            assert_eq!(
+                frame.batches.len(),
+                4,
+                "cheap source coverage survives capacity pressure"
+            );
+            assert!(frame.stats.triangles <= baseline);
+            assert_eq!(frame.stats.rejected_by_species[1], 0);
+        }
     }
 }

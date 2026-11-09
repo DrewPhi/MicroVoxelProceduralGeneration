@@ -14,6 +14,7 @@ mod cold_source_cache;
 pub mod column_mesh;
 mod derived_disk_cache;
 mod derived_disk_writeback;
+mod development_resources;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
@@ -241,6 +242,7 @@ struct Gpu {
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
+    vegetation_background_paused: bool,
     vegetation_stats: vegetation::VegetationStats,
     vegetation_inspection: Vec<vegetation::ShadowInspection>,
     vegetation_caster_roots: Vec<[i64; 3]>,
@@ -479,6 +481,7 @@ impl Gpu {
             adaptive: None,
             vegetation: None,
             vegetation_stream: None,
+            vegetation_background_paused: false,
             vegetation_stats: Default::default(),
             vegetation_inspection: Vec::new(),
             vegetation_caster_roots: Vec::new(),
@@ -1356,6 +1359,11 @@ struct Viewer {
     visual_menu_enabled: bool,
     visual_started: Instant,
     display_frame_ms: f64,
+    throughput: development_resources::ThroughputGovernor,
+    resource_checked: Instant,
+    resource_available_mib: Option<usize>,
+    resource_process_mib: Option<f64>,
+    resource_pressure: bool,
     visual_build_mib: usize,
     visual_disk_cache: Option<PathBuf>,
     visual_disk_mib: usize,
@@ -1819,6 +1827,7 @@ impl Viewer {
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
+        self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
             let right = forward.cross(Vec3::Y);
@@ -2690,6 +2699,13 @@ pub fn run() -> Result<()> {
                 max_entry_bytes: 64 * 1024 * 1024,
             }),
         )?);
+        if let Some(view) = &mut adaptive_view {
+            view.reconfigure(adaptive_stream::StreamSettings {
+                native_radius_m: visual_settings.native_radius_m,
+                ..view.stream_settings()
+            })?;
+            view.set_upload_budget(visual_settings.upload_mib);
+        }
         if scene == "adaptive-topology" {
             volume::build(&world)?
         } else {
@@ -3147,6 +3163,11 @@ pub fn run() -> Result<()> {
         visual_menu_enabled,
         visual_started: now,
         display_frame_ms: 0.,
+        throughput: Default::default(),
+        resource_checked: Instant::now() - std::time::Duration::from_secs(2),
+        resource_available_mib: None,
+        resource_process_mib: None,
+        resource_pressure: false,
         visual_build_mib: adaptive_build_mib,
         visual_disk_cache,
         visual_disk_mib: adaptive_disk_mib,
@@ -3399,6 +3420,17 @@ pub fn run() -> Result<()> {
         ));
         json.pop();
         json.push_str(&format!(",\"beauty\":{}}}", visual.beauty));
+        json.pop();
+        json.push_str(&format!(
+            ",\"development_resources\":{{\"profile\":\"{}\",\"available_mib\":{},\"process_mib\":{},\"background_paused\":{},\"native_radius_m\":{},\"vegetation_near_m\":{},\"terrain_cpu_mib\":{},\"build_mib\":{},\"terrain_gpu_mib\":{},\"plant_cpu_mib\":{},\"plant_gpu_mib\":{},\"plant_triangle_budget\":{},\"native_geometry\":\"{}\"}}}}",
+            visual.resource_profile.label(),
+            viewer.resource_available_mib.map_or("null".into(), |n| n.to_string()),
+            viewer.resource_process_mib.map_or("null".into(), |n| n.to_string()),
+            viewer.resource_pressure, visual.native_radius_m, visual.vegetation_near_m,
+            visual.cache_mib, visual.build_mib, visual.terrain_gpu_mib,
+            visual.plant_cpu_mib, visual.plant_gpu_mib, visual.triangle_budget,
+            adaptive_geometry::native_geometry_mode()
+        ));
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             json.pop();
             json.push_str(&format!(

@@ -10,6 +10,9 @@ use std::{collections::HashSet, time::Instant};
 
 pub struct AdaptiveView {
     upload_budget: u64,
+    background_paused: bool,
+    stream_settings: StreamSettings,
+    owner_surface_bounds: Vec<(TileKey, [[f64; 3]; 2])>,
     worker: Worker,
     pending: Option<SelectionFrame>,
     deferred: Option<SelectionFrame>,
@@ -69,6 +72,8 @@ pub struct AdaptiveView {
     deferred_arc_bytes: usize,
     gpu_pending_clusters: usize,
     gpu_resource_limited: bool,
+    /// Configured admission budget; physical pool allocation is reported separately.
+    gpu_pool_budget_bytes: u64,
     max_visible_error_px: Option<f64>,
     visible_unresolved_count: usize,
     visible_uncertified_count: usize,
@@ -78,8 +83,51 @@ pub struct AdaptiveView {
     frame_attachment_bytes: u64,
 }
 impl AdaptiveView {
+    /// Suppress new builds and GPU uploads under measured memory pressure.
+    /// Existing owners stay drawable; this does not reclaim driver allocations.
+    pub fn set_background_paused(&mut self, paused: bool) {
+        self.background_paused = paused;
+        self.worker.set_background_paused(paused);
+    }
     pub fn set_upload_budget(&mut self, mib: usize) {
         self.upload_budget = mib.clamp(1, 64) as u64 * 1024 * 1024;
+    }
+    /// Changes scheduling and quality demand while retaining canonical caches,
+    /// partially uploaded payloads and the complete currently displayed owners.
+    pub fn reconfigure(&mut self, settings: StreamSettings) -> Result<(), String> {
+        self.worker.reconfigure(settings)?;
+        let quality_changed = self.stream_settings.pixel_error != settings.pixel_error
+            || self.stream_settings.native_radius_m != settings.native_radius_m;
+        self.stream_settings = settings;
+        self.pixel_error = settings.pixel_error;
+        self.cpu_cache_budget_bytes = settings.cpu_cache_bytes;
+        self.worker_count = settings.worker_count;
+        self.refinements_per_transaction = settings.refinements_per_transaction;
+        self.direct_native_urgent = settings.direct_native_urgent;
+        if quality_changed {
+            self.quality_ready = false;
+            self.refinement_ready = false;
+            self.cpu_quality_ready = false;
+            self.cpu_refinement_ready = false;
+            self.candidate_preparation = None;
+        }
+        Ok(())
+    }
+    pub fn stream_settings(&self) -> StreamSettings {
+        self.stream_settings
+    }
+    /// Call only when the governor's integer work allowance changes. Equality
+    /// is checked here too, so unchanged throughput never restarts planning.
+    pub fn set_throughput(&mut self, jobs: usize, refinements: usize) -> Result<(), String> {
+        let settings = StreamSettings {
+            jobs_per_update: jobs.clamp(1, 16),
+            refinements_per_transaction: refinements.clamp(1, 32),
+            ..self.stream_settings
+        };
+        if settings == self.stream_settings {
+            return Ok(());
+        }
+        self.reconfigure(settings)
     }
     pub fn new(
         world: frontier_world::World,
@@ -92,23 +140,23 @@ impl AdaptiveView {
         build_budget_bytes: usize,
         disk_cache: Option<crate::adaptive_stream::DiskCacheConfig>,
     ) -> Result<Self, String> {
+        let stream_settings = StreamSettings {
+            pixel_error,
+            cpu_cache_bytes: cpu_cache_budget_bytes,
+            worker_count,
+            refinements_per_transaction,
+            direct_native_urgent,
+            build_budget_bytes,
+            ..Default::default()
+        };
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
         Ok(Self {
             upload_budget: 2 * 1024 * 1024,
-            worker: Worker::new_with_cache(
-                world,
-                StreamSettings {
-                    pixel_error,
-                    cpu_cache_bytes: cpu_cache_budget_bytes,
-                    worker_count,
-                    refinements_per_transaction,
-                    direct_native_urgent,
-                    build_budget_bytes,
-                    ..Default::default()
-                },
-                disk_cache,
-            )?,
+            background_paused: false,
+            stream_settings,
+            owner_surface_bounds: Vec::new(),
+            worker: Worker::new_with_cache(world, stream_settings, disk_cache)?,
             pending: None,
             deferred: None,
             epoch: 0,
@@ -167,6 +215,7 @@ impl AdaptiveView {
             deferred_arc_bytes: 0,
             gpu_pending_clusters: 0,
             gpu_resource_limited: false,
+            gpu_pool_budget_bytes: 512 * 1024 * 1024,
             max_visible_error_px: None,
             visible_unresolved_count: 0,
             visible_uncertified_count: 0,
@@ -271,6 +320,12 @@ impl AdaptiveView {
             }
         }
         let adaptive = gpu.adaptive.as_mut().unwrap();
+        adaptive.set_resource_budget_mib(
+            gpu.visual_settings
+                .as_ref()
+                .map_or(512, |settings| settings.terrain_gpu_mib as u64),
+        );
+        self.gpu_pool_budget_bytes = adaptive.resource_budget_mib().saturating_mul(1024 * 1024);
         adaptive.set_visual_lighting(
             &gpu.visual_settings.clone().unwrap_or_default(),
             gpu.regional_appearance,
@@ -290,7 +345,7 @@ impl AdaptiveView {
         }
         let mut uploaded = 0;
         self.gpu_resource_limited = false;
-        if let Some(frame) = &self.pending {
+        if let (false, Some(frame)) = (self.background_paused, &self.pending) {
             for tile in &frame.tiles {
                 if adaptive.contains(&tile.key) {
                     continue;
@@ -345,6 +400,11 @@ impl AdaptiveView {
                         keys.iter().copied(),
                         self.topology_supported,
                     );
+                    self.owner_surface_bounds = frame
+                        .tiles
+                        .iter()
+                        .map(|tile| (tile.key, tile.conservative_surface_bounds))
+                        .collect();
                     self.owners = keys;
                     self.retain_dirty = true;
                     if let Some(transaction) = frame.publication_transaction {
@@ -428,7 +488,16 @@ impl AdaptiveView {
         ]) {
             *total += value;
         }
-        self.quality_ready = self.coverage_ready && self.stats.current_quality_ready;
+        let native_pending = self.owner_surface_bounds.iter().any(|(key, bounds)| {
+            key.step_cells > 1
+                && crate::adaptive_stream::native_band(
+                    *bounds,
+                    camera.position,
+                    self.stream_settings.native_radius_m,
+                )
+        });
+        self.quality_ready =
+            self.coverage_ready && self.stats.current_quality_ready && !native_pending;
         if self.quality_ready && self.first_quality_ms.is_none() {
             self.first_quality_ms = Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
         }
@@ -528,6 +597,11 @@ impl AdaptiveView {
         let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved,self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
         json.pop();
         json.push_str(&format!(
+            ",\"background_paused\":{}}}",
+            self.background_paused
+        ));
+        json.pop();
+        json.push_str(&format!(
             ",\"upload_budget_bytes_per_frame\":{}}}",
             self.upload_budget
         ));
@@ -541,7 +615,7 @@ impl AdaptiveView {
             self.generated_columns, self.source_cache_hits, self.source_cache_bytes, self.latest_cache.source_budget_bytes
         ));
         json.pop();
-        json.push_str(&format!(",\"cpu_cache_budget_bytes\":{},\"pending_selection_arc_bytes\":{},\"cpu_selection_bytes_overlap_cache\":true,\"gpu_pool_budget_bytes\":536870912}}",self.cpu_cache_budget_bytes,self.pending_arc_bytes));
+        json.push_str(&format!(",\"cpu_cache_budget_bytes\":{},\"pending_selection_arc_bytes\":{},\"cpu_selection_bytes_overlap_cache\":true,\"gpu_pool_budget_bytes\":{}}}",self.cpu_cache_budget_bytes,self.pending_arc_bytes,self.gpu_pool_budget_bytes));
         json.pop();
         json.push_str(&format!(",\"max_visible_error_px\":{},\"visible_unresolved_count\":{},\"visible_global_bound_clusters\":{},\"visible_local_certified_clusters\":{},\"gpu_pool_allocated_bytes\":{},\"gpu_camera_uniform_bytes\":{},\"frame_attachment_logical_bytes\":{}}}",self.max_visible_error_px.map_or("null".into(),|v|v.to_string()),self.visible_unresolved_count,self.global_bound_clusters,self.local_certified_clusters,self.stats.allocated_bytes,crate::adaptive_gpu::CAMERA_UNIFORM_BYTES,self.frame_attachment_bytes));
         json.pop();

@@ -47,6 +47,18 @@ pub struct NativeQuad {
     pub material: u32,
     pub profile_index: u32,
 }
+#[path = "native_conforming.rs"]
+mod native_conforming;
+
+/// Stable representation tag; source identity is unchanged.
+pub fn native_geometry_mode() -> &'static str {
+    if std::env::var("FRONTIER_NATIVE_GEOMETRY").as_deref() == Ok("unit") {
+        "unit"
+    } else {
+        "conforming-v1"
+    }
+}
+
 pub(crate) const MAX_NATIVE_QUADS: usize = 4_000_000;
 /// Lossless proxy primitive. The three positions retain the indexed triangle's
 /// original order; identical per-corner normal/color/profile data is stored once.
@@ -202,17 +214,17 @@ pub fn build(
 fn build_cached(
     world: &World,
     key: TileKey,
-    cancelled: impl FnMut() -> bool,
+    mut cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
 ) -> Result<GeometryTile, String> {
     samples.source_stage = SourceStage::Proxy;
     samples.begin_job();
     samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
-        let mut tile = build_surface(world, key, cancelled, samples)?;
+        let mut tile = build_surface(world, key, &mut cancelled, samples)?;
         let finalize_started = std::time::Instant::now();
         if tile.exact {
-            pack_native_quads(&mut tile)?;
+            pack_exact_native(&mut tile, &mut cancelled)?;
         } else {
             compact_vertices(&mut tile);
         }
@@ -262,7 +274,7 @@ fn build_cached(
             source_revision: 0,
             ..key
         },
-        cancelled,
+        &mut cancelled,
         samples,
     )?;
     tile.key = key;
@@ -270,7 +282,7 @@ fn build_cached(
     remove_volume_boundary_faces(&mut tile);
     disable_owner_boundary_profiles(&mut tile);
     if tile.exact {
-        pack_native_quads(&mut tile)?;
+        pack_exact_native(&mut tile, &mut cancelled)?;
     } else {
         compact_vertices(&mut tile);
     }
@@ -557,7 +569,37 @@ pub(crate) fn pack_proxy_triangles(tile: &mut GeometryTile) -> Result<(), String
     Ok(())
 }
 
+fn pack_exact_native(
+    tile: &mut GeometryTile,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), String> {
+    if native_geometry_mode() != "unit" {
+        if let Some(triangles) = native_conforming::triangulate(tile, &mut cancelled)? {
+            tile.proxy_triangles = triangles;
+            tile.mesh.vertices = vec![];
+            tile.mesh.indices = vec![];
+            tile.face_profile_indices = vec![];
+            tile.native_bins = vec![];
+            tile.bytes = tile.proxy_triangles.capacity() * std::mem::size_of::<ProxyTriangle>()
+                + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
+                + tile
+                    .gpu_profiles
+                    .as_ref()
+                    .map_or(0, DeferredProfiles::payload_bytes);
+            return Ok(());
+        }
+    }
+    pack_native_quads_cancelled(tile, cancelled)
+}
+
+#[cfg(test)]
 fn pack_native_quads(tile: &mut GeometryTile) -> Result<(), String> {
+    pack_native_quads_cancelled(tile, || false)
+}
+fn pack_native_quads_cancelled(
+    tile: &mut GeometryTile,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), String> {
     if tile.mesh.vertices.len() % 4 != 0 {
         return Err("native quad packing requires canonical rectangles".into());
     }
@@ -622,7 +664,13 @@ fn pack_native_quads(tile: &mut GeometryTile) -> Result<(), String> {
             ((q[2].position[v] - q[0].position[v]) as f64 / VOXEL_SIZE).round() as usize,
         ];
         for dv in 0..extent[1] {
+            if dv % 128 == 0 && cancelled() {
+                return Err("adaptive geometry cancelled".into());
+            }
             for du in 0..extent[0] {
+                if du % 1024 == 0 && cancelled() {
+                    return Err("adaptive geometry cancelled".into());
+                }
                 let mut anchor = q[0].position;
                 anchor[u] += (du as f64 * VOXEL_SIZE) as f32;
                 anchor[v] += (dv as f64 * VOXEL_SIZE) as f32;
@@ -3093,6 +3141,29 @@ impl GeometryCache {
             live_payload_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
+    /// Resize mesh residency without discarding valid source pages. The
+    /// existing source reservation is retained; smaller totals are rejected.
+    /// External Arc owners remain valid and are charged separately as before.
+    pub fn set_budget_bytes(&mut self, budget_bytes: usize) -> Result<(), String> {
+        if budget_bytes < self.source_budget {
+            return Err("geometry budget is smaller than retained source reservation".into());
+        }
+        self.budget = budget_bytes;
+        self.mesh_budget = budget_bytes - self.source_budget;
+        while self.mesh_bytes.saturating_add(self.lru_metadata_bytes()) > self.mesh_budget {
+            let oldest = self.oldest.ok_or("adaptive cache accounting error")?;
+            self.unlink(oldest);
+            let old = self.entries.remove(&oldest).unwrap();
+            self.mesh_bytes -= old.tile.bytes;
+            self.stats.evictions += 1;
+        }
+        self.stats.resident_bytes = self.mesh_bytes
+            + self.lru_metadata_bytes()
+            + self.samples.pages.snapshot().source_cache_bytes;
+        // Begin a new total-budget measurement epoch after reconfiguration.
+        self.stats.peak_bytes = self.stats.resident_bytes;
+        Ok(())
+    }
     pub(crate) fn enable_disk_cache(
         &mut self,
         path: std::path::PathBuf,
@@ -4290,6 +4361,15 @@ mod tests {
                 }
                 .map(|i| base + i),
             );
+        }
+        for t in &tile.proxy_triangles {
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend(t.positions.map(|position| Vertex {
+                position,
+                normal: t.normal,
+                color: t.color,
+            }));
+            mesh.indices.extend([base, base + 1, base + 2]);
         }
         mesh
     }
@@ -5733,6 +5813,15 @@ mod tests {
                 outside_band = true;
             }
         }
+        for t in &tile.proxy_triangles {
+            if t.positions.iter().any(|p| p[0] < 1.) {
+                assert_eq!(tile.face_profiles[t.profile_index as usize], [[0.; 4]; 5]);
+                exact_band = true;
+            } else {
+                assert!(tile.face_profiles[t.profile_index as usize][0][3] > 0.);
+                outside_band = true;
+            }
+        }
         assert!(exact_band && outside_band);
         let proxy = build(
             &world,
@@ -6027,7 +6116,8 @@ mod tests {
             },
         )
         .unwrap();
-        let tile = build(&world, key(1), || false).unwrap();
+        let mut tile = build_surface(&world, key(1), || false, &mut SourceSamples::new(0)).unwrap();
+        pack_native_quads(&mut tile).unwrap();
         let mut next = 0;
         assert!(!tile.native_bins.is_empty() && tile.native_bins.len() <= 6);
         for &bin in &tile.native_bins {
@@ -6097,6 +6187,24 @@ mod tests {
         assert_eq!(native.native_bins, direct.native_bins);
         assert_eq!(native.best_certified_vertical_error_m, Some(0.));
         assert_eq!(native.bounds, direct.bounds);
+    }
+    #[test]
+    fn cache_budget_resize_preserves_content_and_evicts_only_residency() {
+        let world = World::fbm(7, FbmParams::default()).unwrap();
+        let mut cache = GeometryCache::new(world, 16 * 1024 * 1024);
+        let tile = cache.get_or_build(key(4), || false).unwrap();
+        let source_budget = cache.source_budget;
+        cache.set_budget_bytes(32 * 1024 * 1024).unwrap();
+        assert!(Arc::ptr_eq(&tile, &cache.get(key(4)).unwrap()));
+        assert_eq!(cache.source_budget, source_budget);
+        cache.set_budget_bytes(source_budget).unwrap();
+        assert!(cache.entries.is_empty());
+        assert!(!tile.is_empty());
+        assert!(cache.stats().live_evicted_payload_bytes >= tile.bytes);
+        if source_budget > 0 {
+            assert!(cache.set_budget_bytes(source_budget - 1).is_err());
+        }
+        assert_eq!(cache.budget, source_budget);
     }
     #[test]
     fn source_budget_override_is_bounded_and_preserves_total_reservation() {

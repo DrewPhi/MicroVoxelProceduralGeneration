@@ -435,6 +435,7 @@ impl PreparedView {
     }
 }
 pub struct AdaptiveGpu {
+    resource_budget_bytes: u64,
     gpu_profiles: Option<GpuOrderedProfiles>,
     gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
@@ -713,6 +714,7 @@ impl AdaptiveGpu {
             usage: wgpu::BufferUsages::VERTEX,
         });
         Self {
+            resource_budget_bytes: MAX_BYTES,
             gpu_profiles: None,
             gpu_profile_stats: GpuProfileStats {
                 enabled: std::env::var("FRONTIER_GPU_PROFILES").as_deref() == Ok("1"),
@@ -772,6 +774,32 @@ impl AdaptiveGpu {
             visible: vec![],
             camera_upload: vec![],
         }
+    }
+    /// Rebuild only the color pipelines for a supported MSAA sample count.
+    /// Existing geometry arenas, cluster owners, profiles and shadow resources
+    /// retain their identities. Apply this while settings presentation is paused:
+    /// the temporary constructor allocates fresh scratch/shadow resources too.
+    pub fn set_sample_count_preserving_geometry(
+        &mut self,
+        device: &wgpu::Device,
+        sample_count: u32,
+    ) {
+        if self.sample_count == sample_count {
+            return;
+        }
+        let fresh = Self::new(device, self.format, sample_count);
+        // Explicit bind-group layouts have identical structural contracts;
+        // existing camera/profile/shadow bindings remain compatible.
+        self.pipeline = fresh.pipeline;
+        self.profile_pipeline = fresh.profile_pipeline;
+        self.native_pipeline = fresh.native_pipeline;
+        self.proxy_pipeline = fresh.proxy_pipeline;
+        self.indexed_proxy_pipeline = fresh.indexed_proxy_pipeline;
+        self.derived_proxy_pipeline = fresh.derived_proxy_pipeline;
+        self.sample_count = sample_count;
+        self.prepared_view = None;
+        self.resident_stats = None;
+        self.invalidate_bundle();
     }
     pub fn set_visual_lighting(
         &mut self,
@@ -833,6 +861,14 @@ impl AdaptiveGpu {
         }
         self.voxel_filter = enabled;
     }
+    /// Limit future page/scratch allocations. Existing coherent content remains
+    /// resident when lowering the limit; reclamation follows normal ownership.
+    pub fn set_resource_budget_mib(&mut self, mib: u64) {
+        self.resource_budget_bytes = mib.saturating_mul(1024 * 1024);
+    }
+    pub fn resource_budget_mib(&self) -> u64 {
+        self.resource_budget_bytes / (1024 * 1024)
+    }
     pub fn contains(&self, key: &TileKey) -> bool {
         self.clusters.contains_key(key)
     }
@@ -883,7 +919,9 @@ impl AdaptiveGpu {
             }
         }
         let size = bytes.max(PAGE_BYTES).next_multiple_of(4);
-        if total + size > MAX_BYTES || size > device.limits().max_buffer_size {
+        if total.saturating_add(size) > self.resource_budget_bytes
+            || size > device.limits().max_buffer_size
+        {
             return Err(POOL_CAPACITY_ERROR.into());
         }
         let mut arena = Arena::new(
@@ -928,8 +966,7 @@ impl AdaptiveGpu {
             return self.upload_native(device, queue, tile);
         }
         if !tile.proxy_triangles.is_empty() {
-            if tile.exact
-                || !tile.mesh.vertices.is_empty()
+            if !tile.mesh.vertices.is_empty()
                 || !tile.mesh.indices.is_empty()
                 || !tile.face_profile_indices.is_empty()
             {
@@ -1602,7 +1639,8 @@ impl AdaptiveGpu {
             // Reserve fixed scratch under the same hard GPU budget as arenas.
             if self.gpu_profiles.is_none() {
                 const SCRATCH_BYTES: u64 = crate::gpu_ordered_profiles::RESIDENT_BYTES;
-                if self.allocated_bytes() + SCRATCH_BYTES > MAX_BYTES {
+                if self.allocated_bytes().saturating_add(SCRATCH_BYTES) > self.resource_budget_bytes
+                {
                     return Err(POOL_CAPACITY_ERROR.into());
                 }
                 let started = std::time::Instant::now();
@@ -1771,7 +1809,7 @@ impl AdaptiveGpu {
                     .map_or(0, |p| p.positions.len() as u64 * 12),
                 position_reserved_bytes: table_extra,
                 bins: vec![],
-                exact: false,
+                exact: tile.exact,
                 profile: Some(ProfileAllocation {
                     indices: None,
                     table,

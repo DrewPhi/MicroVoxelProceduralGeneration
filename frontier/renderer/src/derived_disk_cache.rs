@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 6;
+const REPRESENTATION_VERSION: u64 = 7;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,6 +55,7 @@ struct AppearanceConfig {
     anisotropy: u32,
     near_blend: u32,
     shared_near: bool,
+    native_conforming: bool,
 }
 impl AppearanceConfig {
     fn current(world: &World) -> Self {
@@ -67,6 +68,7 @@ impl AppearanceConfig {
             anisotropy: crate::appearance_method::map_anisotropy(),
             near_blend: crate::appearance_method::near_blend(),
             shared_near: crate::adaptive_geometry::near_profile_shared(),
+            native_conforming: crate::adaptive_geometry::native_geometry_mode() != "unit",
         }
     }
     fn supported(self) -> bool {
@@ -502,6 +504,7 @@ fn source_identity_with_mode(
 fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
+    put(&mut b, u64::from(appearance.native_conforming));
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());
     put(&mut b, VOXEL_SIZE.to_bits());
@@ -918,8 +921,7 @@ fn validate(t: &GeometryTile) -> bool {
     bbox(t.bounds)
         && crate::spatial_appearance::valid_table(&t.face_profiles)
         && (t.proxy_triangles.is_empty()
-            || (!t.exact
-                && t.native_quads.is_empty()
+            || (t.native_quads.is_empty()
                 && t.mesh.vertices.is_empty()
                 && t.mesh.indices.is_empty()
                 && t.face_profile_indices.is_empty()))
@@ -1455,11 +1457,19 @@ mod tests {
         t.face_profile_indices[0] = u32::MAX;
         assert!(decode(&bytes(&t), t.key).is_none());
         let mut t = build(&w, key(1), || false).unwrap();
-        t.native_quads[0].profile_index = u32::MAX;
-        assert!(decode(&bytes(&t), t.key).is_none());
-        t.native_quads[0].profile_index = 0;
-        t.native_bins[0].min_plane = f32::INFINITY;
-        assert!(decode(&bytes(&t), t.key).is_none());
+        // Native geometry may use either exact triangles or unit quads.
+        assert!(t.exact);
+        assert_eq!(bytes(&decode(&bytes(&t), t.key).unwrap()), bytes(&t));
+        if !t.proxy_triangles.is_empty() {
+            t.proxy_triangles[0].profile_index = u32::MAX;
+            assert!(decode(&bytes(&t), t.key).is_none());
+        } else {
+            t.native_quads[0].profile_index = u32::MAX;
+            assert!(decode(&bytes(&t), t.key).is_none());
+            t.native_quads[0].profile_index = 0;
+            t.native_bins[0].min_plane = f32::INFINITY;
+            assert!(decode(&bytes(&t), t.key).is_none());
+        }
     }
     #[test]
     fn key_reservation_rejects_large_record_before_reading() {
@@ -1567,6 +1577,7 @@ mod tests {
             anisotropy: 1,
             near_blend: 0,
             shared_near: false,
+            native_conforming: crate::adaptive_geometry::native_geometry_mode() != "unit",
         }
     }
     fn explicit_cache(dir: &Temp, w: &World, config: AppearanceConfig) -> DiskCache {
@@ -1654,6 +1665,10 @@ mod tests {
         let w = world();
         let base = map_config(&w);
         let alternatives = [
+            AppearanceConfig {
+                native_conforming: !base.native_conforming,
+                ..base
+            },
             AppearanceConfig {
                 method: crate::appearance_method::Method::Baseline,
                 ..base

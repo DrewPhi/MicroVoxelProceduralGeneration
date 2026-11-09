@@ -1,5 +1,5 @@
 //! Small egui overlay composited at output resolution after the terrain scene.
-use crate::settings::{SettingsChanges, SettingsStats, VisualSettings};
+use crate::settings::{ResourceProfile, SettingsChanges, SettingsStats, VisualSettings};
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use winit::{
     event::{ElementState, WindowEvent},
@@ -18,6 +18,7 @@ pub struct SettingsUi {
     free_textures: Vec<egui::TextureId>,
     screen: ScreenDescriptor,
     started: std::time::Instant,
+    settings_error: Option<String>,
 }
 
 impl SettingsUi {
@@ -45,6 +46,7 @@ impl SettingsUi {
         );
         Self {
             started: std::time::Instant::now(),
+            settings_error: None,
             context,
             input,
             renderer: Renderer::new(device, format, None, 1, false),
@@ -60,6 +62,12 @@ impl SettingsUi {
         }
     }
 
+    pub fn restore_after_error(&mut self, previous: VisualSettings, message: String) {
+        self.loading_draft = previous.clone();
+        self.settings = previous;
+        self.settings_error = Some(message);
+        self.open = true;
+    }
     pub fn menu_open(&self) -> bool {
         self.open
     }
@@ -166,6 +174,10 @@ impl SettingsUi {
                             memory.push_str(&format!("  ·  process {rss:.0} MiB"));
                         }
                         ui.label(memory);
+                        if let Some(available) = stats.available_mib { ui.small(format!("Available system RAM: {available} MiB")); }
+                        if stats.background_paused {
+                            ui.colored_label(egui::Color32::YELLOW, "Low available RAM · background builds and uploads paused");
+                        }
                         ui.small("Render GPU includes shadows/atmosphere/UI when supported; excludes CPU and prior uploads.");
                         if self.settings.vegetation {
                             ui.label(format!("Plants: {} instances · {} pending · {:.1} MiB GPU", stats.plant_instances, stats.plant_pending, stats.plant_gpu_mib));
@@ -194,6 +206,9 @@ impl SettingsUi {
                             self.open = false;
                         }
                     });
+                    if let Some(message) = &self.settings_error {
+                        ui.colored_label(egui::Color32::YELLOW, format!("Settings were not applied: {message}"));
+                    }
                     egui::ScrollArea::vertical()
                         .max_height((available - 80.).max(80.))
                         .show(ui, |ui| {
@@ -296,33 +311,49 @@ impl SettingsUi {
                                 );
                             });
                             ui.separator();
-                            ui.heading("Loading resources");
-                            ui.label(
-                                "More resources can reduce FPS. Quality and loading changes take effect on Apply.",
-                            );
-                            let max_workers = std::thread::available_parallelism()
-                                .map(usize::from)
-                                .unwrap_or(4)
-                                .min(4);
-                            ui.add(
-                                egui::Slider::new(&mut self.loading_draft.workers, 1..=max_workers)
-                                    .text("Workers"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.loading_draft.refinements, 1..=32)
-                                    .logarithmic(true)
-                                    .text("Refinements / batch"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.loading_draft.cache_mib, 128..=2048)
-                                    .logarithmic(true)
-                                    .text("Cache budget (MiB)"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.loading_draft.upload_mib, 1..=64)
-                                    .logarithmic(true)
-                                    .text("Upload / frame (MiB)"),
-                            );
+                            ui.heading("Performance & memory");
+                            ui.label("Development targets smooth 30–60 FPS. Budgets grow lazily as content is needed.");
+                            let profile_before = self.loading_draft.resource_profile;
+                            ui.horizontal(|ui| {
+                                for profile in [ResourceProfile::Development, ResourceProfile::Constrained, ResourceProfile::Custom] {
+                                    ui.selectable_value(&mut self.loading_draft.resource_profile, profile, profile.label());
+                                }
+                            });
+                            if profile_before != self.loading_draft.resource_profile {
+                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_alpine);
+                            }
+                            if ui.button("Refresh available RAM").on_hover_text("Re-measures free capacity. Close other large apps first; current game residency reduces the new recommendation.").clicked() {
+                                self.loading_draft.memory = crate::settings::MemorySnapshot::detect();
+                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_alpine);
+                            }
+                            let memory = self.loading_draft.memory;
+                            ui.small(format!("RAM available {} / {} MiB{} · suggested working budgets {} MiB",
+                                memory.available_mib, memory.total_mib,
+                                if memory.measured { "" } else { " (portable estimate)" }, memory.working_mib()));
+                            ui.small("Integrated GPU memory shares RAM. CPU + GPU budgets count together; OS, drivers and temporary replacements need headroom. These are working-set limits, not a whole-process cap.");
+                            let manual_before = self.loading_draft.clone();
+                            let max_workers = std::thread::available_parallelism().map(usize::from).unwrap_or(4).min(16);
+                            ui.add(egui::Slider::new(&mut self.loading_draft.workers, 1..=max_workers).text("Workers"));
+                            ui.add(egui::Slider::new(&mut self.loading_draft.refinements, 1..=32).text("Refinements / batch"));
+                            ui.add(egui::Slider::new(&mut self.loading_draft.native_radius_m, 0.0..=64.0).text("Minimum native radius (m)"));
+                            ui.small("Larger native radii are costly; native voxels remain 6.25 cm.");
+                            ui.add(egui::Slider::new(&mut self.loading_draft.vegetation_near_m, 0.0..=128.0).text("Near plant detail (m)"));
+                            let max_mib = memory.working_mib().max(2048);
+                            for (field, label) in [
+                                (&mut self.loading_draft.cache_mib, "Terrain CPU cache (MiB)"),
+                                (&mut self.loading_draft.build_mib, "Build memory (MiB)"),
+                                (&mut self.loading_draft.terrain_gpu_mib, "Terrain GPU (MiB)"),
+                                (&mut self.loading_draft.plant_cpu_mib, "Plant CPU cache (MiB)"),
+                                (&mut self.loading_draft.plant_gpu_mib, "Plant GPU cache (MiB)"),
+                            ] { ui.add(egui::Slider::new(field, 0..=max_mib).logarithmic(true).text(label)); }
+                            ui.add(egui::Slider::new(&mut self.loading_draft.triangle_budget, 100_000..=32_000_000).logarithmic(true).text("Plant triangles"));
+                            ui.add(egui::Slider::new(&mut self.loading_draft.upload_mib, 1..=64).text("Upload / frame (MiB)"));
+                            if manual_before != self.loading_draft { self.loading_draft.resource_profile = ResourceProfile::Custom; }
+                            let combined = self.loading_draft.working_budgets().total_mib();
+                            ui.label(format!("Combined configured working budgets: {combined} MiB"));
+                            if combined > memory.working_mib() {
+                                ui.colored_label(egui::Color32::YELLOW, "Above available-memory recommendation: risk of paging and repeated evictions.");
+                            }
                             let dirty = self.settings.pixel_error != self.loading_draft.pixel_error
                                 || self.settings.view_distance != self.loading_draft.view_distance
                                 || self.settings.render_scale != self.loading_draft.render_scale
@@ -331,11 +362,17 @@ impl SettingsUi {
                                 || self.settings.workers != self.loading_draft.workers
                                 || self.settings.refinements != self.loading_draft.refinements
                                 || self.settings.cache_mib != self.loading_draft.cache_mib
-                                || self.settings.upload_mib != self.loading_draft.upload_mib;
+                                || self.settings.upload_mib != self.loading_draft.upload_mib
+                                || self.settings.working_budgets() != self.loading_draft.working_budgets()
+                                || self.settings.resource_profile != self.loading_draft.resource_profile
+                                || self.settings.native_radius_m != self.loading_draft.native_radius_m
+                                || self.settings.vegetation_near_m != self.loading_draft.vegetation_near_m
+                                || self.settings.triangle_budget != self.loading_draft.triangle_budget;
                             if ui
                                 .add_enabled(dirty, egui::Button::new("Apply quality & loading"))
                                 .clicked()
                             {
+                                self.settings_error = None;
                                 self.settings.pixel_error = self.loading_draft.pixel_error;
                                 self.settings.view_distance = self.loading_draft.view_distance;
                                 self.settings.render_scale = self.loading_draft.render_scale;
@@ -345,6 +382,16 @@ impl SettingsUi {
                                 self.settings.refinements = self.loading_draft.refinements;
                                 self.settings.cache_mib = self.loading_draft.cache_mib;
                                 self.settings.upload_mib = self.loading_draft.upload_mib;
+                                self.settings.resource_profile = self.loading_draft.resource_profile;
+                                self.settings.resource_alpine = self.loading_draft.resource_alpine;
+                                self.settings.memory = self.loading_draft.memory;
+                                self.settings.native_radius_m = self.loading_draft.native_radius_m;
+                                self.settings.vegetation_near_m = self.loading_draft.vegetation_near_m;
+                                self.settings.build_mib = self.loading_draft.build_mib;
+                                self.settings.terrain_gpu_mib = self.loading_draft.terrain_gpu_mib;
+                                self.settings.plant_cpu_mib = self.loading_draft.plant_cpu_mib;
+                                self.settings.plant_gpu_mib = self.loading_draft.plant_gpu_mib;
+                                self.settings.triangle_budget = self.loading_draft.triangle_budget;
                                 changes.loading_applied = true;
                             }
                         });
@@ -380,6 +427,16 @@ impl SettingsUi {
         visual_previous.refinements = self.settings.refinements;
         visual_previous.cache_mib = self.settings.cache_mib;
         visual_previous.upload_mib = self.settings.upload_mib;
+        visual_previous.resource_profile = self.settings.resource_profile;
+        visual_previous.resource_alpine = self.settings.resource_alpine;
+        visual_previous.memory = self.settings.memory;
+        visual_previous.native_radius_m = self.settings.native_radius_m;
+        visual_previous.vegetation_near_m = self.settings.vegetation_near_m;
+        visual_previous.build_mib = self.settings.build_mib;
+        visual_previous.terrain_gpu_mib = self.settings.terrain_gpu_mib;
+        visual_previous.plant_cpu_mib = self.settings.plant_cpu_mib;
+        visual_previous.plant_gpu_mib = self.settings.plant_gpu_mib;
+        visual_previous.triangle_budget = self.settings.triangle_budget;
         changes.visual_changed = visual_previous != self.settings;
         changes
     }

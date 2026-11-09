@@ -139,9 +139,13 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary',type=Path,default=ROOT/'target/release/frontier')
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--width',type=int,default=1280)
+    parser.add_argument('--height',type=int,default=720)
     parser.add_argument('--settle-seconds',type=float,default=0.,help='Wait before recording and inputs; does not lock interactive input')
     parser.add_argument('game_args',nargs=argparse.REMAINDER,help='Optional game arguments after --')
     args=parser.parse_args()
+    if args.width < 64 or args.height < 64:
+        parser.error('Window dimensions must be at least 64 pixels')
     if not math.isfinite(args.settle_seconds) or not 0 <= args.settle_seconds <= 120:
         parser.error('--settle-seconds must be between 0 and 120')
     out=args.output.resolve()
@@ -151,7 +155,7 @@ def main():
         parser.error('These benchmark flags lock player input; use --settle-seconds for a walking recording')
     out.mkdir(parents=True,exist_ok=False)
     binary_hash=hashlib.sha256(binary.read_bytes()).hexdigest()
-    command=[str(binary),'--preset','alpine','--width','1280','--height','720','--seconds',str(28+args.settle_seconds),'--report',str(out/'game.json')]+extra
+    command=[str(binary),'--preset','alpine','--width',str(args.width),'--height',str(args.height),'--seconds',str(28+args.settle_seconds),'--report',str(out/'game.json')]+extra
     events=[];app=rec=x=window=None;started=time.monotonic();failure=None
     movement=None
     def note(action):events.append({'seconds_from_launch':round(time.monotonic()-started,4),'action':action})
@@ -172,7 +176,7 @@ def main():
                 if app.poll() is not None:raise RuntimeError('Game exited during settling')
                 note('settle_end')
             note('record_start')
-            rec=subprocess.Popen(['ffmpeg','-y','-f','x11grab','-framerate','20','-window_id',str(window),'-video_size','1280x720','-i',os.environ['DISPLAY'],'-t','20','-an','-c:v','libx264','-preset','ultrafast','-crf','25','-threads','2','-pix_fmt','yuv420p',str(out/'walking.mp4')],stdout=rlog,stderr=subprocess.STDOUT)
+            rec=subprocess.Popen(['ffmpeg','-y','-f','x11grab','-framerate','20','-window_id',str(window),'-video_size',f'{args.width}x{args.height}','-draw_mouse','0','-i',os.environ['DISPLAY'],'-t','20','-an','-c:v','libx264','-preset','ultrafast','-crf','25','-threads','2','-pix_fmt','yuv420p',str(out/'walking.mp4')],stdout=rlog,stderr=subprocess.STDOUT)
             time.sleep(1)
             for key,duration in [('w',3),(None,2),('w',3)]:
                 x.focus(window,app.pid);note('hold_'+str(key))

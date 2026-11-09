@@ -65,6 +65,17 @@ pub(super) struct ShadowLifecycle {
     residents: BTreeMap<[i64; 3], Resident>,
 }
 impl ShadowLifecycle {
+    /// Geometry still owned during replacement/exit must fit alongside color,
+    /// even after the camera or resource profile changes the desired casters.
+    pub(super) fn geometry_triangles(&self) -> usize {
+        self.residents
+            .values()
+            .map(|resident| {
+                cost(&resident.batch) + resident.transition.as_ref().map_or(0, |(old, _)| cost(old))
+            })
+            .sum()
+    }
+
     pub fn clear(&mut self) {
         self.residents.clear();
     }

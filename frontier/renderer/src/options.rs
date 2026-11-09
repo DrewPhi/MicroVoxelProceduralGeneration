@@ -56,6 +56,11 @@ pub fn parse() -> Result<Option<Options>> {
     parse_args(std::env::args().skip(1))
 }
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
+    use crate::settings::ResourceProfile;
+    let mut resource_profile = None;
+    let mut resource_overrides: Vec<(String, usize)> = Vec::new();
+    let mut native_radius = None;
+    let mut vegetation_near = None;
     let mut atmosphere = None;
     let mut visual = crate::settings::VisualSettings::default();
     let mut render_scale = 1.0f32;
@@ -102,7 +107,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut adaptive_wait_quality = false;
     let mut adaptive_cache_mib = 512usize;
     let mut adaptive_workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
-    let mut adaptive_build_mib = 512usize;
+    let mut adaptive_build_mib: usize;
     let mut adaptive_refinements = 8usize;
     let mut adaptive_direct_native = false;
     let mut adaptive_disk_cache = None;
@@ -111,6 +116,26 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut native_bins = true;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--resource-profile" => {
+                resource_profile = Some(match args.next().as_deref() {
+                    Some("development") => ResourceProfile::Development,
+                    Some("constrained") => ResourceProfile::Constrained,
+                    Some("custom") => ResourceProfile::Custom,
+                    _ => return Err("--resource-profile requires development|constrained|custom".into()),
+                });
+            }
+            "--native-radius" | "--vegetation-near" => {
+                let value: f64 = args.next().ok_or("detail distance requires meters")?.parse()?;
+                if !value.is_finite() || !(0.0..=128.0).contains(&value) { return Err("detail distance requires finite 0..128 meters".into()); }
+                if arg == "--native-radius" { native_radius = Some(value); } else { vegetation_near = Some(value); }
+            }
+            "--terrain-cache-mib" | "--build-memory-mib" | "--terrain-gpu-mib"
+            | "--plant-cpu-mib" | "--plant-gpu-mib" | "--triangle-budget" | "--upload-mib" => {
+                let value: usize = args.next().ok_or("resource flag requires an integer")?.parse()?;
+                if value == 0 || value.checked_mul(1024*1024).is_none() { return Err("resource flag requires a positive representable value".into()); }
+                if arg == "--upload-mib" && value > 64 { return Err("--upload-mib requires 1..64".into()); }
+                resource_overrides.push((arg, value));
+            }
             "--preset" => {
                 if args.next().as_deref() != Some("alpine") {
                     return Err("--preset requires alpine".into());
@@ -218,6 +243,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 {
                     return Err("--adaptive-build-mib requires positive representable MiB".into());
                 }
+                resource_overrides.push((arg.clone(), adaptive_build_mib));
             }
             "--adaptive-direct-native" => {
                 adaptive_direct_native = match args.next().as_deref() {
@@ -234,6 +260,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 if !(1..=32).contains(&adaptive_refinements) {
                     return Err("--adaptive-refinements requires 1..32".into());
                 }
+                resource_overrides.push((arg.clone(), adaptive_refinements));
             }
             "--adaptive-workers" => {
                 adaptive_workers = args
@@ -243,6 +270,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 if !(1..=16).contains(&adaptive_workers) {
                     return Err("--adaptive-workers requires 1..16".into());
                 }
+                resource_overrides.push((arg.clone(), adaptive_workers));
             }
             "--no-adaptive-disk-cache" => {
                 adaptive_disk_cache = None;
@@ -282,6 +310,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 {
                     return Err("--adaptive-cache-mib requires positive representable MiB".into());
                 }
+                resource_overrides.push((arg.clone(), adaptive_cache_mib));
             }
             "--capture-unresolved" => capture_unresolved = true,
             "--adaptive-wait-quality" => adaptive_wait_quality = true,
@@ -469,6 +498,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 )
             }
             "--help" | "-h" => {
+                println!("Resource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
                 println!("Visual preview: --preset alpine selects the Alpine meadow scene; later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded Alpine adaptive geometry only). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
@@ -621,6 +651,53 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     if adaptive_wait_quality && (capture.is_some() || !scene.starts_with("adaptive")) {
         return Err("--adaptive-wait-quality requires an adaptive window benchmark".into());
     }
+    // Finite captures/benchmarks keep their historic resource baseline. Normal
+    // interactive starts can use available RAM; no image quality is changed here.
+    let deterministic = capture.is_some()
+        || capture_on_exit.is_some()
+        || frame_limit.is_some()
+        || seconds.is_some()
+        || report_path.is_some()
+        || benchmark_input_lock;
+    let profile = resource_profile.unwrap_or(if deterministic {
+        ResourceProfile::Constrained
+    } else {
+        ResourceProfile::Development
+    });
+    let alpine = params.recipe == frontier_world::FbmRecipe::Alpine;
+    visual.apply_resource_profile(profile, alpine);
+    if profile == ResourceProfile::Custom {
+        visual.cache_mib = adaptive_cache_mib;
+    }
+    visual.workers = adaptive_workers;
+    visual.refinements = adaptive_refinements;
+    for (flag, value) in &resource_overrides {
+        match flag.as_str() {
+            "--terrain-cache-mib" | "--adaptive-cache-mib" => visual.cache_mib = *value,
+            "--build-memory-mib" | "--adaptive-build-mib" => visual.build_mib = *value,
+            "--terrain-gpu-mib" => visual.terrain_gpu_mib = *value,
+            "--plant-cpu-mib" => visual.plant_cpu_mib = *value,
+            "--plant-gpu-mib" => visual.plant_gpu_mib = *value,
+            "--triangle-budget" => visual.triangle_budget = *value,
+            "--upload-mib" => visual.upload_mib = *value,
+            "--adaptive-workers" => visual.workers = *value,
+            "--adaptive-refinements" => visual.refinements = *value,
+            _ => unreachable!(),
+        }
+    }
+    if let Some(radius) = native_radius {
+        visual.native_radius_m = radius;
+    }
+    if let Some(distance) = vegetation_near {
+        visual.vegetation_near_m = distance;
+    }
+    if !resource_overrides.is_empty() || native_radius.is_some() || vegetation_near.is_some() {
+        visual.resource_profile = ResourceProfile::Custom;
+    }
+    adaptive_cache_mib = visual.cache_mib;
+    adaptive_build_mib = visual.build_mib;
+    adaptive_workers = visual.workers;
+    adaptive_refinements = visual.refinements;
     Ok(Some(Options {
         atmosphere,
         visual,
@@ -696,6 +773,47 @@ mod tests {
         .into_iter()
         .map(str::to_string)
         .collect()
+    }
+    #[test]
+    fn resource_profiles_preserve_finite_comparisons_and_manual_overrides() {
+        use crate::settings::ResourceProfile;
+        let args = ["--preset", "alpine", "--frames", "1"];
+        let constrained = parse_args(args.into_iter().map(str::to_string))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            constrained.visual.resource_profile,
+            ResourceProfile::Constrained
+        );
+        assert_eq!(constrained.visual.cache_mib, 640);
+        assert_eq!(constrained.visual.build_mib, 512);
+        assert_eq!(constrained.visual.terrain_gpu_mib, 512);
+        assert_eq!(constrained.visual.upload_mib, 2);
+        let args = [
+            "--resource-profile",
+            "development",
+            "--adaptive-cache-mib",
+            "900",
+            "--plant-cpu-mib",
+            "300",
+            "--native-radius",
+            "12",
+        ];
+        let custom = parse_args(args.into_iter().map(str::to_string))
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.visual.resource_profile, ResourceProfile::Custom);
+        assert_eq!(custom.visual.cache_mib, 900);
+        assert_eq!(custom.adaptive_cache_mib, 900);
+        assert_eq!(custom.visual.plant_cpu_mib, 300);
+        assert_eq!(custom.visual.native_radius_m, 12.);
+        for args in [
+            ["--native-radius", "NaN"],
+            ["--resource-profile", "unknown"],
+            ["--upload-mib", "0"],
+        ] {
+            assert!(parse_args(args.into_iter().map(str::to_string)).is_err());
+        }
     }
     #[test]
     fn alpine_preset_and_visual_overrides_are_reproducible() {

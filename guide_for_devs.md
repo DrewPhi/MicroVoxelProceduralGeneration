@@ -62,11 +62,44 @@ the current sky/fog profile.
 ## Adaptive loading controls
 
 See [loading optimization and measurements](frontier/LOADING_OPTIMIZATION.md).
-The adaptive renderer defaults to up to four CPU preparation workers, bounded by
-available logical CPUs and the separate 512 MiB builder reservation. Override
-with `--adaptive-workers 1..16` (at most four jobs run concurrently) and
-`--adaptive-build-mib`. The geometry/source cache remains separately controlled
-by `--adaptive-cache-mib`.
+Ordinary interactive launches default to **Development** resources; finite runs
+(`--frames`, `--seconds`, captures or reports) preserve **Constrained** defaults
+unless explicitly overridden. **Custom** permits manual budgets. These profiles
+are not measured FPS guarantees: development targets 1080p at 60 FPS where
+possible, with 30 FPS acceptable.
+
+Press **Esc** to adjust the profile, minimum native terrain radius, near plant
+detail distance, CPU/GPU caches, build memory, triangles, workers and uploads.
+**Apply quality & loading** preserves valid terrain/source caches and current
+GPU owners; MSAA changes rebuild compatible pipelines and attachments.
+Development initially requests 4 m native terrain and 12 m near plant detail;
+Constrained uses zero for both, preserving the earlier selection policy.
+Native terrain remains canonical 6.25 cm; larger radii can be costly.
+
+Development grows lazy working budgets from measured available RAM, accounting
+for CPU and shared GPU memory together. It leaves at least 1 GiB or 30% of
+available RAM as headroom and recommends at most half of total RAM. The startup
+snapshot stays fixed until **Refresh available RAM**; refreshing during play
+includes current game residency. A separate check at most once per second
+pauses new terrain builds/uploads and plant job submissions under memory
+pressure, then resumes with hysteresis. Existing owners remain drawable and
+bounded plant jobs may finish. This is not a whole-process memory cap or driver
+memory reclamation. Frame pacing adjusts throughput without automatically
+changing geometry quality, vegetation density, view distance or fog.
+
+From `frontier/`:
+
+```sh
+./run.sh --preset alpine --resource-profile development --native-radius 4 --vegetation-near 12
+./run.sh --resource-profile constrained --frames 120
+```
+
+Manual flags include `--terrain-cache-mib`, `--build-memory-mib`,
+`--terrain-gpu-mib`, `--plant-cpu-mib`, `--plant-gpu-mib`, `--triangle-budget`
+and `--upload-mib`; they select Custom while retaining other profile values.
+Existing `--adaptive-cache-mib`/`--adaptive-build-mib` aliases remain supported.
+`--adaptive-workers 1..16` permits at most four simultaneous builders;
+`--adaptive-refinements 1..32` controls selections per coherent replacement.
 
 Persistent derived geometry is opt-in: add
 `--adaptive-disk-cache output/terrain-cache --adaptive-disk-mib 2048`.

@@ -1,4 +1,7 @@
 //! Display and streaming controls; these never change authoritative voxels.
+use crate::development_resources::ResourceBudgets;
+pub use crate::development_resources::{MemorySnapshot, ResourceProfile};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualSettings {
     pub beauty: bool,
@@ -13,6 +16,17 @@ pub struct VisualSettings {
     pub refinements: usize,
     pub cache_mib: usize,
     pub upload_mib: usize,
+    pub resource_profile: ResourceProfile,
+    /// Keeps the fixed Alpine baseline independent of the vegetation toggle.
+    pub resource_alpine: bool,
+    pub memory: MemorySnapshot,
+    pub native_radius_m: f64,
+    pub vegetation_near_m: f64,
+    pub build_mib: usize,
+    pub terrain_gpu_mib: usize,
+    pub plant_cpu_mib: usize,
+    pub plant_gpu_mib: usize,
+    pub triangle_budget: usize,
     pub voxel_filter: bool,
     pub atmosphere: bool,
     /// Bounded directional shadow map; enabled only for the Alpine adaptive scene.
@@ -47,6 +61,16 @@ impl Default for VisualSettings {
             refinements: 8,
             cache_mib: 512,
             upload_mib: 2,
+            resource_profile: ResourceProfile::Constrained,
+            resource_alpine: false,
+            memory: MemorySnapshot::detect(),
+            native_radius_m: 0.,
+            vegetation_near_m: 0.,
+            build_mib: 512,
+            terrain_gpu_mib: 512,
+            plant_cpu_mib: 160,
+            plant_gpu_mib: 256,
+            triangle_budget: 1_000_000,
             voxel_filter: true,
             atmosphere: false,
             terrain_shadows: false,
@@ -64,6 +88,8 @@ impl Default for VisualSettings {
 
 #[derive(Clone, Debug, Default)]
 pub struct SettingsStats {
+    pub available_mib: Option<usize>,
+    pub background_paused: bool,
     pub plant_instances: usize,
     pub plant_pending: usize,
     pub plant_gpu_mib: f64,
@@ -82,4 +108,55 @@ pub struct SettingsStats {
 pub struct SettingsChanges {
     pub visual_changed: bool,
     pub loading_applied: bool,
+}
+
+impl VisualSettings {
+    /// Reuse the startup/explicit-refresh snapshot: resident engine memory must
+    /// not make repeated profile application shrink its own budgets.
+    pub fn apply_resource_profile(&mut self, profile: ResourceProfile, alpine: bool) {
+        self.resource_profile = profile;
+        self.resource_alpine = alpine;
+        if profile == ResourceProfile::Custom {
+            return;
+        }
+        let budgets = if profile == ResourceProfile::Development {
+            ResourceBudgets::development(self.memory)
+        } else {
+            ResourceBudgets::constrained(alpine)
+        };
+        self.cache_mib = budgets.terrain_cpu_mib;
+        self.build_mib = budgets.build_mib;
+        self.terrain_gpu_mib = budgets.terrain_gpu_mib;
+        self.plant_cpu_mib = budgets.plant_cpu_mib;
+        self.plant_gpu_mib = budgets.plant_gpu_mib;
+        self.triangle_budget = if profile == ResourceProfile::Development {
+            4_000_000
+        } else {
+            1_000_000
+        };
+        self.native_radius_m = if profile == ResourceProfile::Development {
+            4.
+        } else {
+            0.
+        };
+        self.vegetation_near_m = if profile == ResourceProfile::Development {
+            12.
+        } else {
+            0.
+        };
+        self.upload_mib = if profile == ResourceProfile::Development {
+            8
+        } else {
+            2
+        };
+    }
+    pub fn working_budgets(&self) -> ResourceBudgets {
+        ResourceBudgets {
+            terrain_cpu_mib: self.cache_mib,
+            build_mib: self.build_mib,
+            terrain_gpu_mib: self.terrain_gpu_mib,
+            plant_cpu_mib: self.plant_cpu_mib,
+            plant_gpu_mib: self.plant_gpu_mib,
+        }
+    }
 }

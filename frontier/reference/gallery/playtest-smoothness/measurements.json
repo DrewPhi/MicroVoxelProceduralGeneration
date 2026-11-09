@@ -1,0 +1,2044 @@
+{
+  "scope": "Serialized GPU measurements under normal desktop load. Recordings are separate 20 FPS observations, not timing benchmarks. World seed7/native0.0625m. Source budgets vary by available RAM.",
+  "runs": {
+    "meadow-before": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/baseline-frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--seconds",
+          "12",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/playtest-smoothness/meadow-before.json"
+        ],
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 431,
+        "accepted_frames": 431,
+        "missed_budget_frames": 385,
+        "rejected_inputs": 0,
+        "p50_ms": 22.542336,
+        "p95_ms": 37.514361,
+        "p99_ms": 43.870051000000004
+      },
+      "quality": {
+        "measured_frames": 431,
+        "coverage_ready_frames": 431,
+        "quality_ready_frames": 431,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 4.365752069502366,
+        "peak_unresolved_clusters": 0
+      },
+      "resources": null,
+      "memory": {
+        "rss_bytes": 1320230912,
+        "peak_rss_bytes": 1320230912,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 399,
+        "p50_ms": 20.62755260539627,
+        "p95_ms": 25.158802035427094,
+        "p99_ms": 27.669572530460357,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1953872,
+        "native_clusters": 32,
+        "resident_clusters": 4600,
+        "gpu_resident_bytes": 245742784,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 652977932,
+        "pending_clusters": 22,
+        "first_refinement_ms": 35025.39112,
+        "gpu_pool_budget_bytes": 536870912,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 990772,
+        "selected_instances": 119,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 167619800,
+        "selected_cpu_geometry_bytes": 113997200,
+        "gpu_bytes": 63270100,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            232,
+            301,
+            306
+          ],
+          "completed": [
+            232,
+            301,
+            306
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            264050234,
+            5366004575,
+            1030423198
+          ],
+          "max_job_nanos": [
+            24450350,
+            89268174,
+            23514746
+          ],
+          "assembly_nanos": [
+            0,
+            3500655319,
+            618010983
+          ],
+          "mesh_nanos": [
+            0,
+            1863248891,
+            410343882
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": null
+      }
+    },
+    "mountain-before": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/baseline-frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--start-xz",
+          "-650,2350",
+          "--seconds",
+          "8",
+          "--report",
+          "output/playtest-smoothness/mountain-before.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/mountain-before.png"
+        ],
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 404,
+        "accepted_frames": 404,
+        "missed_budget_frames": 242,
+        "rejected_inputs": 0,
+        "p50_ms": 16.97146,
+        "p95_ms": 19.20361,
+        "p99_ms": 19.703467999999997
+      },
+      "quality": {
+        "measured_frames": 404,
+        "coverage_ready_frames": 404,
+        "quality_ready_frames": 404,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 3.597075633441814,
+        "peak_unresolved_clusters": 0
+      },
+      "resources": null,
+      "memory": {
+        "rss_bytes": 830586880,
+        "peak_rss_bytes": 862044160,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 301,
+        "p50_ms": 15.916962425720214,
+        "p95_ms": 16.579421105415346,
+        "p99_ms": 16.88420018944931,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1671796,
+        "native_clusters": 48,
+        "resident_clusters": 2626,
+        "gpu_resident_bytes": 168457024,
+        "gpu_allocated_bytes": 213910000,
+        "cpu_cache_bytes": 572767192,
+        "pending_clusters": 0,
+        "first_refinement_ms": 23512.346226999998,
+        "gpu_pool_budget_bytes": 536870912,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 387976,
+        "selected_instances": 66,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 53175200,
+        "selected_cpu_geometry_bytes": 40217600,
+        "gpu_bytes": 11702864,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            210,
+            26,
+            109
+          ],
+          "completed": [
+            210,
+            26,
+            109
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            87008712,
+            289110859,
+            201217606
+          ],
+          "max_job_nanos": [
+            13760965,
+            25115244,
+            12656763
+          ],
+          "assembly_nanos": [
+            0,
+            185108127,
+            141652452
+          ],
+          "mesh_nanos": [
+            0,
+            103855509,
+            58928740
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": null
+      }
+    },
+    "meadow-final-constrained": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--resource-profile",
+          "constrained",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--seconds",
+          "12",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/playtest-smoothness/meadow-final-constrained.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/meadow-final-constrained.png"
+        ],
+        "binary_sha256": "39fa1bf686816e922b0c6d75943fe01a37924ede706e236ea81dd1d780f6c4c5"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 456,
+        "accepted_frames": 456,
+        "missed_budget_frames": 409,
+        "rejected_inputs": 0,
+        "p50_ms": 21.103306,
+        "p95_ms": 36.539566,
+        "p99_ms": 43.877161
+      },
+      "quality": {
+        "measured_frames": 456,
+        "coverage_ready_frames": 456,
+        "quality_ready_frames": 456,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 4.361296126112766,
+        "peak_unresolved_clusters": 0
+      },
+      "resources": {
+        "profile": "Constrained",
+        "available_mib": 2371,
+        "process_mib": 1302.65234375,
+        "background_paused": false,
+        "native_radius_m": 0,
+        "vegetation_near_m": 0,
+        "terrain_cpu_mib": 640,
+        "build_mib": 512,
+        "terrain_gpu_mib": 512,
+        "plant_cpu_mib": 160,
+        "plant_gpu_mib": 256,
+        "plant_triangle_budget": 1000000,
+        "native_geometry": "conforming-v1"
+      },
+      "memory": {
+        "rss_bytes": 1390960640,
+        "peak_rss_bytes": 1414742016,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 428,
+        "p50_ms": 19.054082993648528,
+        "p95_ms": 22.998377201488495,
+        "p99_ms": 24.406492638256072,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1674920,
+        "native_clusters": 32,
+        "resident_clusters": 4588,
+        "gpu_resident_bytes": 244183680,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 670447828,
+        "pending_clusters": 0,
+        "first_refinement_ms": 36031.57444,
+        "gpu_pool_budget_bytes": 536870912,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 999990,
+        "selected_instances": 261,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 167660600,
+        "selected_cpu_geometry_bytes": 114919000,
+        "gpu_bytes": 58096440,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            228,
+            294,
+            597
+          ],
+          "completed": [
+            228,
+            294,
+            597
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            304194402,
+            5528033122,
+            1785384291
+          ],
+          "max_job_nanos": [
+            27568226,
+            65949315,
+            25141358
+          ],
+          "assembly_nanos": [
+            0,
+            3591242643,
+            1346574693
+          ],
+          "mesh_nanos": [
+            0,
+            1934710322,
+            434890295
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": {
+          "selected": 205,
+          "missing_mesh": 0,
+          "budget_rejected": 0,
+          "retained": 205,
+          "coarse_fallback": 60
+        }
+      }
+    },
+    "meadow-final-development": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--resource-profile",
+          "development",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--seconds",
+          "12",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/playtest-smoothness/meadow-final-development.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/meadow-final-development.png"
+        ],
+        "binary_sha256": "39fa1bf686816e922b0c6d75943fe01a37924ede706e236ea81dd1d780f6c4c5"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 432,
+        "accepted_frames": 432,
+        "missed_budget_frames": 386,
+        "rejected_inputs": 0,
+        "p50_ms": 21.810945,
+        "p95_ms": 39.499537000000004,
+        "p99_ms": 49.393419
+      },
+      "quality": {
+        "measured_frames": 432,
+        "coverage_ready_frames": 432,
+        "quality_ready_frames": 432,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 4.384430197129177,
+        "peak_unresolved_clusters": 0
+      },
+      "resources": {
+        "profile": "Development",
+        "available_mib": 2155,
+        "process_mib": 1392.234375,
+        "background_paused": false,
+        "native_radius_m": 4,
+        "vegetation_near_m": 12,
+        "terrain_cpu_mib": 865,
+        "build_mib": 865,
+        "terrain_gpu_mib": 576,
+        "plant_cpu_mib": 230,
+        "plant_gpu_mib": 346,
+        "plant_triangle_budget": 4000000,
+        "native_geometry": "conforming-v1"
+      },
+      "memory": {
+        "rss_bytes": 1483673600,
+        "peak_rss_bytes": 1505751040,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 400,
+        "p50_ms": 20.595451613113404,
+        "p95_ms": 24.958581614147185,
+        "p99_ms": 26.503837619693755,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1601848,
+        "native_clusters": 32,
+        "resident_clusters": 4579,
+        "gpu_resident_bytes": 243378016,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 741887824,
+        "pending_clusters": 22,
+        "first_refinement_ms": 20100.882033,
+        "gpu_pool_budget_bytes": 603979776,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 2260836,
+        "selected_instances": 261,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 240888000,
+        "selected_cpu_geometry_bytes": 240888000,
+        "gpu_bytes": 116134196,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            228,
+            235,
+            957
+          ],
+          "completed": [
+            228,
+            235,
+            957
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            218172372,
+            4862901431,
+            3503848070
+          ],
+          "max_job_nanos": [
+            14972020,
+            76814417,
+            39468667
+          ],
+          "assembly_nanos": [
+            0,
+            3447671540,
+            1581314830
+          ],
+          "mesh_nanos": [
+            0,
+            1413571231,
+            1915823705
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": {
+          "selected": 205,
+          "missing_mesh": 0,
+          "budget_rejected": 0,
+          "retained": 205,
+          "coarse_fallback": 21
+        }
+      }
+    },
+    "mountain-final": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--start-xz",
+          "-650,2350",
+          "--seconds",
+          "8",
+          "--report",
+          "output/playtest-smoothness/mountain-final.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/mountain-final.png"
+        ],
+        "binary_sha256": "39fa1bf686816e922b0c6d75943fe01a37924ede706e236ea81dd1d780f6c4c5"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 407,
+        "accepted_frames": 407,
+        "missed_budget_frames": 225,
+        "rejected_inputs": 0,
+        "p50_ms": 16.833727,
+        "p95_ms": 19.163236,
+        "p99_ms": 20.304244
+      },
+      "quality": {
+        "measured_frames": 407,
+        "coverage_ready_frames": 407,
+        "quality_ready_frames": 407,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 3.597075633441814,
+        "peak_unresolved_clusters": 0
+      },
+      "resources": {
+        "profile": "Constrained",
+        "available_mib": 3016,
+        "process_mib": 844.33203125,
+        "background_paused": false,
+        "native_radius_m": 0,
+        "vegetation_near_m": 0,
+        "terrain_cpu_mib": 640,
+        "build_mib": 512,
+        "terrain_gpu_mib": 512,
+        "plant_cpu_mib": 160,
+        "plant_gpu_mib": 256,
+        "plant_triangle_budget": 1000000,
+        "native_geometry": "conforming-v1"
+      },
+      "memory": {
+        "rss_bytes": 886624256,
+        "peak_rss_bytes": 917704704,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 303,
+        "p50_ms": 15.805069828399658,
+        "p95_ms": 16.58334856764221,
+        "p99_ms": 16.913776384586335,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1671796,
+        "native_clusters": 48,
+        "resident_clusters": 2626,
+        "gpu_resident_bytes": 168457024,
+        "gpu_allocated_bytes": 213910000,
+        "cpu_cache_bytes": 572224408,
+        "pending_clusters": 0,
+        "first_refinement_ms": 25357.850351,
+        "gpu_pool_budget_bytes": 536870912,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 654110,
+        "selected_instances": 168,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 94067000,
+        "selected_cpu_geometry_bytes": 66831000,
+        "gpu_bytes": 20705620,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            210,
+            26,
+            322
+          ],
+          "completed": [
+            210,
+            26,
+            322
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            90584867,
+            440218944,
+            681014384
+          ],
+          "max_job_nanos": [
+            11113252,
+            41076289,
+            21539050
+          ],
+          "assembly_nanos": [
+            0,
+            297121581,
+            478051498
+          ],
+          "mesh_nanos": [
+            0,
+            142912146,
+            200870841
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": {
+          "selected": 156,
+          "missing_mesh": 0,
+          "budget_rejected": 0,
+          "retained": 154,
+          "coarse_fallback": 0
+        }
+      }
+    },
+    "meadow-accepted-development": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--adaptive-wait-quality",
+          "--resource-profile",
+          "development",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--seconds",
+          "12",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/playtest-smoothness/meadow-accepted-development.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/meadow-accepted-development.png"
+        ],
+        "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 424,
+        "accepted_frames": 424,
+        "missed_budget_frames": 379,
+        "rejected_inputs": 0,
+        "p50_ms": 22.198023,
+        "p95_ms": 40.817483,
+        "p99_ms": 46.059474
+      },
+      "quality": {
+        "measured_frames": 424,
+        "coverage_ready_frames": 424,
+        "quality_ready_frames": 415,
+        "unbounded_error_frames": 0,
+        "max_finite_visible_error_px": 4.5602412502003595,
+        "peak_unresolved_clusters": 2
+      },
+      "resources": {
+        "profile": "Development",
+        "available_mib": 1948,
+        "process_mib": 1508.25390625,
+        "background_paused": false,
+        "native_radius_m": 4,
+        "vegetation_near_m": 12,
+        "terrain_cpu_mib": 824,
+        "build_mib": 824,
+        "terrain_gpu_mib": 549,
+        "plant_cpu_mib": 219,
+        "plant_gpu_mib": 329,
+        "plant_triangle_budget": 4000000,
+        "native_geometry": "conforming-v1"
+      },
+      "memory": {
+        "rss_bytes": 1594572800,
+        "peak_rss_bytes": 1615892480,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 395,
+        "p50_ms": 20.372708398246765,
+        "p95_ms": 25.810199699054717,
+        "p99_ms": 27.509708787368773,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 1616224,
+        "native_clusters": 32,
+        "resident_clusters": 4594,
+        "gpu_resident_bytes": 245177472,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 787295100,
+        "pending_clusters": 10,
+        "first_refinement_ms": 48732.468437999996,
+        "gpu_pool_budget_bytes": 575668224,
+        "quality_ready": true,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 2142850,
+        "selected_instances": 261,
+        "pending_jobs": 0,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 229099800,
+        "selected_cpu_geometry_bytes": 229089400,
+        "gpu_bytes": 113595296,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            228,
+            276,
+            1052
+          ],
+          "completed": [
+            228,
+            276,
+            1052
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            300505649,
+            4495995146,
+            3317546672
+          ],
+          "max_job_nanos": [
+            26183838,
+            85161288,
+            27732095
+          ],
+          "assembly_nanos": [
+            0,
+            3115560863,
+            1372080341
+          ],
+          "mesh_nanos": [
+            0,
+            1378624820,
+            1938397107
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": {
+          "selected": 205,
+          "missing_mesh": 0,
+          "budget_rejected": 0,
+          "retained": 205,
+          "coarse_fallback": 19
+        }
+      }
+    },
+    "flight-before": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/baseline-frontier",
+          "--preset",
+          "alpine",
+          "--walk",
+          "off",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--eye",
+          "-900,1300,1500",
+          "--target",
+          "-900,1100,3300",
+          "--route",
+          "fly",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "80",
+          "--seconds",
+          "20",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--report",
+          "output/playtest-smoothness/flight-before.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/flight-before.png"
+        ],
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5",
+        "scope": "ordinary coarse startup; development vs old budgets, not equal resident quality"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 2018,
+        "accepted_frames": 2018,
+        "missed_budget_frames": 3,
+        "rejected_inputs": 0,
+        "p50_ms": 9.41303,
+        "p95_ms": 12.526168,
+        "p99_ms": 13.888018
+      },
+      "quality": {
+        "measured_frames": 2018,
+        "coverage_ready_frames": 2018,
+        "quality_ready_frames": 0,
+        "unbounded_error_frames": 29,
+        "max_finite_visible_error_px": 2086.8777184022997,
+        "peak_unresolved_clusters": 204
+      },
+      "resources": null,
+      "memory": {
+        "rss_bytes": 767647744,
+        "peak_rss_bytes": 797188096,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 1518,
+        "p50_ms": 8.40785502867508,
+        "p95_ms": 9.294860349769593,
+        "p99_ms": 9.617032480808257,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 26264,
+        "native_clusters": 0,
+        "resident_clusters": 1117,
+        "gpu_resident_bytes": 53500384,
+        "gpu_allocated_bytes": 96469488,
+        "cpu_cache_bytes": 293475352,
+        "pending_clusters": 72,
+        "first_refinement_ms": null,
+        "gpu_pool_budget_bytes": 536870912,
+        "quality_ready": false,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 0,
+        "selected_instances": 0,
+        "pending_jobs": 2,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 165974400,
+        "selected_cpu_geometry_bytes": 7405600,
+        "gpu_bytes": 30933512,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            1336,
+            367,
+            0
+          ],
+          "completed": [
+            1328,
+            354,
+            0
+          ],
+          "cancelled": [
+            8,
+            13,
+            0
+          ],
+          "worker_wall_nanos": [
+            2856503020,
+            6430553661,
+            0
+          ],
+          "max_job_nanos": [
+            45100143,
+            69042339,
+            0
+          ],
+          "assembly_nanos": [
+            0,
+            4467468004,
+            0
+          ],
+          "mesh_nanos": [
+            0,
+            1851012661,
+            0
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": null
+      }
+    },
+    "flight-final": {
+      "invocation": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--walk",
+          "off",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--eye",
+          "-900,1300,1500",
+          "--target",
+          "-900,1100,3300",
+          "--route",
+          "fly",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "80",
+          "--seconds",
+          "20",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--report",
+          "output/playtest-smoothness/flight-final.json",
+          "--capture-on-exit",
+          "output/playtest-smoothness/flight-final.png",
+          "--resource-profile",
+          "development"
+        ],
+        "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+        "scope": "ordinary coarse startup; development vs old budgets, not equal resident quality"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 2242,
+        "accepted_frames": 2242,
+        "missed_budget_frames": 1,
+        "rejected_inputs": 0,
+        "p50_ms": 8.571224,
+        "p95_ms": 11.268801999999999,
+        "p99_ms": 12.565349
+      },
+      "quality": {
+        "measured_frames": 2242,
+        "coverage_ready_frames": 2242,
+        "quality_ready_frames": 0,
+        "unbounded_error_frames": 43,
+        "max_finite_visible_error_px": 2315.8368141032347,
+        "peak_unresolved_clusters": 150
+      },
+      "resources": {
+        "profile": "Development",
+        "available_mib": 3441,
+        "process_mib": 400.16796875,
+        "background_paused": false,
+        "native_radius_m": 4,
+        "vegetation_near_m": 12,
+        "terrain_cpu_mib": 859,
+        "build_mib": 859,
+        "terrain_gpu_mib": 572,
+        "plant_cpu_mib": 229,
+        "plant_gpu_mib": 343,
+        "plant_triangle_budget": 4000000,
+        "native_geometry": "conforming-v1"
+      },
+      "memory": {
+        "rss_bytes": 431050752,
+        "peak_rss_bytes": 460648448,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full": {
+        "supported": true,
+        "samples": 1688,
+        "p50_ms": 7.658270809375763,
+        "p95_ms": 8.192205291503907,
+        "p99_ms": 8.410259597385407,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "terrain": {
+        "triangles": 26112,
+        "native_clusters": 0,
+        "resident_clusters": 976,
+        "gpu_resident_bytes": 46782336,
+        "gpu_allocated_bytes": 88080880,
+        "cpu_cache_bytes": 251938456,
+        "pending_clusters": 78,
+        "first_refinement_ms": null,
+        "gpu_pool_budget_bytes": 599785472,
+        "quality_ready": false,
+        "coverage_ready": true
+      },
+      "vegetation": {
+        "triangles": 0,
+        "selected_instances": 0,
+        "pending_jobs": 2,
+        "coverage_unresolved": 0,
+        "selected_mesh_evictions": 0,
+        "cpu_cache_geometry_bytes": 0,
+        "selected_cpu_geometry_bytes": 0,
+        "gpu_bytes": 0,
+        "jobs": {
+          "workers": 4,
+          "started": [
+            1340,
+            0,
+            0
+          ],
+          "completed": [
+            1339,
+            0,
+            0
+          ],
+          "cancelled": [
+            1,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            4095101105,
+            0,
+            0
+          ],
+          "max_job_nanos": [
+            45662929,
+            0,
+            0
+          ],
+          "assembly_nanos": [
+            0,
+            0,
+            0
+          ],
+          "mesh_nanos": [
+            0,
+            0,
+            0
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "ground_decisions": {
+          "selected": 0,
+          "missing_mesh": 0,
+          "budget_rejected": 0,
+          "retained": 0,
+          "coarse_fallback": 0
+        }
+      }
+    }
+  },
+  "motion": {
+    "walk-startup": {
+      "manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--seconds",
+          "28.0",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/walk-startup/game.json",
+          "--resource-profile",
+          "development",
+          "--pixel-error",
+          "4.5"
+        ],
+        "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+        "settle_seconds": 0.0,
+        "movement": {
+          "max_displacement_m": 22.35861844227697,
+          "yaw_range_radians": 1.279999727,
+          "walk_verified": true,
+          "turn_verified": true
+        },
+        "failure": null,
+        "events": [
+          {
+            "seconds_from_launch": 0.9631,
+            "action": "record_start"
+          },
+          {
+            "seconds_from_launch": 2.0483,
+            "action": "hold_w"
+          },
+          {
+            "seconds_from_launch": 5.1293,
+            "action": "hold_None"
+          },
+          {
+            "seconds_from_launch": 7.21,
+            "action": "hold_w"
+          },
+          {
+            "seconds_from_launch": 10.3191,
+            "action": "mouse_turn"
+          },
+          {
+            "seconds_from_launch": 12.0205,
+            "action": "walk_after_turn"
+          },
+          {
+            "seconds_from_launch": 15.0208,
+            "action": "stop_after_turn"
+          },
+          {
+            "seconds_from_launch": 21.4065,
+            "action": "record_end"
+          }
+        ],
+        "scope": "Actual X11 inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "sampled_frames": 1588,
+      "terrain_ready_frames": 0,
+      "max_selected_mesh_evictions": 0,
+      "final_pending": 0,
+      "final_coverage_unresolved": 0,
+      "visual_scope": "8 timestamped frames inspected plus image-difference outlier locator; 20 FPS cannot rule out subframe artifacts. Distant/startup refinements remain visible; terrain quality readiness remained false.",
+      "differences": {
+        "frames": 400,
+        "largest_changes": [
+          {
+            "seconds": 10.6,
+            "mean_byte_change": 18.646018981933594
+          },
+          {
+            "seconds": 10.5,
+            "mean_byte_change": 18.241920471191406
+          },
+          {
+            "seconds": 9.15,
+            "mean_byte_change": 18.214027404785156
+          },
+          {
+            "seconds": 9.35,
+            "mean_byte_change": 17.552106857299805
+          },
+          {
+            "seconds": 9.4,
+            "mean_byte_change": 17.359676361083984
+          },
+          {
+            "seconds": 9.95,
+            "mean_byte_change": 17.246458053588867
+          },
+          {
+            "seconds": 10.3,
+            "mean_byte_change": 16.95201301574707
+          },
+          {
+            "seconds": 9.85,
+            "mean_byte_change": 16.794004440307617
+          }
+        ],
+        "late_idle_max_byte_change": 3.065023183822632,
+        "note": "Screen-space difference locator, not a geometric correctness test; motion and LOD updates can both produce changes."
+      }
+    },
+    "walk-settled": {
+      "manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--seconds",
+          "53.0",
+          "--report",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/walk-settled/game.json",
+          "--resource-profile",
+          "development",
+          "--pixel-error",
+          "4.5"
+        ],
+        "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+        "settle_seconds": 25.0,
+        "movement": {
+          "max_displacement_m": 22.412274576511575,
+          "yaw_range_radians": 1.279999727,
+          "walk_verified": true,
+          "turn_verified": true
+        },
+        "failure": null,
+        "events": [
+          {
+            "seconds_from_launch": 0.775,
+            "action": "settle_begin"
+          },
+          {
+            "seconds_from_launch": 25.7752,
+            "action": "settle_end"
+          },
+          {
+            "seconds_from_launch": 25.7752,
+            "action": "record_start"
+          },
+          {
+            "seconds_from_launch": 26.8858,
+            "action": "hold_w"
+          },
+          {
+            "seconds_from_launch": 29.9961,
+            "action": "hold_None"
+          },
+          {
+            "seconds_from_launch": 32.0797,
+            "action": "hold_w"
+          },
+          {
+            "seconds_from_launch": 35.2056,
+            "action": "mouse_turn"
+          },
+          {
+            "seconds_from_launch": 36.9317,
+            "action": "walk_after_turn"
+          },
+          {
+            "seconds_from_launch": 39.9321,
+            "action": "stop_after_turn"
+          },
+          {
+            "seconds_from_launch": 46.1186,
+            "action": "record_end"
+          }
+        ],
+        "scope": "Actual X11 inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "sampled_frames": 2818,
+      "terrain_ready_frames": 0,
+      "max_selected_mesh_evictions": 0,
+      "final_pending": 0,
+      "final_coverage_unresolved": 0,
+      "visual_scope": "8 timestamped frames inspected plus image-difference outlier locator; 20 FPS cannot rule out subframe artifacts. Distant/startup refinements remain visible; terrain quality readiness remained false.",
+      "differences": {
+        "frames": 400,
+        "largest_changes": [
+          {
+            "seconds": 10.4,
+            "mean_byte_change": 18.983379364013672
+          },
+          {
+            "seconds": 9.55,
+            "mean_byte_change": 18.58231544494629
+          },
+          {
+            "seconds": 10.65,
+            "mean_byte_change": 18.256088256835938
+          },
+          {
+            "seconds": 9.6,
+            "mean_byte_change": 17.976573944091797
+          },
+          {
+            "seconds": 9.75,
+            "mean_byte_change": 17.918193817138672
+          },
+          {
+            "seconds": 10.25,
+            "mean_byte_change": 17.803401947021484
+          },
+          {
+            "seconds": 10.0,
+            "mean_byte_change": 17.361064910888672
+          },
+          {
+            "seconds": 10.2,
+            "mean_byte_change": 16.930578231811523
+          }
+        ],
+        "late_idle_max_byte_change": 2.7113194465637207,
+        "note": "Screen-space difference locator, not a geometric correctness test; motion and LOD updates can both produce changes."
+      }
+    }
+  },
+  "geometry": {
+    "primary-adaptive": {
+      "different_color_pixels": 0,
+      "max_color_byte_difference": 0,
+      "different_depth_components": 0,
+      "max_depth_difference": 0.0,
+      "different_coverage_components": 0,
+      "captures": {
+        "conforming": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--scene",
+              "adaptive",
+              "--pixel-error",
+              "4.5",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--terrain-recipe",
+              "legacy",
+              "--view-levels",
+              "11",
+              "--voxel-filter",
+              "on",
+              "--msaa",
+              "1",
+              "--capture-linear",
+              "--capture-far",
+              "300",
+              "--eye",
+              "0,94.8875,0",
+              "--target",
+              "-8.731370115810932e-08,94.83756238296628,-0.9987523555755615",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/accepted-geometry/primary-adaptive-conforming.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "conforming"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 10.88828429800924
+          },
+          "counters": {
+            "native_clusters": 52,
+            "triangles": 3600147,
+            "gpu_resident_bytes": 157965616,
+            "resident_native_quad_bytes": 75302784,
+            "resident_proxy_triangle_bytes": 56446272,
+            "quality_ready": true
+          }
+        },
+        "unit": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--scene",
+              "adaptive",
+              "--pixel-error",
+              "4.5",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--terrain-recipe",
+              "legacy",
+              "--view-levels",
+              "11",
+              "--voxel-filter",
+              "on",
+              "--msaa",
+              "1",
+              "--capture-linear",
+              "--capture-far",
+              "300",
+              "--eye",
+              "0,94.8875,0",
+              "--target",
+              "-8.731370115810932e-08,94.83756238296628,-0.9987523555755615",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/accepted-geometry/primary-adaptive-unit.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "unit"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 9.735348192043602
+          },
+          "counters": {
+            "native_clusters": 52,
+            "triangles": 3600147,
+            "gpu_resident_bytes": 157965616,
+            "resident_native_quad_bytes": 75302784,
+            "resident_proxy_triangle_bytes": 56446272,
+            "quality_ready": true
+          }
+        }
+      }
+    },
+    "flat-native": {
+      "different_color_pixels": 98,
+      "max_color_byte_difference": 4,
+      "different_depth_components": 530896,
+      "max_depth_difference": 1.7881393432617188e-07,
+      "different_coverage_components": 0,
+      "captures": {
+        "conforming": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--scene",
+              "adaptive",
+              "--terrain-recipe",
+              "legacy",
+              "--amplitude",
+              "1",
+              "--octaves",
+              "2",
+              "--pixel-error",
+              "4.5",
+              "--native-radius",
+              "8",
+              "--capture-far",
+              "64",
+              "--eye",
+              "0,2,0",
+              "--target",
+              "0,0,10",
+              "--seed",
+              "7",
+              "--msaa",
+              "1",
+              "--voxel-filter",
+              "on",
+              "--beauty",
+              "off",
+              "--vegetation",
+              "off",
+              "--atmosphere",
+              "off",
+              "--terrain-shadows",
+              "off",
+              "--walk",
+              "off",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/accepted-flat-native/flat-native-conforming.png",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--width",
+              "1920",
+              "--height",
+              "1080"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "conforming"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 0.8167108340421692
+          },
+          "counters": {
+            "native_clusters": 4,
+            "triangles": 11560,
+            "gpu_resident_bytes": 9279872,
+            "resident_native_quad_bytes": 0,
+            "resident_proxy_triangle_bytes": 6001152,
+            "quality_ready": true
+          }
+        },
+        "unit": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--scene",
+              "adaptive",
+              "--terrain-recipe",
+              "legacy",
+              "--amplitude",
+              "1",
+              "--octaves",
+              "2",
+              "--pixel-error",
+              "4.5",
+              "--native-radius",
+              "8",
+              "--capture-far",
+              "64",
+              "--eye",
+              "0,2,0",
+              "--target",
+              "0,0,10",
+              "--seed",
+              "7",
+              "--msaa",
+              "1",
+              "--voxel-filter",
+              "on",
+              "--beauty",
+              "off",
+              "--vegetation",
+              "off",
+              "--atmosphere",
+              "off",
+              "--terrain-shadows",
+              "off",
+              "--walk",
+              "off",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/accepted-flat-native/flat-native-unit.png",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--width",
+              "1920",
+              "--height",
+              "1080"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "unit"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 0.8164163780165836
+          },
+          "counters": {
+            "native_clusters": 4,
+            "triangles": 75624,
+            "gpu_resident_bytes": 11188608,
+            "resident_native_quad_bytes": 2097152,
+            "resident_proxy_triangle_bytes": 5812736,
+            "quality_ready": true
+          }
+        }
+      }
+    },
+    "mountain-still": {
+      "different_color_pixels": 0,
+      "max_color_byte_difference": 0,
+      "different_depth_components": 0,
+      "max_depth_difference": 0.0,
+      "different_coverage_components": 0,
+      "captures": {
+        "conforming": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--preset",
+              "alpine",
+              "--pixel-error",
+              "1",
+              "--msaa",
+              "1",
+              "--seed",
+              "7",
+              "--voxel-filter",
+              "on",
+              "--render-scale",
+              "1",
+              "--eye",
+              "-650,587.825,2350",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--adaptive-disk-cache",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/disk-cache/conforming",
+              "--adaptive-disk-mib",
+              "1024",
+              "--target",
+              "-649.4361380338669,587.8789355650545,2350.8241059184074",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/mountain-still-conforming.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "475935fa1b688fc5a42b8f0283e0013237fd8abe329f843cc72d82d94c416aa8",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "conforming"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 26.121680133976042
+          },
+          "counters": {
+            "native_clusters": 146,
+            "triangles": 4054946,
+            "gpu_resident_bytes": 300378752,
+            "resident_native_quad_bytes": 138621120,
+            "resident_proxy_triangle_bytes": 70572992,
+            "quality_ready": true
+          }
+        },
+        "unit": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--preset",
+              "alpine",
+              "--pixel-error",
+              "1",
+              "--msaa",
+              "1",
+              "--seed",
+              "7",
+              "--voxel-filter",
+              "on",
+              "--render-scale",
+              "1",
+              "--eye",
+              "-650,587.825,2350",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--adaptive-disk-cache",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/disk-cache/unit",
+              "--adaptive-disk-mib",
+              "1024",
+              "--target",
+              "-649.4361380338669,587.8789355650545,2350.8241059184074",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/mountain-still-unit.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "475935fa1b688fc5a42b8f0283e0013237fd8abe329f843cc72d82d94c416aa8",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "unit"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 25.219299479038455
+          },
+          "counters": {
+            "native_clusters": 146,
+            "triangles": 4054946,
+            "gpu_resident_bytes": 300378752,
+            "resident_native_quad_bytes": 138621120,
+            "resident_proxy_triangle_bytes": 70572992,
+            "quality_ready": true
+          }
+        }
+      }
+    },
+    "grazing-still": {
+      "different_color_pixels": 0,
+      "max_color_byte_difference": 0,
+      "different_depth_components": 0,
+      "max_depth_difference": 0.0,
+      "different_coverage_components": 0,
+      "captures": {
+        "conforming": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--preset",
+              "alpine",
+              "--pixel-error",
+              "1",
+              "--msaa",
+              "1",
+              "--seed",
+              "7",
+              "--voxel-filter",
+              "on",
+              "--render-scale",
+              "1",
+              "--eye",
+              "-650,587.825,2350",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--adaptive-disk-cache",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/disk-cache/conforming",
+              "--adaptive-disk-mib",
+              "1024",
+              "--target",
+              "-593.61380338669,587.835,2432.41059184074",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/grazing-still-conforming.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "475935fa1b688fc5a42b8f0283e0013237fd8abe329f843cc72d82d94c416aa8",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "conforming"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 18.75773292197846
+          },
+          "counters": {
+            "native_clusters": 138,
+            "triangles": 3880478,
+            "gpu_resident_bytes": 226774448,
+            "resident_native_quad_bytes": 131414848,
+            "resident_proxy_triangle_bytes": 48709120,
+            "quality_ready": true
+          }
+        },
+        "unit": {
+          "invocation": {
+            "command": [
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+              "--preset",
+              "alpine",
+              "--pixel-error",
+              "1",
+              "--msaa",
+              "1",
+              "--seed",
+              "7",
+              "--voxel-filter",
+              "on",
+              "--render-scale",
+              "1",
+              "--eye",
+              "-650,587.825,2350",
+              "--width",
+              "1920",
+              "--height",
+              "1080",
+              "--resource-profile",
+              "custom",
+              "--terrain-cache-mib",
+              "1024",
+              "--terrain-gpu-mib",
+              "1536",
+              "--build-memory-mib",
+              "768",
+              "--adaptive-disk-cache",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/disk-cache/unit",
+              "--adaptive-disk-mib",
+              "1024",
+              "--target",
+              "-593.61380338669,587.835,2432.41059184074",
+              "--capture-linear",
+              "--capture",
+              "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/playtest-smoothness/geometry-alpine/grazing-still-unit.png"
+            ],
+            "cwd": "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier",
+            "binary_sha256": "475935fa1b688fc5a42b8f0283e0013237fd8abe329f843cc72d82d94c416aa8",
+            "environment_overrides": {
+              "FRONTIER_NATIVE_GEOMETRY": "unit"
+            },
+            "comparison": "same candidate binary; topology mode only",
+            "adaptive_resource_budgets_mib": {
+              "terrain_cache": 1024,
+              "terrain_gpu": 1536,
+              "build_memory": 768
+            },
+            "cache_policy": "persistent, isolated mode directories; not a cold-cache proof",
+            "returncode": 0,
+            "wall_seconds": 48.32726858195383
+          },
+          "counters": {
+            "native_clusters": 138,
+            "triangles": 3880478,
+            "gpu_resident_bytes": 226774448,
+            "resident_native_quad_bytes": 131414848,
+            "resident_proxy_triangle_bytes": 48709120,
+            "quality_ready": true
+          }
+        }
+      }
+    }
+  },
+  "primary": {
+    "png": {
+      "identical": true,
+      "sha256": "56eab7bb9f1c909d1e1408b0a2b9030e35a30f62b867c779d8754df5a4b473a4"
+    },
+    "depth.f32": {
+      "identical": true,
+      "sha256": "20196b4ab4f9217dcc9f26c24968977936d1ce4991b65ffe4cf140ed5495fa8f"
+    },
+    "linear_rgb.f32": {
+      "identical": true,
+      "sha256": "f553d36160f597bfa85922bb8e2ab6c9783678d9b62de164a0fb417de2327f9f"
+    }
+  },
+  "tests": {
+    "cpu_passed": 533,
+    "cpu_ignored": 15,
+    "hardware_test": "frozen_native_gpu_parity",
+    "hardware_passed": true,
+    "gpu_scope": "1080 covered frozen pixels: expanded/compact/compact-indexed/pooled exact color and depth"
+  }
+}

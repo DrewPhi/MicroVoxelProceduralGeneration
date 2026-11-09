@@ -36,6 +36,21 @@ impl Gpu {
             self.origin =
                 DVec3::from_array(camera.position.to_array().map(|v| (v / 32.).floor() * 32.));
         }
+        if let Some(settings) = &self.visual_settings {
+            self.vegetation_stream
+                .as_mut()
+                .unwrap()
+                .configure_resources(
+                    settings.plant_cpu_mib.saturating_mul(1024 * 1024),
+                    settings.plant_gpu_mib.saturating_mul(1024 * 1024),
+                    settings.triangle_budget,
+                    settings.vegetation_near_m,
+                );
+        }
+        self.vegetation_stream
+            .as_mut()
+            .unwrap()
+            .set_background_paused(self.vegetation_background_paused);
         let frame = self.vegetation_stream.as_mut().unwrap().update_view(
             camera.position.to_array(),
             height,
@@ -61,6 +76,11 @@ impl Gpu {
             self.vegetation_samples = self.sample_count;
         }
         let plants = self.vegetation.as_mut().unwrap();
+        plants.set_color_view_projection(
+            camera
+                .matrix(self.origin, width as f32 / height.max(1) as f32)
+                .to_cols_array_2d(),
+        );
         if let Some(settings) = &self.visual_settings {
             plants.set_visual_lighting(&self.queue, settings, self.regional_appearance);
         }
@@ -137,6 +157,19 @@ impl Gpu {
             self.adaptive.as_ref().is_some_and(|a| a.near_shadow_cache_reused()),
             self.adaptive.as_ref().is_some_and(|a| a.shadow_cache_reused()),
             self.adaptive.as_ref().is_some_and(|a| a.shadow_cascades_active())));
+        // Format diagnostics only when a report is requested. Streaming keeps a
+        // bounded in-memory sample and does no per-patch hot-path I/O.
+        let ground_inspection = self.vegetation_stream.as_ref().map_or_else(String::new, |stream| {
+            stream.ground_inspection().iter().map(|patch| {
+                let selected = patch.selected_lod.map_or_else(|| "null".to_owned(), |lod| lod.to_string());
+                format!("{{\"species\":{},\"tile\":{:?},\"seed\":{},\"edit_id\":{},\"distance_m\":{},\"target_lod\":{},\"selected_lod\":{},\"triangles\":{},\"headroom\":{},\"reason\":\"{}\"}}",
+                    patch.key.species, patch.key.tile, patch.key.seed, patch.key.edit_id,
+                    patch.distance_m, patch.target_lod, selected, patch.triangles, patch.headroom, patch.reason)
+            }).collect::<Vec<_>>().join(",")
+        });
+        json.pop();
+        json.push_str(&format!(",\"ground_decisions\":{{\"selected\":{},\"missing_mesh\":{},\"budget_rejected\":{},\"retained\":{},\"coarse_fallback\":{}}},\"ground_inspection_limit\":256,\"ground_inspection\":[{}]}}",
+            s.ground_decisions[0],s.ground_decisions[1],s.ground_decisions[2],s.ground_decisions[3],s.ground_decisions[4],ground_inspection));
         json
     }
 }

@@ -64,9 +64,11 @@ pub(crate) fn weighted_near_detail_error(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StreamSettings {
     pub pixel_error: f64,
+    /// All-heading canonical near-surface detail; zero preserves baseline selection.
+    pub native_radius_m: f64,
     pub cpu_cache_bytes: usize,
     pub max_nodes: usize,
     pub jobs_per_update: usize,
@@ -83,6 +85,7 @@ impl Default for StreamSettings {
     fn default() -> Self {
         Self {
             pixel_error: 2.0,
+            native_radius_m: 0.,
             cpu_cache_bytes: 512 * 1024 * 1024,
             max_nodes: 100_000,
             jobs_per_update: 4,
@@ -92,6 +95,26 @@ impl Default for StreamSettings {
             direct_native_urgent: false,
         }
     }
+}
+impl StreamSettings {
+    fn validate(self) -> Result<(), String> {
+        if !self.pixel_error.is_finite()
+            || self.pixel_error < 0.0
+            || !self.native_radius_m.is_finite()
+            || !(0.0..=128.0).contains(&self.native_radius_m)
+            || self.max_nodes == 0
+            || self.jobs_per_update == 0
+            || !(1..=32).contains(&self.refinements_per_transaction)
+            || !(1..=16).contains(&self.worker_count)
+            || self.build_budget_bytes == 0
+        {
+            return Err("invalid adaptive stream settings".into());
+        }
+        Ok(())
+    }
+}
+pub(crate) fn native_band(bounds: [[f64; 3]; 2], eye: DVec3, radius: f64) -> bool {
+    radius > 0. && surface_bounds_distance(bounds, eye) <= radius
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PlanningStats {
@@ -493,16 +516,7 @@ impl AdaptiveStream {
                     .into(),
             );
         }
-        if !settings.pixel_error.is_finite()
-            || settings.pixel_error < 0.0
-            || settings.max_nodes == 0
-            || settings.jobs_per_update == 0
-            || !(1..=32).contains(&settings.refinements_per_transaction)
-            || !(1..=16).contains(&settings.worker_count)
-            || settings.build_budget_bytes == 0
-        {
-            return Err("invalid adaptive stream settings".into());
-        }
+        settings.validate()?;
         Ok(Self {
             cache: GeometryCache::new(world.clone(), settings.cpu_cache_bytes),
             world,
@@ -544,6 +558,32 @@ impl AdaptiveStream {
             #[cfg(test)]
             finest_cells: 128,
         })
+    }
+    pub fn reconfigure(&mut self, settings: StreamSettings) -> Result<(), String> {
+        settings.validate()?;
+        if settings.cpu_cache_bytes != self.settings.cpu_cache_bytes {
+            self.cache.set_budget_bytes(settings.cpu_cache_bytes)?;
+        }
+        if settings.build_budget_bytes != self.settings.build_budget_bytes
+            || settings.cpu_cache_bytes != self.settings.cpu_cache_bytes
+        {
+            self.build_refused.clear();
+        }
+        if settings.pixel_error != self.settings.pixel_error
+            || settings.native_radius_m != self.settings.native_radius_m
+        {
+            self.rejected_coarsen.clear();
+        }
+        self.settings = settings;
+        self.build_memory.budget_bytes = settings.build_budget_bytes;
+        Ok(())
+    }
+    fn native_protects(&self, tile: &GeometryTile, camera: &Camera) -> bool {
+        native_band(
+            tile.conservative_surface_bounds,
+            camera.position,
+            self.settings.native_radius_m,
+        )
     }
     fn finest_cells(&self) -> u32 {
         #[cfg(test)]
@@ -618,6 +658,10 @@ impl AdaptiveStream {
         };
         self.refresh_occlusion(camera);
         if self.obsolete_transaction_preempt
+            && !self
+                .transaction_refinements
+                .iter()
+                .any(|tile| self.native_protects(tile, camera))
             && self.transaction.is_some()
             && obsolete_refinement_demand(
                 &self.transaction_refinements,
@@ -712,10 +756,17 @@ impl AdaptiveStream {
             .committed
             .iter()
             .filter_map(|t| {
-                if !self.tile_visible(t, camera, p) {
+                let native_request = self.native_protects(t, camera) && t.key.step_cells > 1;
+                if !native_request
+                    && !(self.frustum_visible(t, camera, p) && !self.is_occluded(t, camera))
+                {
                     return None;
                 }
-                let error_px = self.projected_error(t, camera, p);
+                let error_px = if native_request {
+                    f64::INFINITY
+                } else {
+                    self.projected_error(t, camera, p)
+                };
                 if error_px <= self.settings.pixel_error * REFINEMENT_RESERVE {
                     return None;
                 }
@@ -846,11 +897,14 @@ impl AdaptiveStream {
                 }
             }
         } else {
-            let Some(extents) = all_heading_horizontal_extents(camera, width, height) else {
+            let Some(mut extents) = all_heading_horizontal_extents(camera, width, height) else {
                 frame.limit_reached = true;
                 self.finish_build_memory(&mut frame);
                 return frame;
             };
+            for extent in &mut extents {
+                *extent = extent.max(self.settings.native_radius_m);
+            }
             let far = extents.map(|v| (v / VOXEL_SIZE).ceil() as i64);
             let root = (far[0].max(far[1]).max(512) as u64)
                 .next_power_of_two()
@@ -1279,9 +1333,15 @@ impl AdaptiveStream {
                 _ => {}
             }
         }
+        let native_pending = frame
+            .tiles
+            .iter()
+            .any(|tile| self.native_protects(tile, camera) && tile.key.step_cells > 1);
         frame.max_visible_error_px = finite.then_some(max_error);
-        frame.quality_ready = frame.coverage_ready && frame.visible_unresolved_count == 0;
+        frame.quality_ready =
+            frame.coverage_ready && frame.visible_unresolved_count == 0 && !native_pending;
         frame.refinement_ready = frame.coverage_ready
+            && !native_pending
             && finite
             && max_error <= self.settings.pixel_error * REFINEMENT_RESERVE;
     }
@@ -1301,8 +1361,10 @@ impl AdaptiveStream {
                 .unwrap_or(false)
                 || self.committed_ancestors.contains(&(n.min, n.width_cells));
             if is_coarsening
-                && self.frustum_visible(tile, camera, p)
-                && self.projected_error(tile, camera, p) > self.settings.pixel_error * 0.65
+                && ((self.native_protects(tile, camera) && tile.key.step_cells > 1)
+                    || (self.frustum_visible(tile, camera, p)
+                        && self.projected_error(tile, camera, p)
+                            > self.settings.pixel_error * 0.65))
             {
                 let error_m = tile
                     .best_certified_vertical_error_m
@@ -1365,6 +1427,9 @@ impl AdaptiveStream {
                 self.rejected_coarsen.remove(&(min, width, k.step_cells));
             }
             if let Some(tile) = self.cache.get(k) {
+                if self.native_protects(&tile, camera) && k.step_cells > 1 {
+                    continue;
+                }
                 if (!self.tile_visible(&tile, camera, p)
                     || self.projected_error(&tile, camera, p) <= self.settings.pixel_error * 0.65)
                     && (!self.prediction_protects(tile.key)
@@ -1539,10 +1604,13 @@ impl AdaptiveStream {
         )
     }
     fn tile_visible(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> bool {
-        self.frustum_visible(tile, camera, p) && !self.is_occluded(tile, camera)
+        self.native_protects(tile, camera)
+            || (self.frustum_visible(tile, camera, p) && !self.is_occluded(tile, camera))
     }
     fn accepts(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> bool {
-        self.projected_error(tile, camera, p) <= self.settings.pixel_error * REFINEMENT_RESERVE
+        (!self.native_protects(tile, camera) || tile.key.step_cells == 1)
+            && self.projected_error(tile, camera, p)
+                <= self.settings.pixel_error * REFINEMENT_RESERVE
             && (!self.prediction_protects(tile.key)
                 || self.prediction.as_ref().is_none_or(|predicted| {
                     !self.frustum_visible(tile, predicted, p)
@@ -2462,6 +2530,7 @@ mod tests {
         let mut frame = stream.plan(&camera, 160, 90);
         frame.tiles = vec![Arc::new(tile)];
         let policy = |near_detail| DeliveryPolicy {
+            native_radius_m: 0.,
             volume_owner: false,
             pixel_error: raw * 2.,
             near_detail,
@@ -3368,6 +3437,7 @@ mod tests {
 /// Latest-state worker: request replaces queued demand, and published results
 /// are epoch-tagged. CPU generation never runs on the requesting/render thread.
 struct DeliveryPolicy {
+    native_radius_m: f64,
     volume_owner: bool,
     pixel_error: f64,
     near_detail: bool,
@@ -3432,8 +3502,17 @@ impl DeliveryPolicy {
             }
         }
         frame.max_visible_error_px = finite.then_some(maximum);
-        frame.quality_ready = frame.visible_unresolved_count == 0;
-        frame.refinement_ready = finite && maximum <= self.pixel_error * REFINEMENT_RESERVE;
+        let native_pending = frame.tiles.iter().any(|tile| {
+            tile.key.step_cells > 1
+                && native_band(
+                    tile.conservative_surface_bounds,
+                    camera.position,
+                    self.native_radius_m,
+                )
+        });
+        frame.quality_ready = frame.visible_unresolved_count == 0 && !native_pending;
+        frame.refinement_ready =
+            !native_pending && finite && maximum <= self.pixel_error * REFINEMENT_RESERVE;
         true
     }
 }
@@ -3467,11 +3546,15 @@ pub(crate) struct DiskCacheConfig {
     pub max_entry_bytes: usize,
 }
 pub struct Worker {
+    minimum_cache_bytes: usize,
     delivery: DeliveryPolicy,
     state: std::sync::Arc<(std::sync::Mutex<WorkerState>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 struct WorkerState {
+    background_paused: bool,
+    pending_settings: Option<StreamSettings>,
+    settings: StreamSettings,
     request: Option<(u64, Camera, u32, u32)>,
     epoch: u64,
     last_request: Option<(Camera, u32, u32)>,
@@ -3553,6 +3636,7 @@ impl Worker {
         disk: Option<DiskCacheConfig>,
     ) -> Result<Self, String> {
         let delivery = DeliveryPolicy {
+            native_radius_m: settings.native_radius_m,
             volume_owner: world.topology_base_cells().is_some(),
             pixel_error: settings.pixel_error,
             near_detail: near_detail_setting(&world),
@@ -3566,6 +3650,9 @@ impl Worker {
         }
         let state = std::sync::Arc::new((
             std::sync::Mutex::new(WorkerState {
+                background_paused: false,
+                pending_settings: None,
+                settings,
                 request: None,
                 epoch: 0,
                 last_request: None,
@@ -3584,21 +3671,36 @@ impl Worker {
             }),
             std::sync::Condvar::new(),
         ));
+        let minimum_cache_bytes = stream.cache.stats().source_budget_bytes;
         let shared = state.clone();
         let volume_owner = delivery.volume_owner;
         let thread = std::thread::Builder::new()
             .name("adaptive-terrain".into())
             .spawn(move || loop {
-                let (epoch, camera, width, height) = {
+                let (command, request) = {
                     let (lock, wake) = &*shared;
                     let mut s = lock.lock().unwrap();
-                    while s.request.is_none() && !s.stop {
+                    while (s.background_paused
+                        || (s.request.is_none() && s.pending_settings.is_none()))
+                        && !s.stop
+                    {
                         s = wake.wait(s).unwrap();
                     }
                     if s.stop {
                         break;
                     }
-                    s.request.as_ref().unwrap().clone()
+                    (s.pending_settings.take(), s.request.clone())
+                };
+                if let Some(settings) = command {
+                    if let Err(error) = stream.reconfigure(settings) {
+                        let mut s = shared.0.lock().unwrap();
+                        s.result = Some(Err(error));
+                        s.request = None;
+                        continue;
+                    }
+                }
+                let Some((epoch, camera, width, height)) = request else {
+                    continue;
                 };
                 stream.prediction = shared.0.lock().unwrap().motion.predicted.clone();
                 let planning_started = std::time::Instant::now();
@@ -3667,7 +3769,7 @@ impl Worker {
                         return true;
                     }
                     let s = shared.0.lock().unwrap();
-                    if s.stop {
+                    if s.stop || s.background_paused || s.pending_settings.is_some() {
                         return true;
                     }
                     if checked_epoch.load(Ordering::Relaxed) != s.epoch {
@@ -3726,10 +3828,51 @@ impl Worker {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            minimum_cache_bytes,
             delivery,
             state,
             thread: Some(thread),
         })
+    }
+    /// Pause new canonical builds at cancellation checkpoints. Completed source
+    /// pages, immutable geometry and pending transactions remain valid on resume.
+    pub fn set_background_paused(&self, paused: bool) {
+        let mut state = self.state.0.lock().unwrap();
+        if state.background_paused == paused {
+            return;
+        }
+        state.background_paused = paused;
+        self.state.1.notify_one();
+    }
+    /// Queue a bounded job-boundary update. Never joins or rebuilds the worker.
+    pub fn reconfigure(&mut self, settings: StreamSettings) -> Result<(), String> {
+        settings.validate()?;
+        if settings.cpu_cache_bytes < self.minimum_cache_bytes {
+            return Err(format!(
+                "terrain CPU cache must retain at least {} MiB of canonical source reservation",
+                self.minimum_cache_bytes.div_ceil(1024 * 1024)
+            ));
+        }
+        let mut state = self.state.0.lock().unwrap();
+        if state.settings == settings {
+            return Ok(());
+        }
+        let quality_changed = state.settings.pixel_error != settings.pixel_error
+            || state.settings.native_radius_m != settings.native_radius_m;
+        state.settings = settings;
+        state.pending_settings = Some(settings);
+        self.delivery.pixel_error = settings.pixel_error;
+        self.delivery.native_radius_m = settings.native_radius_m;
+        if quality_changed {
+            state.epoch = state.epoch.wrapping_add(1);
+            state.result = None;
+            state.active_preparation = None;
+        }
+        if let Some((camera, width, height)) = state.last_request.clone() {
+            state.request = Some((state.epoch, camera, width, height));
+        }
+        self.state.1.notify_one();
+        Ok(())
     }
     pub(crate) fn request(&self, camera: Camera, width: u32, height: u32) -> u64 {
         let mut s = self.state.0.lock().unwrap();
@@ -3859,6 +4002,166 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+    #[test]
+    fn background_pause_resume_preserves_request_epoch_and_source_reservation() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let worker = Worker::new(world, StreamSettings::default()).unwrap();
+        worker.set_background_paused(true);
+        let mut camera = Camera::fixture();
+        camera.position.y = 10000.;
+        camera.far = 1.;
+        let epoch = worker.request(camera, 160, 90);
+        let source_reservation = worker.minimum_cache_bytes;
+        {
+            let state = worker.state.0.lock().unwrap();
+            assert!(state.background_paused);
+            assert!(
+                state.result.is_none(),
+                "paused worker cannot start queued generation"
+            );
+            assert_eq!(state.request.as_ref().unwrap().0, epoch);
+        }
+        worker.set_background_paused(false);
+        assert_eq!(worker.request(camera, 160, 90), epoch);
+        assert_eq!(worker.minimum_cache_bytes, source_reservation);
+        assert!(!worker.state.0.lock().unwrap().background_paused);
+    }
+    #[test]
+    fn native_radius_protects_backside_and_coarsening_but_zero_preserves_baseline() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(
+            world.clone(),
+            StreamSettings {
+                pixel_error: 1e9,
+                native_radius_m: 4.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 16,
+            step_cells: 2,
+            edge_steps: [2; 4],
+            source_revision: 0,
+        };
+        let coarse = stream.cache.get_or_build(key, || false).unwrap();
+        let native_key = TileKey {
+            step_cells: 1,
+            edge_steps: [1; 4],
+            ..key
+        };
+        let exact = stream.cache.get_or_build(native_key, || false).unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.5, world.height_m(0.5, 0.5) + 1.7, 2.);
+        camera.yaw = 0.;
+        camera.pitch = 0.;
+        camera.far = 8.;
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        assert!(!stream.frustum_visible(&coarse, &camera, p));
+        assert!(stream.native_protects(&coarse, &camera));
+        assert!(stream.tile_visible(&coarse, &camera, p));
+        assert!(!stream.accepts(&coarse, &camera, p));
+        stream.set_committed(vec![exact]);
+        assert!(!stream.coarsening_certified(&[coarse.clone()], &camera, p));
+        stream
+            .variants
+            .insert((key.min, key.width_cells), vec![key, native_key]);
+        assert!(stream
+            .cached_coarse(key.min, key.width_cells, 1, &camera, p)
+            .is_none());
+        stream.settings.native_radius_m = 0.;
+        assert!(!stream.native_protects(&coarse, &camera));
+        assert!(!stream.tile_visible(&coarse, &camera, p));
+        assert!(stream.coarsening_certified(&[coarse], &camera, p));
+        assert!(!native_band(
+            [[0., 0., 0.], [1., 1., 1.]],
+            DVec3::new(0.5, 100., 0.5),
+            4.
+        ));
+    }
+    #[test]
+    fn reconfigure_retains_committed_and_cached_identity() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 16,
+            step_cells: 2,
+            edge_steps: [2; 4],
+            source_revision: 0,
+        };
+        let original = stream.cache.get_or_build(key, || false).unwrap();
+        stream.set_committed(vec![original.clone()]);
+        let before = stream.cache.stats();
+        stream
+            .reconfigure(StreamSettings {
+                pixel_error: 0.5,
+                cpu_cache_bytes: 768 * 1024 * 1024,
+                native_radius_m: 4.,
+                ..stream.settings
+            })
+            .unwrap();
+        let reused = stream.cache.get_or_build(key, || false).unwrap();
+        assert!(Arc::ptr_eq(&original, &reused));
+        assert!(Arc::ptr_eq(&original, &stream.committed[0]));
+        assert_eq!(stream.cache.stats().builds, before.builds);
+    }
+    #[test]
+    fn worker_reconfiguration_reissues_same_pose_only_for_quality_epoch() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut worker = Worker::new(world, StreamSettings::default()).unwrap();
+        let mut camera = Camera::fixture();
+        camera.position.y = 10000.;
+        camera.far = 1.;
+        let first = worker.request(camera, 160, 90);
+        worker
+            .reconfigure(StreamSettings {
+                pixel_error: 0.5,
+                ..Default::default()
+            })
+            .unwrap();
+        let changed = worker.request(camera, 160, 90);
+        assert_ne!(changed, first);
+        assert_eq!(worker.request(camera, 160, 90), changed);
+        worker
+            .reconfigure(StreamSettings {
+                pixel_error: 0.5,
+                jobs_per_update: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(worker.request(camera, 160, 90), changed);
+        assert_eq!(worker.state.0.lock().unwrap().settings.jobs_per_update, 2);
+    }
     #[test]
     fn retained_drain_skips_cover_scans_and_publishes_the_same_coherent_partition() {
         let world = World::fbm(

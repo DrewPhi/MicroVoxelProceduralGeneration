@@ -354,11 +354,13 @@ struct Pools {
     instance_arena: Arena,
 }
 impl Pools {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, budget: u64) -> Self {
         let instance_bytes = 8 * 1024 * 1024;
         let cull_bytes = (MAX_CLUSTERS * (std::mem::size_of::<Cluster>() + 16)) as u64;
-        let geometry_bytes =
-            (CACHE_BYTES - instance_bytes - cull_bytes).min(device.limits().max_buffer_size);
+        let geometry_bytes = budget
+            .saturating_sub(instance_bytes + cull_bytes)
+            .max(256)
+            .min(device.limits().max_buffer_size);
         Self {
             geometry: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("bounded vegetation geometry pool"),
@@ -388,6 +390,7 @@ struct ColorDraw {
 }
 
 pub struct VegetationGpu {
+    color_view_projection: Option<glam::Mat4>,
     color_draws: Vec<ColorDraw>,
     cull: Cull,
     pools: Option<Pools>,
@@ -581,9 +584,10 @@ impl VegetationGpu {
             cache: None,
         });
         Self {
+            color_view_projection: None,
             color_draws: Vec::new(),
             cull: Cull::new(device, camera_layout),
-            pools: (mode == "pooled").then(|| Pools::new(device)),
+            pools: (mode == "pooled").then(|| Pools::new(device, CACHE_BYTES)),
             shadow_pipeline,
             expanded,
             compact_indexed,
@@ -624,6 +628,10 @@ impl VegetationGpu {
 
     /// Geometry stays resident across frames; instance storage grows geometrically.
     /// Inactive templates are evicted only when needed to satisfy the fixed budget.
+    /// Camera-relative matrix used for conservative draw culling in every backend.
+    pub fn set_color_view_projection(&mut self, matrix: [[f32; 4]; 4]) {
+        self.color_view_projection = Some(glam::Mat4::from_cols_array_2d(&matrix));
+    }
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -664,11 +672,23 @@ impl VegetationGpu {
         self.stats.shadow_removed = 0;
         self.stats.shadow_budget_rejected = 0;
         self.stats.uploaded_bytes = 0;
-        let cache_budget = if frame.stats.reference {
-            1024 * 1024 * 1024
-        } else {
+        let cache_budget = if frame.stats.gpu_budget_bytes == 0 {
             CACHE_BYTES
+        } else {
+            frame.stats.gpu_budget_bytes as u64
         };
+        if self.pools.is_some()
+            && (if self.stats.cache_budget_bytes == 0 {
+                CACHE_BYTES
+            } else {
+                self.stats.cache_budget_bytes
+            }) != cache_budget
+        {
+            // Resource profile changes are rare; rebuild once, then reuse every
+            // immutable template normally. Device allocation limits remain hard.
+            self.templates.clear();
+            self.pools = Some(Pools::new(device, cache_budget));
+        }
         self.stats.cache_budget_bytes = cache_budget;
         let batches = frame_batches(frame);
         let wanted: HashSet<_> = batches
@@ -976,7 +996,18 @@ impl VegetationGpu {
             template.shadow_count = shadow_count;
             self.stats.shadow_instances += shadow_count as usize;
             self.stats.shadow_triangles = shadow_triangles;
-            if entry.color {
+            let color_visible = entry.color
+                && self.color_view_projection.is_none_or(|matrix| {
+                    cluster_visible(
+                        &cluster_bounds(
+                            template.local_bounds,
+                            &self.scratch,
+                            template.vertex_count,
+                        ),
+                        matrix,
+                    )
+                });
+            if color_visible {
                 self.stats.instances += self.scratch.len();
                 self.active.push(batch.key);
                 if self.cull.enabled {
@@ -1260,6 +1291,44 @@ fn mesh_bounds(mesh: &crate::vegetation::VegetationMesh) -> [[f32; 3]; 2] {
         }
     }
     bounds
+}
+// Match the GPU clip-plane test including its roundoff margin. Uncertain
+// bounds remain visible; all eight corners must be outside the same plane.
+fn cluster_visible(cluster: &Cluster, matrix: glam::Mat4) -> bool {
+    let mut outside = [0u8; 6];
+    for corner in 0..8 {
+        let p = matrix
+            * glam::Vec4::new(
+                if corner & 1 == 0 {
+                    cluster.low[0]
+                } else {
+                    cluster.high[0]
+                },
+                if corner & 2 == 0 {
+                    cluster.low[1]
+                } else {
+                    cluster.high[1]
+                },
+                if corner & 4 == 0 {
+                    cluster.low[2]
+                } else {
+                    cluster.high[2]
+                },
+                1.,
+            );
+        let e = 0.001 + p.w.abs() * 0.00001;
+        for (count, rejected) in outside.iter_mut().zip([
+            p.x < -p.w - e,
+            p.x > p.w + e,
+            p.y < -p.w - e,
+            p.y > p.w + e,
+            p.z < -e,
+            p.z > p.w + e,
+        ]) {
+            *count += u8::from(rejected);
+        }
+    }
+    !outside.contains(&8)
 }
 fn cluster_bounds(bounds: [[f32; 3]; 2], instances: &[Instance], vertices: u32) -> Cluster {
     let mut low = [f32::INFINITY; 4];
@@ -2143,3 +2212,83 @@ mod tests {
 #[cfg(test)]
 #[path = "vegetation_gpu_parity.rs"]
 mod parity;
+
+#[cfg(test)]
+mod flower_bounds_tests {
+    use super::*;
+    #[test]
+    fn actual_rotated_flower_voxels_never_false_cull_during_full_turn() {
+        use frontier_world::{
+            vegetation::{self, PlantRecord, Species},
+            Cell,
+        };
+        for variant in 0..3 {
+            let plant = PlantRecord {
+                species: Species::Edelweiss,
+                variant,
+                seed: 47,
+                root: Cell::default(),
+                rotation: 0,
+            };
+            let model = vegetation::model_for(&plant);
+            let bounds = [
+                [
+                    model.min.x as f32 * 0.0625,
+                    model.min.y as f32 * 0.0625,
+                    model.min.z as f32 * 0.0625,
+                ],
+                [
+                    (model.max.x + 1) as f32 * 0.0625,
+                    (model.max.y + 1) as f32 * 0.0625,
+                    (model.max.z + 1) as f32 * 0.0625,
+                ],
+            ];
+            for turn in 0..4 {
+                let instance = Instance {
+                    root: [0., 0., -2.],
+                    turn,
+                    ..bytemuck::Zeroable::zeroed()
+                };
+                let cluster = cluster_bounds(bounds, &[instance], 12);
+                for degree in 0..360 {
+                    let yaw = (degree as f32).to_radians();
+                    let matrix = glam::Mat4::perspective_rh(1., 16. / 9., 0.025, 100.)
+                        * glam::Mat4::look_to_rh(
+                            glam::Vec3::new(0., 0.4, 0.),
+                            glam::Vec3::new(yaw.sin(), 0., yaw.cos()),
+                            glam::Vec3::Y,
+                        );
+                    // Independent voxel-center visibility oracle in shader rotation space.
+                    for voxel in &model.voxels {
+                        let x = voxel.cell.x as f32 * 0.0625;
+                        let z = voxel.cell.z as f32 * 0.0625;
+                        let (x, z) = match turn {
+                            1 => (-z, x),
+                            2 => (-x, -z),
+                            3 => (z, -x),
+                            _ => (x, z),
+                        };
+                        let p = matrix
+                            * glam::Vec4::new(
+                                x + 0.03125,
+                                (voxel.cell.y as f32 + 0.5) * 0.0625,
+                                z - 2. + 0.03125,
+                                1.,
+                            );
+                        if p.w > 0.
+                            && p.x.abs() <= p.w
+                            && p.y.abs() <= p.w
+                            && p.z >= 0.
+                            && p.z <= p.w
+                        {
+                            assert!(
+                                cluster_visible(&cluster, matrix),
+                                "variant {variant}, turn {turn}, heading {degree}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
