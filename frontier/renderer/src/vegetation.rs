@@ -1301,7 +1301,20 @@ impl VegetationStream {
                     ground_reservations.insert(identity, reserved);
                     remaining_ground_coarse = remaining_ground_coarse.saturating_add(reserved);
                 } else {
-                    ground_coverage_ready = false;
+                    // A known but evicted baseline still needs a reservation:
+                    // otherwise trees can spend its budget before it is rebuilt.
+                    // An unaffordable far patch must not freeze all near refinement.
+                    let known = self.mesh_costs.get(&key).map(|(cost, _)| *cost);
+                    let room = selection_config
+                        .max_triangles
+                        .saturating_sub(remaining_ground_coarse);
+                    if let Some(cost) = known.filter(|cost| *cost <= room) {
+                        ground_reservations.insert(identity, cost);
+                        remaining_ground_coarse = remaining_ground_coarse.saturating_add(cost);
+                        ground_coverage_ready = false;
+                    } else if known.is_none() {
+                        ground_coverage_ready = false;
+                    }
                 }
             }
         }
@@ -1483,6 +1496,13 @@ impl VegetationStream {
                     selection_config.max_triangles,
                     stats.triangles_by_species[2],
                     remaining_tree_coarse,
+                )
+                .min(
+                    selection_config
+                        .max_triangles
+                        .saturating_sub(stats.triangles)
+                        .saturating_sub(remaining_ground_coarse)
+                        .saturating_sub(remaining_tree_coarse),
                 )
             } else {
                 usize::MAX
@@ -4130,6 +4150,148 @@ mod flower_turn_tests {
             }
         }
         (stream, world)
+    }
+    #[test]
+    fn unaffordable_missing_far_baseline_does_not_freeze_near_refinement() {
+        let (mut stream, world) = flower_surround();
+        stream.config.flower_radius_m = 20.;
+        stream.meshes.retain(|key, _| key.lod >= 4);
+        for key in stream.meshes.keys().filter(|key| key.lod == 4) {
+            stream.previous_lods.insert(tree_identity(*key), 4);
+        }
+        let far = PlantRecord {
+            species: Species::Edelweiss,
+            variant: 0,
+            seed: 7123,
+            root: Cell {
+                x: 192,
+                y: 0,
+                z: 64,
+            },
+            rotation: 0,
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 1,
+                x: 0,
+                z: 0,
+            })
+            .unwrap()
+            .0
+            .push(far);
+        let patch = PlantRecord {
+            variant: u8::MAX,
+            seed: mix(world.seed() ^ mix(1) ^ 1),
+            root: Cell { x: 128, y: 0, z: 0 },
+            ..far
+        };
+        stream
+            .mesh_costs
+            .insert(ground_key(&patch, 8, 0), (200_000, 0));
+        let frame = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert!(
+            stream.pending_meshes.iter().any(|key| key.lod == 2),
+            "near refinement must progress despite an impossible distant baseline; {:?}",
+            frame.stats.ground_decisions
+        );
+        assert!(frame.batches.iter().any(|b| b.key.species == 1));
+    }
+    #[test]
+    fn turning_toward_cached_tree_cannot_spend_retained_native_flower_reservations() {
+        let (mut stream, world) = flower_surround();
+        stream.config.tree_radius_m = 64.;
+        let native: usize = stream
+            .meshes
+            .iter()
+            .filter(|(k, _)| k.lod == 1)
+            .map(|(_, (m, _))| m.indices.len() / 3)
+            .sum();
+        let tree = PlantRecord {
+            species: Species::Rowan,
+            variant: 0,
+            seed: 98271,
+            root: Cell {
+                x: 0,
+                y: 0,
+                z: -512,
+            },
+            rotation: 0,
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 0,
+                z: -1,
+            })
+            .unwrap()
+            .0
+            .push(tree);
+        // Weighted selector fixture: expensive cached fine tree and cheap cover.
+        // Actual canonical flower meshes surround the stationary camera.
+        for lod in [1, 2, 4, 8] {
+            let cost = if lod == 8 { 12 } else { native / 2 };
+            let key = MeshKey {
+                species: 2,
+                variant: 0,
+                seed: tree.seed,
+                tile: [0; 2],
+                lod,
+                edit_id: 0,
+            };
+            let mesh = Arc::new(VegetationMesh {
+                vertices: Vec::new(),
+                indices: vec![0; cost * 3],
+            });
+            stream.mesh_costs.insert(key, (cost, 0));
+            stream.meshes.insert(key, (mesh, 0));
+        }
+        stream.config.max_triangles = native + 20;
+        let first = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert_eq!(
+            first
+                .batches
+                .iter()
+                .filter(|b| b.key.species == 1 && b.key.lod == 1)
+                .count(),
+            4
+        );
+        for degree in (0..=360).step_by(15) {
+            let angle = (degree as f64).to_radians();
+            let frame = stream.update_view(
+                [0., 1.7, 0.],
+                1080,
+                1.,
+                world.revision(),
+                [angle.sin(), 0., angle.cos()],
+                16. / 9.,
+            );
+            assert_eq!(
+                frame
+                    .batches
+                    .iter()
+                    .filter(|b| b.key.species == 1 && b.key.lod == 1)
+                    .count(),
+                4,
+                "turn {degree} must keep already affordable native flowers; decisions {:?}",
+                frame.stats.ground_decisions
+            );
+        }
     }
     #[test]
     fn exact_flowers_keep_native_residency_through_full_in_place_rotation() {

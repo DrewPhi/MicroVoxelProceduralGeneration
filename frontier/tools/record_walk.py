@@ -139,6 +139,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary',type=Path,default=ROOT/'target/release/frontier')
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--turn-only',action='store_true',help='Stay in place and sweep a full yaw circle and pitch up/down; detects view-dependent residency loss')
     parser.add_argument('--width',type=int,default=1280)
     parser.add_argument('--height',type=int,default=720)
     parser.add_argument('--settle-seconds',type=float,default=0.,help='Wait before recording and inputs; does not lock interactive input')
@@ -155,7 +156,7 @@ def main():
         parser.error('These benchmark flags lock player input; use --settle-seconds for a walking recording')
     out.mkdir(parents=True,exist_ok=False)
     binary_hash=hashlib.sha256(binary.read_bytes()).hexdigest()
-    command=[str(binary),'--preset','alpine','--width',str(args.width),'--height',str(args.height),'--seconds',str(28+args.settle_seconds),'--report',str(out/'game.json')]+extra
+    command=[str(binary),'--preset','alpine','--width',str(args.width),'--height',str(args.height),'--seconds',str((44 if args.turn_only else 28)+args.settle_seconds),'--report',str(out/'game.json')]+extra
     events=[];app=rec=x=window=None;started=time.monotonic();failure=None
     movement=None
     def note(action):events.append({'seconds_from_launch':round(time.monotonic()-started,4),'action':action})
@@ -176,22 +177,32 @@ def main():
                 if app.poll() is not None:raise RuntimeError('Game exited during settling')
                 note('settle_end')
             note('record_start')
-            rec=subprocess.Popen(['ffmpeg','-y','-f','x11grab','-framerate','20','-window_id',str(window),'-video_size',f'{args.width}x{args.height}','-draw_mouse','0','-i',os.environ['DISPLAY'],'-t','20','-an','-c:v','libx264','-preset','ultrafast','-crf','25','-threads','2','-pix_fmt','yuv420p',str(out/'walking.mp4')],stdout=rlog,stderr=subprocess.STDOUT)
+            rec=subprocess.Popen(['ffmpeg','-y','-f','x11grab','-framerate','20','-window_id',str(window),'-video_size',f'{args.width}x{args.height}','-draw_mouse','0','-i',os.environ['DISPLAY'],'-t',('30' if args.turn_only else '20'),'-an','-c:v','libx264','-preset','ultrafast','-crf','25','-threads','2','-pix_fmt','yuv420p',str(out/'walking.mp4')],stdout=rlog,stderr=subprocess.STDOUT)
             time.sleep(1)
-            for key,duration in [('w',3),(None,2),('w',3)]:
-                x.focus(window,app.pid);note('hold_'+str(key))
-                if key:x.key(key,True)
-                try:time.sleep(duration)
-                finally:
-                    if key:x.key(key,False)
-            # A gradual mouse turn, then real grounded forward walking again.
-            x.focus(window,app.pid);note('mouse_turn')
-            relative=x.t.XTestFakeRelativeMotionEvent
-            relative.restype=I;relative.argtypes=[P,I,I,U]
-            for _ in range(40):relative(x.d,8,0,0);x.flush(x.d);time.sleep(.04)
-            x.focus(window,app.pid);x.key('w',True);note('walk_after_turn')
-            try:time.sleep(3)
-            finally:x.key('w',False)
+            if args.turn_only:
+                relative=x.t.XTestFakeRelativeMotionEvent
+                relative.restype=I;relative.argtypes=[P,I,I,U]
+                time.sleep(3)
+                for dx,dy,count in [(20,0,80),(0,6,40),(-20,0,80),(0,-6,40)]:
+                    x.focus(window,app.pid);note(f'turn_{dx}_{dy}')
+                    for _ in range(count):
+                        relative(x.d,dx,dy,0);x.flush(x.d);time.sleep(.035)
+                    time.sleep(2)
+            else:
+                for key,duration in [('w',3),(None,2),('w',3)]:
+                    x.focus(window,app.pid);note('hold_'+str(key))
+                    if key:x.key(key,True)
+                    try:time.sleep(duration)
+                    finally:
+                        if key:x.key(key,False)
+                # A gradual mouse turn, then real grounded forward walking again.
+                x.focus(window,app.pid);note('mouse_turn')
+                relative=x.t.XTestFakeRelativeMotionEvent
+                relative.restype=I;relative.argtypes=[P,I,I,U]
+                for _ in range(40):relative(x.d,8,0,0);x.flush(x.d);time.sleep(.04)
+                x.focus(window,app.pid);x.key('w',True);note('walk_after_turn')
+                try:time.sleep(3)
+                finally:x.key('w',False)
             note('stop_after_turn');rec.wait(timeout=15)
             if rec.returncode:raise RuntimeError('ffmpeg failed; see record.log')
             note('record_end');app.wait(timeout=15)
@@ -202,7 +213,7 @@ def main():
             yaw_range=max(frame['yaw'] for frame in observations)-min(frame['yaw'] for frame in observations)
             movement={'max_displacement_m':displacement,'yaw_range_radians':yaw_range,
                       'walk_verified':displacement>1.,'turn_verified':yaw_range>0.2}
-            if not movement['walk_verified'] or not movement['turn_verified']:
+            if (not args.turn_only and not movement['walk_verified']) or not movement['turn_verified']:
                 raise RuntimeError(f'Walking/turn inputs did not move the camera: {movement}')
     except Exception as error:
         failure=str(error);raise
@@ -215,5 +226,5 @@ def main():
                 try:process.wait(timeout=4)
                 except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5)
         if x:x.close(x.d)
-        (out/'manifest.json').write_text(json.dumps({'command':command,'binary_sha256':binary_hash,'settle_seconds':args.settle_seconds,'movement':movement,'failure':failure,'events':events,'scope':'Actual X11 inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support.'},indent=2)+'\n')
+        (out/'manifest.json').write_text(json.dumps({'command':command,'binary_sha256':binary_hash,'settle_seconds':args.settle_seconds,'movement':movement,'turn_only':args.turn_only,'failure':failure,'events':events,'scope':'Actual X11 walking or stationary full yaw/pitch inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support.'},indent=2)+'\n')
 if __name__=='__main__':main()

@@ -6,6 +6,12 @@ acceptable during development. Stable visible detail and responsive walking and
 turning take priority over the former small cache defaults. This does not change
 the canonical 6.25 cm voxel world or establish the longer-term performance gate.
 
+## Follow-up: camera-turn regression
+
+The initial walking check missed a loaded-tree/ground budget conflict. See
+[the reproduced failure and repair](VEGETATION_TURN_FIX.md) before treating this
+checkpoint as proof that nearby detail survives arbitrary camera turns.
+
 ## Implemented changes
 
 - Development, Constrained and Custom resource controls expose terrain CPU/GPU,
