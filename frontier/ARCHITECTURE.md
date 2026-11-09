@@ -11,6 +11,15 @@ renderer gates remain unimplemented/unproven. See ../guide_for_devs.md. Generate
 
 ## Product contract / invariants
 
+**Development playtest priority, updated by the user on 2026-11-08:** target
+1920×1080 at 60 FPS where possible; 30 FPS is acceptable during development.
+Prioritize stable visible content, responsive detail streaming and smooth frame
+pacing. The earlier small cache, triangle and residency defaults are adjustable
+implementation choices, not product requirements. A development resource profile
+should use available system/shared GPU memory with OS headroom and paging
+protection. The measured laptop 60 FPS gate remains the longer-term optimization
+goal; canonical voxel correctness and the visibility requirements below remain.
+
 - A deterministic, **editable, 0.0625 m** (6.25 cm) integer-lattice world, including air/material, digging/placing, caves, rock arches, player structures and vegetation.
 - **Beautiful, visually stable distant mountains and valleys**, several miles of unobstructed visibility. Do not substitute artificial opaque fog for a working horizon. Real atmospheric scattering/aerial perspective is compatible with this goal and must be independently adjustable.
 - Walk/run/turn and aircraft travel at a **configurable, measured game max speed**. Teleports instantly supersede old-camera work. Visible popping, holes, stale tiles, frustum holes, terrain faceting, tiny-ridge disappearance, and tile-chasing are primary defects.
