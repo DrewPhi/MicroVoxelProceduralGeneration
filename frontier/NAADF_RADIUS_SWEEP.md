@@ -83,6 +83,10 @@ GPU/chunked construction and a paged/sparse outer representation. Increasing a
 radius cap alone cannot address those costs. No such architecture change is
 included in this measurement-only checkpoint.
 
+The subsequent [112 m mesh comparison](NATIVE112_COMPARISON.md) includes the
+requested larger-native-radius screenshot and preparation failures; it must not
+be confused with the ordinary 4 m baseline above.
+
 ## Captures and reproduction
 
 ![Ordinary small native mesh radius versus 112m exact cube](reference/gallery/naadf-radius-sweep/ordinary-vs-radius112.png)
