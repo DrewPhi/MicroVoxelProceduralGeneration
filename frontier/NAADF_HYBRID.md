@@ -53,6 +53,9 @@ uses current-frame readiness, and cancelled placement and mesh requests become
 eligible to retry. A camera can leave the cube: rays intersect its entry/exit
 bounds, so the old location stays owned and remains visible when looking back.
 There is no whole-world NAADF rebuild merely because the camera turns.
+A changed owner starts a fresh coverage-preparation deadline and timing cycle.
+Long snapshot construction is reported separately instead of consuming the
+120-second raster-handoff settling allowance.
 
 This does **not** implement a moving NAADF chunk cache, incremental edits,
 background per-chunk replacement or the paper's GPU world-generation pipeline.

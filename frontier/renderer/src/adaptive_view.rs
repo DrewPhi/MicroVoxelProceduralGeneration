@@ -97,6 +97,12 @@ impl AdaptiveView {
             return;
         }
         self.desired_naadf_owner = id;
+        // A new owner starts a new coverage-preparation cycle. Snapshot build
+        // time must not consume the raster handoff's independent settle window.
+        self.preparation_started = Instant::now();
+        self.first_coverage_ms = None;
+        self.first_quality_ms = None;
+        self.first_refinement_ms = None;
         self.worker.set_naadf_owner(owner);
         self.pending = None;
         self.deferred = None;
