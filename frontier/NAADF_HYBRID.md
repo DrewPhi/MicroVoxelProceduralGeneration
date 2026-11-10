@@ -114,6 +114,9 @@ an analytic projection-depth formula, avoiding cancellation in a translated
 inverse view-projection matrix. This follows the separation of camera and world
 transforms described in [PBRT's projective cameras](https://pbr-book.org/4ed/Cameras_and_Film/Projective_Camera_Models).
 
+The subsequent [larger-radius capacity sweep](NAADF_RADIUS_SWEEP.md) reached a
+112 m half-extent and records failed/refused larger requests separately.
+
 ## Measured checkpoint — Radeon 760M laptop, 2026-11-09
 
 [Recorded measurements and exact commands](reference/gallery/naadf-hybrid/summary.json).
