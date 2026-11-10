@@ -876,6 +876,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         + face_profiles.capacity() * 80
         + face_profile_indices.capacity() * 4;
     let t = GeometryTile {
+        naadf_owned: false,
         key,
         mesh: Mesh {
             vertices,

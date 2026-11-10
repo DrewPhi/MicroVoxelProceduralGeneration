@@ -1,5 +1,11 @@
 //! Bounded immutable cluster residency. Geometry and ownership are CPU contracts;
 //! this path never adds a normal-derived coverage approximation or screen blur.
+const ADAPTIVE_SHADER: &str = concat!(
+    "const NAADF_GROUP:u32=2u;const NAADF_BASE:u32=3u;\n",
+    include_str!("naadf/trace.wgsl"),
+    include_str!("adaptive.wgsl")
+);
+
 use crate::{
     adaptive_geometry::{GeometryTile, NativeBin, TileKey},
     gpu_ordered_profiles::GpuOrderedProfiles,
@@ -544,7 +550,7 @@ impl AdaptiveGpu {
         let bind = profile_bind(device, &layout, &uniform, &zero_table);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("adaptive canonical shading"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("adaptive.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(ADAPTIVE_SHADER.into()),
         });
         let shadows_layout = adaptive_shadow::sampling_layout(device);
         let shadow_pipeline_layout =
@@ -868,6 +874,23 @@ impl AdaptiveGpu {
     }
     pub fn resource_budget_mib(&self) -> u64 {
         self.resource_budget_bytes / (1024 * 1024)
+    }
+    pub(crate) fn naadf_residency(
+        &self,
+        owner: &crate::naadf::ownership::Ownership,
+    ) -> (usize, usize) {
+        let certified = self.clusters.keys().filter(|k| owner.terrain(**k)).count();
+        let overlap = self
+            .clusters
+            .values()
+            .filter(|c| {
+                (0..3).all(|a| {
+                    c.proxy_bounds[1][a] >= owner.bounds[0][a]
+                        && c.proxy_bounds[0][a] <= owner.bounds[1][a]
+                })
+            })
+            .count();
+        (certified, overlap)
     }
     pub fn contains(&self, key: &TileKey) -> bool {
         self.clusters.contains_key(key)
@@ -1928,6 +1951,7 @@ fn profile_bind(
 
 #[cfg(test)]
 mod tests {
+    use super::ADAPTIVE_SHADER;
     #[test]
     fn experimental_vertex_padding_preserves_default_and_releases_full_reservations() {
         use super::*;
@@ -2047,7 +2071,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(ProxyTriangle, normal), 36);
         assert_eq!(std::mem::offset_of!(ProxyTriangle, color), 48);
         assert_eq!(std::mem::offset_of!(ProxyTriangle, profile_index), 60);
-        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2137,7 +2161,7 @@ mod tests {
     #[test]
     fn packed_native_material_palette_matches_canonical_world_exactly() {
         use frontier_world::Material;
-        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
         let (_, palette) = module
             .constants
             .iter()
@@ -2264,7 +2288,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Triangle, normal), 12);
         assert_eq!(std::mem::offset_of!(Triangle, color), 24);
         assert_eq!(std::mem::offset_of!(Triangle, profile_index), 36);
-        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2298,7 +2322,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(DerivedTriangle, positions), 0);
         assert_eq!(std::mem::offset_of!(DerivedTriangle, material), 12);
         assert_eq!(std::mem::offset_of!(DerivedTriangle, profile_index), 16);
-        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2326,7 +2350,7 @@ mod tests {
     }
     #[test]
     fn canonical_shader_validates() {
-        let module = naga::front::wgsl::parse_str(include_str!("adaptive.wgsl")).unwrap();
+        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

@@ -264,6 +264,7 @@ impl AdaptiveGpu {
         queue: &wgpu::Queue,
         bounds: Option<[[f64; 3]; 2]>,
         eye: [f64; 3],
+        comparison: bool,
     ) {
         let mut values = [0f32; 8];
         if let Some(b) = bounds {
@@ -273,6 +274,7 @@ impl AdaptiveGpu {
             }
             values[7] = 1.;
         }
+        values[3] = if comparison { 1. } else { 0. };
         queue.write_buffer(
             &self.shadows.near.uniform,
             80,
@@ -527,37 +529,44 @@ fn near_size() -> u32 {
 pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("close plant shadow sampling"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+        entries: &{
+            let mut entries = vec![
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: std::num::NonZeroU64::new(112),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
                 },
-                count: None,
-            },
-        ],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(112),
+                    },
+                    count: None,
+                },
+            ];
+            entries.extend(crate::naadf::binding_layout(3));
+            entries
+        },
     })
 }
 pub(super) struct NearShadowResources {
+    naadf_id: u64,
+    naadf_empty: crate::naadf::Bindings,
+    sampler: wgpu::Sampler,
     _texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub bind: wgpu::BindGroup,
@@ -596,24 +605,8 @@ impl NearShadowResources {
             contents: &[0u8; 112],
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("close plant shadows"),
-            layout: &near_sampling_layout(device),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform.as_entire_binding(),
-                },
-            ],
-        });
+        let naadf_empty = crate::naadf::Bindings::empty(device);
+        let bind = near_sampling_bind(device, &view, &sampler, &uniform, &naadf_empty);
         let depth_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("plant shadow depth uniform"),
             layout: &near_depth_layout(device),
@@ -623,6 +616,9 @@ impl NearShadowResources {
             }],
         });
         Self {
+            naadf_id: 0,
+            naadf_empty,
+            sampler,
             _texture: texture,
             view,
             bind,
@@ -656,7 +652,49 @@ fn near_light_matrix(camera: &Camera, lighting: [f32; 12]) -> Mat4 {
     Mat4::orthographic_rh(-48., 48., -48., 48., 1., 256.)
         * Mat4::look_at_rh(center + sun * 128., center, up)
 }
+pub(crate) fn near_sampling_bind(
+    device: &wgpu::Device,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+    naadf: &crate::naadf::Bindings,
+) -> wgpu::BindGroup {
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: uniform.as_entire_binding(),
+        },
+    ];
+    entries.extend(naadf.entries(3));
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shared voxel and near-shadow visibility"),
+        layout: &near_sampling_layout(device),
+        entries: &entries,
+    })
+}
 impl AdaptiveGpu {
+    pub(crate) fn set_naadf_shadow(
+        &mut self,
+        device: &wgpu::Device,
+        resources: Option<(u64, crate::naadf::Bindings)>,
+    ) {
+        let near = &mut self.shadows.near;
+        let id = resources.as_ref().map_or(0, |r| r.0);
+        if near.naadf_id == id {
+            return;
+        }
+        let bindings = resources.as_ref().map_or(&near.naadf_empty, |r| &r.1);
+        near.bind = near_sampling_bind(device, &near.view, &near.sampler, &near.uniform, bindings);
+        near.naadf_id = id;
+    }
     /// Published terrain depth uses the same bounded owner set as surface shadows.
     pub(crate) fn far_shadow_bind(&self) -> &wgpu::BindGroup {
         &self.shadows.sampling_bind

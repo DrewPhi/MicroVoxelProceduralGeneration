@@ -314,13 +314,16 @@ impl SettingsUi {
                             ui.heading("NAADF experiment");
                             ui.checkbox(&mut self.loading_draft.naadf_enabled, "Use exact voxel rays in test region");
                             ui.add(egui::Slider::new(&mut self.loading_draft.naadf_radius_m, 1..=256).text("NAADF radius (m)"));
+                            ui.checkbox(&mut self.loading_draft.naadf_auto_memory,"Use available RAM for NAADF (leave system headroom)");
+                            ui.checkbox(&mut self.settings.visibility_benchmark,"Diagnostic matched white lighting");
                             ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build budget (MiB)"));
                             let top = (self.loading_draft.naadf_radius_m as f64 * 2.).powi(3) * 4. / 1048576.;
                             ui.small(format!("Top grid {top:.1} MiB GPU; at least {:.1} MiB with CPU/build copies, plus voxel payloads.",top*3.));
-                            ui.small("Fixed cube (radius = half-extent) around your position when applied. Basic visibility lighting; distant terrain keeps its current renderer. Rebuild here after moving.");
+                            ui.small("Fixed cube (radius = half-extent). Exact local visibility and sun shadows; distant terrain keeps its renderer. Mesh coverage is restored before disabling or rebuilding.");
                             ui.label(format!("{} · {:.1} MiB NAADF GPU",stats.naadf_status,stats.naadf_gpu_mib));
                             if ui.button("Rebuild NAADF here").clicked() {
                                 changes.naadf_rebuild=true;
+                                self.settings.naadf_auto_memory=self.loading_draft.naadf_auto_memory;
                                 self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
                                 self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
                                 self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
@@ -370,7 +373,7 @@ impl SettingsUi {
                             if combined > memory.working_mib() {
                                 ui.colored_label(egui::Color32::YELLOW, "Above available-memory recommendation: risk of paging and repeated evictions.");
                             }
-                            let dirty = self.settings.naadf_enabled != self.loading_draft.naadf_enabled
+                            let dirty = self.settings.naadf_auto_memory != self.loading_draft.naadf_auto_memory || self.settings.naadf_enabled != self.loading_draft.naadf_enabled
                                 || self.settings.naadf_radius_m != self.loading_draft.naadf_radius_m
                                 || self.settings.naadf_budget_mib != self.loading_draft.naadf_budget_mib
                                 || self.settings.pixel_error != self.loading_draft.pixel_error
@@ -392,6 +395,7 @@ impl SettingsUi {
                                 .clicked()
                             {
                                 self.settings_error = None;
+                                self.settings.naadf_auto_memory=self.loading_draft.naadf_auto_memory;
                                 self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
                                 self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
                                 self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
@@ -452,6 +456,7 @@ impl SettingsUi {
         visual_previous.resource_profile = self.settings.resource_profile;
         visual_previous.resource_alpine = self.settings.resource_alpine;
         visual_previous.memory = self.settings.memory;
+        visual_previous.naadf_auto_memory = self.settings.naadf_auto_memory;
         visual_previous.naadf_enabled = self.settings.naadf_enabled;
         visual_previous.naadf_radius_m = self.settings.naadf_radius_m;
         visual_previous.naadf_budget_mib = self.settings.naadf_budget_mib;

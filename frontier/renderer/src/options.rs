@@ -116,9 +116,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut native_bins = true;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--visibility-benchmark" => {visual.visibility_benchmark=true;}
             "--naadf" => { visual.naadf_enabled = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--naadf requires on|off".into())}; }
             "--naadf-radius" => { let radius:u32=args.next().ok_or("NAADF radius requires metres")?.parse()?; if !(1..=256).contains(&radius){return Err("--naadf-radius requires integer 1..256 metres".into());} visual.naadf_radius_m=radius;visual.naadf_enabled=true; }
-            "--naadf-budget-mib" => { let budget:usize=args.next().ok_or("NAADF budget requires MiB")?.parse()?; if !(16..=16384).contains(&budget){return Err("--naadf-budget-mib requires 16..16384".into());} visual.naadf_budget_mib=budget; }
+            "--naadf-budget-mib" => { let budget:usize=args.next().ok_or("NAADF budget requires MiB")?.parse()?; if !(16..=16384).contains(&budget){return Err("--naadf-budget-mib requires 16..16384".into());} visual.naadf_budget_mib=budget;visual.naadf_auto_memory=false; }
             "--resource-profile" => {
                 resource_profile = Some(match args.next().as_deref() {
                     Some("development") => ResourceProfile::Development,

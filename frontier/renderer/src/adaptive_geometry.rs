@@ -121,6 +121,7 @@ impl Drop for PayloadLifetime {
     }
 }
 pub struct GeometryTile {
+    pub naadf_owned: bool,
     pub(crate) payload_lifetime: Option<PayloadLifetime>,
     pub key: TileKey,
     pub mesh: Mesh,
@@ -1198,6 +1199,7 @@ fn finish(
     let bytes =
         mesh.vertices.capacity() * std::mem::size_of::<Vertex>() + mesh.indices.capacity() * 4;
     GeometryTile {
+        naadf_owned: false,
         payload_lifetime: None,
         key,
         mesh,
@@ -3092,6 +3094,7 @@ const LRU_ENTRY_BYTES: usize =
 /// Bounded source cache. Returned Arc handles may outlive eviction; the caller
 /// must include upload/active handles in its independent in-flight budget.
 pub struct GeometryCache {
+    pub(crate) naadf_owner: Option<Arc<crate::naadf::ownership::Ownership>>,
     world: World,
     budget: usize,
     source_budget: usize,
@@ -3127,6 +3130,7 @@ impl GeometryCache {
                 .or(if alpine { Some("128") } else { None }),
         );
         Self {
+            naadf_owner: None,
             world,
             budget: budget_bytes,
             source_budget,
@@ -3223,7 +3227,56 @@ impl GeometryCache {
     fn lru_metadata_bytes(&self) -> usize {
         self.entries.len() * LRU_ENTRY_BYTES
     }
+    pub(crate) fn set_naadf_owner(
+        &mut self,
+        owner: Option<Arc<crate::naadf::ownership::Ownership>>,
+    ) {
+        if let Some(o) = &owner {
+            let remove: Vec<_> = self
+                .entries
+                .keys()
+                .filter(|k| o.terrain(**k))
+                .copied()
+                .collect();
+            for key in remove {
+                self.unlink(key);
+                let e = self.entries.remove(&key).unwrap();
+                self.mesh_bytes -= e.tile.bytes;
+            }
+        }
+        self.naadf_owner = owner;
+        self.stats.resident_bytes = self.mesh_bytes
+            + self.lru_metadata_bytes()
+            + self.samples.pages.snapshot().source_cache_bytes;
+    }
     pub fn get(&mut self, key: TileKey) -> Option<Arc<GeometryTile>> {
+        if let Some(owner) = self.naadf_owner.as_ref().filter(|o| o.terrain(key)) {
+            let mesh = Mesh {
+                vertices: vec![],
+                indices: vec![],
+                origin: Cell::default(),
+                exposed_native_faces: 0,
+            };
+            let mut tile = finish(key, mesh, 0, 0., true);
+            tile.naadf_owned = true;
+            tile.bounds = [
+                [
+                    key.min[0] as f64 * VOXEL_SIZE,
+                    owner.bounds[0][1],
+                    key.min[1] as f64 * VOXEL_SIZE,
+                ],
+                [
+                    (key.min[0] + key.width_cells as i64) as f64 * VOXEL_SIZE,
+                    owner.bounds[1][1],
+                    (key.min[1] + key.width_cells as i64) as f64 * VOXEL_SIZE,
+                ],
+            ];
+            tile.conservative_surface_bounds = tile.bounds;
+            tile.certified_error_m = Some(0.);
+            tile.best_certified_vertical_error_m = Some(0.);
+            tile.global_error_m = Some(0.);
+            return Some(Arc::new(tile));
+        }
         let tile = self.entries.get(&key)?.tile.clone();
         if self.newest != Some(key) {
             self.unlink(key);
@@ -3262,7 +3315,7 @@ impl GeometryCache {
         workers: usize,
         cancelled: impl Fn() -> bool + Sync,
     ) -> Result<Vec<Arc<GeometryTile>>, String> {
-        if keys.len() > workers.clamp(1, 4) {
+        if keys.len() > workers.clamp(1, 16) {
             return Err("adaptive build batch exceeds bounded worker count".into());
         }
         if keys.iter().copied().collect::<HashSet<_>>().len() != keys.len() {

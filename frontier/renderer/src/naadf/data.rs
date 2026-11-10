@@ -21,6 +21,7 @@ pub struct Pigment {
 }
 #[derive(Debug)]
 pub struct Snapshot {
+    pub ownership: std::sync::Arc<super::ownership::Ownership>,
     pub origin: Cell,
     pub chunks_per_edge: u32,
     /// Y-fast layout: (z*n+x)*n+y. Texture coordinates are (y,x,z).
@@ -288,7 +289,9 @@ pub fn build(
         y: centre.y.div_euclid(16) * 16 - r,
         z: centre.z.div_euclid(16) * 16 - r,
     };
+    let mut safe_columns = vec![false; n * n];
     let mut out = Snapshot {
+        ownership: std::sync::Arc::new(super::ownership::Ownership::new([[0.; 3]; 2], 0, &[])),
         origin: min,
         chunks_per_edge: n as u32,
         chunks: vec![0; count],
@@ -440,6 +443,10 @@ pub fn build(
                     min.x.div_euclid(16) + cx as i64,
                     min.z.div_euclid(16) + cz as i64,
                 ));
+            safe_columns[cz * n + cx] = fast
+                && heights
+                    .iter()
+                    .all(|h| *h > min.y + 1 && *h < min.y + n as i64 * 16 - 1);
             for cy in 0..n {
                 let ci = (cz * n + cx) * n + cy;
                 let y0 = min.y + (cy * 16) as i64;
@@ -567,6 +574,11 @@ pub fn build(
     drop(pigments);
     stage.store(85, Ordering::Relaxed);
     bounds(&mut out.chunks, [n; 3], [n, 1, n * n], 5, &cancel)?;
+    out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
+        out.bounds(),
+        n,
+        &safe_columns,
+    ));
     out.build_ms = start.elapsed().as_secs_f64() * 1000.;
     stage.store(100, Ordering::Relaxed);
     Ok(out)

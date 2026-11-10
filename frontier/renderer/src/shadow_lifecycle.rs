@@ -76,6 +76,21 @@ impl ShadowLifecycle {
             .sum()
     }
 
+    pub(super) fn exclude_naadf(&mut self, owner: &crate::naadf::ownership::Ownership) {
+        self.residents.retain(|root, _| {
+            !owner.plant(&frontier_world::vegetation::PlantRecord {
+                species: frontier_world::vegetation::Species::Rowan,
+                seed: 0,
+                root: frontier_world::Cell {
+                    x: root[0],
+                    y: root[1],
+                    z: root[2],
+                },
+                variant: 0,
+                rotation: 0,
+            })
+        });
+    }
     pub fn clear(&mut self) {
         self.residents.clear();
     }

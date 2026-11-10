@@ -116,7 +116,11 @@ impl Cull {
     }
 }
 
-const SHADER: &str = include_str!("vegetation.wgsl");
+const SHADER: &str = concat!(
+    "const NAADF_GROUP:u32=2u;const NAADF_BASE:u32=3u;\n",
+    include_str!("naadf/trace.wgsl"),
+    include_str!("vegetation.wgsl")
+);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -1111,6 +1115,26 @@ impl VegetationGpu {
             "compact"
         }
     }
+    pub(crate) fn discard_naadf_templates(&mut self, keys: &std::collections::BTreeSet<MeshKey>) {
+        let remove: Vec<_> = self
+            .templates
+            .keys()
+            .filter(|k| {
+                keys.contains(&MeshKey {
+                    lod: 0,
+                    edit_id: 0,
+                    ..**k
+                })
+            })
+            .copied()
+            .collect();
+        for key in remove {
+            let t = self.templates.remove(&key).unwrap();
+            if let Some(p) = &mut self.pools {
+                p.release(&t);
+            }
+        }
+    }
     pub fn draw<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
@@ -1930,7 +1954,7 @@ mod tests {
     fn color_and_shadow_share_identical_native_decoder() {
         let end = "    return out;\n}";
         assert_eq!(
-            SHADER
+            include_str!("vegetation.wgsl")
                 .split(end)
                 .next()
                 .unwrap()

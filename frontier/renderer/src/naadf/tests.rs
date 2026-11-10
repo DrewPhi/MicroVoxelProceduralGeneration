@@ -1,5 +1,32 @@
 use super::*;
 #[test]
+fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
+    let mut camera = Camera {
+        position: DVec3::new(-1e9, 300., 1e9),
+        yaw: 1.2,
+        pitch: -0.3,
+        fov_y: 60.,
+        far: 300.,
+    };
+    let basis = ray_basis(camera, 16. / 9.);
+    camera.position = DVec3::ZERO;
+    assert_eq!(basis, ray_basis(camera, 16. / 9.));
+    let forward = glam::Vec3::from_array(basis[0][..3].try_into().unwrap());
+    let right = glam::Vec3::from_array(basis[1][..3].try_into().unwrap());
+    let up = glam::Vec3::from_array(basis[2][..3].try_into().unwrap());
+    for x in [-0.9, 0., 0.9] {
+        for y in [-0.9, 0., 0.9] {
+            let direction = (forward + x * right * basis[1][3] + y * up * basis[2][3]).normalize();
+            let projected = camera
+                .matrix(DVec3::ZERO, 16. / 9.)
+                .project_point3(direction * 10.);
+            assert!((projected.x - x).abs() < 1e-6 && (projected.y - y).abs() < 1e-6);
+            let depth = basis[3][2] + basis[3][3] / (10. * direction.dot(forward));
+            assert!((depth - projected.z).abs() < 3e-7);
+        }
+    }
+}
+#[test]
 fn shader_is_valid() {
     let m = naga::front::wgsl::parse_str(SHADER).unwrap();
     naga::valid::Validator::new(
@@ -71,6 +98,7 @@ fn naadf_gpu_matches_canonical_rays() {
         gpu.queue.submit(std::iter::empty());
         gpu.device.poll(wgpu::Maintain::Wait);
         let volume = pending.volume;
+        let shadow_source = crate::adaptive_gpu::AdaptiveGpu::new(&gpu.device, gpu.scene_format, 1);
         let texture = |format| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("NAADF parity"),
@@ -102,11 +130,15 @@ fn naadf_gpu_matches_canonical_rays() {
             })
             .collect();
         let mut tested = 0;
-        for (yaw, pitch) in [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3.0, 0.3)] {
+        for (yaw, pitch, shadows) in [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3., 0.3)]
+            .into_iter()
+            .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
+        {
             camera.yaw = yaw;
             camera.pitch = pitch;
             let matrix = camera.matrix(DVec3::from_array(bounds[0]), 1.);
             let inverse = matrix.inverse();
+            let basis = ray_basis(camera, 1.);
             let local = (eye - DVec3::from_array(bounds[0])).as_vec3();
             gpu.queue.write_buffer(
                 &volume.uniform,
@@ -116,9 +148,15 @@ fn naadf_gpu_matches_canonical_rays() {
                     inverse: inverse.to_cols_array_2d(),
                     eye: local.extend(0.).to_array(),
                     extent: [volume.n * 16, volume.n * 16, volume.n * 16, volume.n],
-                    viewport: [64., 64., 1., 1.],
-                    sun: [0.; 4],
+                    viewport: [64., 64., 1., if shadows { 2. } else { 1. }],
+                    sun: [-0.5, 0.8, -0.3, 0.],
                     sky: [0.; 4],
+                    far_matrix: [[0.; 4]; 4],
+                    shadow: [0.; 4],
+                    forward: basis[0],
+                    right: basis[1],
+                    up: basis[2],
+                    projection: basis[3],
                 }),
             );
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -146,6 +184,7 @@ fn naadf_gpu_matches_canonical_rays() {
                 });
                 pass.set_pipeline(&volume.pipeline);
                 pass.set_bind_group(0, &volume.bind, &[]);
+                pass.set_bind_group(1, shadow_source.far_shadow_bind(), &[]);
                 pass.draw(0..3, 0..1);
             }
             for (tex, buffer) in [(&color, &buffers[0]), (&depth, &buffers[1])] {
@@ -195,8 +234,14 @@ fn naadf_gpu_matches_canonical_rays() {
                         0.5,
                         1.,
                     );
-                    let p = inverse * ndc;
-                    let direction = (p.truncate() / p.w - local).normalize();
+                    let direction = (Vec3::from_array(basis[0][..3].try_into().unwrap())
+                        + ndc.x
+                            * Vec3::from_array(basis[1][..3].try_into().unwrap())
+                            * basis[1][3]
+                        + ndc.y
+                            * Vec3::from_array(basis[2][..3].try_into().unwrap())
+                            * basis[2][3])
+                        .normalize();
                     let d = direction.as_dvec3();
                     let max = (0..3)
                         .filter_map(|a| {
@@ -221,11 +266,36 @@ fn naadf_gpu_matches_canonical_rays() {
                         "coverage pixel {x},{y}, yaw{yaw},pitch{pitch}"
                     );
                     if let Some(hit) = hit {
-                        assert_eq!(
-                            results[0][i * 4],
-                            data::id(hit.material) as u8,
-                            "material {x},{y}"
-                        );
+                        if shadows {
+                            let sun = Vec3::new(-0.5, 0.8, -0.3).normalize().as_dvec3();
+                            let origin = eye
+                                + d * hit.distance
+                                + DVec3::from_array(hit.normal.map(|v| v as f64)) * 0.001;
+                            let limit = (0..3)
+                                .map(|a| {
+                                    if sun[a] > 0. {
+                                        (bounds[1][a] - origin[a]) / sun[a]
+                                    } else {
+                                        (bounds[0][a] - origin[a]) / sun[a]
+                                    }
+                                })
+                                .fold(f64::INFINITY, f64::min);
+                            let blocked = frontier_world::raycast(
+                                &world,
+                                origin.to_array(),
+                                sun.to_array(),
+                                (limit - 1e-7).max(0.),
+                            )
+                            .is_some();
+                            assert_eq!(results[0][i * 4] != 0, blocked, "shadow {x},{y}, yaw{yaw}");
+                        } else {
+                            assert_eq!(
+                                results[0][i * 4],
+                                data::id(hit.material) as u8,
+                                "material {x},{y}"
+                            );
+                        }
+
                         let point = local + direction * hit.distance as f32;
                         let clip = matrix * point.extend(1.);
                         assert!((depths[i] - clip.z / clip.w).abs() < 2e-6, "depth {x},{y}");
@@ -234,8 +304,7 @@ fn naadf_gpu_matches_canonical_rays() {
                 }
             }
         }
-        eprintln!("NAADF exact GPU oracle: {tested} covered rays across4headings; all16384coverage decisions checked");
+        eprintln!("NAADF GPU oracle: {tested} covered primary/shadow samples across4headings;32768coverage decisions checked");
         assert!(tested > 1000);
-        let _ = Vec3::ZERO;
     });
 }

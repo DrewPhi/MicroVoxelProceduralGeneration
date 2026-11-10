@@ -1,4 +1,8 @@
-# Adjustable exact-voxel visibility experiment
+# Initial adjustable exact-voxel visibility experiment
+
+**Historical checkpoint at `ca5a19b`.** The current ownership, lighting and
+measurement path is documented in [NAADF_HYBRID.md](NAADF_HYBRID.md). The figures
+below describe the earlier overlay and are not a mesh-versus-NAADF comparison.
 
 Esc → **NAADF experiment** enables a separate primary-visibility backend in the
 adaptive terrain scene. Start at **64 m**, change **NAADF radius (m)**, then click

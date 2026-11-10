@@ -2,6 +2,7 @@
 //! partial snapshot. Outside its published region the regular renderer owns
 //! coverage. This is not a production streaming implementation or the GI paper.
 mod data;
+pub(crate) mod ownership;
 #[cfg(test)]
 mod tests;
 use super::{Camera, Gpu};
@@ -18,7 +19,11 @@ use std::{
     time::Instant,
 };
 use wgpu::util::DeviceExt;
-const SHADER: &str = include_str!("ray.wgsl");
+const SHADER: &str = concat!(
+    "const NAADF_GROUP:u32=0u;const NAADF_BASE:u32=0u;\n",
+    include_str!("trace.wgsl"),
+    include_str!("ray.wgsl")
+);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Request {
     radius: u32,
@@ -96,8 +101,16 @@ struct Uniform {
     viewport: [f32; 4],
     sun: [f32; 4],
     sky: [f32; 4],
+    far_matrix: [[f32; 4]; 4],
+    shadow: [f32; 4],
+    forward: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    projection: [f32; 4],
 }
 struct Volume {
+    resources: Bindings,
+    ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -174,46 +187,7 @@ impl Pending {
                 contents: bytemuck::bytes_of(&Uniform::zeroed()),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-        let mut entries = vec![
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D3,
-                    multisampled: false,
-                },
-                count: None,
-            },
-        ];
-        for binding in 2..5 {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            });
-        }
-        let layout = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("NAADF layout"),
-                entries: &entries,
-            });
+        let layout = layout(&gpu.device);
         let view = chunks.create_view(&Default::default());
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NAADF snapshot"),
@@ -241,56 +215,17 @@ impl Pending {
                 },
             ],
         });
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("NAADF hierarchical exact rays"),
-                source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-            });
-        let pl = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("NAADF primary visibility"),
-                bind_group_layouts: &[&layout],
-                push_constant_ranges: &[],
-            });
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("NAADF exact native voxel pass"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: gpu.scene_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: gpu.sample_count,
-                    ..Default::default()
-                },
-                multiview: None,
-                cache: None,
-            });
+        let pipeline = make_pipeline(gpu, &layout);
+        let resources = Bindings {
+            uniform: uniform.clone(),
+            chunks: view.clone(),
+            blocks: blocks.clone(),
+            voxels: voxels.clone(),
+            palette: palette.clone(),
+        };
         let volume = Volume {
+            resources,
+            ownership: snapshot.ownership.clone(),
             pipeline,
             bind,
             uniform,
@@ -321,6 +256,9 @@ impl Pending {
         })
     }
     fn advance(&mut self, queue: &wgpu::Queue) -> bool {
+        if self.phase >= 4 {
+            return true;
+        }
         let start = Instant::now();
         let allowance = 8 * 1048576;
         if self.phase == 0 {
@@ -390,6 +328,8 @@ impl Pending {
     }
 }
 pub struct Experiment {
+    restoring_raster: bool,
+    effective_budget_mib: usize,
     worker: Worker,
     request: Option<Request>,
     epoch: u64,
@@ -405,6 +345,8 @@ pub struct Experiment {
 impl Default for Experiment {
     fn default() -> Self {
         Self {
+            restoring_raster: false,
+            effective_budget_mib: 0,
             worker: Worker::new(),
             request: None,
             epoch: 0,
@@ -420,18 +362,43 @@ impl Default for Experiment {
     }
 }
 impl Experiment {
-    pub fn poll(&mut self, gpu: &Gpu, world: &World, camera: Camera, serial: u64, pressure: bool) {
+    pub fn poll(
+        &mut self,
+        gpu: &Gpu,
+        world: &World,
+        camera: Camera,
+        serial: u64,
+        pressure: bool,
+        raster_restored: bool,
+    ) {
         let Some(s) = &gpu.visual_settings else {
             return;
         };
-        if !s.naadf_enabled {
-            if self.request.is_some() {
-                self.worker.cancel();
-                self.request = None;
-                self.active = None;
-                self.pending = None;
+        for volume in self
+            .active
+            .iter_mut()
+            .chain(self.pending.iter_mut().map(|p| &mut p.volume))
+        {
+            if volume.samples != gpu.sample_count {
+                volume.pipeline = make_pipeline(gpu, &volume.pipeline.get_bind_group_layout(0));
+                volume.samples = gpu.sample_count;
             }
-            self.status = "Off".into();
+        }
+        if !s.naadf_enabled {
+            self.worker.cancel();
+            self.request = None;
+            self.pending = None;
+            self.restoring_raster = self.active.is_some();
+            if raster_restored {
+                self.active = None;
+                self.restoring_raster = false;
+            }
+            self.status = if self.active.is_some() {
+                "Restoring raster coverage before disabling"
+            } else {
+                "Off"
+            }
+            .into();
             return;
         }
         if gpu.volume_owner || gpu.adaptive.is_none() {
@@ -441,13 +408,18 @@ impl Experiment {
         }
         let r = Request {
             radius: s.naadf_radius_m,
-            budget: s.naadf_budget_mib.saturating_mul(1048576),
+            budget: if s.naadf_auto_memory {
+                usize::MAX
+            } else {
+                s.naadf_budget_mib.saturating_mul(1048576)
+            },
             revision: world.revision(),
             vegetation: world.vegetation_enabled(),
             serial,
-            samples: gpu.sample_count,
+            samples: 0,
         };
         if self.request != Some(r) {
+            self.restoring_raster = self.active.is_some();
             let source_changed = self
                 .request
                 .is_some_and(|old| old.vegetation != r.vegetation);
@@ -472,9 +444,10 @@ impl Experiment {
                     .saturating_sub((memory.total_mib / 20).max(768))
                     * 1048576
             } else {
-                r.budget
+                s.naadf_budget_mib.saturating_mul(1048576)
             };
             let effective_budget = r.budget.min(headroom);
+            self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
             let _ = self.worker.tx.as_ref().unwrap().send((
@@ -509,36 +482,41 @@ impl Experiment {
             }
         }
         if let Some(p) = &mut self.pending {
-            if p.advance(&gpu.queue) {
+            if p.advance(&gpu.queue) && (!self.restoring_raster || raster_restored) {
                 let p = self.pending.take().unwrap();
                 self.upload_ms = p.upload_ms;
                 self.active = Some(p.volume);
+                self.restoring_raster = false;
                 self.published_epoch = self.epoch;
                 self.status = "Ready · fixed region; rebuild here to move it".into();
             }
         }
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|v| v.samples != gpu.sample_count)
-        {
-            self.active = None;
-            self.status = "MSAA changed; apply/rebuild NAADF region".into();
-        }
     }
+
     pub fn ready(&self) -> bool {
         self.active.is_some() && self.published_epoch == self.epoch && self.error.is_none()
     }
     pub fn bounds_for(&self, camera: Camera) -> Option<[[f64; 3]; 2]> {
         let a = self.active.as_ref()?;
-        let p = camera.position.to_array();
-        ((0..3).all(|i| p[i] >= a.bounds[0][i] + VOXEL_SIZE && p[i] < a.bounds[1][i] - VOXEL_SIZE))
-            .then_some(a.bounds)
+        let _ = camera;
+        Some([
+            a.bounds[0].map(|v| v + VOXEL_SIZE),
+            a.bounds[1].map(|v| v - VOXEL_SIZE),
+        ])
     }
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+    pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {
+        if self.restoring_raster {
+            None
+        } else {
+            self.active.as_ref().map(|a| a.ownership.clone())
+        }
+    }
+
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, far: &'a wgpu::BindGroup) {
         if let Some(a) = &self.active {
             pass.set_pipeline(&a.pipeline);
             pass.set_bind_group(0, &a.bind, &[]);
+            pass.set_bind_group(1, far, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -549,7 +527,12 @@ impl Experiment {
         let origin = DVec3::from_array(a.bounds[0]);
         let matrix = camera.matrix(origin, width as f32 / height as f32);
         let s = gpu.visual_settings.clone().unwrap_or_default();
-        let sun = crate::atmosphere::sun_direction(s.sun_elevation, s.sun_azimuth);
+        let sun = if s.beauty {
+            crate::atmosphere::sun_direction(s.sun_elevation, s.sun_azimuth)
+        } else {
+            glam::Vec3::new(-0.5, 0.8, -0.3).normalize()
+        };
+        let basis = ray_basis(camera, width as f32 / height as f32);
         gpu.queue.write_buffer(
             &a.uniform,
             0,
@@ -560,9 +543,38 @@ impl Experiment {
                 extent: [a.n * 16, a.n * 16, a.n * 16, a.n],
                 viewport: [width as f32, height as f32, a.samples as f32, 0.],
                 sun: [sun.x, sun.y, sun.z, if s.beauty { 1. } else { 0. }],
-                sky: [s.overcast, 0., 0., 0.],
+                sky: [
+                    s.overcast,
+                    0.,
+                    0.,
+                    if s.visibility_benchmark { 1. } else { 0. },
+                ],
+                far_matrix: gpu
+                    .adaptive
+                    .as_ref()
+                    .map_or(glam::Mat4::IDENTITY, |a| a.far_shadow_projection(&camera))
+                    .to_cols_array_2d(),
+                forward: basis[0],
+                right: basis[1],
+                up: basis[2],
+                projection: basis[3],
+                shadow: [
+                    if s.terrain_shadows && !s.visibility_benchmark {
+                        1.
+                    } else {
+                        0.
+                    },
+                    0.,
+                    0.,
+                    0.,
+                ],
             }),
         );
+    }
+    pub(crate) fn shadow_bindings(&self) -> Option<(u64, Bindings)> {
+        self.active
+            .as_ref()
+            .map(|a| (a.ownership.id, a.resources.clone()))
     }
     pub fn gpu_bytes(&self) -> usize {
         self.active.as_ref().map_or(0, |a| a.bytes)
@@ -572,9 +584,176 @@ impl Experiment {
         let a = self.active.as_ref();
         let bounds = a.map(|a| a.bounds);
         let region = bounds.map_or("null".into(), |b| format!("{:?}", b));
-        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":true,\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_existing_raster_overhead\":true}}",
+        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":true,\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{}}}",
             self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
-            self.request.map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
-            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused)
+            self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
+            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX))
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct Bindings {
+    pub uniform: wgpu::Buffer,
+    pub chunks: wgpu::TextureView,
+    pub blocks: wgpu::Buffer,
+    pub voxels: wgpu::Buffer,
+    pub palette: wgpu::Buffer,
+}
+pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
+    (0..5)
+        .map(|i| wgpu::BindGroupLayoutEntry {
+            binding: first + i,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: match i {
+                0 => wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                1 => wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                _ => wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            },
+            count: None,
+        })
+        .collect()
+}
+fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("NAADF exact hierarchy"),
+        entries: &binding_layout(0),
+    })
+}
+impl Bindings {
+    pub fn entries(&self, first: u32) -> Vec<wgpu::BindGroupEntry<'_>> {
+        vec![
+            wgpu::BindGroupEntry {
+                binding: first,
+                resource: self.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 1,
+                resource: wgpu::BindingResource::TextureView(&self.chunks),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 2,
+                resource: self.blocks.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 3,
+                resource: self.voxels.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 4,
+                resource: self.palette.as_entire_binding(),
+            },
+        ]
+    }
+    pub fn empty(device: &wgpu::Device) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("inactive NAADF"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let buffer = |bytes: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("inactive NAADF words"),
+                contents: bytes,
+                usage,
+            })
+        };
+        Self {
+            uniform: buffer(
+                bytemuck::bytes_of(&Uniform::zeroed()),
+                wgpu::BufferUsages::UNIFORM,
+            ),
+            chunks: texture.create_view(&Default::default()),
+            blocks: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
+            voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
+            palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),
+        }
+    }
+}
+
+fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    let shader = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("NAADF hierarchical exact rays"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+    let pl = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("NAADF primary visibility"),
+            bind_group_layouts: &[
+                &layout,
+                &crate::adaptive_gpu::adaptive_shadow::sampling_layout(&gpu.device),
+            ],
+            push_constant_ranges: &[],
+        });
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("NAADF exact native voxel pass"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.scene_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: gpu.sample_count,
+                ..Default::default()
+            },
+            multiview: None,
+            cache: None,
+        })
+}
+
+fn ray_basis(camera: Camera, aspect: f32) -> [[f32; 4]; 4] {
+    let forward = camera.direction().normalize();
+    let right = forward.cross(glam::Vec3::Y).normalize();
+    let up = right.cross(forward);
+    let p = glam::Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 0.025, camera.far);
+    [
+        forward.extend(0.).to_array(),
+        right.extend(1. / p.x_axis.x).to_array(),
+        up.extend(1. / p.y_axis.y).to_array(),
+        [0.025, camera.far, -p.z_axis.z, p.w_axis.z],
+    ]
 }

@@ -175,6 +175,7 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
         if all(point>=near_shadow.naadf_lo.xyz)&&all(point<near_shadow.naadf_hi.xyz) {discard;}
     }
 
+    if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(i.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
     // Fixed canonical-cell/instance threshold: no time noise or transparency.
     // Opaque survivors write normal scene depth and receive its atmosphere pass.
     if i.fade<1. {
@@ -184,7 +185,7 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
         if f32(h&65535u)/65536.>=i.fade { discard; }
     }
     let ao=mix(1.,i.ao,lighting.sky.y);
-    let visibility=plant_shadow(i.local,i.normal,lighting.sun.xyz);
+    let visibility=min(naadf_sun_visibility(i.local-camera.eye.xyz,normalize(i.normal),lighting.sun.xyz),plant_shadow(i.local,i.normal,lighting.sun.xyz));
     if lighting.sky.y>0.5 && lighting.sun.w>0.5 {
         return vec4<f32>(i.color*beauty_plant_lighting(i,visibility,ao),1.);
     }

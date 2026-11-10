@@ -74,6 +74,7 @@ pub struct VegetationStats {
     pub culled_instances: usize,
     pub coverage_fallbacks: usize,
     pub coverage_unresolved: usize,
+    pub requested_native_unresolved: usize,
     /// Offline native reference is incomplete if the global budget rejected a plant.
     pub reference_budget_exceeded: bool,
     pub reference: bool,
@@ -598,6 +599,14 @@ pub struct GroundInspection {
     pub reason: &'static str,
 }
 pub struct VegetationStream {
+    pub visibility_benchmark: bool,
+    benchmark_radius: u32,
+    benchmark_cube: Option<[[f64; 3]; 2]>,
+    benchmark_base_radii: [f64; 3],
+    shadows_enabled: bool,
+    naadf_owner: Option<Arc<crate::naadf::ownership::Ownership>>,
+    pub naadf_omitted: usize,
+    pub naadf_omitted_keys: BTreeSet<MeshKey>,
     world: World,
     edits: Vec<Cell>,
     pub config: VegetationConfig,
@@ -792,6 +801,18 @@ impl VegetationStream {
             .collect();
         let reference = config.reference;
         Self {
+            visibility_benchmark: false,
+            benchmark_radius: 0,
+            benchmark_cube: None,
+            benchmark_base_radii: [
+                config.grass_radius_m,
+                config.flower_radius_m,
+                config.tree_radius_m,
+            ],
+            shadows_enabled: true,
+            naadf_owner: None,
+            naadf_omitted: 0,
+            naadf_omitted_keys: BTreeSet::new(),
             edits: world.edit_cells().collect(),
             world,
             config,
@@ -833,6 +854,58 @@ impl VegetationStream {
     }
     /// Memory pressure suppresses new speculative work without cancelling valid
     /// completions or changing existing display/cache ownership.
+    pub(crate) fn set_naadf_owner(
+        &mut self,
+        owner: Option<Arc<crate::naadf::ownership::Ownership>>,
+    ) {
+        if self.naadf_owner.as_ref().map(|o| o.id) == owner.as_ref().map(|o| o.id) {
+            return;
+        }
+        if let Some(o) = &owner {
+            self.shadow_lifecycle.exclude_naadf(o);
+        }
+        self.naadf_omitted_keys.clear();
+        self.naadf_owner = owner;
+        self.stable_frame = None;
+        self.grouped_ground = None;
+        self.epoch.fetch_add(1, Ordering::Relaxed);
+        // Placement jobs share the cancellation epoch. Their old completions
+        // may never arrive, so both demand sets must become eligible to retry.
+        self.pending_tiles.clear();
+        self.tile_started.clear();
+        self.pending_meshes.clear();
+        self.mesh_started.clear();
+    }
+    pub(crate) fn set_visibility_benchmark(&mut self, enabled: bool, radius: u32, eye: [f64; 3]) {
+        if self.visibility_benchmark == enabled && self.benchmark_radius == radius {
+            return;
+        }
+        self.visibility_benchmark = enabled;
+        self.benchmark_radius = radius;
+        self.config.grass_radius_m = self.benchmark_base_radii[0];
+        self.config.flower_radius_m = self.benchmark_base_radii[1];
+        self.benchmark_cube = enabled.then(|| {
+            let c = eye.map(f64::floor);
+            [c.map(|v| v - radius as f64), c.map(|v| v + radius as f64)]
+        });
+        if enabled {
+            // Enumerate enough placement records for the whole comparison cube.
+            // Outside it retain the ordinary species-specific draw distances.
+            self.config.grass_radius_m = self.config.grass_radius_m.max(radius as f64 * 2. + 8.);
+            self.config.flower_radius_m = self.config.flower_radius_m.max(radius as f64 * 2. + 8.);
+        }
+        self.stable_frame = None;
+        self.grouped_ground = None;
+    }
+    pub(crate) fn set_shadows_enabled(&mut self, enabled: bool) {
+        if self.shadows_enabled != enabled {
+            self.shadows_enabled = enabled;
+            self.stable_frame = None;
+            if !enabled {
+                self.shadow_lifecycle.clear();
+            }
+        }
+    }
     pub fn set_background_paused(&mut self, paused: bool) {
         self.background_paused = paused;
     }
@@ -1112,6 +1185,8 @@ impl VegetationStream {
         let mut submitted = 0;
         // (coverage/refinement, fair class, distance, key, source, ground).
         let mut mesh_requests = Vec::new();
+        self.naadf_omitted = 0;
+        let mut omitted_keys = BTreeSet::new();
         let mut plants = Vec::new();
         let mut offscreen = Vec::new();
         let mut group_key: Vec<_> = demand
@@ -1140,6 +1215,18 @@ impl VegetationStream {
                                 ground.entry((t.species, x, z)).or_default().push(*p);
                             }
                         }
+                        continue;
+                    }
+                    if self.naadf_owner.as_ref().is_some_and(|o| o.plant(p)) {
+                        self.naadf_omitted += 1;
+                        omitted_keys.insert(MeshKey {
+                            species: 2,
+                            variant: p.variant,
+                            seed: p.seed,
+                            tile: [0; 2],
+                            lod: 0,
+                            edit_id: 0,
+                        });
                         continue;
                     }
                     let dx = (p.root.x - c.x) as f64 * VOXEL_SIZE;
@@ -1194,15 +1281,48 @@ impl VegetationStream {
                 .fold((i64::MAX, i64::MIN), |(low, high), plant| {
                     (low.min(plant.root.y), high.max(plant.root.y))
                 });
+            if self
+                .naadf_owner
+                .as_ref()
+                .is_some_and(|o| o.ground(x, z, low, high))
+            {
+                self.naadf_omitted += 1;
+                for key in self
+                    .meshes
+                    .keys()
+                    .filter(|k| k.species == s && k.tile == [x, z])
+                {
+                    omitted_keys.insert(MeshKey {
+                        lod: 0,
+                        edit_id: 0,
+                        ..*key
+                    });
+                }
+                continue;
+            }
             let distance = distance_with_vertical_bounds(
                 dx.hypot(dz),
                 camera[1],
                 low as f64 * VOXEL_SIZE,
                 (high + 14) as f64 * VOXEL_SIZE,
             );
-            if distance > radii[s as usize] + 5.7 {
+            let cube_overlap = self.benchmark_cube.is_some_and(|b| {
+                (x + 1) as f64 * 8. > b[0][0]
+                    && x as f64 * 8. < b[1][0]
+                    && (z + 1) as f64 * 8. > b[0][2]
+                    && z as f64 * 8. < b[1][2]
+                    && (high + 14) as f64 * VOXEL_SIZE >= b[0][1]
+                    && low as f64 * VOXEL_SIZE <= b[1][1]
+            });
+            let ordinary_radius = if self.visibility_benchmark {
+                self.benchmark_base_radii[s as usize]
+            } else {
+                radii[s as usize]
+            };
+            if distance > ordinary_radius + 5.7 && !cube_overlap {
                 continue;
             }
+
             // Residency is all-heading. Exact GPU mesh bounds cull color draws;
             // turning must not change ground admission, LOD history or cache age.
             let p = PlantRecord {
@@ -1221,6 +1341,21 @@ impl VegetationStream {
             };
             plants.push((distance, p));
         }
+        self.naadf_omitted_keys.extend(omitted_keys.iter().copied());
+        self.meshes.retain(|k, _| {
+            !omitted_keys.contains(&MeshKey {
+                lod: 0,
+                edit_id: 0,
+                ..*k
+            })
+        });
+        self.mesh_costs.retain(|k, _| {
+            !omitted_keys.contains(&MeshKey {
+                lod: 0,
+                edit_id: 0,
+                ..*k
+            })
+        });
         self.grouped_ground = Some((group_key, ground));
         // Preserve tall silhouettes before spending the remaining geometry
         // budget on small repeated ground cover. Within each class, nearest wins.
@@ -1243,10 +1378,11 @@ impl VegetationStream {
         let cpu_bytes_per_triangle =
             2 * std::mem::size_of::<VegetationVertex>() + 3 * std::mem::size_of::<u32>();
         let cpu_triangle_capacity = self.cpu_cache_bytes / cpu_bytes_per_triangle;
-        let needs_tree_shadows = !offscreen.is_empty()
-            || plants
-                .iter()
-                .any(|(distance, p)| p.species == Species::Rowan && *distance < 96.);
+        let needs_tree_shadows = self.shadows_enabled
+            && (!offscreen.is_empty()
+                || plants
+                    .iter()
+                    .any(|(distance, p)| p.species == Species::Rowan && *distance < 96.));
         let shadow_triangle_budget = if needs_tree_shadows {
             TREE_SHADOW_TRIANGLE_BUDGET.min(cpu_triangle_capacity / 4)
         } else {
@@ -1391,6 +1527,9 @@ impl VegetationStream {
             .map(|(d, p)| (*d, *p, false))
             .chain(offscreen.into_iter().map(|(d, p)| (d, p, true)))
             .collect();
+        if !self.shadows_enabled {
+            shadow_plants.clear();
+        }
         // Heading changes only color visibility, never caster membership.
         // Retained casters share the GPU's 90m entry / 96m exit band.
         shadow_plants.retain(|(distance, p, _)| {
@@ -1470,6 +1609,12 @@ impl VegetationStream {
                     previous,
                 );
             }
+            let force_native =
+                self.visibility_benchmark && distance <= self.native_detail_distance_m;
+            if force_native {
+                key.lod = 1;
+                stats.requested_native_unresolved += 1;
+            }
             let coarse_key = MeshKey { lod: 8, ..key };
             let ground_headroom = if s != 2 && !self.config.reference {
                 remaining_ground_coarse = remaining_ground_coarse.saturating_sub(
@@ -1509,7 +1654,7 @@ impl VegetationStream {
             };
             // If fine geometry costs too much, automatically request the next
             // coarser stride. Native desired LOD still drives the quality target.
-            let ground_target = if self.config.reference {
+            let ground_target = if self.config.reference || force_native {
                 1
             } else {
                 hysteretic_stride(
@@ -1537,7 +1682,7 @@ impl VegetationStream {
                 )
             };
             let mut request_key = key;
-            if s == 2 && !self.config.reference {
+            if s == 2 && !self.config.reference && !force_native {
                 if !tree_coverage_ready {
                     request_key = resident_coverage_key(&self.meshes, coarse_key, previous)
                         .unwrap_or(coarse_key);
@@ -1622,7 +1767,10 @@ impl VegetationStream {
                     s != 2,
                 ));
             }
-            let render_key = if self.config.reference {
+            if force_native {
+                request_key = key;
+            }
+            let render_key = if self.config.reference || force_native {
                 // A missing native mesh stays pending; never substitute an LOD
                 // proxy in the reference target.
                 key
@@ -1750,6 +1898,9 @@ impl VegetationStream {
                 }
                 if s == 2 && render_key.lod > key.lod {
                     stats.coverage_fallbacks += 1;
+                }
+                if force_native {
+                    stats.requested_native_unresolved -= 1;
                 }
                 stats.selected_instances += 1;
                 stats.triangles += tris;
@@ -3455,6 +3606,39 @@ pub(crate) fn mesh_cells_scaled_reference(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owner_change_cancels_placement_and_mesh_demand_but_keeps_source_records() {
+        use super::*;
+        let mut stream = VegetationStream::new(World::new(7), VegetationConfig::default());
+        let tile = Tile {
+            species: 0,
+            x: 0,
+            z: 0,
+        };
+        let key = MeshKey {
+            species: 0,
+            variant: 0,
+            seed: 1,
+            tile: [0; 2],
+            lod: 1,
+            edit_id: 0,
+        };
+        stream.pending_tiles.insert(tile);
+        stream.tile_started.insert(tile, Instant::now());
+        stream.pending_meshes.insert(key);
+        stream.mesh_started.insert(key, Instant::now());
+        stream.tiles.insert(tile, (vec![], 0));
+        let owner = Arc::new(crate::naadf::ownership::Ownership::new(
+            [[-8.; 3], [8.; 3]],
+            16,
+            &vec![true; 256],
+        ));
+        stream.set_naadf_owner(Some(owner));
+        assert!(stream.pending_tiles.is_empty() && stream.pending_meshes.is_empty());
+        assert!(stream.tile_started.is_empty() && stream.mesh_started.is_empty());
+        assert!(stream.tiles.contains_key(&tile));
+    }
+
     use super::*;
     #[test]
     fn distance_hysteresis_preserves_detail_until_outside_exit_band() {

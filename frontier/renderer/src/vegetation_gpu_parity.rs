@@ -198,24 +198,13 @@ fn frozen_native_gpu_parity() {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let shadow_layout = crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(&device);
-        let shadow = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("inactive parity near shadow"),
-            layout: &shadow_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: shadow_uniform.as_entire_binding(),
-                },
-            ],
-        });
+        let shadow = crate::adaptive_gpu::adaptive_shadow::near_sampling_bind(
+            &device,
+            &shadow_view,
+            &sampler,
+            &shadow_uniform,
+            &crate::naadf::Bindings::empty(&device),
+        );
         let color = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
         let depth = texture(&device, wgpu::TextureFormat::Depth32Float);
         let color_view = color.create_view(&Default::default());

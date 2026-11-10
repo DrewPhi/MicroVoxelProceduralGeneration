@@ -128,6 +128,7 @@ pub(crate) struct PlanningStats {
     pub obsolete_transaction_pending_jobs: u64,
 }
 pub struct SelectionFrame {
+    pub ownership_id: u64,
     pub epoch: u64,
     pub preparation: Option<PreparationCycle>,
     pub publication_transaction: Option<PublicationTransaction>,
@@ -579,11 +580,12 @@ impl AdaptiveStream {
         Ok(())
     }
     fn native_protects(&self, tile: &GeometryTile, camera: &Camera) -> bool {
-        native_band(
-            tile.conservative_surface_bounds,
-            camera.position,
-            self.settings.native_radius_m,
-        )
+        !tile.naadf_owned
+            && native_band(
+                tile.conservative_surface_bounds,
+                camera.position,
+                self.settings.native_radius_m,
+            )
     }
     fn finest_cells(&self) -> u32 {
         #[cfg(test)]
@@ -601,6 +603,25 @@ impl AdaptiveStream {
         assert!(self.committed.is_empty() && self.transaction.is_none());
         self.finest_cells = cells;
     }
+    fn set_naadf_owner(&mut self, owner: Option<Arc<crate::naadf::ownership::Ownership>>) {
+        self.cache.set_naadf_owner(owner);
+        self.pending.clear();
+        self.transaction = None;
+        self.transaction_refinements.clear();
+        self.pending_publication = None;
+        self.committed_publication = None;
+        self.committed.clear();
+        self.committed_index.clear();
+        self.committed_ancestors.clear();
+        self.committed_pose = None;
+        self.known_bytes.clear();
+        self.variants.clear();
+        self.coarsen_probes.clear();
+        self.coarsen_targets.clear();
+        self.rejected_coarsen.clear();
+        self.occlusion = None;
+        self.prediction_occlusion = None;
+    }
     pub(crate) fn plan(&mut self, camera: &Camera, width: u32, height: u32) -> SelectionFrame {
         let started = std::time::Instant::now();
         let mut frame = self.plan_partition(camera, width, height);
@@ -617,6 +638,7 @@ impl AdaptiveStream {
         self.coarsen_requested = false;
         self.coarsen_targets.clear();
         let mut frame = SelectionFrame {
+            ownership_id: self.cache.naadf_owner.as_ref().map_or(0, |o| o.id),
             epoch: self.epoch,
             preparation: None,
             publication_transaction: None,
@@ -1775,7 +1797,7 @@ impl AdaptiveStream {
     ) -> Result<usize, String> {
         // Never queue payloads behind occupied workers. Only canonical keys sit
         // in `pending`; the synchronous bounded batch is drained before planning.
-        let limit = limit.min(self.settings.worker_count).min(4);
+        let limit = limit.min(self.settings.worker_count).min(16);
         if cancelled() || limit == 0 {
             return Ok(0);
         }
@@ -3552,6 +3574,7 @@ pub struct Worker {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 struct WorkerState {
+    pending_owner: Option<Option<Arc<crate::naadf::ownership::Ownership>>>,
     background_paused: bool,
     pending_settings: Option<StreamSettings>,
     settings: StreamSettings,
@@ -3650,6 +3673,7 @@ impl Worker {
         }
         let state = std::sync::Arc::new((
             std::sync::Mutex::new(WorkerState {
+                pending_owner: None,
                 background_paused: false,
                 pending_settings: None,
                 settings,
@@ -3677,11 +3701,13 @@ impl Worker {
         let thread = std::thread::Builder::new()
             .name("adaptive-terrain".into())
             .spawn(move || loop {
-                let (command, request) = {
+                let (command, owner, request) = {
                     let (lock, wake) = &*shared;
                     let mut s = lock.lock().unwrap();
                     while (s.background_paused
-                        || (s.request.is_none() && s.pending_settings.is_none()))
+                        || (s.request.is_none()
+                            && s.pending_settings.is_none()
+                            && s.pending_owner.is_none()))
                         && !s.stop
                     {
                         s = wake.wait(s).unwrap();
@@ -3689,8 +3715,15 @@ impl Worker {
                     if s.stop {
                         break;
                     }
-                    (s.pending_settings.take(), s.request.clone())
+                    (
+                        s.pending_settings.take(),
+                        s.pending_owner.take(),
+                        s.request.clone(),
+                    )
                 };
+                if let Some(owner) = owner {
+                    stream.set_naadf_owner(owner);
+                }
                 if let Some(settings) = command {
                     if let Err(error) = stream.reconfigure(settings) {
                         let mut s = shared.0.lock().unwrap();
@@ -3836,6 +3869,18 @@ impl Worker {
     }
     /// Pause new canonical builds at cancellation checkpoints. Completed source
     /// pages, immutable geometry and pending transactions remain valid on resume.
+    pub(crate) fn set_naadf_owner(&self, owner: Option<Arc<crate::naadf::ownership::Ownership>>) {
+        let (lock, wake) = &*self.state;
+        let mut s = lock.lock().unwrap();
+        s.pending_owner = Some(owner);
+        s.result = None;
+        s.epoch = s.epoch.wrapping_add(1);
+        s.last_request = None;
+        if let Some((_, camera, width, height)) = s.request {
+            s.request = Some((s.epoch, camera, width, height));
+        }
+        wake.notify_one();
+    }
     pub fn set_background_paused(&self, paused: bool) {
         let mut state = self.state.0.lock().unwrap();
         if state.background_paused == paused {

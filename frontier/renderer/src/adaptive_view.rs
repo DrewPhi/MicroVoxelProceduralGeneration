@@ -9,6 +9,9 @@ use crate::{
 use std::{collections::HashSet, time::Instant};
 
 pub struct AdaptiveView {
+    desired_naadf_owner: u64,
+    pub published_naadf_owner: u64,
+    pub naadf_owned_tiles: usize,
     upload_budget: u64,
     background_paused: bool,
     stream_settings: StreamSettings,
@@ -85,6 +88,24 @@ pub struct AdaptiveView {
 impl AdaptiveView {
     /// Suppress new builds and GPU uploads under measured memory pressure.
     /// Existing owners stay drawable; this does not reclaim driver allocations.
+    pub(crate) fn set_naadf_owner(
+        &mut self,
+        owner: Option<std::sync::Arc<crate::naadf::ownership::Ownership>>,
+    ) {
+        let id = owner.as_ref().map_or(0, |o| o.id);
+        if id == self.desired_naadf_owner {
+            return;
+        }
+        self.desired_naadf_owner = id;
+        self.worker.set_naadf_owner(owner);
+        self.pending = None;
+        self.deferred = None;
+        self.candidate_preparation = None;
+        self.quality_ready = false;
+        self.refinement_ready = false;
+        self.cpu_quality_ready = false;
+        self.cpu_refinement_ready = false;
+    }
     pub fn set_background_paused(&mut self, paused: bool) {
         self.background_paused = paused;
         self.worker.set_background_paused(paused);
@@ -152,6 +173,9 @@ impl AdaptiveView {
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
         Ok(Self {
+            desired_naadf_owner: 0,
+            published_naadf_owner: 0,
+            naadf_owned_tiles: 0,
             upload_budget: 2 * 1024 * 1024,
             background_paused: false,
             stream_settings,
@@ -396,6 +420,16 @@ impl AdaptiveView {
                     width,
                     height,
                 ) {
+                    self.published_naadf_owner = frame.ownership_id;
+                    self.naadf_owned_tiles = frame.tiles.iter().filter(|t| t.naadf_owned).count();
+                    // Owned tiles have no raster payload, including shadow payload.
+                    let raster_keys = frame
+                        .tiles
+                        .iter()
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.key)
+                        .collect();
+                    adaptive.retain(&raster_keys);
                     self.owner_guard = crate::adaptive_stream::PartitionGuard::new(
                         keys.iter().copied(),
                         self.topology_supported,
@@ -403,6 +437,7 @@ impl AdaptiveView {
                     self.owner_surface_bounds = frame
                         .tiles
                         .iter()
+                        .filter(|tile| !tile.naadf_owned)
                         .map(|tile| (tile.key, tile.conservative_surface_bounds))
                         .collect();
                     self.owners = keys;
@@ -595,6 +630,11 @@ impl AdaptiveView {
     }
     pub fn json(&self) -> String {
         let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved,self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
+        json.pop();
+        json.push_str(&format!(
+            ",\"naadf_owned_tiles\":{},\"naadf_ownership_id\":{}}}",
+            self.naadf_owned_tiles, self.published_naadf_owner
+        ));
         json.pop();
         json.push_str(&format!(
             ",\"background_paused\":{}}}",

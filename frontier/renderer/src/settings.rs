@@ -22,6 +22,8 @@ pub struct VisualSettings {
     pub memory: MemorySnapshot,
     pub native_radius_m: f64,
     pub naadf_enabled: bool,
+    pub visibility_benchmark: bool,
+    pub naadf_auto_memory: bool,
     pub naadf_radius_m: u32,
     pub naadf_budget_mib: usize,
     pub vegetation_near_m: f64,
@@ -60,7 +62,8 @@ impl Default for VisualSettings {
             workers: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(2)
-                .min(4),
+                .saturating_sub(2)
+                .clamp(1, 16),
             refinements: 8,
             cache_mib: 512,
             upload_mib: 2,
@@ -69,6 +72,8 @@ impl Default for VisualSettings {
             memory: MemorySnapshot::detect(),
             native_radius_m: 0.,
             naadf_enabled: false,
+            visibility_benchmark: false,
+            naadf_auto_memory: true,
             naadf_radius_m: 64,
             naadf_budget_mib: 1024,
             vegetation_near_m: 0.,

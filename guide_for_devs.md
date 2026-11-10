@@ -318,4 +318,4 @@ Esc → **NAADF experiment** exposes an enable switch, 1–256 m cube radius, bu
 budget, status and GPU payload. Apply changes, or use **Rebuild NAADF here** to
 recenter. Start with `./frontier/run.sh --preset alpine --naadf-radius 64`.
 This is a fixed snapshot visibility prototype; distant terrain retains the
-existing backend. See [implementation, limits and measurements](frontier/NAADF_EXPERIMENT.md).
+existing backend. See [implementation, limits and measurements](frontier/NAADF_HYBRID.md).

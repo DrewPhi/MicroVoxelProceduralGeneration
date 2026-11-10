@@ -417,24 +417,13 @@ impl Atmosphere {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
-        let fallback_shadow = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("disabled air shadow"),
-            layout: &near_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&fallback_depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&fallback_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: fallback_uniform.as_entire_binding(),
-                },
-            ],
-        });
+        let fallback_shadow = crate::adaptive_gpu::adaptive_shadow::near_sampling_bind(
+            device,
+            &fallback_depth,
+            &fallback_sampler,
+            &fallback_uniform,
+            &crate::naadf::Bindings::empty(device),
+        );
         let air_source = air_shader_source(sample_count);
         let air_pipeline = make_pipeline_groups(
             device,

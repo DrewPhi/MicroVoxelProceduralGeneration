@@ -246,6 +246,7 @@ struct Gpu {
     vegetation_background_paused: bool,
     naadf: Option<naadf::Experiment>,
     naadf_serial: u64,
+    naadf_raster_restored: bool,
     vegetation_stats: vegetation::VegetationStats,
     vegetation_inspection: Vec<vegetation::ShadowInspection>,
     vegetation_caster_roots: Vec<[i64; 3]>,
@@ -321,7 +322,13 @@ impl Gpu {
                         & (wgpu::Features::TIMESTAMP_QUERY
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_buffer_size: adapter.limits().max_buffer_size,
+                        max_storage_buffer_binding_size: adapter
+                            .limits()
+                            .max_storage_buffer_binding_size,
+                        ..wgpu::Limits::default()
+                    },
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
@@ -487,6 +494,7 @@ impl Gpu {
             vegetation_background_paused: false,
             naadf: None,
             naadf_serial: 0,
+            naadf_raster_restored: true,
             vegetation_stats: Default::default(),
             vegetation_inspection: Vec::new(),
             vegetation_caster_roots: Vec::new(),
@@ -800,7 +808,14 @@ impl Gpu {
         }
         let naadf_bounds = self.naadf.as_ref().and_then(|n| n.bounds_for(*camera));
         if let Some(adaptive) = &self.adaptive {
-            adaptive.set_naadf_mask(&self.queue, naadf_bounds, camera.position.to_array());
+            adaptive.set_naadf_mask(
+                &self.queue,
+                naadf_bounds,
+                camera.position.to_array(),
+                self.visual_settings
+                    .as_ref()
+                    .is_some_and(|s| s.visibility_benchmark),
+            );
         }
         if naadf_bounds.is_some() {
             if let Some(n) = &self.naadf {
@@ -833,10 +848,16 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        if let Some(t) = &plant_timings {
+            t.naadf_start(&mut pass);
+        }
         if naadf_bounds.is_some() {
             if let Some(n) = &self.naadf {
-                n.draw(&mut pass);
+                n.draw(&mut pass, self.adaptive.as_ref().unwrap().far_shadow_bind());
             }
+        }
+        if let Some(t) = &plant_timings {
+            t.naadf_end(&mut pass);
         }
         // Dense opaque vegetation occludes expensive terrain shading here.
         // Keep terrain-first as a diagnostic A/B; it was slower on the laptop.
@@ -1977,7 +1998,47 @@ impl Viewer {
             );
         }
         if let Some(gpu) = &mut self.gpu {
+            // Use the current frame's restoration proof, never last frame's
+            // potentially pre-transition vegetation readiness.
+            gpu.naadf_raster_restored = gpu
+                .naadf
+                .as_ref()
+                .is_none_or(|n| n.desired_owner().is_none())
+                && self
+                    .adaptive_view
+                    .as_ref()
+                    .is_none_or(|v| v.published_naadf_owner == 0 && v.coverage_ready)
+                && gpu.vegetation_stats.pending_jobs == 0
+                && gpu.vegetation_stats.missing_tiles == 0
+                && gpu.vegetation_stats.missing_meshes == 0
+                && gpu.vegetation_stats.coverage_unresolved == 0
+                && gpu.vegetation_stats.requested_native_unresolved == 0;
             gpu.update_naadf(&self.world, self.camera);
+            let owner = gpu.naadf.as_ref().and_then(|n| n.desired_owner());
+            if let Some(view) = &mut self.adaptive_view {
+                view.set_naadf_owner(owner.clone());
+            }
+            if let Some(stream) = &mut gpu.vegetation_stream {
+                stream.set_naadf_owner(owner);
+            }
+        }
+        if self
+            .adaptive_view
+            .as_ref()
+            .is_some_and(|v| v.published_naadf_owner != 0)
+            && self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.naadf.as_ref())
+                .is_some_and(|n| n.bounds_for(self.camera).is_none())
+        {
+            // Keep the last coherent presentation while a changed canonical
+            // source restores its mesh cover. Flush uploads without drawing holes.
+            if let Some(gpu) = &self.gpu {
+                gpu.queue.submit(std::iter::empty());
+                gpu.device.poll(wgpu::Maintain::Poll);
+            }
+            return Ok(());
         }
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             if !pages.contains(self.camera.position, self.camera.far) {
@@ -1998,6 +2059,7 @@ impl Viewer {
                     || self.gpu.as_ref().is_some_and(|g| {
                         g.vegetation_stats.pending_jobs > 0
                             || g.vegetation_stats.coverage_unresolved > 0
+                            || g.vegetation_stats.requested_native_unresolved > 0
                     }))
                     && (view.preparation_refused() || view.preparation_elapsed_seconds() >= 120.)
                 {
@@ -2017,7 +2079,13 @@ impl Viewer {
                 .gpu
                 .as_ref()
                 .and_then(|g| g.naadf.as_ref())
-                .is_some_and(|n| n.ready());
+                .is_some_and(|n| {
+                    n.ready()
+                        && self.adaptive_view.as_ref().is_none_or(|v| {
+                            n.desired_owner()
+                                .is_some_and(|o| v.published_naadf_owner == o.id)
+                        })
+                });
         if waiting_naadf {
             if let Some(error) = self
                 .gpu
@@ -2041,6 +2109,7 @@ impl Viewer {
                 || self.gpu.as_ref().is_none_or(|g| {
                     g.vegetation_stats.pending_jobs == 0
                         && g.vegetation_stats.coverage_unresolved == 0
+                        && g.vegetation_stats.requested_native_unresolved == 0
                 }))
             && self.adaptive_view.as_ref().is_some_and(|v| {
                 v.coverage_ready && (!self.adaptive_wait_quality || v.refinement_ready)
@@ -2056,6 +2125,7 @@ impl Viewer {
                 probe.full_stats = frontier_runtime::FrameStats::new(10000);
                 probe.plant_color_stats = frontier_runtime::FrameStats::new(10000);
                 probe.plant_shadow_stats = frontier_runtime::FrameStats::new(10000);
+                probe.naadf_stats = frontier_runtime::FrameStats::new(10000);
             }
             eprintln!(
                 "adaptive route starts after {} publication",
@@ -3110,6 +3180,11 @@ pub fn run() -> Result<()> {
         }
         gpu.configure_visuals(&world, &visual_settings);
         if let Some(view) = &mut adaptive_view {
+            if visual_settings.naadf_enabled {
+                view.poll(&mut gpu, camera, width, height)?;
+                gpu.settle_naadf(&world, camera)?;
+                view.set_naadf_owner(gpu.naadf.as_ref().and_then(|n| n.desired_owner()));
+            }
             view.settle(&mut gpu, camera, width, height, capture_unresolved)?;
         }
         if gpu
@@ -3488,6 +3563,21 @@ pub fn run() -> Result<()> {
         if let Some(n) = viewer.gpu.as_ref().and_then(|g| g.naadf.as_ref()) {
             json.pop();
             json.push_str(&format!(",\"naadf\":{}}}", n.json()));
+            if let Some(owner) = n.desired_owner() {
+                let counts = viewer
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| g.adaptive.as_ref())
+                    .map_or((0, 0), |a| a.naadf_residency(&owner));
+                json.pop();
+                json.push_str(&format!(",\"hybrid_mesh_residency\":{{\"certified_interior_clusters_retained\":{},\"overlap_boundary_clusters_retained\":{}}}}}",counts.0,counts.1));
+            }
+
+            if let Some(probe) = &viewer.gpu_probe {
+                let t = probe.naadf_stats.summary();
+                json.pop();
+                json.push_str(&format!(",\"naadf_gpu_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans\"}}}}",t.sample_count,t.p50_ms.map_or("null".into(),|v|v.to_string()),t.p95_ms.map_or("null".into(),|v|v.to_string()),t.p99_ms.map_or("null".into(),|v|v.to_string())));
+            }
         }
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             json.pop();
