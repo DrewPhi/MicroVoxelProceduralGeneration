@@ -1,5 +1,13 @@
 use super::*;
 #[test]
+fn manual_estimate_ceiling_is_not_a_launch_time_free_ram_cap() {
+    let mib = 1048576;
+    assert_eq!(build_budget_limit(usize::MAX, 5300 * mib), 5300 * mib);
+    assert_eq!(build_budget_limit(10240 * mib, 5300 * mib), 10240 * mib);
+    assert_eq!(build_budget_limit(512 * mib, 5300 * mib), 512 * mib);
+    assert_eq!(build_budget_limit(usize::MAX, 0), 0);
+}
+#[test]
 fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
     let mut camera = Camera {
         position: DVec3::new(-1e9, 300., 1e9),

@@ -316,7 +316,7 @@ impl SettingsUi {
                             ui.add(egui::Slider::new(&mut self.loading_draft.naadf_radius_m, 1..=256).text("NAADF radius (m)"));
                             ui.checkbox(&mut self.loading_draft.naadf_auto_memory,"Use available RAM for NAADF (leave system headroom)");
                             ui.checkbox(&mut self.settings.visibility_benchmark,"Diagnostic matched white lighting");
-                            ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build budget (MiB)"));
+                            ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build estimate ceiling (MiB)"));
                             let top = (self.loading_draft.naadf_radius_m as f64 * 2.).powi(3) * 4. / 1048576.;
                             ui.small(format!("Top grid {top:.1} MiB GPU; at least {:.1} MiB with CPU/build copies, plus voxel payloads.",top*3.));
                             ui.small("Fixed cube (radius = half-extent). Exact local visibility and sun shadows; distant terrain keeps its renderer. Mesh coverage is restored before disabling or rebuilding.");

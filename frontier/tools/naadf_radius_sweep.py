@@ -35,8 +35,12 @@ def main():
     parser.add_argument('--radii', nargs='+', type=int, default=[1024, 512, 256, 128, 64, 32, 16])
     parser.add_argument('--seconds', type=float, default=10.)
     parser.add_argument('--atmosphere', choices=['on', 'off'], default='on')
+    parser.add_argument('--naadf-budget-mib', type=int,
+                        help='Explicit conservative build-estimate ceiling; actual RAM watchdog remains active')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
+    if args.naadf_budget_mib is not None and not 16 <= args.naadf_budget_mib <= 16384:
+        parser.error('NAADF estimate ceiling must be 16..16384MiB')
     if not math.isfinite(args.seconds) or not .1 <= args.seconds <= 60:
         parser.error('sample seconds must be finite and between 0.1 and 60')
     if len(set(args.radii)) != len(args.radii):
@@ -60,6 +64,7 @@ def main():
                        'pixel_error': 5, 'route': 'static', 'seconds': args.seconds,
                        'lighting': 'ordinary beauty and sun shadows',
                        'atmosphere': args.atmosphere,
+                       'naadf_estimate_ceiling_mib': args.naadf_budget_mib,
                        'resource_profile': 'development; available RAM with system headroom'},
         'cases': {},
     }
@@ -102,6 +107,8 @@ def main():
                    '--seconds', str(args.seconds), '--route', 'static',
                    '--report', str(report), '--capture-on-exit', str(out / (name + '.png'))]
         case['command'] = command
+        if args.naadf_budget_mib is not None:
+            command += ['--naadf-budget-mib', str(args.naadf_budget_mib)]
         print(shlex.join(command), flush=True)
         save()
         if not args.run:

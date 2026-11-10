@@ -33,6 +33,17 @@ struct Request {
     serial: u64,
     samples: u32,
 }
+
+// This bounds the conservative allocation estimate, not reserved physical RAM.
+// Auto follows currently available RAM; an explicit manual ceiling is opt-in.
+// Actual low-memory cancellation remains independent of this estimate.
+fn build_budget_limit(requested: usize, available: usize) -> usize {
+    if requested == usize::MAX {
+        available
+    } else {
+        requested
+    }
+}
 struct Worker {
     tx: Option<mpsc::Sender<(u64, Request, World, [f64; 3])>>,
     rx: mpsc::Receiver<(u64, Result<Snapshot, String>)>,
@@ -446,7 +457,7 @@ impl Experiment {
             } else {
                 s.naadf_budget_mib.saturating_mul(1048576)
             };
-            let effective_budget = r.budget.min(headroom);
+            let effective_budget = build_budget_limit(r.budget, headroom);
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
