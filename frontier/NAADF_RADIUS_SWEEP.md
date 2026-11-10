@@ -1,6 +1,9 @@
 # Laptop NAADF capacity sweep — November 9, 2026
 
-The largest **completed** fixed-region test was a **112 m half-extent**, a
+**Historical checkpoint:** the later [256 m experiment](NAADF_256M.md) completed
+with a larger explicit estimate ceiling and more free RAM.
+
+The largest **completed** fixed-region test in this earlier sweep was a **112 m half-extent**, a
 224×224×224 m cube of canonical 6.25 cm voxels. It reached approximately 50FPS
 with full lighting, or 58FPS with atmosphere disabled. This establishes a usable
 larger region, not a maximum for NAADF as an algorithm, or a 60FPS guarantee.

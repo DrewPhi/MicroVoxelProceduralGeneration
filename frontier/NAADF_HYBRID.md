@@ -1,6 +1,7 @@
 # Fixed-region NAADF hybrid checkpoint
 
-This extends the [initial overlay experiment](NAADF_EXPERIMENT.md). It is optional,
+This extends the [initial overlay experiment](NAADF_EXPERIMENT.md). The later
+[256 m checkpoint](NAADF_256M.md) measures the larger explicit-memory configuration. It is optional,
 default off, and still a fixed snapshot rather than continuous NAADF streaming.
 The existing renderer and its approved appearance remain the default.
 
