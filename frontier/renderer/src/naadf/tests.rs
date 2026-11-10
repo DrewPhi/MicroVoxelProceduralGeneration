@@ -1,9 +1,9 @@
 use super::*;
 #[test]
-fn manual_estimate_ceiling_is_not_a_launch_time_free_ram_cap() {
+fn manual_estimate_ceiling_respects_available_ram() {
     let mib = 1048576;
     assert_eq!(build_budget_limit(usize::MAX, 5300 * mib), 5300 * mib);
-    assert_eq!(build_budget_limit(10240 * mib, 5300 * mib), 10240 * mib);
+    assert_eq!(build_budget_limit(10240 * mib, 5300 * mib), 5300 * mib);
     assert_eq!(build_budget_limit(512 * mib, 5300 * mib), 512 * mib);
     assert_eq!(build_budget_limit(usize::MAX, 0), 0);
 }

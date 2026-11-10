@@ -36,16 +36,20 @@ struct Request {
     follow: bool,
 }
 
-// This bounds the conservative allocation estimate, not reserved physical RAM.
-// Auto follows currently available RAM; an explicit manual ceiling is opt-in.
-// Actual low-memory cancellation remains independent of this estimate.
+// The user ceiling can tighten the estimate, never bypass live RAM headroom.
 fn build_budget_limit(requested: usize, available: usize) -> usize {
-    if requested == usize::MAX {
-        available
-    } else {
-        requested
-    }
+    requested.min(available)
 }
+
+fn memory_headroom(memory: crate::settings::MemorySnapshot) -> Option<usize> {
+    memory.measured.then(|| {
+        memory
+            .available_mib
+            .saturating_sub((memory.total_mib / 10).max(1024))
+            .saturating_mul(1048576)
+    })
+}
+
 enum Job {
     Build(u64, Request, World, [f64; 3]),
     Install(u64, Snapshot, [usize; 3]),
@@ -217,6 +221,37 @@ impl Pending {
                 ));
             }
         }
+        let follow = gpu.visual_settings.as_ref().is_some_and(|s| s.naadf_follow);
+        let max = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size as u64) as usize;
+        let grow = |used: usize, extra: usize| {
+            if follow {
+                (used + used / 2)
+                    .max(used + extra)
+                    .min(max & !255)
+                    .max(used)
+            } else {
+                used
+            }
+        };
+        let capacities = [
+            grow(snapshot.blocks.len() * 4, 2 * 1048576),
+            grow(snapshot.voxels.len() * 4, 4 * 1048576),
+            grow(snapshot.palette.len() * 16, 2 * 1048576),
+        ];
+        // Snapshot CPU data is still live at this point. Check the actual
+        // arena capacities, including follow-mode slack, before allocating.
+        let upload_bytes = (n as usize).pow(3) * 4 + capacities.iter().sum::<usize>();
+        if let Some(headroom) = memory_headroom(crate::settings::MemorySnapshot::detect()) {
+            if upload_bytes > headroom {
+                return Err(format!(
+                    "NAADF upload needs {} MiB; {} MiB available with system headroom. Try a smaller radius.",
+                    upload_bytes.div_ceil(1048576),
+                    headroom / 1048576,
+                ));
+            }
+        }
         let chunks = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("NAADF exact chunk words"),
             size: wgpu::Extent3d {
@@ -239,25 +274,6 @@ impl Pending {
                 mapped_at_creation: false,
             })
         };
-        let follow = gpu.visual_settings.as_ref().is_some_and(|s| s.naadf_follow);
-        let max = limits
-            .max_buffer_size
-            .min(limits.max_storage_buffer_binding_size as u64) as usize;
-        let grow = |used: usize, extra: usize| {
-            if follow {
-                (used + used / 2)
-                    .max(used + extra)
-                    .min(max & !255)
-                    .max(used)
-            } else {
-                used
-            }
-        };
-        let capacities = [
-            grow(snapshot.blocks.len() * 4, 2 * 1048576),
-            grow(snapshot.voxels.len() * 4, 4 * 1048576),
-            grow(snapshot.palette.len() * 16, 2 * 1048576),
-        ];
         let blocks = buffer(capacities[0], "NAADF block words");
         let voxels = buffer(capacities[1], "NAADF voxel words");
         let palette = buffer(capacities[2], "NAADF exact plant pigments");
@@ -546,15 +562,8 @@ impl Experiment {
             self.worker.stage.store(0, Ordering::Relaxed);
             self.status = "Building exact snapshot".into();
             self.error = None;
-            let memory = crate::settings::MemorySnapshot::detect();
-            let headroom = if memory.measured {
-                memory
-                    .available_mib
-                    .saturating_sub((memory.total_mib / 20).max(768))
-                    * 1048576
-            } else {
-                s.naadf_budget_mib.saturating_mul(1048576)
-            };
+            let headroom = memory_headroom(crate::settings::MemorySnapshot::detect())
+                .unwrap_or_else(|| s.naadf_budget_mib.saturating_mul(1048576));
             let effective_budget = build_budget_limit(r.budget, headroom);
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;

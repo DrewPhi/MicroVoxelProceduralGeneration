@@ -81,12 +81,11 @@ Three earlier automatic-budget attempts were refused by conservative estimates:
 
 Those estimates include vector capacity, GPU copies and hashing/scratch workspace;
 they are not measurements of simultaneously resident physical RAM. The manual
-setting was also being clamped to launch-time free RAM, silently preventing a
-larger explicit estimate ceiling. Commit `1b76aa1` corrects that behavior:
-**automatic mode remains available-RAM based; manual mode honors its configured
-conservative ceiling**. Actual low-memory cancellation and the runner's 768 MiB
-available-RAM watchdog remain active. A manual ceiling reserves nothing and is
-not a whole-process RAM cap.
+estimate override used for this historical test no longer bypasses available
+RAM. Linux killed a later interactive 256 m run under memory pressure. The
+current engine limits either mode to available RAM with headroom and checks
+again before allocating GPU buffers. A manual ceiling reserves nothing and
+is not a whole-process RAM cap.
 
 The first manual 10 GiB attempt built and published the entire snapshot in
 164.71 s, but produced zero accepted frame samples. On owner publication the

@@ -15,11 +15,10 @@ The existing renderer and its approved appearance remain the default.
 
 Esc → NAADF experiment controls radius, automatic available-RAM budgeting and
 manual rebuild. **Use available RAM** is the default; the manual MiB setting
-applies with that checkbox disabled. The manual value is a conservative build-
-estimate ceiling, honored even when it exceeds launch-time free RAM. It does not
-reserve or preallocate that amount. Actual low-memory cancellation and hardware
-binding limits remain active. This manual behavior was corrected on November 10;
-previously both modes were clamped to free RAM measured at launch. Resource budgets grow lazily and the
+applies with that checkbox disabled. Both modes respect measured RAM headroom.
+A manual value can lower the conservative build estimate ceiling; it does not
+reserve RAM. Before uploading, the engine checks available RAM again against
+the actual size of the GPU allocations. Resource budgets grow lazily and the
 Development profile follows available memory. Terrain generation can use up to
 16 workers (the laptop has 12 logical CPUs); normal throughput adaptation backs off
 after repeated frames above 33 ms. This is not a guaranteed frame-rate floor. GPU buffers request the adapter's supported limits,

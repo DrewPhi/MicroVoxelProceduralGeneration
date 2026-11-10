@@ -12,7 +12,9 @@ From the repository root:
 ./frontier/run.sh --preset alpine --naadf-radius 32 --msaa 1
 ```
 
-A 256 m half-extent can use the previously validated manual estimate ceiling:
+Use 32 m for a first playtest. The 256 m half-extent is a capacity test,
+and the engine may refuse it if the build or upload cannot fit with headroom.
+The manual estimate ceiling below does not reserve memory:
 
 ```sh
 ./frontier/run.sh --preset alpine --naadf-radius 256 --naadf-budget-mib 10240 --msaa 1 --width 1920 --height 1080
