@@ -165,6 +165,7 @@ fn naadf_gpu_matches_canonical_rays() {
                     right: basis[1],
                     up: basis[2],
                     projection: basis[3],
+                    ring: [0; 4],
                 }),
             );
             let mut encoder = gpu.device.create_command_encoder(&Default::default());

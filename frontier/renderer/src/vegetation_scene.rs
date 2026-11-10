@@ -82,6 +82,7 @@ impl Gpu {
         }
         if let Some(stream) = &mut self.vegetation_stream {
             stream.set_naadf_owner(self.naadf.as_ref().and_then(|n| n.desired_owner()));
+            stream.set_naadf_retirement(self.naadf.as_ref().and_then(|n| n.retirement()));
         }
         // Adaptive ground owns separate tile-relative uniforms. Its empty
         // native mesh lets the plant pass use a moving integer-aligned origin.
@@ -214,11 +215,12 @@ impl Gpu {
             self.vegetation.is_some(),frontier_world::vegetation::VEGETATION_SOURCE_VERSION,s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded,s.mesh_budget_bytes,s.gpu_budget_bytes,g.cache_budget_bytes,s.shadow_only_instances,s.shadow_only_triangles,s.retained_ground_detail);
         json.pop();
         json.push_str(&format!(
-            ",\"naadf_omitted_groups\":{},\"requested_native_unresolved\":{}}}",
+            ",\"naadf_omitted_groups\":{},\"requested_native_unresolved\":{},\"naadf_retire_unresolved\":{}}}",
             self.vegetation_stream
                 .as_ref()
                 .map_or(0, |s| s.naadf_omitted),
-            self.vegetation_stats.requested_native_unresolved
+            self.vegetation_stats.requested_native_unresolved,
+            self.vegetation_stats.naadf_retire_unresolved
         ));
         json.pop();
         let j = s.jobs;

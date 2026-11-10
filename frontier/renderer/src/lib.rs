@@ -2000,19 +2000,24 @@ impl Viewer {
         if let Some(gpu) = &mut self.gpu {
             // Use the current frame's restoration proof, never last frame's
             // potentially pre-transition vegetation readiness.
-            gpu.naadf_raster_restored = gpu
-                .naadf
-                .as_ref()
-                .is_none_or(|n| n.desired_owner().is_none())
-                && self
-                    .adaptive_view
-                    .as_ref()
-                    .is_none_or(|v| v.published_naadf_owner == 0 && v.coverage_ready)
-                && gpu.vegetation_stats.pending_jobs == 0
-                && gpu.vegetation_stats.missing_tiles == 0
-                && gpu.vegetation_stats.missing_meshes == 0
-                && gpu.vegetation_stats.coverage_unresolved == 0
-                && gpu.vegetation_stats.requested_native_unresolved == 0;
+            let restore_id = gpu.naadf.as_ref().map_or(Some(0), |n| n.restore_owner_id());
+            let plants = &gpu.vegetation_stats;
+            let plant_coverage = if restore_id.is_some_and(|id| id != 0) {
+                // An incoming strip must not wait for refinements elsewhere.
+                // Only admitted fallback coverage in the retiring area matters.
+                plants.naadf_retire_unresolved == 0
+            } else {
+                plants.pending_jobs == 0
+                    && plants.missing_tiles == 0
+                    && plants.missing_meshes == 0
+                    && plants.coverage_unresolved == 0
+                    && plants.requested_native_unresolved == 0
+            };
+            gpu.naadf_raster_restored = restore_id.is_some()
+                && plant_coverage
+                && self.adaptive_view.as_ref().is_none_or(|v| {
+                    Some(v.published_naadf_owner) == restore_id && v.coverage_ready
+                });
             gpu.update_naadf(&self.world, self.camera);
             let owner = gpu.naadf.as_ref().and_then(|n| n.desired_owner());
             if let Some(view) = &mut self.adaptive_view {

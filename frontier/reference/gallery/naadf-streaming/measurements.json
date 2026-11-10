@@ -1,0 +1,592 @@
+{
+  "binary_sha256": "20ddaea4e6f9730c295df941362bf29fe68bc614134a1a81132bffbe9b6a4bb9",
+  "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics",
+  "workspace_tests": {
+    "passed": 553,
+    "failed": 0,
+    "ignored": 16
+  },
+  "gpu_canonical_oracle": {
+    "coverage_decisions": 32768,
+    "covered_primary_and_shadow_samples": 17834
+  },
+  "legacy_primary_byte_equal": [
+    "PNG",
+    "linear RGB",
+    "depth"
+  ],
+  "walk256_conditions": {
+    "width": 1920,
+    "height": 1080,
+    "msaa": 1,
+    "preset": "alpine",
+    "seed": 7,
+    "clip_m": 6000,
+    "native_mesh_radius_m": 4,
+    "vegetation_near_m": 32,
+    "pixel_error": 5,
+    "route": "walk-stop-resume",
+    "route_speed_mps": 2.5,
+    "seconds": 120.0,
+    "lighting": "ordinary beauty and sun shadows",
+    "atmosphere": "on",
+    "naadf_estimate_ceiling_mib": 10240,
+    "resource_profile": "development; available RAM with system headroom"
+  },
+  "walk256_manifest": {
+    "radius_m": 256,
+    "cube_width_m": 512,
+    "top_grid_gpu_mib": 512.0,
+    "minimum_grid_build_copy_mib_before_payload": 1536.0,
+    "memory_before_mib": {
+      "MemTotal": 15287,
+      "MemAvailable": 9142,
+      "SwapFree": 0
+    },
+    "status": "ok",
+    "command": [
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+      "--preset",
+      "alpine",
+      "--seed",
+      "7",
+      "--naadf-radius",
+      "256",
+      "--naadf-follow",
+      "on",
+      "--msaa",
+      "1",
+      "--width",
+      "1920",
+      "--height",
+      "1080",
+      "--pixel-error",
+      "5",
+      "--atmosphere",
+      "on",
+      "--native-radius",
+      "4",
+      "--vegetation-near",
+      "32",
+      "--resource-profile",
+      "development",
+      "--adaptive-workers",
+      "10",
+      "--adaptive-refinements",
+      "32",
+      "--upload-mib",
+      "16",
+      "--no-adaptive-disk-cache",
+      "--adaptive-wait-quality",
+      "--benchmark-input-lock",
+      "--uncapped",
+      "--warmup",
+      "30",
+      "--seconds",
+      "120.0",
+      "--route",
+      "walk-stop-resume",
+      "--route-clock",
+      "realtime",
+      "--route-speed",
+      "2.5",
+      "--report",
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-stream-scope-walk256/r256.json",
+      "--capture-on-exit",
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-stream-scope-walk256/r256.png",
+      "--naadf-budget-mib",
+      "10240"
+    ],
+    "returncode": 0,
+    "wall_seconds": 298.29680423100945,
+    "minimum_available_system_ram_mib": 3096,
+    "measurements": {
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "frames": {
+        "sample_count": 5027,
+        "accepted_frames": 5027,
+        "missed_budget_frames": 4319,
+        "rejected_inputs": 0,
+        "p50_ms": 23.586019,
+        "p95_ms": 34.882130999999994,
+        "p99_ms": 39.202785
+      },
+      "process_memory": {
+        "rss_bytes": 2700328960,
+        "peak_rss_bytes": 6950043648,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "naadf": {
+        "status": "Uploading leading strips; restoring outgoing mesh coverage",
+        "stage": 100,
+        "requested_radius_m": 256,
+        "resident_radius_m": 256,
+        "world_bounds_m": [
+          [
+            -298.0,
+            -260.0,
+            -282.0
+          ],
+          [
+            214.0,
+            252.0,
+            230.0
+          ]
+        ],
+        "native_voxel_m": 0.0625,
+        "requested_build_budget_mib": 10240,
+        "gpu_payload_bytes": 2591849296,
+        "build_ms": 162590.746331,
+        "upload_cpu_ms": 247.76427800000008,
+        "mixed_chunks": 563227,
+        "unique_blocks": 4782565,
+        "sampled_columns": 67108864,
+        "plant_cells": 38674162,
+        "palette_entries": 6069,
+        "color_channel_bits": 10,
+        "refused": 0,
+        "fixed_snapshot": false,
+        "stream_shifts": 8,
+        "stream_build_ms": 4622.642978,
+        "stream_sampled_columns": 4194304,
+        "camera_margin_m": 219.85207571165697,
+        "min_camera_margin_m": 205.74731676625052,
+        "stream_active_frames": 5090,
+        "stream_outside_frames": 0,
+        "initial_snapshot_payload_bytes": 1905490768,
+        "lighting": "primary_visibility_lambert_without_GI",
+        "includes_distant_and_boundary_raster_overhead": true,
+        "interior_meshes_omitted": true,
+        "supports_direct_voxel_shadows": true,
+        "effective_build_budget_mib": 10240,
+        "auto_memory": false
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 4308,
+        "p50_ms": 21.445025814617157,
+        "p95_ms": 26.18427043809128,
+        "p99_ms": 29.833524065174103,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "naadf_gpu_pass": {
+        "samples": 4308,
+        "p50_ms": 12.99561182339859,
+        "p95_ms": 16.07061436631012,
+        "p99_ms": 18.517864171245574,
+        "scope": "primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "hybrid_mesh_residency": {
+        "certified_interior_clusters_retained": 0,
+        "overlap_boundary_clusters_retained": 16
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      },
+      "adaptive_route_quality": {
+        "measured_frames": 5027,
+        "coverage_ready_frames": 5027,
+        "quality_ready_frames": 3936,
+        "unbounded_error_frames": 61,
+        "max_finite_visible_error_px": 2235706.696828716,
+        "peak_unresolved_clusters": 160
+      }
+    },
+    "log_tail": "adapter: AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }\nadaptive route starts after settled quality with refinement reserve publication\ncaptured /home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-stream-scope-walk256/r256.png (1920x1080)\nframe intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 5027, accepted_frames: 5027, missed_budget_frames: 4319, rejected_inputs: 0, p50_ms: Some(23.586019), p95_ms: Some(34.882130999999994), p99_ms: Some(39.202785) }\nbenchmark JSON: /home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-stream-scope-walk256/r256.json"
+  },
+  "walk256_scoped_retirement": {
+    "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+    "scene": "adaptive",
+    "seed": 7,
+    "terrain_recipe": "Alpine",
+    "output": {
+      "width": 1920,
+      "height": 1080
+    },
+    "msaa_samples": 1,
+    "route": "WalkStopResume",
+    "route_speed_mps": 2.5,
+    "route_elapsed_seconds": 120.030722511,
+    "frames": {
+      "sample_count": 5027,
+      "accepted_frames": 5027,
+      "missed_budget_frames": 4319,
+      "rejected_inputs": 0,
+      "p50_ms": 23.586019,
+      "p95_ms": 34.882130999999994,
+      "p99_ms": 39.202785
+    },
+    "naadf": {
+      "status": "Uploading leading strips; restoring outgoing mesh coverage",
+      "stage": 100,
+      "requested_radius_m": 256,
+      "resident_radius_m": 256,
+      "world_bounds_m": [
+        [
+          -298.0,
+          -260.0,
+          -282.0
+        ],
+        [
+          214.0,
+          252.0,
+          230.0
+        ]
+      ],
+      "native_voxel_m": 0.0625,
+      "requested_build_budget_mib": 10240,
+      "gpu_payload_bytes": 2591849296,
+      "build_ms": 162590.746331,
+      "upload_cpu_ms": 247.76427800000008,
+      "mixed_chunks": 563227,
+      "unique_blocks": 4782565,
+      "sampled_columns": 67108864,
+      "plant_cells": 38674162,
+      "palette_entries": 6069,
+      "color_channel_bits": 10,
+      "refused": 0,
+      "fixed_snapshot": false,
+      "stream_shifts": 8,
+      "stream_build_ms": 4622.642978,
+      "stream_sampled_columns": 4194304,
+      "camera_margin_m": 219.85207571165697,
+      "min_camera_margin_m": 205.74731676625052,
+      "stream_active_frames": 5090,
+      "stream_outside_frames": 0,
+      "initial_snapshot_payload_bytes": 1905490768,
+      "lighting": "primary_visibility_lambert_without_GI",
+      "includes_distant_and_boundary_raster_overhead": true,
+      "interior_meshes_omitted": true,
+      "supports_direct_voxel_shadows": true,
+      "effective_build_budget_mib": 10240,
+      "auto_memory": false
+    },
+    "process_memory": {
+      "rss_bytes": 2700328960,
+      "peak_rss_bytes": 6950043648,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "hybrid_mesh_residency": {
+      "certified_interior_clusters_retained": 0,
+      "overlap_boundary_clusters_retained": 16
+    },
+    "adaptive_route_quality": {
+      "measured_frames": 5027,
+      "coverage_ready_frames": 5027,
+      "quality_ready_frames": 3936,
+      "unbounded_error_frames": 61,
+      "max_finite_visible_error_px": 2235706.696828716,
+      "peak_unresolved_clusters": 160
+    },
+    "camera_start": {
+      "position": [
+        -41.06016074388279,
+        28.95,
+        -250
+      ],
+      "yaw": 0.011565727,
+      "pitch": 0.17317964
+    },
+    "camera_end": [
+      -37.70048253730622,
+      9.878056940815775,
+      10.147924288343038
+    ],
+    "yaw_end": 0.011565727,
+    "horizontal_m": 260.1696176519949,
+    "last_frame": {
+      "native_clusters": 10,
+      "terrain_pending": 0,
+      "plant_pending": 0,
+      "plant_triangles": 0,
+      "rss_bytes": null
+    },
+    "vegetation": {
+      "pending_jobs": 0,
+      "missing_tiles": 0,
+      "missing_templates": 0,
+      "coverage_unresolved": 0,
+      "naadf_retire_unresolved": 0,
+      "gpu_bytes": 0
+    }
+  },
+  "walk256_initial_global_retirement_gate": {
+    "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+    "scene": "adaptive",
+    "seed": 7,
+    "terrain_recipe": "Alpine",
+    "output": {
+      "width": 1920,
+      "height": 1080
+    },
+    "msaa_samples": 1,
+    "route": "WalkStopResume",
+    "route_speed_mps": 2.5,
+    "route_elapsed_seconds": 120.005461448,
+    "frames": {
+      "sample_count": 4989,
+      "accepted_frames": 4989,
+      "missed_budget_frames": 3998,
+      "rejected_inputs": 0,
+      "p50_ms": 23.493339,
+      "p95_ms": 36.780547,
+      "p99_ms": 40.384040000000006
+    },
+    "naadf": {
+      "status": "Uploading leading strips; restoring outgoing mesh coverage",
+      "stage": 100,
+      "requested_radius_m": 256,
+      "resident_radius_m": 256,
+      "world_bounds_m": [
+        [
+          -298.0,
+          -228.0,
+          -410.0
+        ],
+        [
+          214.0,
+          284.0,
+          102.0
+        ]
+      ],
+      "native_voxel_m": 0.0625,
+      "requested_build_budget_mib": 10240,
+      "gpu_payload_bytes": 2591849296,
+      "build_ms": 159844.025869,
+      "upload_cpu_ms": 243.5971910000001,
+      "mixed_chunks": 563227,
+      "unique_blocks": 4782565,
+      "sampled_columns": 67108864,
+      "plant_cells": 38674162,
+      "palette_entries": 6069,
+      "color_channel_bits": 10,
+      "refused": 0,
+      "fixed_snapshot": false,
+      "stream_shifts": 3,
+      "stream_build_ms": 4973.775155,
+      "stream_sampled_columns": 4194304,
+      "camera_margin_m": 91.89736624649309,
+      "min_camera_margin_m": 91.89736624649309,
+      "stream_active_frames": 5051,
+      "stream_outside_frames": 0,
+      "initial_snapshot_payload_bytes": 1905490768,
+      "lighting": "primary_visibility_lambert_without_GI",
+      "includes_distant_and_boundary_raster_overhead": true,
+      "interior_meshes_omitted": true,
+      "supports_direct_voxel_shadows": true,
+      "effective_build_budget_mib": 10240,
+      "auto_memory": false
+    },
+    "process_memory": {
+      "rss_bytes": 2406170624,
+      "peak_rss_bytes": 6955036672,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "hybrid_mesh_residency": {
+      "certified_interior_clusters_retained": 0,
+      "overlap_boundary_clusters_retained": 24
+    },
+    "adaptive_route_quality": {
+      "measured_frames": 4989,
+      "coverage_ready_frames": 4989,
+      "quality_ready_frames": 4506,
+      "unbounded_error_frames": 23,
+      "max_finite_visible_error_px": 52272.04002268744,
+      "peak_unresolved_clusters": 151
+    },
+    "camera_start": {
+      "position": [
+        -41.06016074388279,
+        28.95,
+        -250
+      ],
+      "yaw": 0.011565727,
+      "pitch": 0.17317964
+    },
+    "camera_end": [
+      -37.7010646300413,
+      9.899026363502626,
+      10.10263375350691
+    ],
+    "yaw_end": 0.011565727,
+    "horizontal_m": 260.1243233767519,
+    "last_frame": {
+      "native_clusters": 25,
+      "terrain_pending": 6,
+      "plant_pending": 5,
+      "plant_triangles": 307984,
+      "rss_bytes": null
+    },
+    "vegetation": {
+      "pending_jobs": 5,
+      "missing_tiles": 0,
+      "missing_templates": 5,
+      "coverage_unresolved": 0,
+      "naadf_retire_unresolved": null,
+      "gpu_bytes": 6972912
+    }
+  },
+  "walk8": {
+    "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+    "scene": "adaptive",
+    "seed": 7,
+    "terrain_recipe": "Alpine",
+    "output": {
+      "width": 1920,
+      "height": 1080
+    },
+    "msaa_samples": 1,
+    "route": "Stationary",
+    "route_speed_mps": 3,
+    "route_elapsed_seconds": 36.014041226,
+    "frames": {
+      "sample_count": 2154,
+      "accepted_frames": 2154,
+      "missed_budget_frames": 1042,
+      "rejected_inputs": 0,
+      "p50_ms": 16.648556,
+      "p95_ms": 17.774134,
+      "p99_ms": 22.569707
+    },
+    "naadf": {
+      "status": "Ready \u00b7 following player",
+      "stage": 100,
+      "requested_radius_m": 8,
+      "resident_radius_m": 8,
+      "world_bounds_m": [
+        [
+          -58.0,
+          20.0,
+          -238.0
+        ],
+        [
+          -42.0,
+          36.0,
+          -222.0
+        ]
+      ],
+      "native_voxel_m": 0.0625,
+      "requested_build_budget_mib": 0,
+      "gpu_payload_bytes": 9796048,
+      "build_ms": 177.247434,
+      "upload_cpu_ms": 0.33007400000000003,
+      "mixed_chunks": 519,
+      "unique_blocks": 4825,
+      "sampled_columns": 65536,
+      "plant_cells": 25531,
+      "palette_entries": 1437,
+      "color_channel_bits": 10,
+      "refused": 0,
+      "fixed_snapshot": false,
+      "stream_shifts": 16,
+      "stream_build_ms": 6.740398,
+      "stream_sampled_columns": 8192,
+      "camera_margin_m": 7.304424199766004,
+      "min_camera_margin_m": 5.859157756096167,
+      "stream_active_frames": 2144,
+      "stream_outside_frames": 0,
+      "initial_snapshot_payload_bytes": 1407440,
+      "lighting": "primary_visibility_lambert_without_GI",
+      "includes_distant_and_boundary_raster_overhead": true,
+      "interior_meshes_omitted": true,
+      "supports_direct_voxel_shadows": true,
+      "effective_build_budget_mib": 8076,
+      "auto_memory": true
+    },
+    "process_memory": {
+      "rss_bytes": 1649152000,
+      "peak_rss_bytes": 1649152000,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "hybrid_mesh_residency": {
+      "certified_interior_clusters_retained": 0,
+      "overlap_boundary_clusters_retained": 8
+    },
+    "adaptive_route_quality": {
+      "measured_frames": 2154,
+      "coverage_ready_frames": 2154,
+      "quality_ready_frames": 1601,
+      "unbounded_error_frames": 250,
+      "max_finite_visible_error_px": 289491.89224134653,
+      "peak_unresolved_clusters": 59
+    },
+    "camera_start": {
+      "position": [
+        -41.06016074388279,
+        28.95,
+        -250
+      ],
+      "yaw": 0.011565727,
+      "pitch": 0.17317964
+    },
+    "camera_end": [
+      -49.489773511477885,
+      27.56250001,
+      -229.304424199766
+    ],
+    "yaw_end": -1.268434,
+    "horizontal_m": 22.346481358702388,
+    "last_frame": {
+      "native_clusters": 34,
+      "terrain_pending": 0,
+      "plant_pending": 0,
+      "plant_triangles": 3999806,
+      "rss_bytes": null
+    },
+    "vegetation": {
+      "pending_jobs": 0,
+      "missing_tiles": 0,
+      "missing_templates": 0,
+      "coverage_unresolved": 0,
+      "naadf_retire_unresolved": 0,
+      "gpu_bytes": 210220160
+    }
+  },
+  "walk8_command": [
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+    "--preset",
+    "alpine",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--seconds",
+    "36.0",
+    "--report",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-stream-scope-walk8/game.json",
+    "--naadf-radius",
+    "8",
+    "--naadf-follow",
+    "on",
+    "--msaa",
+    "1",
+    "--capture-far",
+    "300",
+    "--pixel-error",
+    "5",
+    "--native-radius",
+    "4",
+    "--vegetation-near",
+    "32",
+    "--resource-profile",
+    "development",
+    "--adaptive-workers",
+    "10",
+    "--adaptive-refinements",
+    "32",
+    "--upload-mib",
+    "16",
+    "--no-adaptive-disk-cache"
+  ]
+}

@@ -6,12 +6,30 @@ use frontier_world::{
     VOXEL_SIZE,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+/// A raster fallback is only needed for objects intersecting the part of
+/// the old exact region that will no longer be owned after publication.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Retirement {
+    pub old: [[f64; 3]; 2],
+    pub kept: [[f64; 3]; 2],
+}
+impl Retirement {
+    pub fn touches(self, bounds: [[f64; 3]; 2]) -> bool {
+        let lo: [f64; 3] = std::array::from_fn(|a| (self.old[0][a] + VOXEL_SIZE).max(bounds[0][a]));
+        let hi: [f64; 3] = std::array::from_fn(|a| (self.old[1][a] - VOXEL_SIZE).min(bounds[1][a]));
+        (0..3).all(|a| lo[a] < hi[a])
+            && (0..3).any(|a| {
+                lo[a] < self.kept[0][a] + VOXEL_SIZE || hi[a] > self.kept[1][a] - VOXEL_SIZE
+            })
+    }
+}
 #[derive(Debug)]
 pub(crate) struct Ownership {
     pub id: u64,
     pub bounds: [[f64; 3]; 2],
     n: usize,
-    unsafe_prefix: Vec<u32>,
+    grid_origin: [f64; 2],
+    unsafe_prefix: std::sync::Arc<Vec<u32>>,
 }
 impl Ownership {
     pub fn new(bounds: [[f64; 3]; 2], n: usize, safe: &[bool]) -> Self {
@@ -28,8 +46,16 @@ impl Ownership {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             bounds,
             n,
-            unsafe_prefix: prefix,
+            unsafe_prefix: std::sync::Arc::new(prefix),
+            grid_origin: [bounds[0][0], bounds[0][2]],
         }
+    }
+    pub fn crop(&self, bounds: [[f64; 3]; 2]) -> std::sync::Arc<Self> {
+        let mut s = Self::new(bounds, 0, &[]);
+        s.n = self.n;
+        s.grid_origin = self.grid_origin;
+        s.unsafe_prefix = self.unsafe_prefix.clone();
+        std::sync::Arc::new(s)
     }
     pub fn contains(&self, b: [[f64; 3]; 2]) -> bool {
         (0..3).all(|a| {
@@ -48,7 +74,10 @@ impl Ownership {
         let mut lo = [0usize; 2];
         let mut hi = lo;
         for a in 0..2 {
-            let origin = self.bounds[0][a * 2];
+            if min[a] - 1. < self.bounds[0][a * 2] || min[a] + width + 1. > self.bounds[1][a * 2] {
+                return false;
+            }
+            let origin = self.grid_origin[a];
             let l = (min[a] - origin).floor() as i64 - 1;
             let h = (min[a] + width - origin).ceil() as i64 + 1;
             if l < 0 || h > self.n as i64 {
@@ -63,12 +92,15 @@ impl Ownership {
                 + self.unsafe_prefix[lo[1] * stride + hi[0]]
     }
     pub fn plant(&self, p: &PlantRecord) -> bool {
+        self.contains(Self::plant_bounds(p))
+    }
+    pub fn plant_bounds(p: &PlantRecord) -> [[f64; 3]; 2] {
         let (r, h) = if p.species == Species::Rowan {
             (MAX_PLANT_RADIUS_CELLS, MAX_PLANT_HEIGHT_CELLS)
         } else {
             (8, 12)
         };
-        self.contains([
+        [
             [
                 p.root.x as f64 * VOXEL_SIZE - r as f64 * VOXEL_SIZE,
                 p.root.y as f64 * VOXEL_SIZE,
@@ -79,10 +111,13 @@ impl Ownership {
                 (p.root.y + h + 1) as f64 * VOXEL_SIZE,
                 (p.root.z + r + 1) as f64 * VOXEL_SIZE,
             ],
-        ])
+        ]
     }
     pub fn ground(&self, x: i64, z: i64, low: i64, high: i64) -> bool {
-        self.contains([
+        self.contains(Self::ground_bounds(x, z, low, high))
+    }
+    pub fn ground_bounds(x: i64, z: i64, low: i64, high: i64) -> [[f64; 3]; 2] {
+        [
             [
                 (x * 128 - 8) as f64 * VOXEL_SIZE,
                 low as f64 * VOXEL_SIZE,
@@ -93,7 +128,7 @@ impl Ownership {
                 (high + 13) as f64 * VOXEL_SIZE,
                 ((z + 1) * 128 + 8) as f64 * VOXEL_SIZE,
             ],
-        ])
+        ]
     }
 }
 
@@ -145,5 +180,16 @@ mod tests {
         cache.set_naadf_owner(None);
         let restored = cache.get_or_build(k, || false).unwrap();
         assert!(!restored.naadf_owned && !restored.is_empty());
+    }
+    #[test]
+    fn retirement_only_blocks_objects_touching_outgoing_voxels() {
+        let r = Retirement {
+            old: [[0.; 3], [16.; 3]],
+            kept: [[2., 0., 0.], [16.; 3]],
+        };
+        assert!(r.touches([[1., 4., 4.], [3., 5., 5.]]));
+        assert!(!r.touches([[4.; 3], [6.; 3]]));
+        assert!(!r.touches([[17.; 3], [20.; 3]]));
+        assert!(!r.touches([[4., 4., 4.], [20., 5., 5.]]));
     }
 }

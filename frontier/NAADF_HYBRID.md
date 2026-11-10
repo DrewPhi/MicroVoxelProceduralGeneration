@@ -1,5 +1,9 @@
 # Fixed-region NAADF hybrid checkpoint
 
+**Historical checkpoint.** [Moving-window NAADF](NAADF_STREAMING.md) now follows
+the player when enabled. The fixed-mode measurements below remain reproducible
+with `--naadf-follow off`.
+
 This extends the [initial overlay experiment](NAADF_EXPERIMENT.md). The later
 [256 m checkpoint](NAADF_256M.md) measures the larger explicit-memory configuration. It is optional,
 default off, and still a fixed snapshot rather than continuous NAADF streaming.

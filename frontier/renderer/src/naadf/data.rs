@@ -19,11 +19,20 @@ pub struct Pigment {
     pub rgb: [f32; 3],
     pub material: u32,
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ColumnSummary {
+    pub low: i64,
+    pub high: i64,
+    pub deep: u32,
+    pub fast: bool,
+}
 #[derive(Debug)]
 pub struct Snapshot {
     pub ownership: std::sync::Arc<super::ownership::Ownership>,
     pub origin: Cell,
     pub chunks_per_edge: u32,
+    pub dims: [usize; 3],
+    pub columns: Vec<ColumnSummary>,
     /// Y-fast layout: (z*n+x)*n+y. Texture coordinates are (y,x,z).
     pub chunks: Vec<u32>,
     pub blocks: Vec<u32>,
@@ -43,7 +52,7 @@ impl Snapshot {
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
         let lo = [self.origin.x, self.origin.y, self.origin.z].map(|v| v as f64 * VOXEL_SIZE);
-        [lo, lo.map(|v| v + self.chunks_per_edge as f64)]
+        [lo, std::array::from_fn(|a| lo[a] + self.dims[a] as f64)]
     }
     #[cfg(test)]
     pub fn material(&self, p: [usize; 3]) -> u32 {
@@ -240,23 +249,22 @@ fn budget(s: &Snapshot, overlay: usize, hash_capacity: usize, limit: usize) -> R
     }
     Ok(())
 }
-fn address(c: Cell, min: Cell, n: usize) -> Option<u64> {
+fn address(c: Cell, min: Cell, dims: [usize; 3]) -> Option<u64> {
     let p = [c.x - min.x, c.y - min.y, c.z - min.z];
-    let edge = n as i64 * 16;
-    if p.iter().any(|v| *v < 0 || *v >= edge) {
+    if (0..3).any(|a| p[a] < 0 || p[a] >= dims[a] as i64 * 16) {
         return None;
     }
     let q = p.map(|v| v as usize);
-    let chunk = ((q[2] / 16 * n + q[0] / 16) * n + q[1] / 16) as u64;
+    let chunk = ((q[2] / 16 * dims[0] + q[0] / 16) * dims[1] + q[1] / 16) as u64;
     Some(chunk * 4096 + (q[0] % 16 + 16 * (q[1] % 16 + 16 * (q[2] % 16))) as u64)
 }
-fn cell_at(a: u64, min: Cell, n: usize) -> Cell {
+fn cell_at(a: u64, min: Cell, dims: [usize; 3]) -> Cell {
     let c = a / 4096;
     let v = a % 4096;
     Cell {
-        x: min.x + ((c as usize / n) % n * 16) as i64 + (v % 16) as i64,
-        y: min.y + (c as usize % n * 16) as i64 + ((v / 16) % 16) as i64,
-        z: min.z + (c as usize / (n * n) * 16) as i64 + (v / 256) as i64,
+        x: min.x + ((c as usize / dims[1]) % dims[0] * 16) as i64 + (v % 16) as i64,
+        y: min.y + (c as usize % dims[1] * 16) as i64 + ((v / 16) % 16) as i64,
+        z: min.z + (c as usize / (dims[0] * dims[1]) * 16) as i64 + (v / 256) as i64,
     }
 }
 pub fn build(
@@ -265,9 +273,8 @@ pub fn build(
     radius: u32,
     limit: usize,
     stage: &AtomicU32,
-    cancel: impl Fn() -> bool,
+    cancel: impl Fn() -> bool + Sync,
 ) -> Result<Snapshot, String> {
-    let start = Instant::now();
     if eye.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
         return Err("NAADF eye outside supported finite coordinate range".into());
     }
@@ -289,11 +296,34 @@ pub fn build(
         y: centre.y.div_euclid(16) * 16 - r,
         z: centre.z.div_euclid(16) * 16 - r,
     };
-    let mut safe_columns = vec![false; n * n];
+    build_region(world, min, [n; 3], limit, stage, None, &cancel)
+}
+
+pub fn build_region(
+    world: &World,
+    min: Cell,
+    dims: [usize; 3],
+    limit: usize,
+    stage: &AtomicU32,
+    cached: Option<&(dyn Fn(i64, i64) -> Option<ColumnSummary> + Sync)>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Snapshot, String> {
+    let start = Instant::now();
+    if dims.iter().any(|v| *v == 0 || *v > 512) {
+        return Err("invalid NAADF region dimensions".into());
+    }
+    let [nx, ny, nz] = dims;
+    let count = nx * ny * nz;
+    if count.saturating_mul(12) > limit {
+        return Err("NAADF strip exceeds build budget".into());
+    }
+    let mut safe_columns = vec![false; nx * nz];
     let mut out = Snapshot {
         ownership: std::sync::Arc::new(super::ownership::Ownership::new([[0.; 3]; 2], 0, &[])),
         origin: min,
-        chunks_per_edge: n as u32,
+        chunks_per_edge: nx as u32,
+        dims,
+        columns: vec![ColumnSummary::default(); nx * nz],
         chunks: vec![0; count],
         blocks: vec![],
         voxels: vec![],
@@ -311,7 +341,7 @@ pub fn build(
     let pad = vegetation::MAX_PLANT_RADIUS_CELLS;
     let mut records = world.vegetation_records(
         [min.x - pad, min.z - pad],
-        [min.x + n as i64 * 16 + pad, min.z + n as i64 * 16 + pad],
+        [min.x + nx as i64 * 16 + pad, min.z + nz as i64 * 16 + pad],
     );
     // For intersections between models below, ask the canonical lookup rather
     // than infer precedence from this enumeration's ordering.
@@ -342,11 +372,11 @@ pub fn build(
             12
         };
         if record.root.x + radius < min.x
-            || record.root.x - radius >= min.x + n as i64 * 16
+            || record.root.x - radius >= min.x + nx as i64 * 16
             || record.root.z + radius < min.z
-            || record.root.z - radius >= min.z + n as i64 * 16
+            || record.root.z - radius >= min.z + nz as i64 * 16
             || record.root.y + height < min.y
-            || record.root.y >= min.y + n as i64 * 16
+            || record.root.y >= min.y + ny as i64 * 16
         {
             continue;
         }
@@ -354,7 +384,7 @@ pub fn build(
             return Err("NAADF build superseded".into());
         };
         for v in &model.voxels {
-            if let Some(a) = address(record.world_cell(v.cell), min, n) {
+            if let Some(a) = address(record.world_cell(v.cell), min, dims) {
                 let ty = pigment(&mut out.palette, &mut pigments, v.color, v.material)?;
                 overlay.push(((a as u128) << 32) | ty as u128);
             }
@@ -377,7 +407,7 @@ pub fn build(
             overlay[i] as u32
         } else {
             let v = world
-                .vegetation_voxel(cell_at(a as u64, min, n))
+                .vegetation_voxel(cell_at(a as u64, min, dims))
                 .ok_or("canonical plant overlap lookup failed")?;
             pigment(&mut out.palette, &mut pigments, v.color, v.material)?
         };
@@ -391,25 +421,41 @@ pub fn build(
     // cells use the ordinary semantic palette, matching canonical material.
     let edits: HashMap<u64, u32> = world
         .edit_cells()
-        .filter_map(|c| address(c, min, n).map(|a| (a, id(world.material(c)))))
+        .filter_map(|c| address(c, min, dims).map(|a| (a, id(world.material(c)))))
         .collect();
     let edited_columns: HashSet<_> = world
         .edit_cells()
         .filter(|c| {
             c.x >= min.x
-                && c.x < min.x + n as i64 * 16
+                && c.x < min.x + nx as i64 * 16
                 && c.z >= min.z
-                && c.z < min.z + n as i64 * 16
+                && c.z < min.z + nz as i64 * 16
         })
         .map(|c| (c.x.div_euclid(16), c.z.div_euclid(16)))
         .collect();
     let mut leaves = HashMap::<[u32; 64], u32>::new();
     let mut cursor = 0;
     stage.store(2, Ordering::Relaxed);
-    for cz in 0..n {
-        for cx in 0..n {
+    for cz in 0..nz {
+        for cx in 0..nx {
             if cancel() {
                 return Err("NAADF build superseded".into());
+            }
+            let summary = cached.and_then(|f| f(min.x / 16 + cx as i64, min.z / 16 + cz as i64));
+            let plant_column = overlay
+                .get(cursor)
+                .is_some_and(|p| (p >> 44) / ny as u128 == (cz * nx + cx) as u128);
+            if let Some(v) = summary.filter(|v| v.fast && edits.is_empty() && !plant_column) {
+                let air = min.y >= v.high;
+                let solid = min.y + ny as i64 * 16 < v.low - 12 && v.deep != 0;
+                if air || solid {
+                    out.columns[cz * nx + cx] = v;
+                    if solid {
+                        out.chunks[(cz * nx + cx) * ny..(cz * nx + cx + 1) * ny]
+                            .fill(FULL | v.deep);
+                    }
+                    continue;
+                }
             }
             let columns: Vec<_> = (0..16)
                 .flat_map(|z| (0..16).map(move |x| (x, z)))
@@ -443,12 +489,22 @@ pub fn build(
                     min.x.div_euclid(16) + cx as i64,
                     min.z.div_euclid(16) + cz as i64,
                 ));
-            safe_columns[cz * n + cx] = fast
+            safe_columns[cz * nx + cx] = fast
                 && heights
                     .iter()
-                    .all(|h| *h > min.y + 1 && *h < min.y + n as i64 * 16 - 1);
-            for cy in 0..n {
-                let ci = (cz * n + cx) * n + cy;
+                    .all(|h| *h > min.y + 1 && *h < min.y + ny as i64 * 16 - 1);
+            out.columns[cz * nx + cx] = ColumnSummary {
+                low: *heights.iter().min().unwrap(),
+                high: *heights.iter().max().unwrap(),
+                deep: if bands.iter().all(|b| b[2] == bands[0][2]) {
+                    bands[0][2]
+                } else {
+                    0
+                },
+                fast,
+            };
+            for cy in 0..ny {
+                let ci = (cz * nx + cx) * ny + cy;
                 let y0 = min.y + (cy * 16) as i64;
                 let plant_start = cursor;
                 while cursor < overlay.len() && (overlay[cursor] >> 44) == ci as u128 {
@@ -563,7 +619,7 @@ pub fn build(
                 limit,
             )?;
             stage.store(
-                10 + ((cz * n + cx) * 70 / (n * n)) as u32,
+                10 + ((cz * nx + cx) * 70 / (nx * nz)) as u32,
                 Ordering::Relaxed,
             );
         }
@@ -573,12 +629,14 @@ pub fn build(
     drop(overlay);
     drop(pigments);
     stage.store(85, Ordering::Relaxed);
-    bounds(&mut out.chunks, [n; 3], [n, 1, n * n], 5, &cancel)?;
-    out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
-        out.bounds(),
-        n,
-        &safe_columns,
-    ));
+    bounds(&mut out.chunks, dims, [ny, 1, nx * ny], 5, &cancel)?;
+    if nx == nz {
+        out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
+            out.bounds(),
+            nx,
+            &safe_columns,
+        ));
+    }
     out.build_ms = start.elapsed().as_secs_f64() * 1000.;
     stage.store(100, Ordering::Relaxed);
     Ok(out)

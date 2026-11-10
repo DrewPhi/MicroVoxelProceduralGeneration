@@ -317,5 +317,6 @@ The [cozy meadow checkpoint](frontier/COZY_SCENE.md) describes the current Alpin
 Esc → **NAADF experiment** exposes an enable switch, 1–256 m cube radius, build
 budget, status and GPU payload. Apply changes, or use **Rebuild NAADF here** to
 recenter. Start with `./frontier/run.sh --preset alpine --naadf-radius 64`.
-This is a fixed snapshot visibility prototype; distant terrain retains the
-existing backend. See [implementation, limits and measurements](frontier/NAADF_HYBRID.md).
+The exact voxel window follows the player by default and reuses overlapping
+strips. Distant terrain retains the existing backend. See the [streaming design
+and measurements](frontier/NAADF_STREAMING.md).

@@ -1,5 +1,8 @@
 # Successful 256 m NAADF hybrid — November 10, 2026
 
+**Historical fixed-region test.** See [moving-window NAADF](NAADF_STREAMING.md)
+for the later walking implementation and measurements.
+
 The laptop completed a **256 m cube half-extent**: a **512×512×512 m** region
 represented at canonical **6.25 cm** voxel resolution. It reached **52.3 FPS
 median at 1920×1080**, with ordinary sun shadows, atmosphere and the existing

@@ -75,6 +75,7 @@ pub struct VegetationStats {
     pub coverage_fallbacks: usize,
     pub coverage_unresolved: usize,
     pub requested_native_unresolved: usize,
+    pub naadf_retire_unresolved: usize,
     /// Offline native reference is incomplete if the global budget rejected a plant.
     pub reference_budget_exceeded: bool,
     pub reference: bool,
@@ -605,6 +606,7 @@ pub struct VegetationStream {
     benchmark_base_radii: [f64; 3],
     shadows_enabled: bool,
     naadf_owner: Option<Arc<crate::naadf::ownership::Ownership>>,
+    naadf_retirement: Option<crate::naadf::ownership::Retirement>,
     pub naadf_omitted: usize,
     pub naadf_omitted_keys: BTreeSet<MeshKey>,
     world: World,
@@ -811,6 +813,7 @@ impl VegetationStream {
             ],
             shadows_enabled: true,
             naadf_owner: None,
+            naadf_retirement: None,
             naadf_omitted: 0,
             naadf_omitted_keys: BTreeSet::new(),
             edits: world.edit_cells().collect(),
@@ -875,6 +878,12 @@ impl VegetationStream {
         self.tile_started.clear();
         self.pending_meshes.clear();
         self.mesh_started.clear();
+    }
+    pub(crate) fn set_naadf_retirement(&mut self, r: Option<crate::naadf::ownership::Retirement>) {
+        if self.naadf_retirement != r {
+            self.naadf_retirement = r;
+            self.stable_frame = None;
+        }
     }
     pub(crate) fn set_visibility_benchmark(&mut self, enabled: bool, radius: u32, eye: [f64; 3]) {
         if self.visibility_benchmark == enabled && self.benchmark_radius == radius {
@@ -1201,7 +1210,8 @@ impl VegetationStream {
             .filter(|(key, _)| key == &group_key);
         let ground_reused = previous.is_some();
         let mut ground = previous.map_or_else(BTreeMap::new, |(_, groups)| groups);
-        for (_, _, t) in demand {
+        let retirement = self.naadf_retirement;
+        for (deadline, _, t) in demand {
             if let Some((records, used)) = self.tiles.get_mut(&t) {
                 *used = self.tick;
                 for p in records.iter() {
@@ -1254,6 +1264,27 @@ impl VegetationStream {
                 }
             } else {
                 stats.missing_tiles += 1;
+                // A not-yet-enumerated tile may contain outgoing objects.
+                // Ignore speculative tiles and conservatively cover the roots
+                // plus their maximum horizontal extent; height is unknown.
+                if deadline == 0.
+                    && retirement.is_some_and(|r| {
+                        r.touches([
+                            [
+                                t.x as f64 * 32. - 16.,
+                                f64::NEG_INFINITY,
+                                t.z as f64 * 32. - 16.,
+                            ],
+                            [
+                                (t.x + 1) as f64 * 32. + 16.,
+                                f64::INFINITY,
+                                (t.z + 1) as f64 * 32. + 16.,
+                            ],
+                        ])
+                    })
+                {
+                    stats.naadf_retire_unresolved += 1;
+                }
                 if !self.background_paused
                     && submitted < self.workers.len()
                     && !self.pending_tiles.contains(&t)
@@ -1270,6 +1301,7 @@ impl VegetationStream {
                 }
             }
         }
+        let mut retiring_ground = std::collections::HashSet::new();
         for (&(s, x, z), records) in &ground {
             let dx = (x as f64 + 0.5) * 8. - camera[0];
             let dz = (z as f64 + 0.5) * 8. - camera[2];
@@ -1339,6 +1371,13 @@ impl VegetationStream {
                 },
                 rotation: 0,
             };
+            if retirement.is_some_and(|r| {
+                r.touches(crate::naadf::ownership::Ownership::ground_bounds(
+                    x, z, low, high,
+                ))
+            }) {
+                retiring_ground.insert((s, x, z));
+            }
             plants.push((distance, p));
         }
         self.naadf_omitted_keys.extend(omitted_keys.iter().copied());
@@ -1576,6 +1615,14 @@ impl VegetationStream {
             if fade <= 0. {
                 continue;
             }
+            let needs_restore = if s == 2 {
+                retirement.is_some_and(|r| {
+                    r.touches(crate::naadf::ownership::Ownership::plant_bounds(&p))
+                })
+            } else {
+                retiring_ground.contains(&(s, p.root.x.div_euclid(128), p.root.z.div_euclid(128)))
+            };
+            stats.naadf_retire_unresolved += usize::from(needs_restore);
             stats.demanded_by_species[s as usize] += 1;
             let mut lod = selected_stride(distance, projection, &self.config);
             // More conservative tree contour than ground cover.
@@ -1902,6 +1949,7 @@ impl VegetationStream {
                 if force_native {
                     stats.requested_native_unresolved -= 1;
                 }
+                stats.naadf_retire_unresolved -= usize::from(needs_restore);
                 stats.selected_instances += 1;
                 stats.triangles += tris;
                 stats.selected_by_species[s as usize] += 1;

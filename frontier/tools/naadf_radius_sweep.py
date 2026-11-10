@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/frontier')
     parser.add_argument('--radii', nargs='+', type=int, default=[1024, 512, 256, 128, 64, 32, 16])
     parser.add_argument('--seconds', type=float, default=10.)
+    parser.add_argument('--route', choices=['static', 'walk-stop-resume', 'walk-turn-return'], default='static')
+    parser.add_argument('--route-speed', type=float, default=2.5)
     parser.add_argument('--atmosphere', choices=['on', 'off'], default='on')
     parser.add_argument('--naadf-budget-mib', type=int,
                         help='Explicit conservative build-estimate ceiling; actual RAM watchdog remains active')
@@ -41,8 +43,10 @@ def main():
     args = parser.parse_args()
     if args.naadf_budget_mib is not None and not 16 <= args.naadf_budget_mib <= 16384:
         parser.error('NAADF estimate ceiling must be 16..16384MiB')
-    if not math.isfinite(args.seconds) or not .1 <= args.seconds <= 60:
-        parser.error('sample seconds must be finite and between 0.1 and 60')
+    if not math.isfinite(args.route_speed) or args.route_speed <= 0:
+        parser.error('route speed must be finite and positive')
+    if not math.isfinite(args.seconds) or not .1 <= args.seconds <= 180:
+        parser.error('sample seconds must be finite and between 0.1 and 180')
     if len(set(args.radii)) != len(args.radii):
         parser.error('radii must be unique to preserve each result')
     if any(not 1 <= r <= 1024 for r in args.radii):
@@ -61,7 +65,8 @@ def main():
         'conditions': {'width': 1920, 'height': 1080, 'msaa': 1,
                        'preset': 'alpine', 'seed': 7, 'clip_m': 6000,
                        'native_mesh_radius_m': 4, 'vegetation_near_m': 32,
-                       'pixel_error': 5, 'route': 'static', 'seconds': args.seconds,
+                       'pixel_error': 5, 'route': args.route, 'route_speed_mps': args.route_speed,
+                       'seconds': args.seconds,
                        'lighting': 'ordinary beauty and sun shadows',
                        'atmosphere': args.atmosphere,
                        'naadf_estimate_ceiling_mib': args.naadf_budget_mib,
@@ -95,7 +100,7 @@ def main():
             continue
         report = out / (name + '.json')
         command = [str(args.binary.resolve()), '--preset', 'alpine', '--seed', '7',
-                   '--naadf-radius', str(radius), '--msaa', '1',
+                   '--naadf-radius', str(radius), '--naadf-follow', 'off' if args.route == 'static' else 'on', '--msaa', '1',
                    '--width', '1920', '--height', '1080', '--pixel-error', '5',
                    '--atmosphere', args.atmosphere,
                    '--native-radius', '4', '--vegetation-near', '32',
@@ -104,7 +109,8 @@ def main():
                    '--adaptive-refinements', '32', '--upload-mib', '16',
                    '--no-adaptive-disk-cache', '--adaptive-wait-quality',
                    '--benchmark-input-lock', '--uncapped', '--warmup', '30',
-                   '--seconds', str(args.seconds), '--route', 'static',
+                   '--seconds', str(args.seconds), '--route', args.route,
+                   '--route-clock', 'realtime', '--route-speed', str(args.route_speed),
                    '--report', str(report), '--capture-on-exit', str(out / (name + '.png'))]
         case['command'] = command
         if args.naadf_budget_mib is not None:
@@ -124,7 +130,7 @@ def main():
                     low = min(low, available)
                     if available < reserve:
                         stopped = 'watchdog_low_available_ram'
-                    elif time.monotonic() - started > 330:
+                    elif time.monotonic() - started > 330 + args.seconds:
                         stopped = 'watchdog_preparation_timeout'
                     if stopped:
                         child.terminate()

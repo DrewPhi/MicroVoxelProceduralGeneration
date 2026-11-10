@@ -1,6 +1,6 @@
 // Shared exact hierarchy for primary rays and occlusion queries. Generated
 // with group0 for the ray pass and the shared near-shadow group for mesh receivers.
-struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>};
+struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>,ring:vec4<u32>};
 struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE) var<uniform> naadf:NaadfCamera;
 @group(NAADF_GROUP) @binding(NAADF_BASE+1u) var chunks:texture_3d<u32>;
@@ -31,7 +31,10 @@ fn trace_voxels(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool)->VoxelHit {
     for(var iteration=0u;iteration<budget;iteration++) {
         if any(cell<vec3(0))||any(cell>=extent){break;}
         let c=vec3<u32>(cell);let cp=c/16u;
-        var node=textureLoad(chunks,vec3<i32>(cp.yxz),0).x;
+        let address=cp+naadf.ring.xyz;
+        let size=vec3(naadf.extent.w);
+        let slot=select(address,address-size,address>=size);
+        var node=textureLoad(chunks,vec3<i32>(slot.yxz),0).x;
         var scale=16u;var bits=5u;var parent_lo=vec3(0);var parent_hi=extent;
         if (node&0x80000000u)!=0u {
             let bp=(c%16u)/4u;node=blocks[(node&0x3fffffffu)+bp.x+4u*(bp.y+4u*bp.z)];

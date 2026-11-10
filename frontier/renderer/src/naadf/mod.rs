@@ -1,10 +1,11 @@
-//! Optional, fixed-region NAADF visibility experiment. It never substitutes a
-//! partial snapshot. Outside its published region the regular renderer owns
-//! coverage. This is not a production streaming implementation or the GI paper.
+//! Optional exact NAADF window. Leading strips are generated and uploaded
+//! asynchronously; the existing renderer covers the exterior and handoff.
 mod data;
 pub(crate) mod ownership;
+mod stream;
 #[cfg(test)]
 mod tests;
+mod upload;
 use super::{Camera, Gpu};
 use bytemuck::{Pod, Zeroable};
 use data::Snapshot;
@@ -32,6 +33,7 @@ struct Request {
     vegetation: bool,
     serial: u64,
     samples: u32,
+    follow: bool,
 }
 
 // This bounds the conservative allocation estimate, not reserved physical RAM.
@@ -44,16 +46,27 @@ fn build_budget_limit(requested: usize, available: usize) -> usize {
         requested
     }
 }
+enum Job {
+    Build(u64, Request, World, [f64; 3]),
+    Install(u64, Snapshot, [usize; 3]),
+    Shift(u64, World, stream::Region, usize),
+    Finish(stream::Change, bool),
+    Reset,
+}
+enum Reply {
+    Built(Snapshot),
+    Shifted(stream::Change),
+}
 struct Worker {
-    tx: Option<mpsc::Sender<(u64, Request, World, [f64; 3])>>,
-    rx: mpsc::Receiver<(u64, Result<Snapshot, String>)>,
+    tx: Option<mpsc::Sender<Job>>,
+    rx: mpsc::Receiver<(u64, Result<Reply, String>)>,
     epoch: Arc<AtomicU64>,
     stage: Arc<AtomicU32>,
     handle: Option<thread::JoinHandle<()>>,
 }
 impl Worker {
     fn new() -> Self {
-        let (tx, input) = mpsc::channel::<(u64, Request, World, [f64; 3])>();
+        let (tx, input) = mpsc::channel::<Job>();
         let (output, rx) = mpsc::channel();
         let epoch = Arc::new(AtomicU64::new(0));
         let stage = Arc::new(AtomicU32::new(0));
@@ -62,21 +75,53 @@ impl Worker {
         let handle = thread::Builder::new()
             .name("naadf-build".into())
             .spawn(move || {
-                while let Ok(mut job) = input.recv() {
-                    while let Ok(new) = input.try_recv() {
-                        job = new;
-                    }
-                    let (generation, r, w, eye) = job;
-                    if e.load(Ordering::Relaxed) != generation {
-                        continue;
-                    }
-                    let result = data::build(&w, eye, r.radius, r.budget, &s, || {
-                        e.load(Ordering::Relaxed) != generation
-                    });
-                    if e.load(Ordering::Relaxed) == generation
-                        && output.send((generation, result)).is_err()
-                    {
-                        break;
+                let mut state: Option<stream::State> = None;
+                while let Ok(job) = input.recv() {
+                    match job {
+                        Job::Build(g, r, w, eye) => {
+                            if e.load(Ordering::Relaxed) != g {
+                                continue;
+                            }
+                            state = None;
+                            let result = data::build(&w, eye, r.radius, r.budget, &s, || {
+                                e.load(Ordering::Relaxed) != g
+                            })
+                            .map(Reply::Built);
+                            if e.load(Ordering::Relaxed) == g && output.send((g, result)).is_err() {
+                                break;
+                            }
+                        }
+                        Job::Install(g, s, c) => {
+                            if e.load(Ordering::Relaxed) == g {
+                                state = Some(stream::State::new(s, c));
+                            }
+                        }
+                        Job::Shift(g, w, r, budget) => {
+                            if e.load(Ordering::Relaxed) != g {
+                                continue;
+                            }
+                            let result = state
+                                .as_mut()
+                                .ok_or_else(|| "NAADF streaming state unavailable".to_string())
+                                .and_then(|s| {
+                                    s.prepare(&w, r, budget, &|| e.load(Ordering::Relaxed) != g)
+                                });
+                            if e.load(Ordering::Relaxed) != g {
+                                if let (Some(s), Ok(c)) = (&mut state, result) {
+                                    s.finish(c, false);
+                                }
+                                continue;
+                            }
+                            if output.send((g, result.map(Reply::Shifted))).is_err() {
+                                break;
+                            }
+                        }
+                        Job::Finish(c, commit) => {
+                            if let Some(s) = &mut state {
+                                s.finish(c, commit);
+                            }
+                        }
+                        Job::Reset => state = None,
                     }
                 }
             })
@@ -88,6 +133,9 @@ impl Worker {
             stage,
             handle: Some(handle),
         }
+    }
+    fn send(&self, job: Job) {
+        let _ = self.tx.as_ref().unwrap().send(job);
     }
     fn cancel(&self) {
         self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -118,6 +166,7 @@ struct Uniform {
     right: [f32; 4],
     up: [f32; 4],
     projection: [f32; 4],
+    ring: [u32; 4],
 }
 struct Volume {
     resources: Bindings,
@@ -130,6 +179,8 @@ struct Volume {
     voxels: wgpu::Buffer,
     palette: wgpu::Buffer,
     bounds: [[f64; 3]; 2],
+    ring: [u32; 3],
+    capacities: [usize; 3],
     n: u32,
     bytes: usize,
     samples: u32,
@@ -188,9 +239,28 @@ impl Pending {
                 mapped_at_creation: false,
             })
         };
-        let blocks = buffer(snapshot.blocks.len() * 4, "NAADF block words");
-        let voxels = buffer(snapshot.voxels.len() * 4, "NAADF voxel words");
-        let palette = buffer(snapshot.palette.len() * 16, "NAADF exact plant pigments");
+        let follow = gpu.visual_settings.as_ref().is_some_and(|s| s.naadf_follow);
+        let max = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size as u64) as usize;
+        let grow = |used: usize, extra: usize| {
+            if follow {
+                (used + used / 2)
+                    .max(used + extra)
+                    .min(max & !255)
+                    .max(used)
+            } else {
+                used
+            }
+        };
+        let capacities = [
+            grow(snapshot.blocks.len() * 4, 2 * 1048576),
+            grow(snapshot.voxels.len() * 4, 4 * 1048576),
+            grow(snapshot.palette.len() * 16, 2 * 1048576),
+        ];
+        let blocks = buffer(capacities[0], "NAADF block words");
+        let voxels = buffer(capacities[1], "NAADF voxel words");
+        let palette = buffer(capacities[2], "NAADF exact plant pigments");
         let uniform = gpu
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -245,6 +315,8 @@ impl Pending {
             voxels,
             palette,
             bounds: snapshot.bounds(),
+            ring: [0; 3],
+            capacities,
             n,
             bytes: snapshot.bytes(),
             samples: gpu.sample_count,
@@ -346,6 +418,15 @@ pub struct Experiment {
     epoch: u64,
     active: Option<Volume>,
     pending: Option<Pending>,
+    shift: Option<upload::PendingShift>,
+    shifting: bool,
+    shifts: u64,
+    strip_ms: f64,
+    strip_columns: usize,
+    camera_margin_m: f64,
+    min_camera_margin_m: Option<f64>,
+    stream_active_frames: u64,
+    stream_outside_frames: u64,
     pub status: String,
     pub stage: u32,
     pub upload_ms: f64,
@@ -363,6 +444,15 @@ impl Default for Experiment {
             epoch: 0,
             active: None,
             pending: None,
+            shift: None,
+            shifting: false,
+            shifts: 0,
+            strip_ms: 0.,
+            strip_columns: 0,
+            camera_margin_m: 0.,
+            min_camera_margin_m: None,
+            stream_active_frames: 0,
+            stream_outside_frames: 0,
             status: "Off".into(),
             stage: 0,
             upload_ms: 0.,
@@ -396,7 +486,12 @@ impl Experiment {
             }
         }
         if !s.naadf_enabled {
-            self.worker.cancel();
+            if self.request.is_some() {
+                self.worker.cancel();
+                self.worker.send(Job::Reset);
+            }
+            self.shift = None;
+            self.shifting = false;
             self.request = None;
             self.pending = None;
             self.restoring_raster = self.active.is_some();
@@ -428,6 +523,7 @@ impl Experiment {
             vegetation: world.vegetation_enabled(),
             serial,
             samples: 0,
+            follow: s.naadf_follow,
         };
         if self.request != Some(r) {
             self.restoring_raster = self.active.is_some();
@@ -438,6 +534,8 @@ impl Experiment {
             self.epoch = self.worker.epoch.load(Ordering::Relaxed);
             self.request = Some(r);
             self.pending = None;
+            self.shift = None;
+            self.shifting = false;
             if self
                 .active
                 .as_ref()
@@ -461,7 +559,7 @@ impl Experiment {
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
-            let _ = self.worker.tx.as_ref().unwrap().send((
+            self.worker.send(Job::Build(
                 self.epoch,
                 job,
                 world.clone(),
@@ -469,26 +567,68 @@ impl Experiment {
             ));
         }
         if pressure {
-            self.worker.cancel();
-            self.pending = None;
-            self.status = "NAADF build cancelled: low available RAM; rebuild here to retry".into();
-            self.error = Some(self.status.clone());
+            if self.active.is_some() && self.published_epoch == self.epoch {
+                if self.shifting {
+                    self.worker.cancel();
+                    self.epoch = self.worker.epoch.load(Ordering::Relaxed);
+                    self.published_epoch = self.epoch;
+                    self.shifting = false;
+                    if let Some(p) = self.shift.take() {
+                        self.worker.send(Job::Finish(p.change, false));
+                    }
+                }
+                while let Ok((_, result)) = self.worker.rx.try_recv() {
+                    if let Ok(Reply::Shifted(c)) = result {
+                        self.worker.send(Job::Finish(c, false));
+                    }
+                }
+                self.status = "NAADF streaming paused: low available RAM".into();
+            } else {
+                self.worker.cancel();
+                self.pending = None;
+                self.status =
+                    "NAADF build cancelled: low available RAM; rebuild here to retry".into();
+                self.error = Some(self.status.clone());
+            }
             return;
         }
         self.stage = self.worker.stage.load(Ordering::Relaxed);
         while let Ok((epoch, result)) = self.worker.rx.try_recv() {
             if epoch != self.epoch {
+                // A stale prepared strip may own reservations in the current
+                // arena after pressure cancellation. Full rebuilds replace it.
+                if self.active.is_some()
+                    && self.published_epoch == self.epoch
+                    && !self.restoring_raster
+                {
+                    if let Ok(Reply::Shifted(c)) = result {
+                        self.worker.send(Job::Finish(c, false));
+                    }
+                }
                 continue;
             }
-            match result.and_then(|snapshot| Pending::new(gpu, snapshot)) {
-                Ok(p) => {
-                    self.pending = Some(p);
-                    self.status = "Uploading complete snapshot".into();
+            match result {
+                Ok(Reply::Built(snapshot)) => match Pending::new(gpu, snapshot) {
+                    Ok(p) => {
+                        self.pending = Some(p);
+                        self.status = "Uploading complete snapshot".into();
+                    }
+                    Err(e) => {
+                        self.error = Some(e.clone());
+                        self.status = e;
+                        self.refused += 1;
+                    }
+                },
+                Ok(Reply::Shifted(c)) => {
+                    self.shift = Some(upload::PendingShift::new(gpu, c));
+                    self.status =
+                        "Uploading leading strips; restoring outgoing mesh coverage".into();
                 }
                 Err(e) => {
                     self.error = Some(e.clone());
                     self.status = e;
                     self.refused += 1;
+                    self.shifting = false;
                 }
             }
         }
@@ -496,10 +636,88 @@ impl Experiment {
             if p.advance(&gpu.queue) && (!self.restoring_raster || raster_restored) {
                 let p = self.pending.take().unwrap();
                 self.upload_ms = p.upload_ms;
+                if r.follow {
+                    self.worker
+                        .send(Job::Install(self.epoch, p.snapshot, p.volume.capacities));
+                }
                 self.active = Some(p.volume);
                 self.restoring_raster = false;
                 self.published_epoch = self.epoch;
-                self.status = "Ready · fixed region; rebuild here to move it".into();
+                self.status = if r.follow {
+                    "Ready · following player"
+                } else {
+                    "Ready · fixed region"
+                }
+                .into();
+            }
+        }
+        // A destination jump supersedes the in-flight shift before any
+        // queued strip can publish for the old camera demand.
+        if r.follow
+            && !self.restoring_raster
+            && self.published_epoch == self.epoch
+            && self.active.as_ref().is_some_and(|v| {
+                (0..3).any(|a| {
+                    let x = camera.position[a];
+                    x < v.bounds[0][a] - r.radius as f64 * 0.5
+                        || x > v.bounds[1][a] + r.radius as f64 * 0.5
+                })
+            })
+        {
+            self.worker.cancel();
+            self.request = None;
+            self.shift = None;
+            self.shifting = false;
+            self.status = "Preparing NAADF at new location".into();
+            return;
+        }
+        if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
+            if p.advance(gpu, v) && raster_restored {
+                let p = self.shift.take().unwrap();
+                let c = p.publish(gpu, v);
+                self.shifts += 1;
+                self.strip_ms = c.build_ms;
+                self.strip_columns = c.generated_columns;
+                self.worker.send(Job::Finish(c, true));
+                self.shifting = false;
+                self.status = "Ready · following player".into();
+            }
+        }
+        if let Some(v) = &self.active {
+            let eye = camera.position.to_array();
+            self.camera_margin_m = (0..3)
+                .map(|a| (eye[a] - v.bounds[0][a]).min(v.bounds[1][a] - eye[a]))
+                .fold(f64::INFINITY, f64::min);
+            if r.follow && self.published_epoch == self.epoch {
+                self.min_camera_margin_m = Some(
+                    self.min_camera_margin_m
+                        .map_or(self.camera_margin_m, |m| m.min(self.camera_margin_m)),
+                );
+                self.stream_active_frames += 1;
+                self.stream_outside_frames += u64::from(self.camera_margin_m < VOXEL_SIZE);
+            }
+            if r.follow
+                && !self.shifting
+                && !self.restoring_raster
+                && self.published_epoch == self.epoch
+                && self.error.is_none()
+            {
+                let region = stream::Region {
+                    lo: v.bounds[0].map(|x| x as i64),
+                    hi: v.bounds[1].map(|x| x as i64),
+                };
+                if let Some(next) = stream::target(region, eye) {
+                    self.shifting = true;
+                    self.status = "Building leading strips".into();
+                    self.worker.send(Job::Shift(
+                        self.epoch,
+                        world.clone(),
+                        next,
+                        self.effective_budget_mib * 1048576,
+                    ));
+                } else {
+                    self.status = "Ready · following player".into();
+                }
             }
         }
     }
@@ -518,11 +736,26 @@ impl Experiment {
     pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {
         if self.restoring_raster {
             None
+        } else if let Some(s) = &self.shift {
+            Some(s.change.retiring.clone())
         } else {
             self.active.as_ref().map(|a| a.ownership.clone())
         }
     }
 
+    pub(crate) fn retirement(&self) -> Option<ownership::Retirement> {
+        Some(ownership::Retirement {
+            old: self.active.as_ref()?.bounds,
+            kept: self.shift.as_ref()?.change.retiring.bounds,
+        })
+    }
+    pub(crate) fn restore_owner_id(&self) -> Option<u64> {
+        if self.restoring_raster || self.request.is_none() {
+            Some(0)
+        } else {
+            self.shift.as_ref().map(|s| s.change.retiring.id)
+        }
+    }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, far: &'a wgpu::BindGroup) {
         if let Some(a) = &self.active {
             pass.set_pipeline(&a.pipeline);
@@ -569,6 +802,7 @@ impl Experiment {
                 right: basis[1],
                 up: basis[2],
                 projection: basis[3],
+                ring: [a.ring[0], a.ring[1], a.ring[2], 0],
                 shadow: [
                     if s.terrain_shadows && !s.visibility_benchmark {
                         1.
@@ -588,17 +822,18 @@ impl Experiment {
             .map(|a| (a.ownership.id, a.resources.clone()))
     }
     pub fn gpu_bytes(&self) -> usize {
-        self.active.as_ref().map_or(0, |a| a.bytes)
-            + self.pending.as_ref().map_or(0, |p| p.volume.bytes)
+        let allocated = |a: &Volume| (a.n as usize).pow(3) * 4 + a.capacities.iter().sum::<usize>();
+        self.active.as_ref().map_or(0, allocated)
+            + self.pending.as_ref().map_or(0, |p| allocated(&p.volume))
     }
     pub fn json(&self) -> String {
         let a = self.active.as_ref();
         let bounds = a.map(|a| a.bounds);
         let region = bounds.map_or("null".into(), |b| format!("{:?}", b));
-        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":true,\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{}}}",
+        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{}}}",
             self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
-            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX))
+            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX))
     }
 }
 
