@@ -194,7 +194,7 @@ fn frozen_native_gpu_parity() {
         });
         let shadow_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("inactive parity near shadow"),
-            contents: &[0; 80],
+            contents: &[0; 112],
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let shadow_layout = crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(&device);

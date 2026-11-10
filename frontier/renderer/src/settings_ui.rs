@@ -311,6 +311,22 @@ impl SettingsUi {
                                 );
                             });
                             ui.separator();
+                            ui.heading("NAADF experiment");
+                            ui.checkbox(&mut self.loading_draft.naadf_enabled, "Use exact voxel rays in test region");
+                            ui.add(egui::Slider::new(&mut self.loading_draft.naadf_radius_m, 1..=256).text("NAADF radius (m)"));
+                            ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build budget (MiB)"));
+                            let top = (self.loading_draft.naadf_radius_m as f64 * 2.).powi(3) * 4. / 1048576.;
+                            ui.small(format!("Top grid {top:.1} MiB GPU; at least {:.1} MiB with CPU/build copies, plus voxel payloads.",top*3.));
+                            ui.small("Fixed cube (radius = half-extent) around your position when applied. Basic visibility lighting; distant terrain keeps its current renderer. Rebuild here after moving.");
+                            ui.label(format!("{} · {:.1} MiB NAADF GPU",stats.naadf_status,stats.naadf_gpu_mib));
+                            if ui.button("Rebuild NAADF here").clicked() {
+                                changes.naadf_rebuild=true;
+                                self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
+                                self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
+                                self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
+                                changes.loading_applied=true;
+                            }
+                            ui.separator();
                             ui.heading("Performance & memory");
                             ui.label("Development targets smooth 30–60 FPS. Budgets grow lazily as content is needed.");
                             let profile_before = self.loading_draft.resource_profile;
@@ -349,12 +365,15 @@ impl SettingsUi {
                             ui.add(egui::Slider::new(&mut self.loading_draft.triangle_budget, 100_000..=32_000_000).logarithmic(true).text("Plant triangles"));
                             ui.add(egui::Slider::new(&mut self.loading_draft.upload_mib, 1..=64).text("Upload / frame (MiB)"));
                             if manual_before != self.loading_draft { self.loading_draft.resource_profile = ResourceProfile::Custom; }
-                            let combined = self.loading_draft.working_budgets().total_mib();
+                            let combined = self.loading_draft.working_budgets().total_mib().saturating_add(if self.loading_draft.naadf_enabled {self.loading_draft.naadf_budget_mib}else{0});
                             ui.label(format!("Combined configured working budgets: {combined} MiB"));
                             if combined > memory.working_mib() {
                                 ui.colored_label(egui::Color32::YELLOW, "Above available-memory recommendation: risk of paging and repeated evictions.");
                             }
-                            let dirty = self.settings.pixel_error != self.loading_draft.pixel_error
+                            let dirty = self.settings.naadf_enabled != self.loading_draft.naadf_enabled
+                                || self.settings.naadf_radius_m != self.loading_draft.naadf_radius_m
+                                || self.settings.naadf_budget_mib != self.loading_draft.naadf_budget_mib
+                                || self.settings.pixel_error != self.loading_draft.pixel_error
                                 || self.settings.view_distance != self.loading_draft.view_distance
                                 || self.settings.render_scale != self.loading_draft.render_scale
                                 || self.settings.msaa != self.loading_draft.msaa
@@ -373,6 +392,9 @@ impl SettingsUi {
                                 .clicked()
                             {
                                 self.settings_error = None;
+                                self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
+                                self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
+                                self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
                                 self.settings.pixel_error = self.loading_draft.pixel_error;
                                 self.settings.view_distance = self.loading_draft.view_distance;
                                 self.settings.render_scale = self.loading_draft.render_scale;
@@ -430,6 +452,9 @@ impl SettingsUi {
         visual_previous.resource_profile = self.settings.resource_profile;
         visual_previous.resource_alpine = self.settings.resource_alpine;
         visual_previous.memory = self.settings.memory;
+        visual_previous.naadf_enabled = self.settings.naadf_enabled;
+        visual_previous.naadf_radius_m = self.settings.naadf_radius_m;
+        visual_previous.naadf_budget_mib = self.settings.naadf_budget_mib;
         visual_previous.native_radius_m = self.settings.native_radius_m;
         visual_previous.vegetation_near_m = self.settings.vegetation_near_m;
         visual_previous.build_mib = self.settings.build_mib;

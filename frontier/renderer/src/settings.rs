@@ -21,6 +21,9 @@ pub struct VisualSettings {
     pub resource_alpine: bool,
     pub memory: MemorySnapshot,
     pub native_radius_m: f64,
+    pub naadf_enabled: bool,
+    pub naadf_radius_m: u32,
+    pub naadf_budget_mib: usize,
     pub vegetation_near_m: f64,
     pub build_mib: usize,
     pub terrain_gpu_mib: usize,
@@ -65,6 +68,9 @@ impl Default for VisualSettings {
             resource_alpine: false,
             memory: MemorySnapshot::detect(),
             native_radius_m: 0.,
+            naadf_enabled: false,
+            naadf_radius_m: 64,
+            naadf_budget_mib: 1024,
             vegetation_near_m: 0.,
             build_mib: 512,
             terrain_gpu_mib: 512,
@@ -89,6 +95,8 @@ impl Default for VisualSettings {
 #[derive(Clone, Debug, Default)]
 pub struct SettingsStats {
     pub available_mib: Option<usize>,
+    pub naadf_status: String,
+    pub naadf_gpu_mib: f64,
     pub background_paused: bool,
     pub plant_instances: usize,
     pub plant_pending: usize,
@@ -108,6 +116,7 @@ pub struct SettingsStats {
 pub struct SettingsChanges {
     pub visual_changed: bool,
     pub loading_applied: bool,
+    pub naadf_rebuild: bool,
 }
 
 impl VisualSettings {

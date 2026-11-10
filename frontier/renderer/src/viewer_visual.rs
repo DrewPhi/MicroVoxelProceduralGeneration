@@ -48,6 +48,15 @@ impl Viewer {
             stats.cache_mib = view.cache_bytes as f64 / 1048576.;
             stats.quality_ready = view.quality_ready;
         }
+        if let Some(experiment) = &gpu.naadf {
+            stats.naadf_status =
+                if experiment.ready() && experiment.bounds_for(self.camera).is_none() {
+                    "Outside fixed NAADF region · rebuild here".into()
+                } else {
+                    format!("{} (stage {})", experiment.status, experiment.stage)
+                };
+            stats.naadf_gpu_mib = experiment.gpu_bytes() as f64 / 1048576.;
+        }
         stats.plant_instances = gpu.vegetation_stats.selected_instances;
         stats.plant_pending = gpu.vegetation_stats.pending_jobs;
         stats.plant_gpu_mib = gpu
@@ -94,6 +103,9 @@ impl Viewer {
             }
         }
         if let Some(gpu) = &mut self.gpu {
+            if changes.naadf_rebuild {
+                gpu.naadf_serial = gpu.naadf_serial.wrapping_add(1);
+            }
             gpu.visual_settings = Some(self.visual_settings.clone());
         }
         Ok(())

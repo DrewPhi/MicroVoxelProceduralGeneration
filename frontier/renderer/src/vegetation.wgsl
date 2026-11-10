@@ -45,7 +45,7 @@ struct Camera { view_projection:mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u3
 struct Lighting { sun:vec4<f32>, sky:vec4<f32> };
 @group(1) @binding(0) var<uniform> lighting:Lighting;
 
-struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32> };
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
@@ -169,6 +169,12 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     return ambient*(1.+overcast*0.3)*ao+direct+transmitted+bounce;
 }
 @fragment fn fs_main(i:Out)->@location(0) vec4<f32> {
+    // Ownership follows the occupied native cell, including faces on box edges.
+    if near_shadow.naadf_hi.w>0.5 {
+        let point=(floor(i.local*16.-i.normal*0.01)+0.5)/16.-camera.eye.xyz;
+        if all(point>=near_shadow.naadf_lo.xyz)&&all(point<near_shadow.naadf_hi.xyz) {discard;}
+    }
+
     // Fixed canonical-cell/instance threshold: no time noise or transparency.
     // Opaque survivors write normal scene depth and receive its atmosphere pass.
     if i.fade<1. {

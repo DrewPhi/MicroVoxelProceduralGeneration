@@ -64,7 +64,7 @@ fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
-struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32> };
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
@@ -267,6 +267,12 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
     return vertex_out(position,MATERIAL_COLORS[min(material,6u)],normal,profile_index);
 }
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Ownership follows the occupied native cell, including faces on box edges.
+    if near_shadow.naadf_hi.w>0.5 {
+        let point=(floor(in.local*16.-in.normal*0.01)+0.5)/16.-camera.eye.xyz;
+        if all(point>=near_shadow.naadf_lo.xyz)&&all(point<near_shadow.naadf_hi.xyz) {discard;}
+    }
+
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
     let visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));

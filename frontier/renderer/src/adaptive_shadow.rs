@@ -259,6 +259,26 @@ fn intersects_light_bounds(matrix: Mat4, bounds: [Vec3; 2]) -> bool {
     low.x <= 1. && high.x >= -1. && low.y <= 1. && high.y >= -1. && low.z <= 1. && high.z >= 0.
 }
 impl AdaptiveGpu {
+    pub(crate) fn set_naadf_mask(
+        &self,
+        queue: &wgpu::Queue,
+        bounds: Option<[[f64; 3]; 2]>,
+        eye: [f64; 3],
+    ) {
+        let mut values = [0f32; 8];
+        if let Some(b) = bounds {
+            for axis in 0..3 {
+                values[axis] = (b[0][axis] - eye[axis]) as f32;
+                values[4 + axis] = (b[1][axis] - eye[axis]) as f32;
+            }
+            values[7] = 1.;
+        }
+        queue.write_buffer(
+            &self.shadows.near.uniform,
+            80,
+            bytemuck::cast_slice(&values),
+        );
+    }
     pub(super) fn prepare_shadows(
         &mut self,
         device: &wgpu::Device,
@@ -530,7 +550,7 @@ pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: std::num::NonZeroU64::new(80),
+                    min_binding_size: std::num::NonZeroU64::new(112),
                 },
                 count: None,
             },
@@ -573,7 +593,7 @@ impl NearShadowResources {
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("eye-relative close plant shadow transform"),
-            contents: &[0u8; 80],
+            contents: &[0u8; 112],
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {

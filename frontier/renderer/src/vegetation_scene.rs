@@ -1,6 +1,51 @@
 //! Scene integration: canonical plants and a bounded, independently streamed display layer.
 use super::*;
 impl Gpu {
+    pub(super) fn settle_naadf(&mut self, world: &World, camera: Camera) -> Result<()> {
+        if self
+            .visual_settings
+            .as_ref()
+            .is_none_or(|s| !s.naadf_enabled)
+        {
+            return Ok(());
+        }
+        let start = Instant::now();
+        loop {
+            self.update_naadf(world, camera);
+            self.queue.submit(std::iter::empty());
+            self.device.poll(wgpu::Maintain::Poll);
+            let n = self.naadf.as_ref().unwrap();
+            if n.ready() {
+                return Ok(());
+            }
+            if let Some(e) = &n.error {
+                return Err(e.clone().into());
+            }
+            if start.elapsed().as_secs() > 300 {
+                return Err("NAADF snapshot did not finish within 300s".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    pub(super) fn update_naadf(&mut self, world: &World, camera: Camera) {
+        if self.naadf.is_none()
+            && self
+                .visual_settings
+                .as_ref()
+                .is_none_or(|s| !s.naadf_enabled)
+        {
+            return;
+        }
+        let mut experiment = self.naadf.take().unwrap_or_default();
+        experiment.poll(
+            self,
+            world,
+            camera,
+            self.naadf_serial,
+            self.vegetation_background_paused,
+        );
+        self.naadf = Some(experiment);
+    }
     pub(super) fn update_vegetation(
         &mut self,
         world: &World,

@@ -410,7 +410,7 @@ impl Atmosphere {
         );
         let fallback_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("disabled air shadow parameters"),
-            contents: &[0u8; 80],
+            contents: &[0u8; 112],
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {

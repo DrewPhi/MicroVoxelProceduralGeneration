@@ -311,3 +311,11 @@ The [cozy meadow checkpoint](frontier/COZY_SCENE.md) describes the current Alpin
 [Playability and motion checks](frontier/PLAYABILITY_CHECKPOINT.md) describe the bounded appearance-node cache, nearby refinement priority, event-driven window sizing, physical-versus-render camera state, full-render GPU query span and frame observation ring. Use `tools/record_walk.py` for window-scoped walking/turn captures; use unrecorded `walk-*` routes for timings.
 
 [Vegetation streaming and GPU representation](frontier/VEGETATION_STREAMING_CHECKPOINT.md): `vegetation_mesher.rs` retains exact reference parity while avoiding nested ordered-map extraction; `vegetation_gpu_parity.rs` is an opt-in hardware test of frozen plant content. `FRONTIER_VEGETATION_GPU` selects compact/compact-indexed/expanded for controlled experiments; compact is the measured default.
+
+## Optional NAADF radius experiment
+
+Esc → **NAADF experiment** exposes an enable switch, 1–256 m cube radius, build
+budget, status and GPU payload. Apply changes, or use **Rebuild NAADF here** to
+recenter. Start with `./frontier/run.sh --preset alpine --naadf-radius 64`.
+This is a fixed snapshot visibility prototype; distant terrain retains the
+existing backend. See [implementation, limits and measurements](frontier/NAADF_EXPERIMENT.md).

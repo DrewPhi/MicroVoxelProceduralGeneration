@@ -22,6 +22,7 @@ mod hybrid;
 mod hybrid_gpu;
 mod integrated_profiles;
 pub mod mesh;
+mod naadf;
 mod native_fbm;
 mod native_stream;
 mod options;
@@ -243,6 +244,8 @@ struct Gpu {
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_background_paused: bool,
+    naadf: Option<naadf::Experiment>,
+    naadf_serial: u64,
     vegetation_stats: vegetation::VegetationStats,
     vegetation_inspection: Vec<vegetation::ShadowInspection>,
     vegetation_caster_roots: Vec<[i64; 3]>,
@@ -482,6 +485,8 @@ impl Gpu {
             vegetation: None,
             vegetation_stream: None,
             vegetation_background_paused: false,
+            naadf: None,
+            naadf_serial: 0,
             vegetation_stats: Default::default(),
             vegetation_inspection: Vec::new(),
             vegetation_caster_roots: Vec::new(),
@@ -793,6 +798,15 @@ impl Gpu {
             t.shadow_start(encoder);
             t.shadow_end(encoder);
         }
+        let naadf_bounds = self.naadf.as_ref().and_then(|n| n.bounds_for(*camera));
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.set_naadf_mask(&self.queue, naadf_bounds, camera.position.to_array());
+        }
+        if naadf_bounds.is_some() {
+            if let Some(n) = &self.naadf {
+                n.prepare(self, *camera, width, height);
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -819,6 +833,11 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        if naadf_bounds.is_some() {
+            if let Some(n) = &self.naadf {
+                n.draw(&mut pass);
+            }
+        }
         // Dense opaque vegetation occludes expensive terrain shading here.
         // Keep terrain-first as a diagnostic A/B; it was slower on the laptop.
         static PLANTS_FIRST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1193,6 +1212,10 @@ impl Gpu {
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
         metadata.pop();
         metadata.push_str(&format!(",{}}}", self.vegetation_json()));
+        if let Some(n) = &self.naadf {
+            metadata.pop();
+            metadata.push_str(&format!(",\"naadf\":{}}}", n.json()));
+        }
         std::fs::write(metadata_path, metadata)?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
@@ -1953,6 +1976,9 @@ impl Viewer {
                 &gpu.vegetation_caster_roots,
             );
         }
+        if let Some(gpu) = &mut self.gpu {
+            gpu.update_naadf(&self.world, self.camera);
+        }
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             if !pages.contains(self.camera.position, self.camera.far) {
                 return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
@@ -1983,7 +2009,34 @@ impl Viewer {
                 }
             }
         }
+        // Finite locked measurements must measure the selected representation,
+        // rather than counting its raster fallback while the snapshot builds.
+        let waiting_naadf = self.benchmark_input_lock
+            && self.visual_settings.naadf_enabled
+            && !self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.naadf.as_ref())
+                .is_some_and(|n| n.ready());
+        if waiting_naadf {
+            if let Some(error) = self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.naadf.as_ref())
+                .and_then(|n| n.error.as_ref())
+            {
+                return Err(format!("NAADF benchmark preparation failed: {error}").into());
+            }
+            if self
+                .adaptive_view
+                .as_ref()
+                .is_some_and(|v| v.preparation_elapsed_seconds() > 300.)
+            {
+                return Err("NAADF benchmark preparation timed out".into());
+            }
+        }
         if !self.adaptive_route_started
+            && !waiting_naadf
             && (!self.adaptive_wait_quality
                 || self.gpu.as_ref().is_none_or(|g| {
                     g.vegetation_stats.pending_jobs == 0
@@ -3069,6 +3122,7 @@ pub fn run() -> Result<()> {
             );
         }
         gpu.settle_vegetation(&world, camera, width, height)?;
+        gpu.settle_naadf(&world, camera)?;
         gpu.capture(&camera, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
@@ -3353,7 +3407,7 @@ pub fn run() -> Result<()> {
                 view.json(),
                 viewer.adaptive_wait_quality,
                 viewer.adaptive_route_quality.json(),
-                if viewer.adaptive_wait_quality {"clear1Hz_poll20Hz_until_refinement_reserve"} else {"normal_interactive_rendering"},
+                if viewer.benchmark_input_lock && viewer.visual_settings.naadf_enabled {"wait_for_naadf_snapshot_and_requested_raster_quality"} else if viewer.adaptive_wait_quality {"clear1Hz_poll20Hz_until_refinement_reserve"} else {"normal_interactive_rendering"},
                 viewer.benchmark_input_lock
             ));
         }
@@ -3431,6 +3485,10 @@ pub fn run() -> Result<()> {
             visual.plant_cpu_mib, visual.plant_gpu_mib, visual.triangle_budget,
             adaptive_geometry::native_geometry_mode()
         ));
+        if let Some(n) = viewer.gpu.as_ref().and_then(|g| g.naadf.as_ref()) {
+            json.pop();
+            json.push_str(&format!(",\"naadf\":{}}}", n.json()));
+        }
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
             json.pop();
             json.push_str(&format!(
