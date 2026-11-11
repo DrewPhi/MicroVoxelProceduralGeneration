@@ -817,9 +817,22 @@ impl Gpu {
                     .is_some_and(|s| s.visibility_benchmark),
             );
         }
+        let capture_layer = naadf::capture_layer();
         if naadf_bounds.is_some() {
+            if let Some(t) = &plant_timings {
+                t.naadf_compute_start(encoder);
+            }
             if let Some(n) = &self.naadf {
                 n.prepare(self, *camera, width, height);
+                if n.has_traversal_compute() {
+                    n.encode_traversal(
+                        self,
+                        encoder,
+                        width,
+                        height,
+                        capture_layer != naadf::CaptureLayer::Raster,
+                    );
+                }
             }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -848,9 +861,10 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
-        let capture_layer = naadf::capture_layer();
         if let Some(t) = &plant_timings {
-            t.naadf_start(&mut pass);
+            if naadf_bounds.is_none() {
+                t.naadf_start(&mut pass);
+            }
         }
         if naadf_bounds.is_some() && capture_layer != naadf::CaptureLayer::Raster {
             if let Some(n) = &self.naadf {
@@ -3609,7 +3623,7 @@ pub fn run() -> Result<()> {
                     ",\"naadf_ray_profile\":{{\"voxel_shadows\":{},\"mesh_receiver_shadows\":{}}}",
                     !omit_voxel_shadows, !omit_mesh_shadows
                 ));
-                json.push_str(&format!(",\"naadf_gpu_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans\"}}}}",t.sample_count,t.p50_ms.map_or("null".into(),|v|v.to_string()),t.p95_ms.map_or("null".into(),|v|v.to_string()),t.p99_ms.map_or("null".into(),|v|v.to_string())));
+                json.push_str(&format!(",\"naadf_gpu_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans\"}}}}",t.sample_count,t.p50_ms.map_or("null".into(),|v|v.to_string()),t.p95_ms.map_or("null".into(),|v|v.to_string()),t.p99_ms.map_or("null".into(),|v|v.to_string())));
             }
         }
         if let Some(pages) = viewer.gpu.as_ref().and_then(|g| g.pages.as_ref()) {

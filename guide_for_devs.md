@@ -321,3 +321,7 @@ The exact voxel window follows the player by default and reuses overlapping
 strips. Distant terrain retains the existing backend. See the [streaming design
 and measurements](frontier/NAADF_STREAMING.md) and the [mesh handoff, packing,
 and ray profiling results](frontier/NAADF_OPTIMIZATION.md).
+
+NAADF optimization experiments and their reproducible configurations are documented
+in [the seven-experiment report](frontier/NAADF_SEVEN_EXPERIMENTS.md). Experimental
+flags are opt-in; use matched full-frame and streaming measurements before promotion.

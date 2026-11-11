@@ -236,7 +236,7 @@ impl State {
             mixed_roots,
             #[cfg(test)]
             chunks: s.chunks,
-            gpu_distance: s.gpu_distance,
+            gpu_distance: s.gpu_distance && !s.cpu_root_fallback,
             columns: s.columns,
             leaves: Arena::new(
                 s.voxels.len() / words_per_leaf,
@@ -709,6 +709,18 @@ mod tests {
             }
             shared += c.shared_leaves;
             total += c.shared_leaves;
+            // The batched uploader can sort these writes by destination:
+            // every staged write owns a distinct range in its arena.
+            let mut ranges: Vec<_> = c
+                .writes
+                .iter()
+                .map(|w| (w.kind, w.word, w.word + w.data.len()))
+                .collect();
+            ranges.sort_unstable();
+            assert!(ranges.iter().all(|&(_, start, end)| start < end));
+            assert!(ranges
+                .windows(2)
+                .all(|r| r[0].0 != r[1].0 || r[0].2 <= r[1].1));
             for w in &c.writes {
                 if w.kind == 1 {
                     total += w.data.len() / encoding.words_per_brick();
@@ -776,4 +788,137 @@ fn leading_window_starts_earlier_only_in_the_direction_of_motion() {
     // A predicted target is ahead of the eye. Do not immediately undo it.
     assert!(target(next, [4., 0., 0.], [2.5, 0., 0.], 3.).is_none());
     assert!(target(next, [4., 0., 0.], [0.; 3], 3.).is_none());
+}
+
+/// Diagnostic over the actual CPU root words from one strip transaction and
+/// a fresh build of exactly the same region. These are root decisions; it
+/// stops at a FULL or CHILD root, before block/leaf traversal or shading.
+#[test]
+fn streamed_and_fresh_root_skip_diagnostic() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Legacy,
+            amplitude: 8.,
+            horizontal_scale: 36.,
+            octaves: 3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let radius = 16;
+    let eye = [-48., world.height_m(-48., -250.).floor() + 1., -250.];
+    let limit = 128 * 1048576;
+    let start = data::build(&world, eye, radius, limit, &AtomicU32::new(0), || false).unwrap();
+    let prepared = super::leaf::Prepared::new(start, false);
+    let mut state = State::new_with_encoding(
+        prepared.snapshot,
+        [16 * 1048576, 32 * 1048576, 1048576],
+        prepared.encoding,
+    );
+    let n = state.n;
+    let run = |root: &dyn Fn([usize; 3]) -> u32,
+               mut pos: [usize; 3],
+               axis: usize,
+               forward: bool,
+               accelerated: bool| {
+        let mut visits = 0;
+        loop {
+            let word = root(pos);
+            visits += 1;
+            if word & (CHILD | FULL) != 0 {
+                return (Some(pos), visits);
+            }
+            let bits = (axis * 2 + usize::from(forward)) * 5;
+            let skip = 1 + if accelerated {
+                ((word >> bits) & 31) as usize
+            } else {
+                0
+            };
+            if forward {
+                pos[axis] += skip;
+                if pos[axis] >= n {
+                    return (None, visits);
+                }
+            } else if let Some(next) = pos[axis].checked_sub(skip) {
+                pos[axis] = next;
+            } else {
+                return (None, visits);
+            }
+        }
+    };
+    for (shift, delta) in [[16, 0, 0], [0, 0, -16], [-16, 0, 0]]
+        .into_iter()
+        .enumerate()
+    {
+        let next = Region {
+            lo: std::array::from_fn(|a| state.region.lo[a] + delta[a]),
+            hi: std::array::from_fn(|a| state.region.hi[a] + delta[a]),
+        };
+        let change = state.prepare(&world, next, limit, &|| false).unwrap();
+        let strip_ms = change.build_ms;
+        let strip_columns = change.generated_columns;
+        state.finish(change, true);
+        let fresh = data::build_region(
+            &world,
+            cell(next.lo),
+            [n; 3],
+            limit,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+        )
+        .unwrap();
+        let fresh_root = |[x, y, z]: [usize; 3]| fresh.chunks[(z * n + x) * n + y];
+        let streamed_root = |pos: [usize; 3]| {
+            state.chunks[state.index(std::array::from_fn(|a| next.lo[a] + pos[a] as i64))]
+        };
+        let mut air = 0;
+        let mut changed = 0;
+        for z in 0..n {
+            for x in 0..n {
+                for y in 0..n {
+                    let p = [x, y, z];
+                    let a = fresh_root(p);
+                    let b = streamed_root(p);
+                    assert_eq!(a & (CHILD | FULL), b & (CHILD | FULL), "{p:?}");
+                    if a & (CHILD | FULL) == 0 {
+                        air += 1;
+                        changed += usize::from(a != b);
+                    }
+                }
+            }
+        }
+        let mut visits = [0; 3];
+        let mut rays = 0;
+        for axis in 0..3 {
+            for forward in [false, true] {
+                for u in 0..n {
+                    for v in 0..n {
+                        let mut pos = [0; 3];
+                        pos[axis] = if forward { 0 } else { n - 1 };
+                        pos[(axis + 1) % 3] = u;
+                        pos[(axis + 2) % 3] = v;
+                        let exact = run(&fresh_root, pos, axis, forward, false);
+                        let fresh = run(&fresh_root, pos, axis, forward, true);
+                        let streamed = run(&streamed_root, pos, axis, forward, true);
+                        assert_eq!(exact.0, fresh.0);
+                        assert_eq!(exact.0, streamed.0);
+                        for (sum, add) in visits.iter_mut().zip([exact.1, fresh.1, streamed.1]) {
+                            *sum += add;
+                        }
+                        rays += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{{\"test\":\"streamed_and_fresh_root_skip_diagnostic\",\"seed\":7,\"region_lo_m\":{:?},\"shift\":{},\"radius_m\":{},\"rays\":{},\"air_roots\":{},\"different_proofs\":{},\"exact_root_visits\":{},\"fresh_root_visits\":{},\"streamed_root_visits\":{},\"fresh_build_ms\":{},\"strip_build_ms\":{},\"fresh_columns\":{},\"strip_columns\":{}}}",
+            next.lo, shift + 1, radius, rays, air, changed, visits[0], visits[1], visits[2],
+            fresh.build_ms, strip_ms, fresh.sampled_columns, strip_columns,
+        );
+        assert!(air > 0);
+        assert!(visits[1] <= visits[0] && visits[2] <= visits[0]);
+    }
 }

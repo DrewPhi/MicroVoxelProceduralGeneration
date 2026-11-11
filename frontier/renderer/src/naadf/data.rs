@@ -35,6 +35,7 @@ pub struct Snapshot {
     pub dims: [usize; 3],
     pub columns: Vec<ColumnSummary>,
     pub gpu_distance: bool,
+    pub cpu_root_fallback: bool,
     /// Y-fast layout: (z*n+x)*n+y. Texture coordinates are (y,x,z).
     pub chunks: Vec<u32>,
     pub blocks: Vec<u32>,
@@ -421,6 +422,7 @@ pub fn build_region(
         dims,
         columns: vec![ColumnSummary::default(); nx * nz],
         gpu_distance,
+        cpu_root_fallback: false,
         chunks: vec![0; count],
         blocks: vec![],
         voxels: vec![],

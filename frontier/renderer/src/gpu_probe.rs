@@ -34,6 +34,9 @@ impl VegetationTiming<'_> {
     pub fn shadow_end(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.write_timestamp(self.query, self.first + 1);
     }
+    pub fn naadf_compute_start(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.write_timestamp(self.query, self.first + 4);
+    }
     pub fn naadf_start(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.write_timestamp(self.query, self.first + 4);
     }

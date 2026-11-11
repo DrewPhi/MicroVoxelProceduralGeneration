@@ -98,3 +98,10 @@ external code was copied (reuse tier G).
 
 Validation: 437 renderer tests passed. Four separate Radeon GPU oracles
 passed, including the sparse atlas and a wrapped moving window.
+
+## Seven exact-acceleration experiments
+
+See [matched experiments, correctness gates and results](NAADF_SEVEN_EXPERIMENTS.md)
+for node reuse, upload batching/scatter, streamed skip quality, height bounds,
+persistent/ray-guided caches and conservative beams. All are selectable experiments;
+a passing correctness test is not a performance endorsement.

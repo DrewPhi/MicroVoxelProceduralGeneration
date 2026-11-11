@@ -8,7 +8,11 @@ mod sparse_roots;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod traversal;
+#[cfg(test)]
+mod traversal_boundary_test;
 mod upload;
+mod scatter;
 use super::{Camera, Gpu};
 use bytemuck::{Pod, Zeroable};
 use data::Snapshot;
@@ -93,16 +97,19 @@ impl Worker {
                                 continue;
                             }
                             state = None;
+                            let cpu_root_fallback = r.gpu_distance && root_distance::cpu_fallback();
                             let result = data::build_with_root_mode(
                                 &w,
                                 eye,
                                 r.radius,
                                 r.budget,
                                 &s,
-                                r.gpu_distance,
+                                r.gpu_distance && !cpu_root_fallback,
                                 || e.load(Ordering::Relaxed) != g,
                             )
-                            .map(|s| {
+                            .map(|mut s| {
+                                s.gpu_distance = r.gpu_distance;
+                                s.cpu_root_fallback = cpu_root_fallback;
                                 let mut prepared = leaf::Prepared::new(s, r.wide_leaves);
                                 if r.sparse_roots {
                                     prepared.make_sparse_roots(|| e.load(Ordering::Relaxed) != g);
@@ -189,20 +196,25 @@ struct Uniform {
     up: [f32; 4],
     projection: [f32; 4],
     ring: [u32; 4],
+    cache: [u32; 4],
 }
 struct Volume {
     resources: Bindings,
     ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
+    height: Option<traversal::Height>,
+    beam: traversal::Beam,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     _chunks: wgpu::Texture,
     root_distance: Option<root_distance::Cache>,
+    cpu_root_fallback: bool,
     root_texture_dims: [u32; 3],
     sparse_roots: bool,
     blocks: wgpu::Buffer,
     voxels: wgpu::Buffer,
     palette: wgpu::Buffer,
+    scatter: Option<scatter::Scatter>,
     bounds: [[f64; 3]; 2],
     ring: [u32; 3],
     capacities: [usize; 3],
@@ -220,10 +232,35 @@ impl Volume {
     fn traversal_flags(&self) -> u32 {
         u32::from(self.sparse_roots)
             | (u32::from(self.leaf_encoding.is_compact()) << 1)
-            | self
-                .root_distance
-                .as_ref()
-                .map_or(0, |c| c.progress().0 << 2)
+            | (u32::from(self.cpu_root_fallback) << 2)
+    }
+
+    fn encode_traversal(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        viewport: [u32; 2],
+        primary: bool,
+    ) {
+        if let Some(height) = &self.height {
+            height.encode(
+                &gpu.queue,
+                encoder,
+                self.ownership.id,
+                self.n,
+                self.sparse_roots,
+                self.ring,
+            );
+        }
+        if primary {
+            self.beam.encode(
+                &gpu.device,
+                encoder,
+                &self.uniform,
+                &self.resources.height,
+                viewport,
+            );
+        }
     }
 
     fn root_bytes(&self) -> usize {
@@ -243,6 +280,14 @@ struct Pending {
 }
 impl Pending {
     fn new(gpu: &Gpu, prepared: leaf::Prepared) -> Result<Self, String> {
+        Self::with_traversal(gpu, prepared, traversal::options())
+    }
+
+    fn with_traversal(
+        gpu: &Gpu,
+        prepared: leaf::Prepared,
+        options: traversal::Options,
+    ) -> Result<Self, String> {
         let leaf::Prepared {
             snapshot,
             encoding,
@@ -308,7 +353,8 @@ impl Pending {
         }
         // Snapshot CPU data is still live at this point. Check the actual
         // arena capacities, including follow-mode slack, before allocating.
-        let upload_bytes = root_bytes + capacities.iter().sum::<usize>();
+        let upload_bytes = root_bytes + capacities.iter().sum::<usize>()
+            + upload::scatter_allowance().unwrap_or(0);
         if let Some(headroom) = headroom {
             if upload_bytes > headroom {
                 return Err(format!(
@@ -355,63 +401,55 @@ impl Pending {
         let build_distance = snapshot.gpu_distance
             && headroom.is_none_or(|bytes| upload_bytes + root_distance::bytes(n) <= bytes);
         let (root_distance, distance_view) = if build_distance {
-            let (cache, view) = root_distance::Cache::new(&gpu.device, n, &view);
+            let [lo, hi] = snapshot.bounds().map(|p| p.map(|v| v as i64));
+            let (cache, view) =
+                root_distance::Cache::new(&gpu.device, n, stream::Region { lo, hi }, &view);
             (Some(cache), view)
         } else {
             (None, root_distance::empty(&gpu.device))
         };
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("NAADF snapshot"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: blocks.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: voxels.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: palette.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&distance_view),
-                },
-            ],
-        });
-        let pipeline = make_pipeline(gpu, &layout);
+        let (height, height_view) = if options.height_enabled() || options.beam {
+            let (height, view) = traversal::Height::new(&gpu.device, n, &view, options);
+            (Some(height), view)
+        } else {
+            (None, traversal::empty_height(&gpu.device))
+        };
+        let beam = traversal::Beam::new(&gpu.device, options);
+        let pipeline = make_pipeline(gpu, &layout, beam.layout(), options);
         let resources = Bindings {
             uniform: uniform.clone(),
-            chunks: view.clone(),
+            chunks: view,
             distance: distance_view,
+            height: height_view,
             blocks: blocks.clone(),
             voxels: voxels.clone(),
             palette: palette.clone(),
         };
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("NAADF snapshot"),
+            layout: &layout,
+            entries: &resources.entries(0),
+        });
+        let scatter = upload::scatter_allowance().map(|allowance| {
+            scatter::Scatter::new(&gpu.device, [&blocks, &voxels, &palette], allowance)
+        });
         let volume = Volume {
             resources,
             ownership: snapshot.ownership.clone(),
             pipeline,
+            height,
+            beam,
             bind,
             uniform,
             _chunks: chunks,
             root_distance,
+            cpu_root_fallback: snapshot.cpu_root_fallback,
             root_texture_dims,
             sparse_roots: sparse_root_dims.is_some(),
             blocks,
             voxels,
             palette,
+            scatter,
             bounds: snapshot.bounds(),
             ring: [0; 3],
             capacities,
@@ -531,6 +569,34 @@ impl ShiftTiming {
         ])
     }
 }
+fn fixed_center() -> Result<Option<[f64; 3]>, &'static str> {
+    static CENTER: std::sync::OnceLock<Result<Option<[f64; 3]>, &'static str>> =
+        std::sync::OnceLock::new();
+    *CENTER.get_or_init(|| {
+        let Some(raw) = std::env::var_os("FRONTIER_NAADF_FIXED_CENTER") else {
+            return Ok(None);
+        };
+        let error = "FRONTIER_NAADF_FIXED_CENTER requires three finite metres as x,y,z";
+        let mut fields = raw.to_str().ok_or(error)?.split(',');
+        let mut center = [0.; 3];
+        for value in &mut center {
+            *value = fields
+                .next()
+                .ok_or(error)?
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| error)?;
+            if !value.is_finite() || value.abs() > 1e12 {
+                return Err(error);
+            }
+        }
+        if fields.next().is_some() {
+            return Err(error);
+        }
+        Ok(Some(center))
+    })
+}
+
 fn stream_lead_seconds() -> f64 {
     static LEAD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *LEAD.get_or_init(|| {
@@ -552,6 +618,7 @@ pub struct Experiment {
     active: Option<Volume>,
     pending: Option<Pending>,
     shift: Option<upload::PendingShift>,
+    stream_upload: upload::UploadStats,
     shifting: bool,
     shifts: u64,
     strip_ms: f64,
@@ -584,6 +651,7 @@ impl Default for Experiment {
             active: None,
             pending: None,
             shift: None,
+            stream_upload: upload::UploadStats::default(),
             shifting: false,
             shifts: 0,
             strip_ms: 0.,
@@ -637,7 +705,12 @@ impl Experiment {
             .chain(self.pending.iter_mut().map(|p| &mut p.volume))
         {
             if volume.samples != gpu.sample_count {
-                volume.pipeline = make_pipeline(gpu, &volume.pipeline.get_bind_group_layout(0));
+                volume.pipeline = make_pipeline(
+                    gpu,
+                    &volume.pipeline.get_bind_group_layout(0),
+                    volume.beam.layout(),
+                    traversal::options(),
+                );
                 volume.samples = gpu.sample_count;
             }
         }
@@ -689,6 +762,19 @@ impl Experiment {
                 || std::env::var_os("FRONTIER_NAADF_WIDE_LEAVES").is_some_and(|v| v == "1"),
         };
         if self.request != Some(r) {
+            let eye = camera.position.to_array();
+            let build_center = if r.follow {
+                eye
+            } else {
+                match fixed_center() {
+                    Ok(value) => value.unwrap_or(eye),
+                    Err(error) => {
+                        self.status = error.into();
+                        self.error = Some(error.into());
+                        return;
+                    }
+                }
+            };
             self.restoring_raster = self.active.is_some();
             let source_changed = self
                 .request
@@ -715,12 +801,8 @@ impl Experiment {
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
-            self.worker.send(Job::Build(
-                self.epoch,
-                job,
-                world.clone(),
-                camera.position.to_array(),
-            ));
+            self.worker
+                .send(Job::Build(self.epoch, job, world.clone(), build_center));
         }
         if pressure {
             if self.active.is_some() && self.published_epoch == self.epoch {
@@ -842,7 +924,8 @@ impl Experiment {
             return;
         }
         if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
-            let uploaded = p.advance(gpu, v);
+            let (uploaded, frame_upload) = p.advance(gpu, v);
+            self.stream_upload.record(frame_upload);
             if uploaded {
                 self.shift_timing.upload.get_or_insert_with(Instant::now);
             }
@@ -857,7 +940,8 @@ impl Experiment {
                     self.shift_samples.push_back(sample);
                 }
                 let p = self.shift.take().unwrap();
-                let c = p.publish(gpu, v);
+                let (c, copies) = p.publish(gpu, v);
+                self.stream_upload.publish_copies += copies;
                 self.shifts += 1;
                 self.strip_ms = c.build_ms;
                 self.strip_columns = c.generated_columns;
@@ -870,7 +954,7 @@ impl Experiment {
         if !self.shifting && !self.restoring_raster && self.published_epoch == self.epoch {
             if let Some(v) = &mut self.active {
                 if let Some(cache) = &mut v.root_distance {
-                    cache.advance(&gpu.device, &gpu.queue, v.n, v.ring);
+                    cache.advance(&gpu.device, &gpu.queue, v.n, v.ring, camera);
                 }
             }
         }
@@ -972,10 +1056,29 @@ impl Experiment {
             pass.set_pipeline(&a.pipeline);
             pass.set_bind_group(0, &a.bind, &[]);
             pass.set_bind_group(1, far, &[]);
+            a.beam.bind(pass);
             pass.draw(0..3, 0..1);
             pass.set_scissor_rect(0, 0, width, height);
         }
     }
+    pub(crate) fn has_traversal_compute(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.height.is_some())
+    }
+
+    pub(crate) fn encode_traversal(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        primary: bool,
+    ) {
+        let Some(a) = &self.active else {
+            return;
+        };
+        a.encode_traversal(gpu, encoder, [width, height], primary);
+    }
+
     pub fn prepare(&self, gpu: &Gpu, camera: Camera, width: u32, height: u32) {
         let Some(a) = &self.active else {
             return;
@@ -988,7 +1091,8 @@ impl Experiment {
         } else {
             glam::Vec3::new(-0.5, 0.8, -0.3).normalize()
         };
-        let basis = ray_basis(camera, width as f32 / height as f32);
+        let aspect = width as f32 / height as f32;
+        let basis = ray_basis(camera, aspect);
         gpu.queue.write_buffer(
             &a.uniform,
             0,
@@ -1015,6 +1119,10 @@ impl Experiment {
                 up: basis[2],
                 projection: basis[3],
                 ring: [a.ring[0], a.ring[1], a.ring[2], a.traversal_flags()],
+                cache: a
+                    .root_distance
+                    .as_ref()
+                    .map_or([0; 4], |c| c.uniforms(aspect)),
                 shadow: [
                     if s.terrain_shadows && !s.visibility_benchmark {
                         1.
@@ -1040,6 +1148,9 @@ impl Experiment {
                 + a.root_distance
                     .as_ref()
                     .map_or(0, |_| root_distance::bytes(a.n))
+                + a.scatter.as_ref().map_or(0, scatter::Scatter::gpu_bytes)
+                + a.height.as_ref().map_or(0, traversal::Height::bytes)
+                + a.beam.bytes()
         };
         self.active.as_ref().map_or(0, allocated)
             + self.pending.as_ref().map_or(0, |p| allocated(&p.volume))
@@ -1051,12 +1162,59 @@ impl Experiment {
         let (distance_tiles_ready, distance_tiles_total) = a
             .and_then(|v| v.root_distance.as_ref())
             .map_or((0, 0), root_distance::Cache::progress);
+        let distance_counters = a.and_then(|v| v.root_distance.as_ref()).map_or(
+            root_distance::Counters::default(),
+            root_distance::Cache::counters,
+        );
         let mut json = format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
             self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
             a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
         json.pop();
         use std::fmt::Write;
+        let options = traversal::options();
+        write!(json,
+            ",\"node_cache\":{},\"node_cache_mode\":{},\"height_tile_roots\":{},\"height_mips\":{},\"height_gate\":{},\"height_levels\":{},\"height_bounds_bytes\":{},\"beam_prefix\":{},\"beam_prefix_bytes\":{}",
+            options.cache != 0,
+            options.cache,
+            if options.height_enabled() { options.tile() } else { 0 },
+            options.height_mips,
+            options.height_gate,
+            a.and_then(|a| a.height.as_ref()).map_or(0, traversal::Height::levels),
+            a.and_then(|a| a.height.as_ref()).map_or(0, traversal::Height::bytes),
+            options.beam,
+            a.map_or(0, |a| a.beam.bytes()),
+        ).unwrap();
+        write!(json,
+            ",\"gpu_root_distance_schedule\":{:?},\"gpu_root_distance_cpu_fallback\":{},\"gpu_root_distance_tiles_retained\":{},\"gpu_root_distance_tiles_invalidated\":{},\"gpu_root_distance_tiles_submitted\":{},\"gpu_root_distance_ray_ranked_tiles\":{},\"gpu_root_distance_rank_cpu_ns\":{},\"gpu_root_distance_feedback_dispatches\":{},\"gpu_root_distance_feedback_reads\":{},\"gpu_root_distance_feedback_stale\":{},\"gpu_root_distance_feedback_prioritized_tiles\":{},\"gpu_root_distance_feedback_cpu_ns\":{}",
+            root_distance::Mode::requested().label(),
+            a.is_some_and(|v| v.cpu_root_fallback),
+            distance_counters.retained,
+            distance_counters.invalidated,
+            distance_counters.submitted,
+            distance_counters.ray_ranked,
+            distance_counters.rank_cpu_ns,
+            distance_counters.feedback_dispatches,
+            distance_counters.feedback_reads,
+            distance_counters.feedback_stale,
+            distance_counters.feedback_prioritized,
+            distance_counters.feedback_cpu_ns,
+        ).unwrap();
+        let fixed_override = self
+            .request
+            .filter(|r| !r.follow)
+            .and_then(|_| fixed_center().ok().flatten());
+        write!(
+            json,
+            ",\"fixed_center_override_m\":{}",
+            fixed_override.map_or("null".into(), |c| format!("{c:?}")),
+        )
+        .unwrap();
+        write!(json, r#","stream_upload":{}"#, self.stream_upload.json()).unwrap();
+        write!(json, r#","scatter_gpu_staging_bytes":{},"scatter_cpu_pack_bytes":{}"#,
+            a.and_then(|v| v.scatter.as_ref()).map_or(0, scatter::Scatter::gpu_bytes),
+            a.and_then(|v| v.scatter.as_ref()).map_or(0, scatter::Scatter::cpu_bytes),
+        ).unwrap();
         write!(
             json,
             ",\"stream_lead_s\":{},\"stream_stage_ms\":{:?}}}",
@@ -1073,12 +1231,13 @@ pub(crate) struct Bindings {
     pub uniform: wgpu::Buffer,
     pub chunks: wgpu::TextureView,
     pub distance: wgpu::TextureView,
+    pub height: wgpu::TextureView,
     pub blocks: wgpu::Buffer,
     pub voxels: wgpu::Buffer,
     pub palette: wgpu::Buffer,
 }
 pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..6)
+    (0..7)
         .map(|i| wgpu::BindGroupLayoutEntry {
             binding: first + i,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1091,6 +1250,11 @@ pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
                 1 | 5 => wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                6 => wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
                 _ => wgpu::BindingType::Buffer {
@@ -1136,6 +1300,10 @@ impl Bindings {
                 binding: first + 5,
                 resource: wgpu::BindingResource::TextureView(&self.distance),
             },
+            wgpu::BindGroupEntry {
+                binding: first + 6,
+                resource: wgpu::BindingResource::TextureView(&self.height),
+            },
         ]
     }
     pub fn empty(device: &wgpu::Device) -> Self {
@@ -1167,6 +1335,7 @@ impl Bindings {
             ),
             chunks: texture.create_view(&Default::default()),
             distance: root_distance::empty(device),
+            height: traversal::empty_height(device),
             blocks: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),
@@ -1174,7 +1343,16 @@ impl Bindings {
     }
 }
 
-fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+pub(crate) fn mesh_traversal_constants() -> std::collections::HashMap<String, f64> {
+    traversal::options().mesh_constants()
+}
+
+fn make_pipeline(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    beam_layout: &wgpu::BindGroupLayout,
+    options: traversal::Options,
+) -> wgpu::RenderPipeline {
     let shader = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1188,17 +1366,16 @@ fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipel
             bind_group_layouts: &[
                 &layout,
                 &crate::adaptive_gpu::adaptive_shadow::sampling_layout(&gpu.device),
+                beam_layout,
             ],
             push_constant_ranges: &[],
         });
-    let constants = std::collections::HashMap::from([(
+    let mut constants = options.mesh_constants();
+    constants.insert(
         "traversal_diagnostic".into(),
-        if capture_layer() == CaptureLayer::Steps {
-            1.
-        } else {
-            0.
-        },
-    )]);
+        u8::from(capture_layer() == CaptureLayer::Steps).into(),
+    );
+    constants.insert("traversal_beam".into(), u8::from(options.beam).into());
     gpu.device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("NAADF exact native voxel pass"),

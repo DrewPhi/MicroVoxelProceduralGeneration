@@ -1,0 +1,10 @@
+{
+  "control": {},
+  "batch": {
+    "FRONTIER_NAADF_BATCH_UPLOAD": "1"
+  },
+  "batch-high-calls": {
+    "FRONTIER_NAADF_BATCH_UPLOAD": "1",
+    "FRONTIER_NAADF_UPLOAD_CALLS": "256"
+  }
+}

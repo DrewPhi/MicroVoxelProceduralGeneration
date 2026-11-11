@@ -48,28 +48,83 @@ fn shader_is_valid() {
 #[test]
 #[ignore = "explicit hardware GPU parity: NAADF first-hit cells versus independent canonical DDA"]
 fn naadf_gpu_matches_canonical_rays() {
-    gpu_matches_canonical_rays(false, false, false);
+    gpu_matches_canonical_rays(false, false, false, traversal::Options::default());
 }
 
 #[test]
 #[ignore = "explicit hardware GPU parity: NAADF 32-bit leaf fallback"]
 fn naadf_wide_gpu_matches_canonical_rays() {
-    gpu_matches_canonical_rays(true, false, false);
+    gpu_matches_canonical_rays(true, false, false, traversal::Options::default());
 }
 
 #[test]
 #[ignore = "explicit hardware GPU parity: cold and warm GPU root cache, before and after ring shift"]
 fn naadf_gpu_distance_matches_canonical_rays() {
-    gpu_matches_canonical_rays(false, true, false);
+    gpu_matches_canonical_rays(false, true, false, traversal::Options::default());
 }
 
 #[test]
 #[ignore = "explicit hardware GPU parity: sparse roots and whole uniform pages"]
 fn naadf_sparse_roots_match_canonical_rays() {
-    gpu_matches_canonical_rays(false, false, true);
+    gpu_matches_canonical_rays(false, false, true, traversal::Options::default());
 }
 
-fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, sparse_roots: bool) {
+#[test]
+#[ignore = "explicit hardware GPU parity: node cache, max height bounds, and beam with mixed roots"]
+fn naadf_traversal_variants_match_canonical_rays() {
+    for options in [
+        traversal::Options {
+            cache: 1,
+            ..Default::default()
+        },
+        traversal::Options {
+            cache: 2,
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(1),
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(4),
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(8),
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(4),
+            height_mips: true,
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(4),
+            height_gate: true,
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(4),
+            height_mips: true,
+            height_gate: true,
+            ..Default::default()
+        },
+        traversal::Options {
+            beam: true,
+            ..Default::default()
+        },
+    ] {
+        gpu_matches_canonical_rays(false, true, false, options);
+        gpu_matches_canonical_rays(false, false, true, options);
+    }
+}
+
+fn gpu_matches_canonical_rays(
+    force_wide_pigment: bool,
+    gpu_distance: bool,
+    sparse_roots: bool,
+    options: traversal::Options,
+) {
     use glam::{Vec3, Vec4};
     pollster::block_on(async {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -116,16 +171,26 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
             yaw: 0.,
             pitch: 0.,
         };
+        let cpu_root_fallback = gpu_distance && root_distance::cpu_fallback();
         let mut snapshot = data::build_with_root_mode(
             &world,
             eye.to_array(),
-            if sparse_roots { 8 } else { 4 },
+            if sparse_roots {
+                8
+            } else if options.height_mips {
+                // Ten roots across produce a partial tile and a padded mip base.
+                5
+            } else {
+                4
+            },
             128 * 1048576,
             &AtomicU32::new(0),
-            gpu_distance,
+            gpu_distance && !cpu_root_fallback,
             || false,
         )
         .unwrap();
+        snapshot.gpu_distance = gpu_distance;
+        snapshot.cpu_root_fallback = cpu_root_fallback;
         if force_wide_pigment {
             let word = *snapshot
                 .voxels
@@ -146,7 +211,7 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
             assert!(prepared.sparse_root_dims.is_some());
         }
         assert_eq!(prepared.encoding.is_compact(), !force_wide_pigment);
-        let mut pending = Pending::new(&gpu, prepared).unwrap();
+        let mut pending = Pending::with_traversal(&gpu, prepared, options).unwrap();
         while !pending.advance(&gpu.queue) {}
         gpu.queue.submit(std::iter::empty());
         gpu.device.poll(wgpu::Maintain::Wait);
@@ -189,6 +254,7 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
                 })
             })
             .collect();
+        let initial_camera = camera;
         let mut check_rays = |volume: &Volume| {
             let bounds = volume.bounds;
             let mut tested = 0;
@@ -225,9 +291,14 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
                             volume.ring[2],
                             volume.traversal_flags(),
                         ],
+                        cache: volume
+                            .root_distance
+                            .as_ref()
+                            .map_or([0; 4], |cache| cache.uniforms(1.)),
                     }),
                 );
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                volume.encode_traversal(&gpu, &mut encoder, [64; 2], true);
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("NAADF oracle"),
@@ -252,6 +323,7 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
                     });
                     pass.set_pipeline(&volume.pipeline);
                     pass.set_bind_group(0, &volume.bind, &[]);
+                    volume.beam.bind(&mut pass);
                     pass.set_bind_group(1, shadow_source.far_shadow_bind(), &[]);
                     pass.draw(0..3, 0..1);
                 }
@@ -388,15 +460,30 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
                     .as_mut()
                     .expect("root cache must be allocated");
                 assert_eq!(cache.progress().0, 0);
-                cache.advance(&gpu.device, &gpu.queue, volume.n, volume.ring);
+                cache.advance(
+                    &gpu.device,
+                    &gpu.queue,
+                    volume.n,
+                    volume.ring,
+                    initial_camera,
+                );
                 assert_eq!(cache.progress().0, 0);
-                cache.advance(&gpu.device, &gpu.queue, volume.n, volume.ring);
+                cache.advance(
+                    &gpu.device,
+                    &gpu.queue,
+                    volume.n,
+                    volume.ring,
+                    initial_camera,
+                );
                 gpu.device.poll(wgpu::Maintain::Wait);
                 assert_eq!(cache.progress(), (1, 1));
             };
             warm(&mut volume);
             check_rays(&volume);
             let delta = [-2, 0, 1];
+            let expected_ring = std::array::from_fn(|axis| {
+                (i64::from(volume.ring[axis]) + delta[axis]).rem_euclid(i64::from(volume.n)) as u32
+            });
             let next = stream::Region {
                 lo: std::array::from_fn(|a| state.region.lo[a] + delta[a]),
                 hi: std::array::from_fn(|a| state.region.hi[a] + delta[a]),
@@ -405,10 +492,11 @@ fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, spar
                 .prepare(&world, next, 128 * 1048576, &|| false)
                 .unwrap();
             let mut shift = upload::PendingShift::new(&gpu, change);
-            while !shift.advance(&gpu, &volume) {}
-            let change = shift.publish(&gpu, &mut volume);
+            while !shift.advance(&gpu, &volume).0 {}
+            check_rays(&volume);
+            let (change, _) = shift.publish(&gpu, &mut volume);
             state.finish(change, true);
-            assert_eq!(volume.ring, [6, 0, 1]);
+            assert_eq!(volume.ring, expected_ring);
             assert_eq!(volume.root_distance.as_ref().unwrap().progress().0, 0);
             check_rays(&volume);
             warm(&mut volume);

@@ -490,6 +490,7 @@ impl VegetationGpu {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &instance_attributes,
         });
+        let naadf_constants = crate::naadf::mesh_traversal_constants();
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("instanced voxel vegetation"),
             layout: Some(&layout),
@@ -508,7 +509,10 @@ impl VegetationGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &naadf_constants,
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,

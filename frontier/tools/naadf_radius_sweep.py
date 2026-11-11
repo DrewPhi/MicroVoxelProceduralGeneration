@@ -73,6 +73,8 @@ def main():
     reserve = max(1024, initial['MemTotal'] // 10)
     manifest = {
         'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+        'experiment_environment': {k: v for k, v in sorted(os.environ.items())
+                                   if k.startswith('FRONTIER_NAADF_')},
         'scope': __doc__, 'initial_memory_mib': initial,
         'watchdog_reserve_mib': reserve,
         'conditions': {'width': 1920, 'height': 1080, 'msaa': 1,

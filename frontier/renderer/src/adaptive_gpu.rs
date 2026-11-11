@@ -576,6 +576,7 @@ impl AdaptiveGpu {
         let indexed_proxy_attributes =
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
         let derived_proxy_attributes = wgpu::vertex_attr_array![0=>Uint32x3,1=>Uint32,2=>Uint32];
+        let naadf_constants = crate::naadf::mesh_traversal_constants();
         let make_pipeline = |step_mode, kind, shadow| {
             let native = kind == 1;
             let proxy = kind == 2;
@@ -658,7 +659,10 @@ impl AdaptiveGpu {
                     Some(wgpu::FragmentState {
                         module: &shader,
                         entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &naadf_constants,
+                            ..Default::default()
+                        },
                         targets: &color_targets,
                     })
                 },

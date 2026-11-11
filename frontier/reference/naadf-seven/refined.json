@@ -1,0 +1,13 @@
+{
+  "control": {},
+  "compact": {
+    "FRONTIER_NAADF_CACHE_NODES": "2"
+  },
+  "gated-flat": {
+    "FRONTIER_NAADF_HEIGHT_GATE": "1"
+  },
+  "gated-mips": {
+    "FRONTIER_NAADF_HEIGHT_GATE": "1",
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+  }
+}

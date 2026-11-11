@@ -1,4 +1,6 @@
 override traversal_diagnostic:bool = false;
+override traversal_beam:bool = false;
+@group(2) @binding(0) var beam_prefix:texture_2d<u32>;
 @group(1) @binding(0) var far_depth:texture_depth_2d;
 @group(1) @binding(1) var far_sampler:sampler_comparison;
 @vertex fn vs_main(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32>{let p=vec2(f32((i<<1u)&2u),f32(i&2u));return vec4(p*2.-1.,0.,1.);}
@@ -31,7 +33,13 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     let o=naadf.eye.xyz*16.;
     let d=normalize(naadf.forward.xyz+ndc.x*naadf.right.xyz*naadf.right.w+ndc.y*naadf.up.xyz*naadf.up.w);
     let cosine=dot(d,naadf.forward.xyz);
-    let h=trace_counted(o,d,naadf.projection.x/cosine*16.,false,traversal_diagnostic);
+    let minimum=naadf.projection.x/cosine*16.;
+    var prefix=minimum;
+    if traversal_beam {
+        let steps=textureLoad(beam_prefix,vec2<i32>(vec2<u32>(point)/8u),0).x;
+        prefix=max(minimum,f32(steps)/cosine);
+    }
+    let h=trace_prefixed(o,d,minimum,prefix,false,traversal_diagnostic);
     if traversal_diagnostic {
         return Fragment(vec4(vec3<f32>(h.visits),1.),0.);
     }

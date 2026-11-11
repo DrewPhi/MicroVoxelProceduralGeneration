@@ -1,0 +1,23 @@
+{
+  "control": {},
+  "cache": {
+    "FRONTIER_NAADF_CACHE_NODES": "1"
+  },
+  "height4": {
+    "FRONTIER_NAADF_HEIGHT_TILE_ROOTS": "4"
+  },
+  "height8": {
+    "FRONTIER_NAADF_HEIGHT_TILE_ROOTS": "8"
+  },
+  "mips": {
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+  },
+  "beam": {
+    "FRONTIER_NAADF_BEAM": "1"
+  },
+  "cache-mips-beam": {
+    "FRONTIER_NAADF_CACHE_NODES": "1",
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1",
+    "FRONTIER_NAADF_BEAM": "1"
+  }
+}
