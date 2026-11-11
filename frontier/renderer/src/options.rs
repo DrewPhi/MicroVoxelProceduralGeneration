@@ -57,6 +57,8 @@ pub fn parse() -> Result<Option<Options>> {
 }
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     use crate::settings::ResourceProfile;
+    let mut explicit_naadf = false;
+    let mut explicit_msaa = false;
     let mut resource_profile = None;
     let mut resource_overrides: Vec<(String, usize)> = Vec::new();
     let mut native_radius = None;
@@ -117,10 +119,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--visibility-benchmark" => {visual.visibility_benchmark=true;}
-            "--naadf" => { visual.naadf_enabled = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--naadf requires on|off".into())}; }
+            "--naadf" => { explicit_naadf=true; visual.naadf_enabled = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--naadf requires on|off".into())}; }
             "--naadf-gpu-distance" => {visual.naadf_gpu_distance=match args.next().as_deref(){Some("on")=>true,Some("off")=>false,_=>return Err("--naadf-gpu-distance requires on|off".into())};}
             "--naadf-follow" => {visual.naadf_follow=match args.next().as_deref(){Some("on")=>true,Some("off")=>false,_=>return Err("--naadf-follow requires on|off".into())};}
-            "--naadf-radius" => { let radius:u32=args.next().ok_or("NAADF radius requires metres")?.parse()?; if !(1..=256).contains(&radius){return Err("--naadf-radius requires integer 1..256 metres".into());} visual.naadf_radius_m=radius;visual.naadf_enabled=true; }
+            "--naadf-radius" => { explicit_naadf=true; let radius:u32=args.next().ok_or("NAADF radius requires metres")?.parse()?; if !(1..=256).contains(&radius){return Err("--naadf-radius requires integer 1..256 metres".into());} visual.naadf_radius_m=radius;visual.naadf_enabled=true; }
             "--naadf-budget-mib" => { let budget:usize=args.next().ok_or("NAADF budget requires MiB")?.parse()?; if !(16..=16384).contains(&budget){return Err("--naadf-budget-mib requires 16..16384".into());} visual.naadf_budget_mib=budget;visual.naadf_auto_memory=false; }
             "--resource-profile" => {
                 resource_profile = Some(match args.next().as_deref() {
@@ -438,7 +440,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                         .parse()?,
                 )
             }
-            "--msaa" => msaa = args.next().ok_or("--msaa requires 1|4")?.parse()?,
+            "--msaa" => {explicit_msaa=true; msaa = args.next().ok_or("--msaa requires 1|4")?.parse()?;},
             "--terrain-static" => terrain_static = true,
             "--view-levels" => {
                 view_levels = args.next().ok_or("--view-levels requires 7..11")?.parse()?
@@ -553,6 +555,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     }
     if !["mesh", "brick", "brick-skip", "brick-directional"].contains(&renderer.as_str()) {
         return Err("--renderer requires mesh|brick|brick-skip|brick-directional".into());
+    }
+    if !explicit_naadf {
+        visual.naadf_enabled = scene == "adaptive";
+    }
+    if visual.naadf_enabled && !explicit_msaa {
+        msaa = 1;
     }
     if visual.naadf_enabled && scene != "adaptive" {
         return Err("NAADF experiment requires --scene adaptive (or --preset alpine)".into());
@@ -785,15 +793,30 @@ mod tests {
         .collect()
     }
     #[test]
-    fn naadf_options_are_bounded_explicit_and_default_off() {
+    fn adaptive_defaults_to_hybrid_with_explicit_overrides() {
         let parse = |args: &[&str]| parse_args(args.iter().map(|s| s.to_string()));
         assert!(
-            !parse(&["--scene", "adaptive"])
+            parse(&["--scene", "adaptive"])
                 .unwrap()
                 .unwrap()
                 .visual
                 .naadf_enabled
         );
+        let default = parse(&[]).unwrap().unwrap();
+        assert!(default.visual.naadf_enabled);
+        assert_eq!(default.msaa, 1);
+        assert_eq!(default.visual.naadf_radius_m, 64);
+        let off = parse(&["--preset", "alpine", "--naadf", "off"])
+            .unwrap()
+            .unwrap();
+        assert!(!off.visual.naadf_enabled);
+        assert_eq!(off.msaa, 4);
+        let reference = parse(&["--scene", "hybrid"]).unwrap().unwrap();
+        assert!(!reference.visual.naadf_enabled);
+        let explicit = parse(&["--preset", "alpine", "--msaa", "4"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit.msaa, 4);
         let options = parse(&[
             "--preset",
             "alpine",

@@ -28,8 +28,7 @@ impl UploadConfig {
             };
             Self {
                 batch: std::env::var_os("FRONTIER_NAADF_BATCH_UPLOAD").is_some_and(|s| s == "1"),
-                scatter: std::env::var_os("FRONTIER_NAADF_SCATTER_UPLOAD")
-                    .is_some_and(|s| s == "1"),
+                scatter: std::env::var_os("FRONTIER_NAADF_SCATTER_UPLOAD").is_none_or(|s| s != "0"),
                 // 256 m radius means at most 512 × 512 words in a root plane.
                 bytes: limit("FRONTIER_NAADF_UPLOAD_MIB", 8, 64) * MIB,
                 calls: limit("FRONTIER_NAADF_UPLOAD_CALLS", 64, 512),

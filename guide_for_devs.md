@@ -333,3 +333,12 @@ adds opt-in asynchronous compute-stage timings to reports/capture metadata;
 `FRONTIER_NAADF_DIAGNOSTICS=1` adds traversal counters for diagnostic captures.
 Use ordinary uninstrumented runs for FPS comparisons. The default CPU-proof
 traversal remains the recommended path; experimental switches are documented.
+
+Default launch (2026-11-11): adaptive scenes enable the NAADF/raster hybrid at
+64 m radius with following enabled, CPU distance proofs, and single-sample
+rendering unless MSAA is explicitly specified. Scatter uploads default on;
+`FRONTIER_NAADF_SCATTER_UPLOAD=0` restores individual writes for comparisons.
+`--naadf off` restores the raster path. Reference/fixture scenes retain their
+existing backend; historical experiment configurations explicitly pin scatter
+off where required. Ignored historical captures, videos, derived caches and
+debug builds were removed locally; source and checked-in references are retained.

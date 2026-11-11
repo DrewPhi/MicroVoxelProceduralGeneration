@@ -1,1 +1,5 @@
-{"control": {}}
+{
+  "control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
+  }
+}

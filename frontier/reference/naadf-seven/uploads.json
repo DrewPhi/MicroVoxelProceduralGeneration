@@ -1,10 +1,14 @@
 {
-  "control": {},
+  "control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
+  },
   "batch": {
-    "FRONTIER_NAADF_BATCH_UPLOAD": "1"
+    "FRONTIER_NAADF_BATCH_UPLOAD": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   },
   "batch-high-calls": {
     "FRONTIER_NAADF_BATCH_UPLOAD": "1",
-    "FRONTIER_NAADF_UPLOAD_CALLS": "256"
+    "FRONTIER_NAADF_UPLOAD_CALLS": "256",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   }
 }

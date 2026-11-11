@@ -1,13 +1,18 @@
 {
-  "control": {},
+  "control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
+  },
   "compact": {
-    "FRONTIER_NAADF_CACHE_NODES": "2"
+    "FRONTIER_NAADF_CACHE_NODES": "2",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   },
   "gated-flat": {
-    "FRONTIER_NAADF_HEIGHT_GATE": "1"
+    "FRONTIER_NAADF_HEIGHT_GATE": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   },
   "gated-mips": {
     "FRONTIER_NAADF_HEIGHT_GATE": "1",
-    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   }
 }

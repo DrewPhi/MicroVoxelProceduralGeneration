@@ -396,3 +396,13 @@ query cost on GPU. A ray-guided cache policy or another bounds format should be
 judged on a scene where its maintained data is useful. Runtime cache misses,
 actual wave occupancy and memory stalls remain unmeasured; compiler limits and
 load counts are evidence, not substitutes for those counters.
+
+## Default promotion (2026-11-11)
+
+Following the user playtest decision, adaptive launches now enable the NAADF/raster
+hybrid at the existing64m radius and follow the camera. Single-sample rendering
+is selected unless the user supplies an explicit MSAA setting. The CPU-proof
+traversal remains active; local repair, GPU proof construction and other losing
+experiments remain off. Scatter is now enabled by default, with explicit0 as
+the comparison escape hatch. Historical JSON configurations pin their old upload
+mode so promotion does not silently change benchmark controls.

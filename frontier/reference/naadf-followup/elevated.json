@@ -1,9 +1,13 @@
 {
-  "control": {},
+  "control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
+  },
   "beam": {
-    "FRONTIER_NAADF_BEAM": "1"
+    "FRONTIER_NAADF_BEAM": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   },
   "mips": {
-    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
   }
 }

@@ -14,8 +14,11 @@ An [independent offline voxel reference](frontier/reference/README.md) now provi
 supersampled images, coverage/depth data and matched GPU comparisons. See the
 [reference checkpoint](frontier/REFERENCE_CHECKPOINT.md) for measured results and scope.
 
-The default playtest launches the experimental adaptive renderer with Regional
-terrain, detailed appearance maps, voxel appearance filtering and 4×MSAA. Press **Esc** for live light and
+The default playtest uses a hybrid renderer: exact NAADF voxels within a
+64 m cube radius, with adaptive raster terrain in the distance. It uses Regional
+terrain, detailed appearance maps, voxel appearance filtering, single-sample
+rendering and scatter uploads. Adjust the NAADF radius in **Esc**;
+`--naadf off` selects the raster path, and explicit `--msaa 4` is still accepted. Press **Esc** for live light and
 atmosphere controls plus image-quality and loading settings. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
 Use `--terrain-recipe legacy` for the original spiky terrain.

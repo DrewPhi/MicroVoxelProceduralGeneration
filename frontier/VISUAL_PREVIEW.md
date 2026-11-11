@@ -1,8 +1,10 @@
 # Interactive visual preview
 
 From `frontier/`, launch `./run.sh`. The default preview uses the adaptive
-renderer and Regional terrain, with 6.25cm native voxels, voxel appearance
-filtering and 4×MSAA. Rebuild with `cargo build --release --locked` after source
+NAADF/raster hybrid and Regional terrain, with 6.25 cm native voxels, a
+64 m NAADF radius, voxel appearance filtering, single-sample rendering and
+scatter uploads. Esc exposes the NAADF radius; `--naadf off` selects raster
+terrain, and `--msaa 4` explicitly requests 4× sampling. Rebuild with `cargo build --release --locked` after source
 changes: the launcher prefers an existing release binary.
 
 Press **Esc** to open or close settings. Sun elevation/azimuth, exposure, haze
