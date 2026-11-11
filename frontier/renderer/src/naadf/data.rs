@@ -59,7 +59,6 @@ impl Snapshot {
         let lo = [self.origin.x, self.origin.y, self.origin.z].map(|v| v as f64 * VOXEL_SIZE);
         [lo, std::array::from_fn(|a| lo[a] + self.dims[a] as f64)]
     }
-    #[cfg(test)]
     pub fn material(&self, p: [usize; 3]) -> u32 {
         let n = self.chunks_per_edge as usize;
         let c = p.map(|v| v / 16);
@@ -260,6 +259,23 @@ impl ChunkBlocks {
     }
 }
 
+// Fingerprints only select an equality bucket. They never establish identity;
+// LeafIndex compares all 64 canonical occupancy/pigment words on every hit.
+fn leaf_fingerprint(values: &[u32; 64], fast: bool) -> u64 {
+    if !fast {
+        let mut h = DefaultHasher::new();
+        values.hash(&mut h);
+        return h.finish();
+    }
+    // Four independent FNV-1a-style lanes avoid a single long dependency chain.
+    let mut lanes = [0xcbf29ce484222325_u64; 4];
+    for row in values.chunks_exact(4) {
+        for i in 0..4 {
+            lanes[i] = (lanes[i] ^ u64::from(row[i])).wrapping_mul(0x100000001b3);
+        }
+    }
+    lanes[0] ^ lanes[1].rotate_left(13) ^ lanes[2].rotate_left(29) ^ lanes[3].rotate_left(47)
+}
 #[derive(Default)]
 struct LeafIndex {
     first: HashMap<u64, u32>,
@@ -618,37 +634,6 @@ fn build_region_options(
                     continue;
                 }
             }
-            let phase = profile.start();
-            let columns: Vec<_> = (0..16)
-                .flat_map(|z| (0..16).map(move |x| (x, z)))
-                .map(|(x, z)| {
-                    world.column(min.x + (cx * 16 + x) as i64, min.z + (cz * 16 + z) as i64)
-                })
-                .collect();
-            let heights: Vec<_> = columns
-                .iter()
-                .map(|c| (c.height_m() / VOXEL_SIZE) as i64)
-                .collect();
-            let bands: Vec<_> = columns
-                .iter()
-                .zip(&heights)
-                .map(|(c, h)| {
-                    [
-                        id(c.material(h - 1)),
-                        id(c.material(h - 2)),
-                        id(c.material(h - 13)),
-                    ]
-                })
-                .collect();
-            profile.end(Stage::ColumnSampling, phase);
-            if let Some(m) = &mut profile.metrics {
-                m.column_vec_allocations += 3;
-                m.column_vec_bytes += (columns.capacity() * std::mem::size_of_val(&columns[0])
-                    + heights.capacity() * std::mem::size_of_val(&heights[0])
-                    + bands.capacity() * std::mem::size_of_val(&bands[0]))
-                    as u64;
-            }
-            out.sampled_columns += 256;
             let fast = world.fbm_terrain().is_some()
                 && !world.volume_owned(Cell {
                     x: min.x + (cx * 16) as i64,
@@ -659,6 +644,72 @@ fn build_region_options(
                     min.x.div_euclid(16) + cx as i64,
                     min.z.div_euclid(16) + cz as i64,
                 ));
+            let cache_x = min.x + (cx * 16) as i64;
+            let cache_z = min.z + (cz * 16) as i64;
+            let reusable = fast && super::column_cache::enabled();
+            let cached_samples = if reusable {
+                super::column_cache::get(world, cache_x, cache_z)
+            } else {
+                None
+            };
+            let phase = profile.start();
+            let columns: Vec<_> = if cached_samples.is_none() {
+                (0..16)
+                    .flat_map(|z| (0..16).map(move |x| (x, z)))
+                    .map(|(x, z)| {
+                        world.column(min.x + (cx * 16 + x) as i64, min.z + (cz * 16 + z) as i64)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let heights: Vec<_> = cached_samples.as_ref().map_or_else(
+                || {
+                    columns
+                        .iter()
+                        .map(|c| (c.height_m() / VOXEL_SIZE) as i64)
+                        .collect()
+                },
+                |v| v.heights.clone(),
+            );
+            let bands: Vec<_> = cached_samples.as_ref().map_or_else(
+                || {
+                    columns
+                        .iter()
+                        .zip(&heights)
+                        .map(|(c, h)| {
+                            [
+                                id(c.material(h - 1)),
+                                id(c.material(h - 2)),
+                                id(c.material(h - 13)),
+                            ]
+                        })
+                        .collect()
+                },
+                |v| v.bands.clone(),
+            );
+            if reusable && cached_samples.is_none() {
+                super::column_cache::insert(
+                    world,
+                    cache_x,
+                    cache_z,
+                    super::column_cache::Samples {
+                        heights: heights.clone(),
+                        bands: bands.clone(),
+                    },
+                );
+            }
+            profile.end(Stage::ColumnSampling, phase);
+            if let Some(m) = &mut profile.metrics {
+                m.column_vec_allocations += 2 + u64::from(!columns.is_empty());
+                m.column_vec_bytes += (columns.capacity()
+                    * std::mem::size_of::<frontier_world::WorldColumn<'_>>()
+                    + heights.capacity() * 8
+                    + bands.capacity() * 12) as u64;
+            }
+            if cached_samples.is_none() {
+                out.sampled_columns += 256;
+            }
             safe_columns[cz * nx + cx] = fast
                 && heights
                     .iter()
@@ -781,9 +832,9 @@ fn build_region_options(
                                 continue;
                             }
                             leaf_requests += 1;
-                            let mut hash = DefaultHasher::new();
-                            values.hash(&mut hash);
-                            let pointer = leaves.intern(hash.finish(), values, &mut out.voxels)?;
+                            let fingerprint =
+                                leaf_fingerprint(&values, super::prepare_profile::fast_hash());
+                            let pointer = leaves.intern(fingerprint, values, &mut out.voxels)?;
                             blocks[bi] = CHILD | pointer;
                         }
                     }

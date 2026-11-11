@@ -342,3 +342,9 @@ rendering unless MSAA is explicitly specified. Scatter uploads default on;
 existing backend; historical experiment configurations explicitly pin scatter
 off where required. Ignored historical captures, videos, derived caches and
 debug builds were removed locally; source and checked-in references are retained.
+
+The [post-Teardown optimization checkpoint](frontier/NAADF_NEXT_CHECKPOINT.md)
+records shader specialization, bounded exact column caching, lighting and brick/RT
+experiments, matched 1080p walking gates, and the shared-instance vegetation
+cache-eviction fix. New performance modes remain opt-in; the ownership fix is
+active. The hardware lab is a standalone workspace, not a game dependency upgrade.

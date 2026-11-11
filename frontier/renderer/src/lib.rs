@@ -4038,3 +4038,10 @@ mod tests {
         assert!(original.abs_diff_eq(camera.matrix(offset, 1.), 1e-5));
     }
 }
+
+/// Export bounded canonical voxels for isolated renderer benchmarks.
+pub fn export_voxel_fixtures(
+    path: &std::path::Path,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    naadf::fixture::export(path)
+}

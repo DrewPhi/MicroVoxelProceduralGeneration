@@ -11,6 +11,8 @@ struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE+6u) var heights:texture_2d<u32>;
 @group(NAADF_GROUP) @binding(NAADF_BASE+7u) var<storage,read_write> trace_metrics:array<atomic<u32>>;
 override traversal_metrics:bool=false;
+// Approximate lighting-only experiment. Primary hits always remain exact.
+override traversal_shadow_coarse_after_m:f32=0.;
 fn trace_metric(lane:u32,index:u32,value:u32) {
     if traversal_metrics {atomicAdd(&trace_metrics[lane*32u+index],value);}
 }
@@ -24,6 +26,15 @@ fn trace_distance(lane:u32,first:u32,amount:f32) {
 
 // Pipeline specialization keeps cache state and branches out of the control.
 override traversal_cache_nodes:bool=false;
+// 0 retains the general runtime format. Known immutable volume formats can
+// specialize primary rays without specializing shared raster receiver shaders.
+override traversal_leaf_format:u32=0u;
+override traversal_root_format:u32=0u;
+override traversal_cpu_roots:bool=false;
+fn naadf_sparse()->bool {
+    if traversal_root_format!=0u{return traversal_root_format==2u;}
+    return (naadf.ring.w&1u)!=0u;
+}
 override traversal_cache_nodes_compact:bool=false;
 override traversal_height_bounds:bool=false;
 override traversal_height_tile:u32=8u;
@@ -45,7 +56,7 @@ fn root_decode(word:u32)->u32 {
 }
 
 fn cached_root_word(cp:vec3<u32>,fallback:u32,lane:u32,record:bool)->u32 {
-    if traversal_direct_roots {return fallback;}
+    if traversal_direct_roots || traversal_cpu_roots {return fallback;}
     let masks=naadf.cache.xy;
     if (masks.x|masks.y)==0u || (fallback&0xc0000000u)!=0u {return fallback;}
     let side=naadf.cache.w>>24u;
@@ -87,7 +98,7 @@ fn voxel_interval(o:vec3<f32>,d:vec3<f32>)->vec2<f32>{
     return vec2(lo,hi);
 }
 fn naadf_leaf_word(address:u32)->u32 {
-    if (naadf.ring.w&2u)==0u { return voxels[address]; }
+    if traversal_leaf_format==1u || (traversal_leaf_format==0u && (naadf.ring.w&2u)==0u) { return voxels[address]; }
     let packed=voxels[address>>1u];
     let word=(packed>>((address&1u)*16u))&0xffffu;
     return select(word,0x40000000u|(word&0x7fffu),(word&0x8000u)!=0u);
@@ -100,7 +111,7 @@ fn sparse_root_load(address:u32,shape:vec3<u32>)->u32 {
 fn trace_diagnostic_crossing(o:vec3<f32>,d:vec3<f32>,cell:vec3<i32>,t:f32)->f32 {
     let c=vec3<u32>(cell);let cp=c/16u;let extent=vec3<i32>(naadf.extent.xyz);
     var node=0u;var scale=16u;var bits=5u;var parent_lo=vec3(0);var parent_hi=extent;
-    if (naadf.ring.w&1u)!=0u {
+    if naadf_sparse() {
         let side=(naadf.extent.w+3u)/4u;let page=cp/4u;let shape=textureDimensions(chunks,0);
         let entry=sparse_root_load(page.y+side*(page.x+side*page.z),shape);
         if (entry&0x80000000u)==0u {node=entry;scale=64u;}
@@ -261,7 +272,7 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
     let extent=vec3<i32>(naadf.extent.xyz);
     var cell=clamp(forward_cell(o+d*t,d),vec3(0),extent-vec3(1));
     var faces=0u;var was_solid=false;
-    let sparse=(naadf.ring.w&1u)!=0u;
+    let sparse=naadf_sparse();
     let page_side=(naadf.extent.w+3u)/4u;
     var atlas_shape=vec3(1u);
     if sparse {atlas_shape=textureDimensions(chunks,0);}
@@ -344,7 +355,7 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
     var cell=clamp(forward_cell(o+d*t,d),vec3(0),vec3<i32>(naadf.extent.xyz)-vec3(1));
     var faces=0u;var was_solid=false;
     let extent=vec3<i32>(naadf.extent.xyz);
-    let sparse=(naadf.ring.w&1u)!=0u;
+    let sparse=naadf_sparse();
     // Very distant camera origins can lose native-cell precision in o+d*t.
     let use_height=traversal_height_bounds && allow_height
         && all(abs(o)<=vec3<f32>(extent)*16.);
@@ -480,6 +491,9 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
             }
             scale=4u;bits=2u;parent_lo=vec3<i32>(cp*16u);parent_hi=parent_lo+vec3(16);
             if (node&0x80000000u)!=0u {
+                if occlusion && traversal_shadow_coarse_after_m>0. && t>=traversal_shadow_coarse_after_m*16. {
+                    return VoxelHit(true,t,vec3(0.),0u,visits,flags);
+                }
                 if measure {visits.z+=1u;}
                 trace_metric(lane,3u,1u);trace_metric(lane,6u,1u);
                 let vp=c%4u;let vi=vp.x+4u*(vp.y+4u*vp.z);
@@ -631,7 +645,8 @@ fn naadf_sun_visibility(receiver_relative:vec3<f32>,normal:vec3<f32>,sun:vec3<f3
     return select(1.,0.,trace_voxels(o,sun,0.,true).found);
 }
 
+override traversal_mesh_sun:bool=true;
 fn naadf_mesh_sun_visibility(receiver_relative:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
-    if naadf.shadow.z>0.5{return 1.;}
+    if !traversal_mesh_sun || naadf.shadow.z>0.5{return 1.;}
     return naadf_sun_visibility(receiver_relative,normal,sun);
 }

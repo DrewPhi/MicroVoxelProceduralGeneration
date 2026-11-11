@@ -58,6 +58,11 @@ pub(super) fn stack_blocks() -> bool {
     })
 }
 
+pub(super) fn fast_hash() -> bool {
+    static FAST: OnceLock<bool> = OnceLock::new();
+    *FAST.get_or_init(|| std::env::var("FRONTIER_NAADF_FAST_LEAF_HASH").as_deref() == Ok("1"))
+}
+
 pub(super) fn column_extrema() -> bool {
     static EXTREMA: OnceLock<bool> = OnceLock::new();
     *EXTREMA

@@ -1,0 +1,234 @@
+{
+  "binary_sha256": "eddf2a5d181b6727101281223fc6438b4a4dcdee363dfdbc81415e393f236ace",
+  "variants": {
+    "control": {},
+    "specialize-format": {
+      "FRONTIER_NAADF_SPECIALIZE_FORMAT": "1"
+    },
+    "split-shaders": {
+      "FRONTIER_NAADF_SPLIT_SHADERS": "1"
+    },
+    "cpu-cache-hash": {
+      "FRONTIER_NAADF_COLUMN_CACHE": "1",
+      "FRONTIER_NAADF_COLUMN_CACHE_MIB": "320",
+      "FRONTIER_NAADF_FAST_LEAF_HASH": "1"
+    }
+  },
+  "mode": "capture",
+  "radius_m": 64,
+  "route": "static",
+  "runs": [
+    {
+      "name": "control",
+      "repeat": 0,
+      "environment": {},
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-captures/0-control/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "comparison_to_first": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      }
+    },
+    {
+      "name": "specialize-format",
+      "repeat": 0,
+      "environment": {
+        "FRONTIER_NAADF_SPECIALIZE_FORMAT": "1"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-captures/0-specialize-format/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "comparison_to_first": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      }
+    },
+    {
+      "name": "split-shaders",
+      "repeat": 0,
+      "environment": {
+        "FRONTIER_NAADF_SPLIT_SHADERS": "1"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-captures/0-split-shaders/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "comparison_to_first": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      }
+    },
+    {
+      "name": "cpu-cache-hash",
+      "repeat": 0,
+      "environment": {
+        "FRONTIER_NAADF_COLUMN_CACHE": "1",
+        "FRONTIER_NAADF_COLUMN_CACHE_MIB": "320",
+        "FRONTIER_NAADF_FAST_LEAF_HASH": "1"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-captures/0-cpu-cache-hash/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "comparison_to_first": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      }
+    }
+  ]
+}

@@ -259,6 +259,7 @@ pub struct DrawStats {
     pub native_bin_tests: u64,
     pub native_bin_skipped_quads: u64,
     pub draw_calls: u64,
+    pub no_voxel_shadow_clusters: usize,
     pub current_local_certified_clusters: usize,
     pub current_affine_bound_clusters: usize,
     pub current_global_bound_clusters: usize,
@@ -280,6 +281,7 @@ fn record_offender(top: &mut [Option<VisibleOffender>; 8], offender: VisibleOffe
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DrawItem {
+    no_voxel_shadow: bool,
     key: TileKey,
     bin_mask: Option<u8>,
 }
@@ -291,19 +293,24 @@ macro_rules! encode_cluster_draws {
         let pass = $pass;
         let mut bound_vertex_page = None;
         for (draw_index, item) in renderer.visible.iter().enumerate() {
+            let far = if item.no_voxel_shadow {
+                renderer.far_pipelines.as_ref()
+            } else {
+                None
+            };
             let c = &renderer.clusters[&item.key];
             if c.native_quads {
-                pass.set_pipeline(&renderer.native_pipeline);
+                pass.set_pipeline(far.map_or(&renderer.native_pipeline, |p| &p[2]));
             } else if c.proxy_triangles {
                 pass.set_pipeline(if c.derived_proxy {
-                    &renderer.derived_proxy_pipeline
+                    far.map_or(&renderer.derived_proxy_pipeline, |p| &p[5])
                 } else if c.indexed_proxy {
-                    &renderer.indexed_proxy_pipeline
+                    far.map_or(&renderer.indexed_proxy_pipeline, |p| &p[4])
                 } else {
-                    &renderer.proxy_pipeline
+                    far.map_or(&renderer.proxy_pipeline, |p| &p[3])
                 });
             } else if let Some(p) = &c.profile {
-                pass.set_pipeline(&renderer.profile_pipeline);
+                pass.set_pipeline(far.map_or(&renderer.profile_pipeline, |p| &p[1]));
                 let indices = p.indices.as_ref().unwrap();
                 pass.set_vertex_buffer(
                     1,
@@ -312,7 +319,7 @@ macro_rules! encode_cluster_draws {
                         .slice(indices.range.clone()),
                 );
             } else {
-                pass.set_pipeline(&renderer.pipeline);
+                pass.set_pipeline(far.map_or(&renderer.pipeline, |p| &p[0]));
                 pass.set_vertex_buffer(1, renderer.zero_profile.slice(..));
             }
             pass.set_bind_group(
@@ -468,6 +475,8 @@ pub struct AdaptiveGpu {
     bundle_build_ms: f64,
     native_bins_enabled: bool,
     voxel_filter: bool,
+    far_pipelines: Option<[wgpu::RenderPipeline; 6]>,
+    naadf_shadow_bounds: Option<[[f64; 3]; 2]>,
     pipeline: wgpu::RenderPipeline,
     profile_pipeline: wgpu::RenderPipeline,
     native_pipeline: wgpu::RenderPipeline,
@@ -577,7 +586,9 @@ impl AdaptiveGpu {
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
         let derived_proxy_attributes = wgpu::vertex_attr_array![0=>Uint32x3,1=>Uint32,2=>Uint32];
         let naadf_constants = crate::naadf::mesh_traversal_constants();
-        let make_pipeline = |step_mode, kind, shadow| {
+        let mut far_constants = naadf_constants.clone();
+        far_constants.insert("traversal_mesh_sun".into(), 0.);
+        let make_pipeline = |step_mode, kind, shadow, far| {
             let native = kind == 1;
             let proxy = kind == 2;
             let indexed_proxy = kind == 3;
@@ -660,7 +671,11 @@ impl AdaptiveGpu {
                         module: &shader,
                         entry_point: Some("fs_main"),
                         compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &naadf_constants,
+                            constants: if far {
+                                &far_constants
+                            } else {
+                                &naadf_constants
+                            },
                             ..Default::default()
                         },
                         targets: &color_targets,
@@ -693,19 +708,30 @@ impl AdaptiveGpu {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false);
-        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false);
-        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false);
-        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false);
-        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false);
-        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false);
+        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false);
+        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false);
+        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false);
+        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false);
+        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false);
+        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false);
+        let far_pipelines = (std::env::var("FRONTIER_NAADF_SPLIT_SHADERS").as_deref() == Ok("1"))
+            .then(|| {
+                [
+                    make_pipeline(wgpu::VertexStepMode::Instance, 0, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 1, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true),
+                ]
+            });
         let shadow_pipelines = [
-            make_pipeline(wgpu::VertexStepMode::Instance, 0, true),
-            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true),
-            make_pipeline(wgpu::VertexStepMode::Instance, 1, true),
-            make_pipeline(wgpu::VertexStepMode::Instance, 2, true),
-            make_pipeline(wgpu::VertexStepMode::Instance, 3, true),
-            make_pipeline(wgpu::VertexStepMode::Instance, 4, true),
+            make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false),
+            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 1, true, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false),
         ];
         let shadows = ShadowResources::new(device, &shadows_layout, shadow_pipelines);
         let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
@@ -757,6 +783,8 @@ impl AdaptiveGpu {
             bundle_build_ms: 0.,
             native_bins_enabled: true,
             voxel_filter: true,
+            far_pipelines,
+            naadf_shadow_bounds: None,
             pipeline,
             profile_pipeline,
             native_pipeline,
@@ -800,6 +828,7 @@ impl AdaptiveGpu {
         let fresh = Self::new(device, self.format, sample_count);
         // Explicit bind-group layouts have identical structural contracts;
         // existing camera/profile/shadow bindings remain compatible.
+        self.far_pipelines = fresh.far_pipelines;
         self.pipeline = fresh.pipeline;
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
@@ -895,6 +924,13 @@ impl AdaptiveGpu {
             })
             .count();
         (certified, overlap)
+    }
+    pub(crate) fn set_naadf_shadow_bounds(&mut self, bounds: Option<[[f64; 3]; 2]>) {
+        if bounds != self.naadf_shadow_bounds {
+            self.naadf_shadow_bounds = bounds;
+            self.prepared_view = None;
+            self.invalidate_bundle();
+        }
     }
     pub fn contains(&self, key: &TileKey) -> bool {
         self.clusters.contains_key(key)
@@ -1403,7 +1439,23 @@ impl AdaptiveGpu {
             self.camera_upload
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
             self.camera_upload[offset..offset + 208].copy_from_slice(&bytes);
-            self.visible.push(DrawItem { key, bin_mask });
+            // A receiver box swept towards the sun can be rejected only if
+            // every possible ray misses the full exact volume. Use actual
+            // resident vertex bounds, not a sampled terrain height estimate.
+            let receiver = [
+                (c.bounds[0].as_dvec3() + c.origin).to_array(),
+                (c.bounds[1].as_dvec3() + c.origin).to_array(),
+            ];
+            let no_voxel_shadow = self.far_pipelines.is_some()
+                && self.naadf_shadow_bounds.is_some_and(|volume| {
+                    !sun_sweep_intersects(receiver, volume, self.lighting[..3].try_into().unwrap())
+                });
+            stats.no_voxel_shadow_clusters += usize::from(no_voxel_shadow);
+            self.visible.push(DrawItem {
+                key,
+                bin_mask,
+                no_voxel_shadow,
+            });
             if packed_first_instance_stride(
                 self.coalesce_vertex_pages,
                 c.native_quads,
@@ -2494,5 +2546,52 @@ mod tests {
         let mut invalid = camera;
         invalid.position.x = f64::NAN;
         assert!(!cached.matches(&invalid, 1920, 1080, 5., &owners));
+    }
+}
+
+/// Conservative ray/AABB test for a whole AABB of receiver origins.
+/// Interval intersection may admit rays from different origins (false positives),
+/// but cannot reject a real ray. Touches, invalid inputs and uncertain numerics
+/// retain the ordinary shader. Padding covers normal offsets and GPU rounding.
+fn sun_sweep_intersects(receiver: [[f64; 3]; 2], volume: [[f64; 3]; 2], sun: [f32; 3]) -> bool {
+    let mut enter = 0.0_f64;
+    let mut leave = f64::INFINITY;
+    for axis in 0..3 {
+        let a = receiver[0][axis];
+        let b = receiver[1][axis];
+        let lo = volume[0][axis];
+        let hi = volume[1][axis];
+        let d = f64::from(sun[axis]);
+        if ![a, b, lo, hi, d].iter().all(|v| v.is_finite()) || a > b || lo > hi {
+            return true;
+        }
+        let pad = 0.125 + 1.0e-6 * a.abs().max(b.abs()).max(lo.abs()).max(hi.abs());
+        if d.abs() < 1.0e-7 {
+            // Ignore this axis: tiny directions can reach the volume on long rays.
+            if d == 0. && (b + pad < lo || a - pad > hi) {
+                return false;
+            }
+        } else {
+            let t0 = (lo - b - pad) / d;
+            let t1 = (hi - a + pad) / d;
+            enter = enter.max(t0.min(t1));
+            leave = leave.min(t0.max(t1));
+        }
+    }
+    leave >= enter
+}
+#[cfg(test)]
+mod shadow_specialization_tests {
+    use super::sun_sweep_intersects as hit;
+    #[test]
+    fn sweep_retains_possible_hits_and_rejects_only_separated_rays() {
+        let b = [[0.; 3], [1.; 3]];
+        assert!(hit([[-2., 0., 0.], [-1., 1., 1.]], b, [1., 0., 0.]));
+        assert!(!hit([[2., 0., 0.], [3., 1., 1.]], b, [1., 0., 0.]));
+        assert!(!hit([[-2., 2., 0.], [-1., 3., 1.]], b, [1., 0., 0.]));
+        assert!(hit(b, b, [1., 1., 1.]));
+        assert!(hit([[f64::NAN; 3], [1.; 3]], b, [1.; 3]));
+        // Opposite direction and grazing contact must keep the full shader.
+        assert!(hit([[2., 1., 0.], [3., 2., 1.]], b, [-1., 0., 0.]));
     }
 }

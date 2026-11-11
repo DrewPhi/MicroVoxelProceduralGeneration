@@ -1,0 +1,9 @@
+[package]
+name = "frontier-voxel-rt-lab"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+pollster = "=0.4.0"
+bytemuck = { version = "=1.25.2", features = ["derive"] }

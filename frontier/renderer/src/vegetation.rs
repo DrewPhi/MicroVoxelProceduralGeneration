@@ -1196,6 +1196,7 @@ impl VegetationStream {
         let mut mesh_requests = Vec::new();
         self.naadf_omitted = 0;
         let mut omitted_keys = BTreeSet::new();
+        let mut nondelegated_templates = BTreeSet::new();
         let mut plants = Vec::new();
         let mut offscreen = Vec::new();
         let mut group_key: Vec<_> = demand
@@ -1239,6 +1240,19 @@ impl VegetationStream {
                         });
                         continue;
                     }
+                    // Ownership belongs to an instance. Geometry keys can be
+                    // shared by independently placed trees (including source
+                    // hash collisions), so an owned instance cannot evict a
+                    // template still needed by a non-owned instance. Collect
+                    // before frustum culling to keep heading changes reusable.
+                    nondelegated_templates.insert(MeshKey {
+                        species: 2,
+                        variant: p.variant,
+                        seed: p.seed,
+                        tile: [0; 2],
+                        lod: 0,
+                        edit_id: 0,
+                    });
                     let dx = (p.root.x - c.x) as f64 * VOXEL_SIZE;
                     let dz = (p.root.z - c.z) as f64 * VOXEL_SIZE;
                     let root_y = p.root.y as f64 * VOXEL_SIZE;
@@ -1380,6 +1394,11 @@ impl VegetationStream {
             }
             plants.push((distance, p));
         }
+        omitted_keys.retain(|key| !nondelegated_templates.contains(key));
+        // An outside placement may arrive after this template was previously
+        // classified as wholly delegated; retract that cumulative GPU eviction.
+        self.naadf_omitted_keys
+            .retain(|key| !nondelegated_templates.contains(key));
         self.naadf_omitted_keys.extend(omitted_keys.iter().copied());
         self.meshes.retain(|k, _| {
             !omitted_keys.contains(&MeshKey {
@@ -2208,6 +2227,12 @@ impl VegetationStream {
                 .then(a.2.total_cmp(&b.2))
                 .then(a.3.cmp(&b.3))
         });
+        if vegetation_trace() && self.tick % 120 == 0 && !mesh_requests.is_empty() {
+            eprintln!(
+                "vegetation_unfulfilled tick={} requests={mesh_requests:?} inflight={:?}",
+                self.tick, self.pending_meshes
+            );
+        }
         let mut requested = BTreeSet::new();
         for (_, _, _, key, p, ground) in mesh_requests {
             if self.background_paused || submitted >= self.workers.len() * 2 {
@@ -3654,6 +3679,99 @@ pub(crate) fn mesh_cells_scaled_reference(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegated_instance_cannot_evict_a_shared_outside_tree_template() {
+        use super::*;
+        let mut stream = VegetationStream::new(
+            World::new(7),
+            VegetationConfig {
+                grass_radius_m: 0.,
+                flower_radius_m: 0.,
+                tree_radius_m: 64.,
+                ..Default::default()
+            },
+        );
+        for species in 0..3 {
+            for x in -8..=8 {
+                for z in -8..=8 {
+                    stream.tiles.insert(Tile { species, x, z }, (Vec::new(), 0));
+                }
+            }
+        }
+        let inside = PlantRecord {
+            species: Species::Rowan,
+            variant: 3,
+            seed: 1274974721108113005,
+            root: Cell { x: 0, y: 0, z: 0 },
+            rotation: 0,
+        };
+        let outside = PlantRecord {
+            root: Cell { x: 320, y: 0, z: 0 },
+            ..inside
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 0,
+                z: 0,
+            })
+            .unwrap()
+            .0
+            .push(inside);
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 1,
+                z: 0,
+            })
+            .unwrap()
+            .0
+            .push(outside);
+        let identity = MeshKey {
+            species: 2,
+            variant: inside.variant,
+            seed: inside.seed,
+            tile: [0; 2],
+            lod: 0,
+            edit_id: 0,
+        };
+        for lod in [1, 2, 4, 8] {
+            let key = MeshKey { lod, ..identity };
+            stream.meshes.insert(
+                key,
+                (
+                    Arc::new(VegetationMesh {
+                        vertices: vec![],
+                        indices: vec![0; 30],
+                    }),
+                    0,
+                ),
+            );
+            stream.mesh_costs.insert(key, (10, 0));
+        }
+        let owner = Arc::new(crate::naadf::ownership::Ownership::new(
+            [[-8., -8., -8.], [8., 24., 8.]],
+            16,
+            &vec![true; 256],
+        ));
+        assert!(owner.plant(&inside));
+        assert!(!owner.plant(&outside));
+        stream.set_naadf_owner(Some(owner));
+        // Reproduce an outside placement arriving after cumulative eviction.
+        stream.naadf_omitted_keys.insert(identity);
+        for _ in 0..3 {
+            let frame = stream.update([10., 1.7, 0.], 1080, 1., 0);
+            assert_eq!(frame.stats.pending_jobs, 0);
+            let instances: Vec<_> = frame.batches.iter().flat_map(|b| &b.instances).collect();
+            assert_eq!(instances.len(), 1);
+            assert_eq!(instances[0].root_cell, [320, 0, 0]);
+            assert!(!stream.naadf_omitted_keys.contains(&identity));
+            assert!(stream.pending_meshes.is_empty());
+        }
+    }
+
     #[test]
     fn owner_change_cancels_placement_and_mesh_demand_but_keeps_source_records() {
         use super::*;

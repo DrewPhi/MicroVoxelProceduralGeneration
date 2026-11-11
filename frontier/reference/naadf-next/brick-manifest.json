@@ -1,0 +1,75 @@
+{
+  "binary_sha256": "eb8b498a642f72e71beba817554661428f4ff6bd9374c0efd11b27ef079c62df",
+  "sustained_warmup_seconds_per_case": 1,
+  "runs": [
+    {
+      "fixture": "meadow",
+      "repeat": 0,
+      "returncode": 0,
+      "fixture_sha256": "70a0d0cd1df6d726af49a933393b63f0b5414158a4cfd376aa5092fff455f84f",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/meadow.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/meadow-0.json"
+      ]
+    },
+    {
+      "fixture": "rowan",
+      "repeat": 0,
+      "returncode": 0,
+      "fixture_sha256": "db045604101a5a19c29828a0fb002f5a6d97008ac06f726b3a3719fed8bb3369",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/rowan.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/rowan-0.json"
+      ]
+    },
+    {
+      "fixture": "mountain",
+      "repeat": 0,
+      "returncode": 0,
+      "fixture_sha256": "22d62b857512d9052fb5ed8e5dd780881aaa747a33891fa033fa6e449c0896bf",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/mountain.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/mountain-0.json"
+      ]
+    },
+    {
+      "fixture": "meadow",
+      "repeat": 1,
+      "returncode": 0,
+      "fixture_sha256": "70a0d0cd1df6d726af49a933393b63f0b5414158a4cfd376aa5092fff455f84f",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/meadow.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/meadow-1.json",
+        "--reverse"
+      ]
+    },
+    {
+      "fixture": "rowan",
+      "repeat": 1,
+      "returncode": 0,
+      "fixture_sha256": "db045604101a5a19c29828a0fb002f5a6d97008ac06f726b3a3719fed8bb3369",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/rowan.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/rowan-1.json",
+        "--reverse"
+      ]
+    },
+    {
+      "fixture": "mountain",
+      "repeat": 1,
+      "returncode": 0,
+      "fixture_sha256": "22d62b857512d9052fb5ed8e5dd780881aaa747a33891fa033fa6e449c0896bf",
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier-voxel-rt-lab",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-fixtures/mountain.vox",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-rt-final/mountain-1.json",
+        "--reverse"
+      ]
+    }
+  ]
+}

@@ -9,6 +9,8 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Options {
     pub(super) cache: u32,
+    pub(super) specialize_format: bool,
+    pub(super) shadow_coarse_after_m: f64,
     pub(super) height_tile: Option<u32>,
     pub(super) height_mips: bool,
     pub(super) height_gate: bool,
@@ -21,6 +23,12 @@ pub(super) struct Options {
 pub(super) fn options() -> Options {
     static OPTIONS: OnceLock<Options> = OnceLock::new();
     *OPTIONS.get_or_init(|| Options {
+        specialize_format: enabled("FRONTIER_NAADF_SPECIALIZE_FORMAT"),
+        shadow_coarse_after_m: std::env::var("FRONTIER_NAADF_SHADOW_COARSE_AFTER_M")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0. && *v <= 4096.)
+            .unwrap_or(0.),
         cache: match std::env::var("FRONTIER_NAADF_CACHE_NODES").as_deref() {
             Ok("1") => 1,
             Ok("2") => 2,
@@ -59,6 +67,10 @@ impl Options {
     }
     pub(super) fn mesh_constants(self) -> HashMap<String, f64> {
         HashMap::from([
+            (
+                "traversal_shadow_coarse_after_m".into(),
+                self.shadow_coarse_after_m,
+            ),
             (
                 "traversal_direct_roots".into(),
                 u8::from(super::root_distance::direct_publication()).into(),

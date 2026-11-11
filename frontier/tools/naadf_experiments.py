@@ -77,8 +77,12 @@ def main():
     p.add_argument('--eye', help='Explicit X,Y,Z; timing otherwise uses the ordinary preset camera')
     p.add_argument('--target', help='Explicit target X,Y,Z (requires --eye)')
     p.add_argument('--capture-size', default='640,360')
+    p.add_argument('--allow-color-error', action='store_true', help='Capture-only approximate lighting experiment: depth must still match exactly')
+    p.add_argument('--keep-going', action='store_true', help='Continue after a rejected comparison; default stops at the first failed gate')
     p.add_argument('--run', action='store_true')
     args = p.parse_args()
+    if args.allow_color_error and args.mode != 'capture':
+        p.error('--allow-color-error applies only to capture mode')
     if args.start_xz is not None and (args.eye is not None or args.mode != 'timing'):
         p.error('--start-xz requires timing mode without explicit --eye')
     if (args.eye is None) != (args.target is None):
@@ -171,7 +175,7 @@ def main():
                         else:
                             record['comparison_to_first'] = compare(reference, frame)
                             unequal = [kind for kind, value in record['comparison_to_first'].items()
-                                       if not value['equal']]
+                                       if not value['equal'] and not (args.allow_color_error and kind == 'linear_rgb')]
                             if unequal:
                                 raise ValueError(f"exact capture mismatch: {', '.join(unequal)}")
                     except (OSError, ValueError, KeyError) as error:
@@ -187,6 +191,8 @@ def main():
             failed |= 'error' in record
             manifest['runs'].append(record)
             (args.output / 'summary.json').write_text(json.dumps(manifest, indent=2) + '\n')
+            if 'error' in record and not args.keep_going:
+                return 1
     return int(failed)
 
 

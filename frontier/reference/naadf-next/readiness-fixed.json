@@ -1,0 +1,83 @@
+{
+  "scope": "readiness validation; 1-second sample is not a performance benchmark",
+  "seed": 7,
+  "source": {
+    "version": 4,
+    "native_voxel_m": 0.0625,
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5
+  },
+  "camera_start": {
+    "position": [
+      -57,
+      12.1375,
+      -47
+    ],
+    "yaw": 0.017028531,
+    "pitch": 0.18829249
+  },
+  "preparation_ms": 11954.915045,
+  "frames": {
+    "sample_count": 19,
+    "accepted_frames": 19,
+    "missed_budget_frames": 16,
+    "rejected_inputs": 0,
+    "p50_ms": 19.082492,
+    "p95_ms": 33.530901,
+    "p99_ms": 33.530901
+  },
+  "pending_jobs": 0,
+  "worker_jobs": {
+    "workers": 4,
+    "started": [
+      208,
+      243,
+      501
+    ],
+    "completed": [
+      208,
+      243,
+      501
+    ],
+    "cancelled": [
+      0,
+      0,
+      0
+    ],
+    "worker_wall_nanos": [
+      244308599,
+      5232048175,
+      1438370075
+    ],
+    "max_job_nanos": [
+      28423081,
+      45596373,
+      29914346
+    ],
+    "assembly_nanos": [
+      0,
+      4045901317,
+      962395386
+    ],
+    "mesh_nanos": [
+      0,
+      1184580798,
+      471010553
+    ],
+    "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+  },
+  "native_region": [
+    [
+      -121.0,
+      -52.0,
+      -111.0
+    ],
+    [
+      7.0,
+      76.0,
+      17.0
+    ]
+  ]
+}

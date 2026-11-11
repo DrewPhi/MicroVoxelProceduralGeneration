@@ -51,6 +51,7 @@ impl Gpu {
         let bindings = experiment.shadow_bindings();
         if let Some(adaptive) = &mut self.adaptive {
             adaptive.set_naadf_shadow(&self.device, bindings);
+            adaptive.set_naadf_shadow_bounds(experiment.full_bounds());
         }
         self.naadf = Some(experiment);
     }

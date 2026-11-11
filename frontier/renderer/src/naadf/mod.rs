@@ -1,7 +1,9 @@
 //! Optional exact NAADF window. Leading strips are generated and uploaded
 //! asynchronously; the existing renderer covers the exterior and handoff.
+mod column_cache;
 mod data;
 mod diagnostics;
+pub(crate) mod fixture;
 pub(crate) mod gpu_stages;
 mod leaf;
 #[cfg(test)]
@@ -433,7 +435,17 @@ impl Pending {
             (None, traversal::empty_height(&gpu.device))
         };
         let beam = traversal::Beam::new(&gpu.device, options);
-        let pipeline = make_pipeline(gpu, &layout, beam.layout(), options);
+        let pipeline = make_pipeline(
+            gpu,
+            &layout,
+            beam.layout(),
+            options,
+            [
+                1 + u32::from(encoding.is_compact()),
+                1 + u32::from(sparse_root_dims.is_some()),
+                u32::from(root_distance.is_none()),
+            ],
+        );
         let diagnostics = diagnostics::Diagnostics::new(&gpu.device, options.diagnostics);
         let resources = Bindings {
             uniform: uniform.clone(),
@@ -737,6 +749,11 @@ impl Experiment {
                     &volume.pipeline.get_bind_group_layout(0),
                     volume.beam.layout(),
                     traversal::options(),
+                    [
+                        1 + u32::from(volume.leaf_encoding.is_compact()),
+                        1 + u32::from(volume.sparse_roots),
+                        u32::from(volume.root_distance.is_none()),
+                    ],
                 );
                 volume.samples = gpu.sample_count;
             }
@@ -1056,6 +1073,9 @@ impl Experiment {
                         ready == total
                     }))
     }
+    pub(crate) fn full_bounds(&self) -> Option<[[f64; 3]; 2]> {
+        self.active.as_ref().map(|a| a.bounds)
+    }
     pub fn bounds_for(&self, camera: Camera) -> Option<[[f64; 3]; 2]> {
         let a = self.active.as_ref()?;
         let _ = camera;
@@ -1228,6 +1248,20 @@ impl Experiment {
         json.pop();
         use std::fmt::Write;
         let options = traversal::options();
+        write!(json, ",\"specialize_format\":{}", options.specialize_format).unwrap();
+        write!(
+            json,
+            ",\"native_column_cache\":{},\"fast_leaf_hash\":{}",
+            column_cache::json(),
+            prepare_profile::fast_hash()
+        )
+        .unwrap();
+        write!(
+            json,
+            ",\"shadow_coarse_after_m\":{}",
+            options.shadow_coarse_after_m
+        )
+        .unwrap();
         write!(
             json,
             r#","cpu_profile_enabled":{},"stack_block_bounds":{},"column_extrema":{}"#,
@@ -1463,6 +1497,7 @@ fn make_pipeline(
     layout: &wgpu::BindGroupLayout,
     beam_layout: &wgpu::BindGroupLayout,
     options: traversal::Options,
+    format: [u32; 3],
 ) -> wgpu::RenderPipeline {
     let shader = gpu
         .device
@@ -1482,6 +1517,11 @@ fn make_pipeline(
             push_constant_ranges: &[],
         });
     let mut constants = options.mesh_constants();
+    if options.specialize_format {
+        constants.insert("traversal_leaf_format".into(), format[0].into());
+        constants.insert("traversal_root_format".into(), format[1].into());
+        constants.insert("traversal_cpu_roots".into(), format[2].into());
+    }
     constants.insert(
         "traversal_diagnostic".into(),
         u8::from(capture_layer() == CaptureLayer::Steps).into(),
