@@ -357,3 +357,5 @@ in [frontier/VEGETATION_REFERENCE.md](frontier/VEGETATION_REFERENCE.md).
 
 A grounded mountain overlook with native vegetation and a matched128m NAADF
 comparison is recorded in [frontier/MOUNTAIN_OVERLOOK_REFERENCE.md](frontier/MOUNTAIN_OVERLOOK_REFERENCE.md).
+
+Distant grass/flower coverage: [frontier/GROUND_COVER.md](frontier/GROUND_COVER.md).

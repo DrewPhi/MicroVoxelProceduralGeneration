@@ -82,6 +82,26 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
         let destination = target(index, offset)?;
         (!is_header(&table[destination])).then_some(destination)
     };
+    // Source terrain elevation is signed. Only the second record of an owned
+    // cover-map node may use a signed final scalar; ordinary paint stays RGB+.
+    let mut signed_height = vec![false; table.len()];
+    for (index, p) in table.iter().enumerate().filter(|(_, p)| p[0][3] == -7.) {
+        let dim = p[1][0];
+        if dim.fract() != 0. || !(2. ..=10.).contains(&dim) {
+            continue;
+        }
+        for node in 0..(dim as usize).pow(2) {
+            let pack = index + 1 + node / 16;
+            if pack >= table.len() {
+                continue;
+            }
+            if let Some(raw) = raw_target(index, table[pack][1 + node % 16 / 4][node % 4]) {
+                if raw + 1 < table.len() {
+                    signed_height[raw + 1] = true;
+                }
+            }
+        }
+    }
     let zeros = |p: &Profile| p[2..].iter().flatten().all(|v| *v == 0.);
     let mut owned = vec![false; table.len()];
     for (index, p) in table.iter().enumerate() {
@@ -97,12 +117,36 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
                     return false;
                 }
             }
-            -2. => {
+            -6. => {
+                if p[0][2] != 0. && p[0][2] != 1. {
+                    return false;
+                }
+                if p[1..].iter().flatten().any(|v| *v != 0.) {
+                    return false;
+                }
+                let Some(base) = target(index, p[0][0]) else {
+                    return false;
+                };
+                if matches!(table[base][0][3], -6. | -7.) {
+                    return false;
+                }
+                let Some(map) = target(index, p[0][1]) else {
+                    return false;
+                };
+                if table[map][0][3] != -7. {
+                    return false;
+                }
+            }
+            -2. | -7. => {
                 let dimension = p[1][0];
                 if p[0][2] <= 0.
                     || dimension.fract() != 0.
                     || !(2. ..=10.).contains(&dimension)
-                    || p[1][2..] != [0., 0.]
+                    || (if p[0][3] == -7. {
+                        p[1][3] != 0. || ![0., 1.].contains(&p[1][2])
+                    } else {
+                        p[1][2..] != [0., 0.]
+                    })
                     || !zeros(p)
                 {
                     return false;
@@ -122,7 +166,15 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
                     for lane in 0..16 {
                         let offset = record[1 + lane / 4][lane % 4];
                         if pack * 16 + lane < nodes {
-                            if raw_target(index, offset).is_none() {
+                            let Some(raw) = raw_target(index, offset) else {
+                                return false;
+                            };
+                            if p[0][3] == -7.
+                                && (raw + (if p[1][2] > 0.5 { 10 } else { 2 }) > table.len()
+                                    || table[raw..raw + (if p[1][2] > 0.5 { 10 } else { 2 })]
+                                        .iter()
+                                        .any(is_header))
+                            {
                                 return false;
                             }
                         } else if offset != 0. {
@@ -158,7 +210,11 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
             -4. => {} // Ownership is checked after all map descriptors.
             tag if tag < 0. => return false,
             _ => {
-                if p.iter().flatten().any(|v| *v < 0.) {
+                if p.iter()
+                    .flatten()
+                    .enumerate()
+                    .any(|(lane, v)| *v < 0. && !(signed_height[index] && lane == 19))
+                {
                     return false;
                 }
             }
@@ -173,6 +229,32 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ground_cover_map_pair_references_and_wrappers_are_validated() {
+        let mut table = vec![[[0.; 4]; 5]; 41];
+        let at = table.len() as u32;
+        let mut h = map_header([0., 0.], 1., 2, &[1, 11, 21, 31], at);
+        h[0][0][3] = -7.;
+        table.extend(h);
+        let id = table.len();
+        let mut wrapper = [[0.; 4]; 5];
+        wrapper[0] = [-(id as f32), at as f32 - id as f32, 0., -6.];
+        table.push(wrapper);
+        table[2][4][3] = -100.;
+        assert!(valid_table(&table));
+        let mut full = table.clone();
+        full[at as usize][1][2] = 1.;
+        assert!(valid_table(&full));
+        full[at as usize][1][2] = 2.;
+        assert!(!valid_table(&full));
+        let mut bad = table.clone();
+        bad[id][0][0] = 0.;
+        assert!(!valid_table(&bad));
+        let mut bad = table.clone();
+        bad[at as usize + 1][1][3] = 200.;
+        assert!(!valid_table(&bad));
+    }
 
     fn corners() -> Vec<Profile> {
         vec![[[0.25, 0.5, 0.75, 1.]; 5]; 4]

@@ -6,7 +6,7 @@ pub mod plant_recipe;
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -740,22 +740,46 @@ pub fn model_for_cancellable(
 pub fn prewarm_models() {}
 
 #[derive(Debug, Default)]
-pub(crate) struct TileCache(Mutex<VecDeque<((i64, i64, Species), Arc<Vec<PlantRecord>>)>>);
+struct PlacementPages {
+    ground: VecDeque<((i64, i64, Species), Arc<Vec<PlantRecord>>)>,
+    trees: HashMap<(i64, i64), Arc<Vec<PlantRecord>>>,
+    tree_order: VecDeque<(i64, i64)>,
+}
+#[derive(Debug, Default)]
+pub(crate) struct TileCache(Mutex<PlacementPages>);
 impl TileCache {
     fn tile(&self, w: &World, x: i64, z: i64, species: Species) -> Arc<Vec<PlantRecord>> {
         let key = (x, z, species);
         {
             let cache = self.0.lock().unwrap();
-            if let Some((_, r)) = cache.iter().find(|(k, _)| *k == key) {
+            if species == Species::Rowan {
+                if let Some(r) = cache.trees.get(&(x, z)) {
+                    return r.clone();
+                }
+            } else if let Some((_, r)) = cache.ground.iter().find(|(k, _)| *k == key) {
                 return r.clone();
             }
         }
         let records = Arc::new(place_tile(w, x, z, species));
         let mut cache = self.0.lock().unwrap();
-        if cache.len() >= 128 {
-            cache.pop_front();
+        if species == Species::Rowan {
+            // Supported-tree stencils are shared by small ground probes. Keep
+            // their tiny 0/1-record pages separate from large grass pages.
+            if !cache.trees.contains_key(&(x, z)) {
+                while cache.trees.len() >= 4096 {
+                    if let Some(old) = cache.tree_order.pop_front() {
+                        cache.trees.remove(&old);
+                    }
+                }
+                cache.trees.insert((x, z), records.clone());
+                cache.tree_order.push_back((x, z));
+            }
+        } else {
+            if cache.ground.len() >= 128 {
+                cache.ground.pop_front();
+            }
+            cache.ground.push_back((key, records.clone()));
         }
-        cache.push_back((key, records.clone()));
         records
     }
 }
@@ -833,14 +857,20 @@ fn patch_field(seed: u64, x: i64, z: i64, scale: i64) -> f64 {
     let b = sample(gx, gz + 1) * (1. - u) + sample(gx + 1, gz + 1) * u;
     a * (1. - v) + b * v
 }
+/// Expected birth probability before the canonical per-candidate random roll.
+/// Display estimators may average this field without promoting a single rare
+/// blossom into a whole coarse population. Placement uses this same function.
+pub fn flower_birth_probability(world_seed: u64, x: i64, z: i64) -> f64 {
+    let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 64);
+    0.001 + 0.30 * ((colony - 0.65) / 0.35).max(0.).powi(2)
+}
 fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option<Species>) {
     let seed = hash(world_seed ^ 0x6d6561646f77, gx, gz);
     let x = gx * 8 + 2 + (seed % 4) as i64;
     let z = gz * 8 + 2 + ((seed >> 16) % 4) as i64;
     let meadow = patch_field(world_seed ^ 0x7061746368, x, z, 192);
     let tuft = patch_field(world_seed ^ 0x74756674, x, z, 48);
-    let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 64);
-    let bloom_probability = 0.001 + 0.30 * ((colony - 0.65) / 0.35).max(0.).powi(2);
+    let bloom_probability = flower_birth_probability(world_seed, x, z);
     let roll = |salt| (mix(seed ^ salt) >> 11) as f64 / ((1u64 << 53) as f64);
     let species = if roll(0x626c6f6f6d) < bloom_probability {
         Some(Species::Edelweiss)
@@ -873,6 +903,17 @@ fn tree_supported(w: &World, x: i64, z: i64) -> Option<i64> {
     Some(h)
 }
 fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord> {
+    place_tile_region(w, tx, tz, species, None)
+}
+// Identical source rules with early root-range rejection. Coarse display probes
+// must not evaluate habitat/support for all 1024 candidates of a 16 m placement tile.
+fn place_tile_region(
+    w: &World,
+    tx: i64,
+    tz: i64,
+    species: Species,
+    bounds: Option<([i64; 2], [i64; 2])>,
+) -> Vec<PlantRecord> {
     let mut records = Vec::new();
     let (x, z, seed) = tree_candidate(w.seed, tx, tz);
     if species == Species::Rowan && tree_allowed(w.seed, tx, tz) {
@@ -898,16 +939,44 @@ fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord>
     let mut trees = Vec::new();
     for dx in -1..=1 {
         for dz in -1..=1 {
-            let (a, b, _) = tree_candidate(w.seed, tx + dx, tz + dz);
-            if tree_allowed(w.seed, tx + dx, tz + dz) && tree_supported(w, a, b).is_some() {
-                trees.push((a, b));
+            if let Some(cache) = &w.vegetation {
+                // Reuse canonical supported tree records across neighboring
+                // bounded probes instead of repeating their support stencil.
+                trees.extend(
+                    cache
+                        .tile(w, tx + dx, tz + dz, Species::Rowan)
+                        .iter()
+                        .map(|r| (r.root.x, r.root.z)),
+                );
+            } else {
+                let (a, b, _) = tree_candidate(w.seed, tx + dx, tz + dz);
+                if tree_allowed(w.seed, tx + dx, tz + dz) && tree_supported(w, a, b).is_some() {
+                    trees.push((a, b));
+                }
             }
         }
     }
-    for gx in 0..32 {
-        for gz in 0..32 {
+    let grid = |axis: usize, tile: i64| {
+        bounds
+            .map(|(min, max)| {
+                (
+                    (min[axis].div_euclid(8) - tile * 32).clamp(0, 32),
+                    ((max[axis] - 1).div_euclid(8) + 1 - tile * 32).clamp(0, 32),
+                )
+            })
+            .unwrap_or((0, 32))
+    };
+    let (x0, x1) = grid(0, tx);
+    let (z0, z1) = grid(1, tz);
+    for gx in x0..x1 {
+        for gz in z0..z1 {
             let (x, z, seed, chosen) = ground_candidate(w.seed, tx * 32 + gx, tz * 32 + gz);
             if chosen != Some(species) {
+                continue;
+            }
+            if bounds
+                .is_some_and(|(min, max)| x < min[0] || z < min[1] || x >= max[0] || z >= max[1])
+            {
                 continue;
             }
             let nearest = trees
@@ -1000,6 +1069,28 @@ impl World {
             }
         }
         out
+    }
+    /// Canonical grass/flower roots in a small rectangle without populating
+    /// entire 16 m placement pages. Same support, shade and seed rules as pages.
+    pub fn vegetation_ground_records_in(
+        &self,
+        min: [i64; 2],
+        max: [i64; 2],
+        species: Species,
+    ) -> Vec<PlantRecord> {
+        if species == Species::Rowan {
+            return self.vegetation_records_species(min, max, species);
+        }
+        if self.vegetation.is_none() || min[0] >= max[0] || min[1] >= max[1] {
+            return Vec::new();
+        }
+        let mut records = Vec::new();
+        for tx in min[0].div_euclid(256)..=(max[0] - 1).div_euclid(256) {
+            for tz in min[1].div_euclid(256)..=(max[1] - 1).div_euclid(256) {
+                records.extend(place_tile_region(self, tx, tz, species, Some((min, max))));
+            }
+        }
+        records
     }
     pub fn vegetation_voxel(&self, c: Cell) -> Option<PlantVoxel> {
         for species in [Species::Rowan, Species::Grass, Species::Edelweiss] {
@@ -1637,6 +1728,32 @@ mod tests {
                         (a.root.x - b.root.x).pow(2) + (a.root.z - b.root.z).pow(2) >= 132 * 132
                     );
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod region_probe_tests {
+    use super::*;
+    #[test]
+    fn bounded_ground_source_is_identical_to_filtered_canonical_pages() {
+        let w = World::fbm(
+            7,
+            crate::FbmParams {
+                recipe: crate::FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .with_vegetation();
+        for min in [[-930, -770], [-8, -8], [240, 248]] {
+            let max = min.map(|v| v + 32);
+            for species in [Species::Grass, Species::Edelweiss] {
+                assert_eq!(
+                    w.vegetation_ground_records_in(min, max, species),
+                    w.vegetation_records_species(min, max, species)
+                );
             }
         }
     }

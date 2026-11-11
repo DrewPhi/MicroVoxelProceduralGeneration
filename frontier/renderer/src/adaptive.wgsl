@@ -156,7 +156,9 @@ fn add_profile(a:FaceProfile,b:FaceProfile)->FaceProfile {
 fn scale_profile(a:FaceProfile,s:f32)->FaceProfile {
     return FaceProfile(a.top*s,a.px*s,a.nx*s,a.pz*s,a.nz*s);
 }
-fn appearance_profile(id:u32,local:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>)->FaceProfile {
+fn appearance_profile(original_id:u32,local:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>)->FaceProfile {
+    var id=original_id;
+    if face_profiles[id].top.w == -6. {id=u32(i32(id)+i32(face_profiles[id].top.x));}
     let p=face_profiles[id];
     if p.top.w>=0. {return p;}
     if p.top.w == -2. {
@@ -203,6 +205,124 @@ fn appearance_profile(id:u32,local:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>)->FacePro
         mix_profile(face_profiles[u32(ids.x)],face_profiles[u32(ids.y)],uv.x),
         mix_profile(face_profiles[u32(ids.z)],face_profiles[u32(ids.w)],uv.x),uv.y);
 }
+// Source-derived compressed ground cover; the original terrain profile is
+// evaluated unchanged. Coverage is a first-hit estimate, never summed area.
+override cover_shell:bool=false;
+override cover_directional:bool=false;
+struct CoverSample {faces:FaceProfile, extra:FaceProfile};
+fn cover_node_address(map:u32,node:u32)->u32 {
+    let pack=face_profiles[map+1u+node/16u]; let lane=node%16u;
+    var row=pack.px;
+    switch lane/4u {case 1u:{row=pack.nx;} case 2u:{row=pack.pz;} case 3u:{row=pack.nz;} default:{}}
+    return u32(i32(map)+i32(row[lane%4u]));
+}
+fn cover_view(view:vec3<f32>,normal:vec3<f32>)->vec2<f32> {
+    var azimuth=0.;if length(view.xz)>0.00001 {let a=atan2(view.z,view.x)*0.6366197723675814;azimuth=a-floor(a/4.)*4.;}
+    // The probe subtracts local ground height, a vertical shear rather than
+    // a rotation. Transform the ray slope by the same ground-plane shear.
+    let elevation=max(dot(view,normalize(normal)),0.)/max(normal.y*length(view.xz),0.0001);
+    return vec2(azimuth,elevation);
+}
+fn cover_node(map:u32,node:u32,direction:vec2<f32>,view:vec3<f32>)->CoverSample {
+    let at=cover_node_address(map,node);let base=face_profiles[at];
+    let first=(u32(floor(direction.x))+2u)%4u;let next=(first+1u)%4u;let t=fract(direction.x);
+    let extra=face_profiles[at+1u];
+    let nadir=FaceProfile(base.top,vec4(0.),vec4(0.),vec4(0.),vec4(0.));
+    var faces=nadir;
+    if cover_directional && face_profiles[map].px.z>0.5 {
+        let low=mix_profile(face_profiles[at+2u+first],face_profiles[at+2u+next],t);
+        let high=mix_profile(face_profiles[at+6u+first],face_profiles[at+6u+next],t);
+        faces=mix_profile(low,high,clamp((direction.y-0.125)/0.875,0.,1.));
+    } else {
+        faces=FaceProfile(base.top*max(view.y,0.),base.px*max(view.x,0.),base.nx*max(-view.x,0.),base.pz*max(view.z,0.),base.nz*max(-view.z,0.));
+        let area=faces.top.w+faces.px.w+faces.nx.w+faces.pz.w+faces.nz.w;
+        let low=mix(extra.px[first],extra.px[next],t);let high=mix(extra.nx[first],extra.nx[next],t);
+        let phi=mix(low,high,clamp((direction.y-0.125)/0.875,0.,1.));
+        if area<=0.00001 {faces=nadir;}
+        let scale=phi/max(select(base.top.w,area,area>0.00001),0.00001);
+        faces=FaceProfile(faces.top*scale,faces.px*scale,faces.nx*scale,faces.pz*scale,faces.nz*scale);
+    }
+    faces=mix_profile(faces,nadir,smoothstep(1.,4.,direction.y));
+    return CoverSample(faces,face_profiles[at+1u]);
+}
+fn mix_cover(a:CoverSample,b:CoverSample,t:f32)->CoverSample {
+    return CoverSample(mix_profile(a.faces,b.faces,t),mix_profile(a.extra,b.extra,t));
+}
+fn cover_sample(id:u32,local:vec3<f32>,normal:vec3<f32>)->CoverSample {
+    let wrapper=face_profiles[id];let map=u32(i32(id)+i32(wrapper.top.y));let h=face_profiles[map];
+    let dim=u32(h.px.x);let uv=clamp((local.xz-h.top.xy)*h.top.z,vec2(0.),vec2(f32(dim-1u)));
+    let cell=min(vec2<u32>(floor(uv)),vec2<u32>(dim-2u));let t=fract(uv);let n=cell.y*dim+cell.x;
+    let view=normalize(camera.eye.xyz-local);let direction=cover_view(view,normal);
+    return mix_cover(mix_cover(cover_node(map,n,direction,view),cover_node(map,n+1u,direction,view),t.x),mix_cover(cover_node(map,n+dim,direction,view),cover_node(map,n+dim+1u,direction,view),t.x),t.y);
+}
+fn view_coverage(p:CoverSample,view:vec3<f32>,normal:vec3<f32>)->f32 {
+    return clamp(p.faces.top.w+p.faces.px.w+p.faces.nx.w+p.faces.pz.w+p.faces.nz.w,0.,1.);
+}
+fn cover_handoff(local:vec3<f32>)->f32 {
+    let d=local-camera.eye.xyz;
+    if near_shadow.naadf_hi.w>0.5 {
+        // Partial native ground patches may extend8m beyond the published box.
+        let outside=max(max(near_shadow.naadf_lo.xyz-d,d-near_shadow.naadf_hi.xyz),vec3(0.));
+        return smoothstep(0.,8.,max(max(outside.x,outside.y),outside.z));
+    }
+    return smoothstep(28.,42.,length(d));
+}
+fn cover_shell_alpha(p:CoverSample,local:vec3<f32>,normal:vec3<f32>,footprint:f32,coverage:f32)->f32 {
+    let height=ceil(p.extra.nz.y*0.5*16.)/16.;
+    let projected=height/max(footprint,0.0001);
+    let band=u32(clamp(floor(height*16./4.),0.,2.));
+    return min(coverage,0.6*p.extra.pz[band]*cover_handoff(local)*smoothstep(0.75,1.5,projected));
+}
+fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>,base:vec3<f32>,visibility:f32)->vec3<f32> {
+    if face_profiles[id].top.w != -6. {return base;}
+    let p=cover_sample(id,local,normal);let view=normalize(camera.eye.xyz-local);
+    let wrapper=face_profiles[id];let map=u32(i32(id)+i32(wrapper.top.y));let spacing=1./face_profiles[map].top.z;
+    if normal.y<0.45 || abs(local.y-p.extra.nz.w)>max(1.,spacing) {return base;}
+    var coverage=view_coverage(p,view,normal)*cover_handoff(local);
+    if coverage<=0.0001 {return base;}
+    let w=vec4(max(view.x,0.),max(-view.x,0.),max(view.z,0.),max(-view.z,0.));
+    let top=1.;let bottom=0.;
+    let area=view_coverage(p,view,normal);
+    if area<=0.00001{return base;}
+    let c0=p.faces.top.rgb/max(p.faces.top.w,0.00001)*terrain_lighting(vec3(0.,1.,0.),visibility);
+    let c1=p.faces.px.rgb/max(p.faces.px.w,0.00001)*terrain_lighting(vec3(1.,0.,0.),visibility);
+    let c2=p.faces.nx.rgb/max(p.faces.nx.w,0.00001)*terrain_lighting(vec3(-1.,0.,0.),visibility);
+    let c3=p.faces.pz.rgb/max(p.faces.pz.w,0.00001)*terrain_lighting(vec3(0.,0.,1.),visibility);
+    let c4=p.faces.nz.rgb/max(p.faces.nz.w,0.00001)*terrain_lighting(vec3(0.,0.,-1.),visibility);
+    let c5=p.extra.top.rgb/max(p.extra.top.w,0.00001)*terrain_lighting(vec3(0.,-1.,0.),visibility);
+    let a0=p.faces.top.w;let a1=p.faces.px.w;let a2=p.faces.nx.w;
+    let a3=p.faces.pz.w;let a4=p.faces.nz.w;let a5=0.;
+    var plant=(a0*c0+a1*c1+a2*c2+a3*c3+a4*c4+a5*c5)/area;
+    let luma=vec3(0.2126,0.7152,0.0722);let mean=dot(plant,luma);
+    let moments=vec4(dot(c0,luma)-mean,dot(c1,luma)-mean,dot(c2,luma)-mean,dot(c3,luma)-mean);
+    let d4=dot(c4,luma)-mean;let d5=dot(c5,luma)-mean;
+    let variance=(dot(vec4(a0,a1,a2,a3),moments*moments)+a4*d4*d4+a5*d5*d5)/area;
+    let relative_sigma=sqrt(max(variance,0.))/max(mean,0.025);
+    // The approved terrain palette already approximates meadow brightness.
+    // Preserve its low-frequency luminance while transferring plant hue and
+    // microgeometry contrast; separate substrate/cover sampling is not a full
+    // joint ground-and-plant radiance prefilter.
+    plant*=mix(mean,max(dot(base,luma),0.),0.85)/max(mean,0.0001);
+    let world_cell=bitcast<vec3<u32>>(vec3<i32>(floor(local*16.)))+camera.paint_origin.xyz;
+    let coarse_cell=vec3(world_cell.x,0u,world_cell.z)>>vec3<u32>(3u);
+    let footprint=max(length(dx.xz),length(dy.xz));let silhouette_footprint=min(length(dx),length(dy));let attenuation=inverseSqrt(max(1.,footprint*footprint/0.25));
+    let grain=(paint_hash(coarse_cell)-0.5)*2.;
+    // Reconstruct unresolved source variance at the plant-candidate scale.
+    // Phase is world-locked; amplitude decays with projected footprint.
+    plant*=1.+grain*min(0.65,0.08+p.extra.nz.z*2.+1.7320508*relative_sigma)*attenuation;
+    let bloom=clamp(p.extra.pz.w/max(view_coverage(p,view,normal),0.02),0.,0.5);
+    let flower=select(0.,1.,paint_hash(coarse_cell^vec3<u32>(131u,723u,391u))<bloom);
+    // Preserve the mean blossom contribution as its stochastic detail becomes
+    // subpixel. The birth field is shared with canonical placement.
+    let flower_color=vec3(0.75,0.74,0.67)*terrain_lighting(vec3(0.,1.,0.),visibility);
+    plant+=mix(bloom,flower,attenuation)*max(vec3(0.),flower_color-plant);
+    if cover_shell {return max(plant,vec3(0.));}
+    if wrapper.top.z>0.5 {
+        let shell_alpha=cover_shell_alpha(p,local,normal,silhouette_footprint,coverage);
+        coverage=clamp((coverage-shell_alpha)/max(1.-shell_alpha,0.0001),0.,1.);
+    }
+    return mix(base,max(plant,vec3(0.)),coverage);
+}
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -216,8 +336,13 @@ struct VertexOut {
 }
 fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:u32)->VertexOut {
     var out:VertexOut;
-    out.position=camera.view_projection*vec4<f32>(position,1.);
-    out.color=color;out.normal=normal;out.local=position;
+    var p=position;
+    if cover_shell && face_profiles[profile_index].top.w == -6. && normal.y>0.45 {
+        let cover=cover_sample(profile_index,position,normal);
+        p.y+=ceil(cover.extra.nz.y*0.5*16.)/16.;
+    }
+    out.position=camera.view_projection*vec4<f32>(p,1.);
+    out.color=color;out.normal=normal;out.local=p;
     out.profile_index=profile_index;
     return out;
 }
@@ -291,6 +416,15 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
     // exact native face response while either tangent direction still resolves
     // a voxel. Filtering changes radiance only, never normal, depth or coverage.
     let dx=dpdx(in.local); let dy=dpdy(in.local);
+    if cover_shell {
+        if face_profiles[in.profile_index].top.w != -6. || in.normal.y<0.45 {discard;}
+        let p=cover_sample(in.profile_index,in.local,in.normal);let view=normalize(camera.eye.xyz-in.local);
+        let coverage=view_coverage(p,view,in.normal)*cover_handoff(in.local);
+        let alpha=cover_shell_alpha(p,in.local,in.normal,min(length(dx),length(dy)),coverage);
+        let cell=bitcast<vec3<u32>>(vec3<i32>(floor(in.local*16.)))+camera.paint_origin.xyz;
+        if paint_hash(vec3(cell.x,991u,cell.z))>=alpha {discard;}
+        return vec4(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*terrain_lighting(in.normal,visibility),visibility),1.);
+    }
     let xx=dot(dx,dx); let yy=dot(dy,dy); let xy=dot(dx,dy);
     let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
     let cross_area=cross(dx,dy);
@@ -317,7 +451,7 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
     if diagnostic==6u {return vec4<f32>(light,1.);}
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
     let resolved=in.color*tint*light;
-    if blend<=0. && diagnostic!=8u {return vec4<f32>(resolved,1.);}
+    if blend<=0. && diagnostic!=8u {return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,resolved,visibility),1.);}
     // All three triangle vertices share this ID. Fetch only for unresolved
     // radiance, rather than exporting80bytes of repeated vertex varyings.
     let profile=appearance_profile(in.profile_index,in.local,dx,dy);
@@ -335,7 +469,7 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
             +w.w*profile.nz.rgb*terrain_lighting(vec3<f32>(0.,0.,-1.),visibility);
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         if diagnostic==8u {return vec4<f32>(filtered/area,1.);}
-        return vec4<f32>(mix(resolved,filtered/area*display_terrain_tint(cell,0.),blend),1.);
+        return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,mix(resolved,filtered/area*display_terrain_tint(cell,0.),blend),visibility),1.);
     }
-    return vec4<f32>(in.color * tint * light, 1.0);
+    return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.0);
 }

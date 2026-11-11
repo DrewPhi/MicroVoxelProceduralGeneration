@@ -88,3 +88,5 @@ cargo build --release --locked -p frontier-reference --bin vegetation_reference
 Defaults use the camera/crop above; `--help` lists overrides. Use a new output
 directory or preserve outputs before rerunning. `--no-vegetation` creates the bare
 comparison; `--spp 16` selects the convergence run.
+
+The coarse grass/flower implementation and its limitations are documented in [GROUND_COVER.md](GROUND_COVER.md).

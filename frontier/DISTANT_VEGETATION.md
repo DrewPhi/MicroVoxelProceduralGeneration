@@ -47,10 +47,11 @@ This pass extends **tree silhouettes** beyond the NAADF region using the existin
 cached vegetation mesh renderer. It does not merge trees into the terrain surface
 heightfield: doing that would lose trunks, vertical geometry and openings. It
 also does not claim all-distance editable volume LODs or production G3/G4.
-Grass/flowers keep their existing local geometry and distant grassy background.
-A statistical coverage-color bake was tried and rejected because it emphasized
-terrain patch boundaries. No terrain appearance, shader, or cache-version change
-from that experiment is retained. Far blossoms are
+At this initial tree-only checkpoint, grass/flowers kept their existing local
+geometry and distant background. Its early coverage-color bake was rejected
+because it emphasized terrain patch boundaries. The later independent
+[ground-cover pass](GROUND_COVER.md) adds a different appearance layer, with
+reference captures and explicit compact/directional cost comparisons. Far blossoms are
 omitted from the approximate crown palette rather than preserved individually.
 
 ## Verification and measurements

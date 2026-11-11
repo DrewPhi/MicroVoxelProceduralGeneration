@@ -223,6 +223,7 @@ fn build_cached(
     samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
         let mut tile = build_surface(world, key, &mut cancelled, samples)?;
+        crate::ground_cover::decorate(world, &mut tile, &mut cancelled)?;
         let finalize_started = std::time::Instant::now();
         if tile.exact {
             pack_exact_native(&mut tile, &mut cancelled)?;
@@ -230,6 +231,10 @@ fn build_cached(
             compact_vertices(&mut tile);
         }
         configure_occlusion_bounds(world, &mut tile);
+        if crate::ground_cover::shell_enabled() && tile.face_profiles.iter().any(|p| p[0][3] == -6.)
+        {
+            tile.conservative_surface_bounds[1][1] += 1.;
+        }
         samples.stages.finalize_ms += finalize_started.elapsed().as_secs_f64() * 1000.;
         return Ok(tile);
     }

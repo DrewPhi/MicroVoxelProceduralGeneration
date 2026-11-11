@@ -160,6 +160,7 @@ struct ProfileAllocation {
     table: Allocation,
 }
 struct Cluster {
+    cover: bool,
     native_quads: bool,
     proxy_triangles: bool,
     indexed_proxy: bool,
@@ -291,14 +292,27 @@ macro_rules! encode_cluster_draws {
     ($renderer:expr, $pass:expr) => {{
         let renderer = $renderer;
         let pass = $pass;
+        encode_cluster_draws!(renderer, &mut *pass, false);
+        if renderer.cover_pipelines.is_some() {
+            encode_cluster_draws!(renderer, &mut *pass, true);
+        }
+    }};
+    ($renderer:expr, $pass:expr, $shell:expr) => {{
+        let renderer = $renderer;
+        let pass = $pass;
         let mut bound_vertex_page = None;
         for (draw_index, item) in renderer.visible.iter().enumerate() {
-            let far = if item.no_voxel_shadow {
+            let far = if $shell {
+                renderer.cover_pipelines.as_ref()
+            } else if item.no_voxel_shadow {
                 renderer.far_pipelines.as_ref()
             } else {
                 None
             };
             let c = &renderer.clusters[&item.key];
+            if $shell && (c.exact || !c.cover) {
+                continue;
+            }
             if c.native_quads {
                 pass.set_pipeline(far.map_or(&renderer.native_pipeline, |p| &p[2]));
             } else if c.proxy_triangles {
@@ -476,6 +490,7 @@ pub struct AdaptiveGpu {
     native_bins_enabled: bool,
     voxel_filter: bool,
     far_pipelines: Option<[wgpu::RenderPipeline; 6]>,
+    cover_pipelines: Option<[wgpu::RenderPipeline; 6]>,
     naadf_shadow_bounds: Option<[[f64; 3]; 2]>,
     pipeline: wgpu::RenderPipeline,
     profile_pipeline: wgpu::RenderPipeline,
@@ -525,7 +540,7 @@ impl AdaptiveGpu {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -585,10 +600,27 @@ impl AdaptiveGpu {
         let indexed_proxy_attributes =
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
         let derived_proxy_attributes = wgpu::vertex_attr_array![0=>Uint32x3,1=>Uint32,2=>Uint32];
-        let naadf_constants = crate::naadf::mesh_traversal_constants();
+        let mut naadf_constants = crate::naadf::mesh_traversal_constants();
+        naadf_constants.insert(
+            "cover_directional".into(),
+            if crate::ground_cover::directional_enabled() {
+                1.
+            } else {
+                0.
+            },
+        );
         let mut far_constants = naadf_constants.clone();
         far_constants.insert("traversal_mesh_sun".into(), 0.);
-        let make_pipeline = |step_mode, kind, shadow, far| {
+        let mut shell_constants = naadf_constants.clone();
+        shell_constants.insert("cover_shell".into(), 1.);
+        let make_pipeline = |step_mode, kind, shadow, far, shell| {
+            let constants = if shell {
+                &shell_constants
+            } else if far {
+                &far_constants
+            } else {
+                &naadf_constants
+            };
             let native = kind == 1;
             let proxy = kind == 2;
             let indexed_proxy = kind == 3;
@@ -651,7 +683,10 @@ impl AdaptiveGpu {
                     } else {
                         "vs_main"
                     }),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
                     buffers: if derived_proxy {
                         &derived_proxy_buffers
                     } else if indexed_proxy {
@@ -671,11 +706,7 @@ impl AdaptiveGpu {
                         module: &shader,
                         entry_point: Some("fs_main"),
                         compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: if far {
-                                &far_constants
-                            } else {
-                                &naadf_constants
-                            },
+                            constants,
                             ..Default::default()
                         },
                         targets: &color_targets,
@@ -708,30 +739,42 @@ impl AdaptiveGpu {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false);
-        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false);
-        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false);
-        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false);
-        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false);
-        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false);
+        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false, false);
+        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false, false);
+        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false, false);
+        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false, false);
+        let indexed_proxy_pipeline =
+            make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false, false);
+        let derived_proxy_pipeline =
+            make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false, false);
         let far_pipelines = (std::env::var("FRONTIER_NAADF_SPLIT_SHADERS").as_deref() == Ok("1"))
             .then(|| {
                 [
-                    make_pipeline(wgpu::VertexStepMode::Instance, 0, false, true),
-                    make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, true),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 1, false, true),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 0, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 1, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true, false),
                 ]
             });
+        let cover_pipelines = crate::ground_cover::shell_enabled().then(|| {
+            [
+                make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false, true),
+            ]
+        });
         let shadow_pipelines = [
-            make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false),
-            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 1, true, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false, false),
+            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 1, true, false, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false, false),
+            make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false, false),
         ];
         let shadows = ShadowResources::new(device, &shadows_layout, shadow_pipelines);
         let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
@@ -784,6 +827,7 @@ impl AdaptiveGpu {
             native_bins_enabled: true,
             voxel_filter: true,
             far_pipelines,
+            cover_pipelines,
             naadf_shadow_bounds: None,
             pipeline,
             profile_pipeline,
@@ -829,6 +873,7 @@ impl AdaptiveGpu {
         // Explicit bind-group layouts have identical structural contracts;
         // existing camera/profile/shadow bindings remain compatible.
         self.far_pipelines = fresh.far_pipelines;
+        self.cover_pipelines = fresh.cover_pipelines;
         self.pipeline = fresh.pipeline;
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
@@ -1123,10 +1168,15 @@ impl AdaptiveGpu {
             bounds[0] = bounds[0].min(p);
             bounds[1] = bounds[1].max(p);
         }
+        if crate::ground_cover::shell_enabled() && tile.face_profiles.iter().any(|p| p[0][3] == -6.)
+        {
+            bounds[1].y += 1.;
+        }
         self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
+                cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
                 proxy_triangles: false,
                 indexed_proxy: false,
@@ -1642,13 +1692,18 @@ impl AdaptiveGpu {
             tile.mesh.origin.y as f64,
             tile.mesh.origin.z as f64,
         ) * frontier_world::VOXEL_SIZE;
-        let bounds = tile
+        let mut bounds = tile
             .bounds
             .map(|b| (DVec3::from_array(b) - origin).as_vec3());
+        if crate::ground_cover::shell_enabled() && tile.face_profiles.iter().any(|p| p[0][3] == -6.)
+        {
+            bounds[1].y += 1.;
+        }
         self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
+                cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: true,
                 proxy_triangles: false,
                 indexed_proxy: false,
@@ -1875,10 +1930,15 @@ impl AdaptiveGpu {
                 bounds[1] = bounds[1].max(p);
             }
         }
+        if crate::ground_cover::shell_enabled() && tile.face_profiles.iter().any(|p| p[0][3] == -6.)
+        {
+            bounds[1].y += 1.;
+        }
         self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
+                cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
                 proxy_triangles: true,
                 indexed_proxy: indexed.is_some(),

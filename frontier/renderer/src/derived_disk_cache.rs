@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 7;
+const REPRESENTATION_VERSION: u64 = 11;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -133,6 +133,13 @@ impl DiskCacheKeyer {
                 }
             };
             halo = halo.max(spacing + filter + 1);
+        }
+        if self.world.vegetation_enabled() && crate::ground_cover::enabled() {
+            let mut spacing = 128i128;
+            while key.width_cells as i128 / spacing > 4 {
+                spacing *= 2;
+            }
+            halo = halo.max(spacing * 2 + 8);
         }
         let min = key.min.map(|v| v as i128 - halo);
         let max = key
@@ -284,8 +291,8 @@ impl DiskCache {
                 return true;
             }
             match self.keyer.appearance.method {
-                crate::appearance_method::Method::Baseline => tag == -1.,
-                crate::appearance_method::Method::Map => matches!(tag, -1. | -2. | -4.),
+                crate::appearance_method::Method::Baseline => matches!(tag, -1. | -4. | -6. | -7.),
+                crate::appearance_method::Method::Map => matches!(tag, -1. | -2. | -4. | -6. | -7.),
                 _ => false,
             }
         })
@@ -504,6 +511,17 @@ fn source_identity_with_mode(
 fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
+    put(
+        &mut b,
+        u64::from(w.vegetation_enabled() && crate::ground_cover::enabled()),
+    );
+    put(&mut b, u64::from(crate::ground_cover::shell_enabled()));
+    put(&mut b, crate::ground_cover::VERSION);
+    put(&mut b, crate::ground_cover::directional_enabled() as u64);
+    put(
+        &mut b,
+        frontier_world::vegetation::VEGETATION_SOURCE_VERSION as u64,
+    );
     put(&mut b, u64::from(appearance.native_conforming));
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());

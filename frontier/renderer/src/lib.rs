@@ -18,6 +18,7 @@ mod development_resources;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
+mod ground_cover;
 mod hybrid;
 mod hybrid_gpu;
 mod integrated_profiles;
@@ -77,7 +78,9 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         return "\"render_appearance_version\":1".into();
     }
     let mode = adaptive_geometry::appearance_mode(world);
-    let version = if appearance_method::debug_view() != 0 {
+    let version = if world.vegetation_enabled() && ground_cover::enabled() {
+        7
+    } else if appearance_method::debug_view() != 0 {
         5
     } else if adaptive_geometry::near_profile_shared()
         || appearance_method::near_blend() != 0
@@ -92,7 +95,7 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
     } else {
         3
     };
-    format!(
+    let mut result=format!(
         "\"render_appearance_version\":{version},\"adaptive_appearance\":{{\"spatial_profiles\":{},\"profile_probe_cells\":{},\"profile_footprint\":\"{}\",\"near_detail\":{},\"method\":\"{}\",\"map_intervals\":{},\"visibility_grid\":{},\"visibility_spatial\":{},\"voxel_grain_amplitude\":{},\"debug_view\":{},\"near_profile_shared\":{},\"near_blend\":{},\"map_prefilter_radius_cells\":{},\"map_anisotropy_taps\":{},\"map_prefilter_mode\":{:?},\"map_filter_soft_surfaces\":{}}}",
         mode.spatial_profiles,
         mode.probe_cells,
@@ -110,7 +113,9 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         appearance_method::map_anisotropy(),
         match appearance_map::map_prefilter() {appearance_map::MapPrefilter::Off=>"off",appearance_map::MapPrefilter::NativeBox{..}=>"native-box",appearance_map::MapPrefilter::Footprint=>"footprint"},
         appearance_method::map_filter_soft_surfaces(),
-    )
+    );
+    result.push_str(&format!(",\"ground_cover\":{}", ground_cover::stats_json()));
+    result
 }
 
 /// CPU command encoding only; GPU execution is measured separately.
