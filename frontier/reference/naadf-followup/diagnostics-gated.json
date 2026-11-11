@@ -1,0 +1,14 @@
+{
+  "control": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1"
+  },
+  "gated-flat": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_HEIGHT_GATE": "1"
+  },
+  "gated-mips": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_HEIGHT_GATE": "1",
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+  }
+}

@@ -335,3 +335,11 @@ The original executable and final integrated control also match in linear RGB
 and depth. The final fixed Legacy reference PNG, linear RGB and depth match the
 original byte for byte. All seven experiments are implemented and tested; only
 the measured streaming improvement is recommended for the next optional playtest.
+
+## Measured follow-up
+
+The [optimization follow-up](NAADF_OPTIMIZATION_FOLLOWUP.md) adds actual compiler
+register statistics, query/skip counters, direct publication with durable proof
+provenance, guarded local grid exits, CPU stage profiling, exact classification
+reuse, and asynchronous GPU compute-stage timings. It records positive and
+negative results across 64/128/256 m workloads with unchanged visual controls.

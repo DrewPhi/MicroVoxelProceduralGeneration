@@ -1,0 +1,9 @@
+{
+  "control": {},
+  "beam": {
+    "FRONTIER_NAADF_BEAM": "1"
+  },
+  "mips": {
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+  }
+}

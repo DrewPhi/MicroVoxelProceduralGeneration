@@ -1,0 +1,8 @@
+{
+  "control": {},
+  "probe-level2": {
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1",
+    "FRONTIER_NAADF_HEIGHT_GATE": "1",
+    "FRONTIER_NAADF_HEIGHT_PROBE_LEVEL": "2"
+  }
+}

@@ -74,6 +74,11 @@ fn naadf_sparse_roots_match_canonical_rays() {
 fn naadf_traversal_variants_match_canonical_rays() {
     for options in [
         traversal::Options {
+            local_exit_repair: true,
+            diagnostics: true,
+            ..Default::default()
+        },
+        traversal::Options {
             cache: 1,
             ..Default::default()
         },
@@ -110,7 +115,22 @@ fn naadf_traversal_variants_match_canonical_rays() {
             ..Default::default()
         },
         traversal::Options {
+            height_mips: true,
+            height_gate: true,
+            height_probe: Some(2),
+            diagnostics: true,
+            ..Default::default()
+        },
+        traversal::Options {
             beam: true,
+            ..Default::default()
+        },
+        traversal::Options {
+            height_tile: Some(4),
+            height_mips: true,
+            height_gate: true,
+            beam: true,
+            diagnostics: true,
             ..Default::default()
         },
     ] {
@@ -351,6 +371,9 @@ fn gpu_matches_canonical_rays(
                     );
                 }
                 gpu.queue.submit(Some(encoder.finish()));
+                if let Some(stages) = &gpu.naadf_gpu_stages {
+                    stages.submitted_render();
+                }
                 let mut results = Vec::new();
                 for buffer in &buffers {
                     let (tx, rx) = mpsc::channel();
@@ -361,6 +384,9 @@ fn gpu_matches_canonical_rays(
                     rx.recv().unwrap().unwrap();
                     results.push(buffer.slice(..).get_mapped_range().to_vec());
                     buffer.unmap();
+                }
+                if let Some(stages) = &gpu.naadf_gpu_stages {
+                    stages.poll(&gpu.device);
                 }
                 let depths: Vec<f32> = results[1]
                     .chunks_exact(4)
@@ -451,6 +477,33 @@ fn gpu_matches_canonical_rays(
             }
             eprintln!("NAADF GPU oracle: {tested} covered primary/shadow samples across four headings; 32768 coverage decisions checked");
             assert!(tested > 1000);
+            if options.diagnostics {
+                let words = volume
+                    .diagnostics
+                    .read_words(&gpu.device, &gpu.queue)
+                    .unwrap()
+                    .unwrap();
+                for lane in words[..64].chunks_exact(32) {
+                    assert!(lane[0] > 0, "primary and shadow rays must be counted");
+                    assert_eq!(lane[0], lane[23] + lane[24]);
+                    assert_eq!(lane[7], lane[9] + lane[11]);
+                    if options.height_probe.is_some() {
+                        assert_eq!(
+                            lane[8], lane[7],
+                            "single probe must issue one height fetch per query"
+                        );
+                    }
+                    assert!(lane[10] <= lane[9]);
+                    assert!(lane[4] > 0 && lane[5] > 0 && lane[6] > 0);
+                }
+                if options.beam {
+                    assert!(words[64] > 0);
+                    assert_eq!(words[64], words[65] + words[66]);
+                    assert!(words[73] <= words[74]);
+                } else {
+                    assert_eq!(words[64], 0);
+                }
+            }
         };
         check_rays(&volume);
         if let Some(state) = &mut state {
@@ -502,7 +555,48 @@ fn gpu_matches_canonical_rays(
             warm(&mut volume);
             check_rays(&volume);
         }
+        if let Some(stages) = &gpu.naadf_gpu_stages {
+            use super::gpu_stages::Stage;
+            stages.flush(&gpu.device);
+            stages.assert_settled();
+            if options.height_enabled() || options.beam {
+                assert!(stages.samples(Stage::HeightBase) > 0);
+            }
+            if options.height_mips {
+                assert!(stages.samples(Stage::HeightReduce) > 0);
+            }
+            if options.beam {
+                assert!(stages.samples(Stage::Beam) > 0);
+            }
+            if gpu_distance {
+                assert!(stages.samples(Stage::RootRepair) > 0);
+            }
+            if gpu_distance && root_distance::Mode::requested() == root_distance::Mode::Feedback {
+                assert!(stages.samples(Stage::Feedback) > 0);
+            }
+            if gpu_distance && upload::scatter_allowance().is_some() {
+                assert!(stages.samples(Stage::Scatter) > 0);
+            }
+            eprintln!("Actual NAADF GPU stage hooks: {}", stages.json());
+        }
         eprintln!("NAADF GPU memory: {}-bit leaves, {} leaf bytes, {} initial payload bytes ({} with wide leaves)",
             volume.leaf_encoding.bits(), volume.leaf_bytes, volume.bytes, volume.wide_bytes);
     });
+}
+
+#[test]
+#[ignore = "explicit stage timestamp hooks with FRONTIER_NAADF_GPU_STAGES=1; optionally SCATTER_UPLOAD=1 and feedback schedule"]
+fn naadf_gpu_stage_timing_hooks_match_canonical_rays() {
+    assert!(gpu_stages::requested(), "set FRONTIER_NAADF_GPU_STAGES=1");
+    gpu_matches_canonical_rays(
+        false,
+        true,
+        false,
+        traversal::Options {
+            height_tile: Some(4),
+            height_mips: true,
+            beam: true,
+            ..Default::default()
+        },
+    );
 }

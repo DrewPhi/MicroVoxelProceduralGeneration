@@ -325,3 +325,11 @@ and ray profiling results](frontier/NAADF_OPTIMIZATION.md).
 NAADF optimization experiments and their reproducible configurations are documented
 in [the seven-experiment report](frontier/NAADF_SEVEN_EXPERIMENTS.md). Experimental
 flags are opt-in; use matched full-frame and streaming measurements before promotion.
+
+The [NAADF optimization follow-up](frontier/NAADF_OPTIMIZATION_FOLLOWUP.md) records
+why individual acceleration experiments help or lose, with canonical GPU tests,
+matched camera/motion measurements and compiler evidence. `FRONTIER_NAADF_GPU_STAGES=1`
+adds opt-in asynchronous compute-stage timings to reports/capture metadata;
+`FRONTIER_NAADF_DIAGNOSTICS=1` adds traversal counters for diagnostic captures.
+Use ordinary uninstrumented runs for FPS comparisons. The default CPU-proof
+traversal remains the recommended path; experimental switches are documented.

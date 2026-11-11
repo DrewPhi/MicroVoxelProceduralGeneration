@@ -7,7 +7,7 @@ const SHADER: &str = concat!(
     "const NAADF_GROUP:u32=0u;const NAADF_BASE:u32=0u;\n",
     include_str!("trace.wgsl"),
     r#"
-@group(0) @binding(7) var<storage,read_write> result:array<vec4<f32>>;
+@group(0) @binding(8) var<storage,read_write> result:array<vec4<f32>>;
 fn sample(h:VoxelHit)->vec4<f32>{
     return vec4(h.normal,select(-1.,h.t,h.found && h.pigment==0u));
 }
@@ -98,6 +98,7 @@ fn accelerated_primary_replays_ambiguous_corner_face() {
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let metrics = super::diagnostics::Diagnostics::new(&device, false);
         let empty = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: &[0; 4],
@@ -141,7 +142,8 @@ fn accelerated_primary_replays_ambiguous_corner_face() {
                 (3, empty.as_entire_binding()),
                 (5, wgpu::BindingResource::TextureView(&distance)),
                 (6, wgpu::BindingResource::TextureView(&heights)),
-                (7, output.as_entire_binding()),
+                (7, metrics.buffer.as_entire_binding()),
+                (8, output.as_entire_binding()),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource }),
         });

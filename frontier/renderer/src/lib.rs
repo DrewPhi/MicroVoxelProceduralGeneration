@@ -245,6 +245,7 @@ struct Gpu {
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_background_paused: bool,
     naadf: Option<naadf::Experiment>,
+    naadf_gpu_stages: Option<std::sync::Arc<naadf::gpu_stages::Profiler>>,
     naadf_serial: u64,
     naadf_raster_restored: bool,
     vegetation_stats: vegetation::VegetationStats,
@@ -476,7 +477,9 @@ impl Gpu {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let naadf_gpu_stages = naadf::gpu_stages::Profiler::new(&device, &queue);
         Ok(Self {
+            naadf_gpu_stages,
             visual_settings: None,
             regional_appearance: false,
             alpine_appearance: false,
@@ -1106,6 +1109,9 @@ impl Gpu {
             );
         }
         self.queue.submit(Some(encoder.finish()));
+        if let Some(stages) = &self.naadf_gpu_stages {
+            stages.submitted_render();
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         buffer
             .slice(..)
@@ -1114,6 +1120,9 @@ impl Gpu {
             });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
+        if let Some(stages) = &self.naadf_gpu_stages {
+            stages.flush(&self.device);
+        }
         let mapped = buffer.slice(..).get_mapped_range();
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for scanline in mapped.chunks_exact(row as usize) {
@@ -1262,9 +1271,21 @@ impl Gpu {
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
         metadata.pop();
         metadata.push_str(&format!(",{}}}", self.vegetation_json()));
+        metadata.pop();
+        metadata.push_str(&format!(
+            ",\"naadf_gpu_stages\":{}}}",
+            naadf::gpu_stages::json(self.naadf_gpu_stages.as_deref(), &self.device)
+        ));
         if let Some(n) = &self.naadf {
             metadata.pop();
             metadata.push_str(&format!(",\"naadf\":{}}}", n.json()));
+            if let Some(counters) = n
+                .traversal_diagnostics(self)
+                .map_err(std::io::Error::other)?
+            {
+                metadata.pop();
+                metadata.push_str(&format!(",\"naadf_traversal_diagnostics\":{counters}}}"));
+            }
         }
         std::fs::write(metadata_path, metadata)?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
@@ -2317,6 +2338,9 @@ impl Viewer {
             probe.resolve(&mut encoder, slot);
         }
         gpu.queue.submit(Some(encoder.finish()));
+        if let Some(stages) = &gpu.naadf_gpu_stages {
+            stages.submitted_render();
+        }
         if let (Some(probe), Some(slot)) = (&mut self.gpu_probe, timing) {
             probe.submitted(slot);
         }
@@ -3602,6 +3626,16 @@ pub fn run() -> Result<()> {
             visual.plant_cpu_mib, visual.plant_gpu_mib, visual.triangle_budget,
             adaptive_geometry::native_geometry_mode()
         ));
+        if let Some(gpu) = &viewer.gpu {
+            if let Some(stages) = &gpu.naadf_gpu_stages {
+                stages.flush(&gpu.device);
+            }
+            json.pop();
+            json.push_str(&format!(
+                ",\"naadf_gpu_stages\":{}}}",
+                naadf::gpu_stages::json(gpu.naadf_gpu_stages.as_deref(), &gpu.device)
+            ));
+        }
         if let Some(n) = viewer.gpu.as_ref().and_then(|g| g.naadf.as_ref()) {
             json.pop();
             json.push_str(&format!(",\"naadf\":{}}}", n.json()));

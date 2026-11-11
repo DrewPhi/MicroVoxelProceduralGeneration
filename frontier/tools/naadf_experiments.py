@@ -71,18 +71,25 @@ def main():
     p.add_argument('--mode', choices=['timing', 'capture'], default='timing')
     p.add_argument('--radius', type=int, default=64)
     p.add_argument('--seconds', type=float, default=10)
-    p.add_argument('--route', choices=['static', 'walk-stop-resume', 'walk-turn-return'], default='static')
+    p.add_argument('--route', choices=['static', 'walk-stop-resume', 'walk-turn-return', 'walk-circuit'], default='static')
     p.add_argument('--repeat', type=int, default=1)
+    p.add_argument('--start-xz', help='Grounded preset X,Z start; timing mode only')
     p.add_argument('--eye', help='Explicit X,Y,Z; timing otherwise uses the ordinary preset camera')
     p.add_argument('--target', help='Explicit target X,Y,Z (requires --eye)')
     p.add_argument('--capture-size', default='640,360')
     p.add_argument('--run', action='store_true')
     args = p.parse_args()
+    if args.start_xz is not None and (args.eye is not None or args.mode != 'timing'):
+        p.error('--start-xz requires timing mode without explicit --eye')
     if (args.eye is None) != (args.target is None):
         p.error('--eye and --target must be provided together')
     variants = json.loads(args.config.read_text())
     if not isinstance(variants, dict) or not variants or args.repeat < 1:
         p.error('provide variants and positive repeat count')
+    if args.mode == 'timing' and any(
+            values.get('FRONTIER_NAADF_DIAGNOSTICS') == '1'
+            for values in variants.values()):
+        p.error('diagnostic atomic shaders are not valid for timing runs')
     for name, overrides in variants.items():
         if not name.replace('-', '').replace('_', '').isalnum():
             p.error('variant names must be simple directory names')
@@ -92,7 +99,8 @@ def main():
             p.error(str(error))
         if args.mode == 'timing':
             managed = {'FRONTIER_NAADF_WIDE_LEAVES', 'FRONTIER_NAADF_SPARSE_ROOTS',
-                       'FRONTIER_NAADF_RAY_PROFILE', 'FRONTIER_NAADF_CAPTURE_LAYER'}
+                       'FRONTIER_NAADF_RAY_PROFILE', 'FRONTIER_NAADF_CAPTURE_LAYER',
+                       'FRONTIER_NAADF_CPU_PROFILE', 'FRONTIER_NAADF_GPU_STAGES'}
             unsupported = managed.intersection(overrides)
             if unsupported:
                 p.error(f"timing uses the full renderer with default leaf/root layouts; "
@@ -118,6 +126,8 @@ def main():
                        '--binary', str(args.binary.resolve()), '--radii', str(args.radius),
                        '--seconds', str(args.seconds), '--route', args.route,
                        '--output', str(out)]
+                if args.start_xz is not None:
+                    cmd += [f'--start-xz={args.start_xz}']
                 if args.eye is not None:
                     cmd += [f'--eye={args.eye}', f'--target={args.target}']
                 if overrides.get('FRONTIER_NAADF_GPU_DISTANCE') == '1':
@@ -160,6 +170,10 @@ def main():
                             raise ValueError(f'initial reference {control!r} did not succeed')
                         else:
                             record['comparison_to_first'] = compare(reference, frame)
+                            unequal = [kind for kind, value in record['comparison_to_first'].items()
+                                       if not value['equal']]
+                            if unequal:
+                                raise ValueError(f"exact capture mismatch: {', '.join(unequal)}")
                     except (OSError, ValueError, KeyError) as error:
                         record['error'] = str(error)
                 elif 'error' not in record and args.run:

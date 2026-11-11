@@ -1,5 +1,6 @@
 //! Incremental toroidal window. Content stays valid independently of camera
 //! demand. New arena slots remain unreachable until an atomic root publication.
+use super::prepare_profile::{Collector, Metrics, Stage};
 use super::{
     data::{self, ColumnSummary, Pigment, Snapshot},
     leaf::Encoding,
@@ -162,6 +163,7 @@ pub struct Change {
     pub owner: Arc<Ownership>,
     pub retiring: Arc<Ownership>,
     pub build_ms: f64,
+    pub cpu_profile: Option<Metrics>,
     pub generated_columns: usize,
     pub shared_leaves: usize,
     palette_base: usize,
@@ -293,6 +295,8 @@ impl State {
         cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Change, String> {
         let start = Instant::now();
+        let mut profile = Collector::new();
+        let parallel_phase = profile.start();
         let mut regions = vec![];
         for region in difference(next, self.region) {
             // Four independent strips share canonical source caches. Work stays
@@ -345,9 +349,12 @@ impl State {
                     .collect()
             });
             for r in results {
-                snapshots.push(r?);
+                let snapshot = r?;
+                profile.merge(snapshot.cpu_profile.as_ref());
+                snapshots.push(snapshot);
             }
         }
+        profile.end(Stage::ParallelRegionsWall, parallel_phase);
         if cancel() {
             return Err("NAADF shift superseded".into());
         }
@@ -362,6 +369,7 @@ impl State {
             let mut columns = HashMap::new();
             let mut generated = 0;
             for (region, mut s) in regions.into_iter().zip(snapshots) {
+                let leaf_phase = profile.start();
                 generated += s.sampled_columns;
                 let mut map = Vec::with_capacity(s.palette.len());
                 for p in &s.palette {
@@ -386,7 +394,11 @@ impl State {
                         *v = FULL | map[(*v & MASK) as usize];
                     }
                 }
+                profile.end(Stage::StreamLeafRemapDedup, leaf_phase);
+                let encoding_phase = profile.start();
                 self.leaf_encoding.pack(&mut s.voxels)?;
+                profile.end(Stage::LeafEncoding, encoding_phase);
+                let leaf_phase = profile.start();
                 // Share equal leaves across leading strips in the same
                 // transaction. A hash only selects a candidate; equality
                 // checks every packed word, including empty face distances.
@@ -432,6 +444,8 @@ impl State {
                     });
                     first = last;
                 }
+                profile.end(Stage::StreamLeafRemapDedup, leaf_phase);
+                let block_phase = profile.start();
                 for v in &mut s.blocks {
                     if *v & CHILD != 0 {
                         *v = CHILD | (ls[(*v & MASK) as usize / 64] * 64) as u32;
@@ -479,7 +493,9 @@ impl State {
                     region,
                     nodes: s.chunks,
                 });
+                profile.end(Stage::StreamBlockRemapWrites, block_phase);
             }
+            let block_phase = profile.start();
             if self.palette.len() > old_palette {
                 writes.push(Write {
                     kind: 2,
@@ -488,6 +504,8 @@ impl State {
                         .to_vec(),
                 });
             }
+            profile.end(Stage::StreamBlockRemapWrites, block_phase);
+            let ownership_phase = profile.start();
             let owner = self.owner(next, &columns);
             let overlap = self.region.intersection(next);
             let mut old = self.region;
@@ -498,6 +516,14 @@ impl State {
                 (self.ring[a] as i64 + next.lo[a] - self.region.lo[a]).rem_euclid(self.n as i64)
                     as u32
             });
+            profile.end(Stage::Ownership, ownership_phase);
+            if let Some(metrics) = &mut profile.metrics {
+                metrics.stream_write_vec_allocations += writes.len() as u64;
+                metrics.stream_write_vec_bytes += writes
+                    .iter()
+                    .map(|w| w.data.capacity() * std::mem::size_of::<u32>())
+                    .sum::<usize>() as u64;
+            }
             Ok(Change {
                 region: next,
                 ring,
@@ -506,6 +532,7 @@ impl State {
                 owner,
                 retiring,
                 build_ms: start.elapsed().as_secs_f64() * 1000.,
+                cpu_profile: profile.metrics.take(),
                 generated_columns: generated,
                 shared_leaves,
                 palette_base: old_palette,
@@ -920,5 +947,55 @@ fn streamed_and_fresh_root_skip_diagnostic() {
         );
         assert!(air > 0);
         assert!(visits[1] <= visits[0] && visits[2] <= visits[0]);
+    }
+}
+
+#[test]
+#[ignore = "bounded CPU strip preparation fixture; run with FRONTIER_NAADF_CPU_PROFILE=1"]
+fn profile_stream_preparation_stages() {
+    assert!(
+        super::prepare_profile::enabled(),
+        "set FRONTIER_NAADF_CPU_PROFILE=1"
+    );
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Alpine,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .with_vegetation();
+    let radius = 16;
+    let eye = [-48., world.height_m(-48., -250.) + 1.7, -250.];
+    let snapshot = data::build(
+        &world,
+        eye,
+        radius,
+        128 * 1048576,
+        &AtomicU32::new(0),
+        || false,
+    )
+    .unwrap();
+    let prepared = super::leaf::Prepared::new(snapshot, false);
+    let mut state = State::new_with_encoding(
+        prepared.snapshot,
+        [16 * 1048576, 32 * 1048576, 1048576],
+        prepared.encoding,
+    );
+    for (shift, delta) in [[4, 0, 0], [0, 0, -4], [-4, 0, 0]].into_iter().enumerate() {
+        let next = Region {
+            lo: std::array::from_fn(|a| state.region.lo[a] + delta[a]),
+            hi: std::array::from_fn(|a| state.region.hi[a] + delta[a]),
+        };
+        let change = state
+            .prepare(&world, next, 128 * 1048576, &|| false)
+            .unwrap();
+        eprintln!(
+            "{{\"test\":\"profile_stream_preparation_stages\",\"seed\":7,\"recipe\":\"Alpine\",\"radius_m\":16,\"shift\":{},\"stack_blocks\":{},\"prepare_wall_ms\":{},\"profile\":{}}}",
+            shift + 1, super::prepare_profile::stack_blocks(), change.build_ms,
+            change.cpu_profile.as_ref().unwrap().json(),
+        );
+        state.finish(change, true);
     }
 }

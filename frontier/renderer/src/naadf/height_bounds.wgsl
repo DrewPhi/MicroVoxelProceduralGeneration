@@ -10,11 +10,16 @@ fn height_sparse_word(address:u32, shape:vec3<u32>)->u32 {
     let row=address/shape.x;
     return textureLoad(height_roots,vec3<i32>(vec3(address%shape.x,row%shape.y,row/shape.y)),0).x;
 }
+fn height_word_occupied(word:u32)->bool {
+    let kind=word&0xc0000000u;
+    // Both flags mark a GPU-grown empty root proof, not occupied geometry.
+    return kind==0x80000000u || kind==0x40000000u;
+}
 fn height_root_occupied(cp:vec3<u32>)->bool {
     if settings.sparse==0u {
         let address=cp+settings.ring.xyz;
         let slot=select(address,address-vec3(settings.n),address>=vec3(settings.n));
-        return (textureLoad(height_roots,vec3<i32>(slot.yxz),0).x&0xc0000000u)!=0u;
+        return height_word_occupied(textureLoad(height_roots,vec3<i32>(slot.yxz),0).x);
     }
     let shape=textureDimensions(height_roots,0);
     let side=(settings.n+3u)/4u;
@@ -23,7 +28,7 @@ fn height_root_occupied(cp:vec3<u32>)->bool {
     if (entry&0x80000000u)==0u {return (entry&0x40000000u)!=0u;}
     let local=cp%4u;
     let address=side*side*side+(entry&0x3fffffffu)+local.y+4u*(local.x+4u*local.z);
-    return (height_sparse_word(address,shape)&0xc0000000u)!=0u;
+    return height_word_occupied(height_sparse_word(address,shape));
 }
 @compute @workgroup_size(height_tile_roots,height_tile_roots)
 fn main(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) index:u32) {

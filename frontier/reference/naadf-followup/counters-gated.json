@@ -1,0 +1,159 @@
+{
+  "instrumented": true,
+  "valid_for_timing": false,
+  "binary_sha256": "a08625b95ff7b5f07f04f5ca174969be323a33d25b21212f782e8e2f5ce82fe7",
+  "radius_m": 128,
+  "variants": {
+    "control": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 3172563,
+        "block_word_fetches": 1716129,
+        "leaf_word_fetches": 759195,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "boundary_replays": 0,
+        "stall_replays": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 634627,
+        "block_word_fetches": 298325,
+        "leaf_word_fetches": 160446,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "boundary_replays": 0,
+        "stall_replays": 0
+      }
+    },
+    "gated-flat": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_HEIGHT_GATE": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 3134915,
+        "block_word_fetches": 1716959,
+        "leaf_word_fetches": 759470,
+        "height_queries": 1224284,
+        "height_level_fetches": 1224284,
+        "height_applied": 98246,
+        "height_failed": 1126038,
+        "height_negative_cache_bypasses": 69192,
+        "saved_native_cells": 5232032,
+        "lost_native_cells": 0,
+        "boundary_replays": 35,
+        "stall_replays": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 596799,
+        "block_word_fetches": 298325,
+        "leaf_word_fetches": 160446,
+        "height_queries": 252003,
+        "height_level_fetches": 252003,
+        "height_applied": 32578,
+        "height_failed": 219425,
+        "height_negative_cache_bypasses": 6303,
+        "saved_native_cells": 1669807,
+        "lost_native_cells": 0,
+        "boundary_replays": 0,
+        "stall_replays": 0
+      }
+    },
+    "gated-mips": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_HEIGHT_GATE": "1",
+        "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 2692691,
+        "block_word_fetches": 1717242,
+        "leaf_word_fetches": 759593,
+        "height_queries": 782378,
+        "height_level_fetches": 3882693,
+        "height_applied": 345857,
+        "height_failed": 436521,
+        "height_negative_cache_bypasses": 68511,
+        "saved_native_cells": 202213201,
+        "lost_native_cells": 0,
+        "boundary_replays": 49,
+        "stall_replays": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 499940,
+        "block_word_fetches": 298325,
+        "leaf_word_fetches": 160446,
+        "height_queries": 155144,
+        "height_level_fetches": 678371,
+        "height_applied": 94155,
+        "height_failed": 60989,
+        "height_negative_cache_bypasses": 6303,
+        "saved_native_cells": 56346392,
+        "lost_native_cells": 0,
+        "boundary_replays": 0,
+        "stall_replays": 0
+      }
+    }
+  },
+  "finding": "Gating removes all shorter-than-AADF resumptions, but gated flat requires about32.5bound reads per primary root load avoided; gated mip walking requires about8.1. This motivates the separately tested one-coarse-level probe; no speedup is inferred from counters."
+}

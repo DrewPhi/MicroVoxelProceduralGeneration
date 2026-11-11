@@ -12,6 +12,7 @@ fn beam_slope(point:vec2<f32>)->vec3<f32> {
 @compute @workgroup_size(8,8)
 fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=(vec2<u32>(naadf.viewport.xy)+7u)/BEAM_PIXELS) {return;}
+    trace_metric(2u,0u,1u);
     let start=vec2<f32>(id.xy*BEAM_PIXELS);
     let end=min(start+vec2(f32(BEAM_PIXELS)),naadf.viewport.xy);
     let a=beam_slope(start);
@@ -28,11 +29,13 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     let max_abs_slope=max(abs(min_slope),abs(max_slope));
     let max_slope_axis=max(max(max_abs_slope.x,max_abs_slope.y),max_abs_slope.z);
     if any(abs(eye)>extent*16.) || max_slope_axis>4. {
+        trace_metric(2u,2u,1u);
         textureStore(beam_out,vec2<i32>(id.xy),vec4(0u));
         return;
     }
     var passed=0u;
     for(var attempt=0u;attempt<8u;attempt++){
+        trace_metric(2u,3u,1u);
         let next=16u<<attempt;
         // Pads normalized-direction conversion, dot products and cell selection.
         let margin=max(0.25,(max(max(abs(eye.x),abs(eye.y)),abs(eye.z))+f32(next)*4.)*0.00002);
@@ -42,16 +45,19 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
             let first=clamp(vec2<i32>(floor(low.xz/span)),vec2(0),last_tile);
             let last=clamp(vec2<i32>(floor(high.xz/span)),vec2(0),last_tile);
             // Bound the cost. An untested slab is never skipped.
-            if any(last-first>vec2(3)) {break;}
+            if any(last-first>vec2(3)) {trace_metric(2u,6u,1u);break;}
             var max_height=0u;
             for(var z=first.y;z<=last.y;z++){
                 for(var x=first.x;x<=last.x;x++){
+                    trace_metric(2u,4u,1u);
                     max_height=max(max_height,textureLoad(beam_heights,vec2(x,z),0).x);
                 }
             }
-            if max_height>0u && low.y<=f32(max_height) {break;}
+            if max_height>0u && low.y<=f32(max_height) {trace_metric(2u,5u,1u);break;}
         }
         passed=next;
     }
+    trace_metric(2u,select(2u,1u,passed>0u),1u);
+    trace_distance(2u,15u,f32(passed));
     textureStore(beam_out,vec2<i32>(id.xy),vec4(passed,0u,0u,0u));
 }

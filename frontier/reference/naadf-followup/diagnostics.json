@@ -1,0 +1,27 @@
+{
+  "control": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1"
+  },
+  "cache": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_CACHE_NODES": "2"
+  },
+  "flat": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_HEIGHT_TILE_ROOTS": "8"
+  },
+  "mips": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+  },
+  "beam": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_BEAM": "1"
+  },
+  "direct": {
+    "FRONTIER_NAADF_DIAGNOSTICS": "1",
+    "FRONTIER_NAADF_GPU_DISTANCE": "1",
+    "FRONTIER_NAADF_DIRECT_ROOTS": "1",
+    "FRONTIER_NAADF_DISTANCE_SCHEDULE": "retain"
+  }
+}

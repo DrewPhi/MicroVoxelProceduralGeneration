@@ -12,7 +12,10 @@ pub(super) struct Options {
     pub(super) height_tile: Option<u32>,
     pub(super) height_mips: bool,
     pub(super) height_gate: bool,
+    pub(super) height_probe: Option<u32>,
     pub(super) beam: bool,
+    pub(super) diagnostics: bool,
+    pub(super) local_exit_repair: bool,
 }
 
 pub(super) fn options() -> Options {
@@ -29,7 +32,14 @@ pub(super) fn options() -> Options {
             .filter(|n| matches!(n, 1 | 4 | 8)),
         height_mips: enabled("FRONTIER_NAADF_HEIGHT_MIPS"),
         height_gate: enabled("FRONTIER_NAADF_HEIGHT_GATE"),
+        height_probe: std::env::var("FRONTIER_NAADF_HEIGHT_PROBE_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|level| *level <= 9),
         beam: enabled("FRONTIER_NAADF_BEAM"),
+        diagnostics: enabled("FRONTIER_NAADF_DIAGNOSTICS"),
+        local_exit_repair: enabled("FRONTIER_NAADF_LOCAL_EXIT_REPAIR")
+            && super::root_distance::direct_publication(),
     })
 }
 
@@ -39,13 +49,28 @@ fn enabled(key: &str) -> bool {
 
 impl Options {
     pub(super) fn height_enabled(self) -> bool {
-        self.height_tile.is_some() || self.height_mips || self.height_gate
+        self.height_tile.is_some() || self.mips_enabled() || self.height_gate
+    }
+    pub(super) fn mips_enabled(self) -> bool {
+        self.height_mips || self.height_probe.is_some()
     }
     pub(super) fn tile(self) -> u32 {
         self.height_tile.unwrap_or(8)
     }
     pub(super) fn mesh_constants(self) -> HashMap<String, f64> {
         HashMap::from([
+            (
+                "traversal_direct_roots".into(),
+                u8::from(super::root_distance::direct_publication()).into(),
+            ),
+            (
+                "traversal_local_exit_repair".into(),
+                u8::from(self.local_exit_repair).into(),
+            ),
+            (
+                "traversal_metrics".into(),
+                u8::from(self.diagnostics).into(),
+            ),
             (
                 "traversal_cache_nodes".into(),
                 u8::from(self.cache == 1).into(),
@@ -61,7 +86,11 @@ impl Options {
             ("traversal_height_tile".into(), self.tile().into()),
             (
                 "traversal_height_mips".into(),
-                u8::from(self.height_mips).into(),
+                u8::from(self.mips_enabled()).into(),
+            ),
+            (
+                "traversal_height_probe".into(),
+                self.height_probe.unwrap_or(u32::MAX).into(),
             ),
             (
                 "traversal_height_gate".into(),
@@ -125,6 +154,7 @@ fn compute(
     label: &'static str,
     shader: &'static str,
     tile: Option<u32>,
+    metrics: Option<bool>,
 ) -> wgpu::ComputePipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -139,6 +169,11 @@ fn compute(
             constants: &tile
                 .into_iter()
                 .map(|tile| ("height_tile_roots".into(), tile.into()))
+                .chain(
+                    metrics
+                        .into_iter()
+                        .map(|enabled| ("traversal_metrics".into(), u8::from(enabled).into())),
+                )
                 .collect(),
             ..Default::default()
         },
@@ -177,7 +212,7 @@ impl Height {
         let tile = options.tile();
         let mut edge = n.div_ceil(tile);
         let mut levels = 1;
-        if options.height_mips {
+        if options.mips_enabled() {
             // Power-of-two storage preserves all partial XZ tiles through the
             // hardware mip layout. The base kernel fills the padding with zero.
             edge = edge.next_power_of_two();
@@ -203,6 +238,7 @@ impl Height {
             "NAADF max occupied root height",
             HEIGHT_SHADER,
             Some(tile),
+            None,
         );
         let settings = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("NAADF max height root layout"),
@@ -226,6 +262,7 @@ impl Height {
                 device,
                 "NAADF occupied height mip reduction",
                 HEIGHT_REDUCE,
+                None,
                 None,
             );
             let layout = pipeline.get_bind_group_layout(0);
@@ -262,6 +299,7 @@ impl Height {
         n: u32,
         sparse: bool,
         ring: [u32; 3],
+        stages: Option<&std::sync::Arc<super::gpu_stages::Profiler>>,
     ) {
         if self.published.get() == Some(owner) {
             return;
@@ -272,17 +310,36 @@ impl Height {
             0,
             bytemuck::cast_slice(&[n, u32::from(sparse), 0, 0, ring[0], ring[1], ring[2], 0]),
         );
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let timing = stages.and_then(|p| p.begin(super::gpu_stages::Stage::HeightBase));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("NAADF occupied-height base"),
+            timestamp_writes: timing.as_ref().map(|t| t.writes(true, true)),
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.dispatch_workgroups(self.edge, self.edge, 1);
         drop(pass);
+        if let Some(t) = timing {
+            t.resolve(encoder);
+            t.defer();
+        }
         if let Some(reduction) = &self.reduction {
-            for (bind, edge) in &reduction.levels {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
+            let timing = stages.and_then(|p| p.begin(super::gpu_stages::Stage::HeightReduce));
+            for (index, (bind, edge)) in reduction.levels.iter().enumerate() {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("NAADF occupied-height reduction"),
+                    timestamp_writes: timing
+                        .as_ref()
+                        .filter(|_| index == 0 || index + 1 == reduction.levels.len())
+                        .map(|t| t.writes(index == 0, index + 1 == reduction.levels.len())),
+                });
                 pass.set_pipeline(&reduction.pipeline);
                 pass.set_bind_group(0, bind, &[]);
                 pass.dispatch_workgroups(edge.div_ceil(8), edge.div_ceil(8), 1);
+            }
+            if let Some(t) = timing {
+                t.resolve(encoder);
+                t.defer();
             }
         }
     }
@@ -343,6 +400,7 @@ impl Beam {
                     "NAADF screen beam empty prefixes",
                     BEAM_SHADER,
                     Some(options.tile()),
+                    Some(options.diagnostics),
                 )
             }),
             target: RefCell::new(BeamTarget {
@@ -364,7 +422,9 @@ impl Beam {
         encoder: &mut wgpu::CommandEncoder,
         camera: &wgpu::Buffer,
         heights: &wgpu::TextureView,
+        metrics: &wgpu::Buffer,
         viewport: [u32; 2],
+        stages: Option<&std::sync::Arc<super::gpu_stages::Profiler>>,
     ) {
         let Some(pipeline) = &self.pipeline else {
             return;
@@ -388,6 +448,10 @@ impl Beam {
                         binding: 3,
                         resource: camera.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: metrics.as_entire_binding(),
+                    },
                 ],
             });
             *target = BeamTarget {
@@ -396,10 +460,19 @@ impl Beam {
                 tiles,
             };
         }
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let timing = stages.and_then(|p| p.begin(super::gpu_stages::Stage::Beam));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("NAADF beam prepass"),
+            timestamp_writes: timing.as_ref().map(|t| t.writes(true, true)),
+        });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, target.write.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(tiles[0].div_ceil(8), tiles[1].div_ceil(8), 1);
+        drop(pass);
+        if let Some(t) = timing {
+            t.resolve(encoder);
+            t.defer();
+        }
     }
 
     pub(super) fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {

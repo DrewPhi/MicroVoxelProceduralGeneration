@@ -34,7 +34,7 @@ def main():
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/frontier')
     parser.add_argument('--radii', nargs='+', type=int, default=[1024, 512, 256, 128, 64, 32, 16])
     parser.add_argument('--seconds', type=float, default=10.)
-    parser.add_argument('--route', choices=['static', 'walk-stop-resume', 'walk-turn-return'], default='static')
+    parser.add_argument('--route', choices=['static', 'walk-stop-resume', 'walk-turn-return', 'walk-circuit'], default='static')
     parser.add_argument('--route-speed', type=float, default=2.5)
     parser.add_argument('--atmosphere', choices=['on', 'off'], default='on')
     parser.add_argument('--naadf-budget-mib', type=int,
@@ -46,12 +46,15 @@ def main():
     parser.add_argument('--root-format', choices=['dense', 'sparse'], default='dense',
                         help='Sparse atlas prototype (fixed cube, CPU root distances only)')
     parser.add_argument('--watch-xz', help='Track published tile width at fixed world x,z in meters')
+    parser.add_argument('--start-xz', help='Grounded preset start X,Z; incompatible with explicit --eye')
     parser.add_argument('--eye', help='Optional explicit x,y,z start (requires --target)')
     parser.add_argument('--target', help='Optional explicit x,y,z heading target (requires --eye)')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
     if args.root_format == 'sparse' and (args.route != 'static' or args.gpu_distance == 'on'):
         parser.error('sparse roots require a static route and GPU distance off')
+    if args.start_xz is not None and args.eye is not None:
+        parser.error('--start-xz and explicit --eye are mutually exclusive')
     if (args.eye is None) != (args.target is None):
         parser.error('--eye and --target must be given together')
     if args.naadf_budget_mib is not None and not 16 <= args.naadf_budget_mib <= 16384:
@@ -84,7 +87,7 @@ def main():
                        'seconds': args.seconds,
                        'lighting': 'ordinary beauty and sun shadows',
                        'atmosphere': args.atmosphere, 'ray_profile': args.ray_profile,
-                       'eye': args.eye, 'target': args.target, 'watch_xz': args.watch_xz,
+                       'eye': args.eye, 'target': args.target, 'watch_xz': args.watch_xz, 'start_xz': args.start_xz,
                        'gpu_distance': args.gpu_distance, 'leaf_format': args.leaf_format,
                        'root_format': args.root_format,
                        'naadf_estimate_ceiling_mib': args.naadf_budget_mib,
@@ -135,6 +138,8 @@ def main():
             command += ['--naadf-budget-mib', str(args.naadf_budget_mib)]
         if args.gpu_distance == 'on':
             command += ['--naadf-gpu-distance', 'on']
+        if args.start_xz is not None:
+            command += ['--start-xz', args.start_xz]
         if args.eye is not None:
             command += ['--eye', args.eye, '--target', args.target]
         print(shlex.join(command), flush=True)

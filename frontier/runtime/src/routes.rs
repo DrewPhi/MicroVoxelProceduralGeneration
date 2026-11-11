@@ -18,11 +18,16 @@ pub enum Route {
     TurnReturn,
     WalkStopResume,
     WalkTurnReturn,
+    /// Sustained square circuit: four 10-second legs, repeated indefinitely.
+    WalkCircuit,
 }
 
 impl Route {
     pub fn grounded(self) -> bool {
-        matches!(self, Self::WalkStopResume | Self::WalkTurnReturn)
+        matches!(
+            self,
+            Self::WalkStopResume | Self::WalkTurnReturn | Self::WalkCircuit
+        )
     }
     /// Sample the route from an initial camera pose at an explicit travel speed
     /// in meters per second. Invalid/negative time or speed is treated as zero.
@@ -70,8 +75,21 @@ impl Route {
             pitch.sin(),
             yaw.cos() * pitch.cos(),
         ];
+        if self == Route::WalkCircuit {
+            let phase = t.rem_euclid(40.0);
+            let leg = (phase / 10.0).floor() as usize;
+            let partial = phase % 10.0;
+            for side in 0..=leg {
+                let heading = yaw + side as f64 * std::f64::consts::FRAC_PI_2;
+                let distance = speed * if side == leg { partial } else { 10.0 };
+                pose.position[0] += heading.sin() * distance;
+                pose.position[2] += heading.cos() * distance;
+            }
+            pose.yaw = yaw + leg as f64 * std::f64::consts::FRAC_PI_2;
+            return pose;
+        }
         let distance = match self {
-            Route::Stationary => 0.0,
+            Route::Stationary | Route::WalkCircuit => 0.0,
             Route::Fly => speed * t,
             Route::StopResume | Route::WalkStopResume => speed * (t - (t - 2.0).clamp(0.0, 2.0)),
             Route::TurnReturn | Route::WalkTurnReturn => {
@@ -135,6 +153,24 @@ mod tests {
         assert_eq!(turned.yaw, std::f64::consts::PI);
         assert!((returned.position[2]).abs() < 1e-12);
         assert_eq!(returned.yaw, std::f64::consts::PI);
+    }
+
+    #[test]
+    fn circuit_keeps_moving_and_closes_without_accumulating_drift() {
+        let origin = [2.0, 5.0, 7.0];
+        assert!(Route::WalkCircuit.grounded());
+        for t in [0.0, 40.0, 4000000.0] {
+            assert_eq!(
+                Route::WalkCircuit
+                    .pose_at(t, origin, 0.0, 0.0, 2.5)
+                    .position,
+                origin
+            );
+        }
+        let corner = Route::WalkCircuit.pose_at(10.0, origin, 0.0, 0.0, 2.5);
+        assert_eq!(corner.position, [2.0, 5.0, 32.0]);
+        let moving = Route::WalkCircuit.pose_at(11.0, origin, 0.0, 0.0, 2.5);
+        assert!((moving.position[0] - 4.5).abs() < 1e-10);
     }
 
     #[test]

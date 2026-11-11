@@ -1,0 +1,579 @@
+{
+  "source_report": "output/naadf-followup/profile128/r128.json",
+  "source_report_sha256": "0c09c01104cee56985662869a0265b5be8108e99250672a930e5331070d2dcd9",
+  "scope": {
+    "scene": "Alpine seed7",
+    "radius_m": 128,
+    "trajectory": "35-second continuous walking circuit",
+    "completed_shifts": 7,
+    "stack_block_bounds": false,
+    "cpu_profile_enabled": true,
+    "worker_intervals": "sum of four region-thread wall intervals, including waits; not OS CPU cycles or additive to prepare wall",
+    "timing_run_is_not_an_FPS_comparison": true,
+    "profile_clock_overhead_not_independently_calibrated": true
+  },
+  "hardware": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "camera_start": {
+    "position": [
+      -41.06016074388279,
+      28.95,
+      -250
+    ],
+    "yaw": 0.011565727,
+    "pitch": 0.17317964
+  },
+  "prepare_wall_ms": {
+    "median": 1308.065282,
+    "min": 782.5077580000001,
+    "max": 1578.3692440000002,
+    "samples": [
+      782.5077580000001,
+      1308.065282,
+      1273.331592,
+      1272.888725,
+      1578.3692440000002,
+      1333.675654,
+      1311.447946
+    ]
+  },
+  "parallel_regions_wall_ms": {
+    "median": 1248.894293,
+    "sum_fraction_of_prepare_wall": 0.953876609995524
+  },
+  "post_region_wall_ms": {
+    "median": 54.273320999999896,
+    "min": 38.16621600000008,
+    "max": 84.78136099999983
+  },
+  "summed_region_worker_wall_ms": {
+    "median": 4614.746117,
+    "total": 31284.691294
+  },
+  "region_unclassified_wall_ms": {
+    "median": 533.1193569999994,
+    "share_percent": 11.269622560335637
+  },
+  "stages": {
+    "initialization": {
+      "median_summed_worker_wall_ms": 0.541415,
+      "sum_ms": 3.9454450000000003,
+      "share_summed_region_worker_wall_percent": 0.012611423788467063
+    },
+    "vegetation_enumeration": {
+      "median_summed_worker_wall_ms": 209.44104499999997,
+      "sum_ms": 1336.635625,
+      "share_summed_region_worker_wall_percent": 4.272491016257365
+    },
+    "vegetation_models": {
+      "median_summed_worker_wall_ms": 477.86185599999624,
+      "sum_ms": 3701.3404109999974,
+      "share_summed_region_worker_wall_percent": 11.83115529642406
+    },
+    "vegetation_assembly": {
+      "median_summed_worker_wall_ms": 80.36096700000087,
+      "sum_ms": 573.7589720000025,
+      "share_summed_region_worker_wall_percent": 1.8339927557796998
+    },
+    "vegetation_overlap": {
+      "median_summed_worker_wall_ms": 195.649201,
+      "sum_ms": 1581.489504,
+      "share_summed_region_worker_wall_percent": 5.055154577482787
+    },
+    "edit_index": {
+      "median_summed_worker_wall_ms": 0.008310000000000001,
+      "sum_ms": 0.054615000000000004,
+      "share_summed_region_worker_wall_percent": 0.00017457420144169507
+    },
+    "column_sampling": {
+      "median_summed_worker_wall_ms": 1501.1143160000015,
+      "sum_ms": 9819.279927000001,
+      "share_summed_region_worker_wall_percent": 31.386852549455114
+    },
+    "native_cell_assembly": {
+      "median_summed_worker_wall_ms": 73.79148299999972,
+      "sum_ms": 499.9875369999986,
+      "share_summed_region_worker_wall_percent": 1.5981859379762837
+    },
+    "leaf_hierarchy_dedup": {
+      "median_summed_worker_wall_ms": 1086.7202650000017,
+      "sum_ms": 7402.135089000015,
+      "share_summed_region_worker_wall_percent": 23.66056618375406
+    },
+    "block_proofs": {
+      "median_summed_worker_wall_ms": 64.24085100000038,
+      "sum_ms": 445.8186190000019,
+      "share_summed_region_worker_wall_percent": 1.42503761603524
+    },
+    "root_proofs": {
+      "median_summed_worker_wall_ms": 357.09425600000003,
+      "sum_ms": 2394.523118,
+      "share_summed_region_worker_wall_percent": 7.653977133727506
+    },
+    "ownership": {
+      "median_summed_worker_wall_ms": 4.3372589999999995,
+      "sum_ms": 30.788243,
+      "share_summed_region_worker_wall_percent": null
+    },
+    "leaf_encoding": {
+      "median_summed_worker_wall_ms": 12.422869,
+      "sum_ms": 93.24928700000001,
+      "share_summed_region_worker_wall_percent": null
+    },
+    "sparse_roots": {
+      "median_summed_worker_wall_ms": 0,
+      "sum_ms": 0,
+      "share_summed_region_worker_wall_percent": 0.0
+    },
+    "parallel_regions_wall": {
+      "median_summed_worker_wall_ms": 1248.894293,
+      "sum_ms": 8451.619765000001,
+      "share_summed_region_worker_wall_percent": null
+    },
+    "stream_leaf_remap_dedup": {
+      "median_summed_worker_wall_ms": 33.796898999999996,
+      "sum_ms": 251.327113,
+      "share_summed_region_worker_wall_percent": null
+    },
+    "stream_block_remap_writes": {
+      "median_summed_worker_wall_ms": 4.104543999999999,
+      "sum_ms": 30.135213,
+      "share_summed_region_worker_wall_percent": null
+    }
+  },
+  "explicit_temporary_block_vec_allocations_per_shift": [
+    17668,
+    17670,
+    16946,
+    17130,
+    17436,
+    17970,
+    17214
+  ],
+  "explicit_temporary_block_vec_requested_bytes_per_shift": [
+    4523008,
+    4523520,
+    4338176,
+    4385280,
+    4463616,
+    4600320,
+    4406784
+  ],
+  "initial_build_wall_ms": 41340.004176,
+  "initial_profile": {
+    "stage_ms": {
+      "initialization": 1.421216,
+      "vegetation_enumeration": 1286.1201389999999,
+      "vegetation_models": 4209.3088679994935,
+      "vegetation_assembly": 917.1836759994326,
+      "vegetation_overlap": 3861.505619,
+      "edit_index": 0.0023740000000000002,
+      "column_sampling": 12102.703426006186,
+      "native_cell_assembly": 643.6938669988275,
+      "leaf_hierarchy_dedup": 9034.86984099302,
+      "block_proofs": 644.503766999421,
+      "root_proofs": 3913.8448289999997,
+      "ownership": 0.092611,
+      "leaf_encoding": 131.06999199999998,
+      "sparse_roots": 0,
+      "parallel_regions_wall": 0,
+      "stream_leaf_remap_dedup": 0,
+      "stream_block_remap_writes": 0
+    },
+    "regions": 1,
+    "region_worker_wall_ms": 41340.001801,
+    "region_unclassified_wall_ms": 4724.751568003616,
+    "sampled_columns": 16777216,
+    "mixed_chunks": 140040,
+    "requested_leaves": 2729354,
+    "unique_leaves": 1232043,
+    "explicit_column_vec_allocations": 196608,
+    "explicit_block_vec_allocations": 280080,
+    "explicit_column_vec_requested_bytes": 872415232,
+    "explicit_block_vec_requested_bytes": 71700480,
+    "explicit_stream_write_vec_allocations": 0,
+    "explicit_stream_write_vec_requested_bytes": 0,
+    "region_workspace_estimate_peak_bytes": 1722220544,
+    "region_stages_are_summed_worker_wall_time": true,
+    "parallel_regions_wall_is_not_additive": true,
+    "workspace_peak_is_largest_individual_region": true
+  },
+  "raw_shift_profiles": [
+    {
+      "prepare_wall_ms": 782.5077580000001,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.541415,
+          "vegetation_enumeration": 72.790674,
+          "vegetation_models": 285.3365129999979,
+          "vegetation_assembly": 61.6963460000009,
+          "vegetation_overlap": 109.03225499999999,
+          "edit_index": 0.008312,
+          "column_sampling": 929.5922119999997,
+          "native_cell_assembly": 48.85324700000005,
+          "leaf_hierarchy_dedup": 691.8254690000016,
+          "block_proofs": 43.284686999999934,
+          "root_proofs": 180.958564,
+          "ownership": 1.847461,
+          "leaf_encoding": 6.9624120000000005,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 744.341542,
+          "stream_leaf_remap_dedup": 22.986404,
+          "stream_block_remap_writes": 5.420087
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 2740.115849,
+        "region_unclassified_wall_ms": 316.19021799999985,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8834,
+        "requested_leaves": 172925,
+        "unique_leaves": 83746,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17668,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4523008,
+        "explicit_stream_write_vec_allocations": 9,
+        "explicit_stream_write_vec_requested_bytes": 12608544,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1308.065282,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.758694,
+          "vegetation_enumeration": 155.31969999999998,
+          "vegetation_models": 477.86185599999624,
+          "vegetation_assembly": 80.74216400000047,
+          "vegetation_overlap": 195.649201,
+          "edit_index": 0.008311,
+          "column_sampling": 1509.9799559999992,
+          "native_cell_assembly": 83.51930099999987,
+          "leaf_hierarchy_dedup": 1163.3293280000025,
+          "block_proofs": 74.52053600000025,
+          "root_proofs": 357.09425600000003,
+          "ownership": 4.3372589999999995,
+          "leaf_encoding": 12.422869,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1253.7919610000001,
+          "stream_leaf_remap_dedup": 33.796898999999996,
+          "stream_block_remap_writes": 3.589251
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 4614.746117,
+        "region_unclassified_wall_ms": 515.9556900000015,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8835,
+        "requested_leaves": 173023,
+        "unique_leaves": 84638,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17670,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4523520,
+        "explicit_stream_write_vec_allocations": 6806,
+        "explicit_stream_write_vec_requested_bytes": 12717088,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1273.331592,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.34550800000000004,
+          "vegetation_enumeration": 229.415231,
+          "vegetation_models": 417.4347359999967,
+          "vegetation_assembly": 74.48023200000068,
+          "vegetation_overlap": 203.829796,
+          "edit_index": 0.009499,
+          "column_sampling": 1501.1143160000015,
+          "native_cell_assembly": 72.17926999999965,
+          "leaf_hierarchy_dedup": 1086.7202650000017,
+          "block_proofs": 64.24085100000038,
+          "root_proofs": 362.574897,
+          "ownership": 6.006624,
+          "leaf_encoding": 16.507229,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1198.863243,
+          "stream_leaf_remap_dedup": 46.486913,
+          "stream_block_remap_writes": 5.392779
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 4545.473458,
+        "region_unclassified_wall_ms": 533.1193569999994,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8473,
+        "requested_leaves": 165633,
+        "unique_leaves": 83882,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 16946,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4338176,
+        "explicit_stream_write_vec_allocations": 4285,
+        "explicit_stream_write_vec_requested_bytes": 12458144,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1272.888725,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.540229,
+          "vegetation_enumeration": 267.89133599999997,
+          "vegetation_models": 439.763380999986,
+          "vegetation_assembly": 80.36096700000087,
+          "vegetation_overlap": 187.856859,
+          "edit_index": 0.008310000000000001,
+          "column_sampling": 1520.511410000001,
+          "native_cell_assembly": 78.10983599999983,
+          "leaf_hierarchy_dedup": 1152.7218430000025,
+          "block_proofs": 63.99503100000034,
+          "root_proofs": 430.196006,
+          "ownership": 2.599029,
+          "leaf_encoding": 11.150069,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1223.9725660000001,
+          "stream_leaf_remap_dedup": 32.007616,
+          "stream_block_remap_writes": 3.111949
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 4785.958027000001,
+        "region_unclassified_wall_ms": 563.9945090000092,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8565,
+        "requested_leaves": 167493,
+        "unique_leaves": 85984,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17130,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4385280,
+        "explicit_stream_write_vec_allocations": 3111,
+        "explicit_stream_write_vec_requested_bytes": 12751616,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1578.3692440000002,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.66727,
+          "vegetation_enumeration": 276.900677,
+          "vegetation_models": 706.1504170000006,
+          "vegetation_assembly": 98.00451899999979,
+          "vegetation_overlap": 504.055263,
+          "edit_index": 0.007124,
+          "column_sampling": 1515.6636199999991,
+          "native_cell_assembly": 75.8978919999997,
+          "leaf_hierarchy_dedup": 1144.2194940000027,
+          "block_proofs": 67.29224600000035,
+          "root_proofs": 375.64010600000006,
+          "ownership": 4.384752,
+          "leaf_encoding": 13.802527000000001,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1521.568132,
+          "stream_leaf_remap_dedup": 34.445174,
+          "stream_block_remap_writes": 4.104543999999999
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 5338.923514,
+        "region_unclassified_wall_ms": 574.4130119999977,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8718,
+        "requested_leaves": 169882,
+        "unique_leaves": 85842,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17436,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4463616,
+        "explicit_stream_write_vec_allocations": 2866,
+        "explicit_stream_write_vec_requested_bytes": 12829200,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1333.675654,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.35263200000000006,
+          "vegetation_enumeration": 124.87696199999999,
+          "vegetation_models": 685.0684430000109,
+          "vegetation_assembly": 100.75194299999902,
+          "vegetation_overlap": 204.891257,
+          "edit_index": 0.007124,
+          "column_sampling": 1350.3680889999996,
+          "native_cell_assembly": 67.6365079999998,
+          "leaf_hierarchy_dedup": 1080.2885780000013,
+          "block_proofs": 62.78874500000032,
+          "root_proofs": 332.35775200000006,
+          "ownership": 7.784031,
+          "leaf_encoding": 20.514416,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1248.894293,
+          "stream_leaf_remap_dedup": 49.902816,
+          "stream_block_remap_writes": 5.174314
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 4489.793181999999,
+        "region_unclassified_wall_ms": 480.39921299998923,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8985,
+        "requested_leaves": 176049,
+        "unique_leaves": 90473,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17970,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4600320,
+        "explicit_stream_write_vec_allocations": 6204,
+        "explicit_stream_write_vec_requested_bytes": 13491488,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    },
+    {
+      "prepare_wall_ms": 1311.447946,
+      "profile": {
+        "stage_ms": {
+          "initialization": 0.739697,
+          "vegetation_enumeration": 209.44104499999997,
+          "vegetation_models": 689.725065000009,
+          "vegetation_assembly": 77.72280100000071,
+          "vegetation_overlap": 176.174873,
+          "edit_index": 0.005935000000000001,
+          "column_sampling": 1492.050324000001,
+          "native_cell_assembly": 73.79148299999972,
+          "leaf_hierarchy_dedup": 1083.0301120000026,
+          "block_proofs": 69.69652300000033,
+          "root_proofs": 355.70153700000003,
+          "ownership": 3.8290870000000004,
+          "leaf_encoding": 11.889765,
+          "sparse_roots": 0,
+          "parallel_regions_wall": 1260.188028,
+          "stream_leaf_remap_dedup": 31.701291000000005,
+          "stream_block_remap_writes": 3.342289
+        },
+        "regions": 4,
+        "region_worker_wall_ms": 4769.681146999999,
+        "region_unclassified_wall_ms": 541.5946289999863,
+        "sampled_columns": 1048576,
+        "mixed_chunks": 8607,
+        "requested_leaves": 167854,
+        "unique_leaves": 82562,
+        "explicit_column_vec_allocations": 12288,
+        "explicit_block_vec_allocations": 17214,
+        "explicit_column_vec_requested_bytes": 54525952,
+        "explicit_block_vec_requested_bytes": 4406784,
+        "explicit_stream_write_vec_allocations": 722,
+        "explicit_stream_write_vec_requested_bytes": 12383744,
+        "region_workspace_estimate_peak_bytes": 27361280,
+        "region_stages_are_summed_worker_wall_time": true,
+        "parallel_regions_wall_is_not_additive": true,
+        "workspace_peak_is_largest_individual_region": true
+      }
+    }
+  ],
+  "limitations": [
+    "One profiled circuit; no FPS improvement claim.",
+    "Profile uses coarse clocks at plant/chunk/region boundaries, not per-voxel clocks.",
+    "Ownership stage combines region ownership and parent assembly and is excluded from region-only percentage.",
+    "Profile is opt-in and clock overhead has not been separately measured.",
+    "The stack candidate removes only the small block-proof allocation bucket; remaining source/leaf work dominates."
+  ],
+  "binary_sha256": "a08625b95ff7b5f07f04f5ca174969be323a33d25b21212f782e8e2f5ce82fe7",
+  "experiment_environment": {
+    "FRONTIER_NAADF_CPU_PROFILE": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
+  },
+  "matched_conditions": {
+    "width": 1920,
+    "height": 1080,
+    "msaa": 1,
+    "preset": "alpine",
+    "seed": 7,
+    "clip_m": 6000,
+    "native_mesh_radius_m": 4,
+    "vegetation_near_m": 32,
+    "pixel_error": 5,
+    "route": "walk-circuit",
+    "route_speed_mps": 2.5,
+    "seconds": 35.0,
+    "lighting": "ordinary beauty and sun shadows",
+    "atmosphere": "on",
+    "ray_profile": "full",
+    "eye": null,
+    "target": null,
+    "watch_xz": null,
+    "gpu_distance": "off",
+    "leaf_format": "auto",
+    "root_format": "dense",
+    "naadf_estimate_ceiling_mib": null,
+    "resource_profile": "development; available RAM with system headroom"
+  },
+  "cpu": "AMD Ryzen 5 7640U, 6 cores / 12 threads",
+  "route": "WalkCircuit",
+  "route_elapsed_seconds": 35.003100644,
+  "projection": {
+    "fov_y_degrees": 60,
+    "near_m": 0.025,
+    "far_m": 6000
+  },
+  "stream_stage_ms": [
+    [
+      784.643736,
+      46.863293,
+      46.864481,
+      831.510591
+    ],
+    [
+      1314.92321,
+      43.543562,
+      43.545936,
+      1358.4703339999999
+    ],
+    [
+      1288.2371349999999,
+      22.458048,
+      122.831219,
+      1411.069542
+    ],
+    [
+      1283.815578,
+      67.922686,
+      36.92666,
+      1351.740638
+    ],
+    [
+      1624.296934,
+      58.276945,
+      58.279320000000006,
+      1682.578628
+    ],
+    [
+      1356.212067,
+      54.427672,
+      54.430046000000004,
+      1410.644488
+    ],
+    [
+      1330.5506440000001,
+      21.904760999999997,
+      54.491787,
+      1385.043619
+    ]
+  ],
+  "source_gpu_payload_bytes": 368016628
+}

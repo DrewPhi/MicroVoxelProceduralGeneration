@@ -1,6 +1,7 @@
 //! Exact three-layer voxel snapshot; greenfield NAADF experiment.
 //! 4³ voxels/block, 4³ blocks/chunk. Uniform nodes remain exact. Empty nodes
 //! store a proven-empty cuboid, never six independently unsafe axis distances.
+use super::prepare_profile::{self, Collector, Metrics, Stage};
 use bytemuck::{Pod, Zeroable};
 use frontier_world::{
     vegetation::{self, Species},
@@ -42,6 +43,7 @@ pub struct Snapshot {
     pub voxels: Vec<u32>,
     pub palette: Vec<Pigment>,
     pub build_ms: f64,
+    pub cpu_profile: Option<Metrics>,
     pub source_revision: u64,
     pub mixed_chunks: usize,
     pub unique_blocks: usize,
@@ -245,6 +247,19 @@ fn pack_block(mut nodes: [u32; 64]) -> [u32; 64] {
     nodes
 }
 
+enum ChunkBlocks {
+    Stack([u32; 64]),
+    Heap(Vec<u32>),
+}
+impl ChunkBlocks {
+    fn words(&mut self) -> &mut [u32] {
+        match self {
+            Self::Stack(words) => words,
+            Self::Heap(words) => words,
+        }
+    }
+}
+
 #[derive(Default)]
 struct LeafIndex {
     first: HashMap<u64, u32>,
@@ -298,7 +313,7 @@ impl LeafIndex {
             + self.collision_entries.saturating_mul(16)
     }
 }
-fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Result<(), String> {
+fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Result<usize, String> {
     // New CPU + GPU payload, top-level Jacobi scratch and hash table workspace.
     // Includes capacity slack; resident old snapshot is reported separately.
     let estimate = s
@@ -316,7 +331,7 @@ fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Resu
             limit / 1048576
         ));
     }
-    Ok(())
+    Ok(estimate)
 }
 fn address(c: Cell, min: Cell, dims: [usize; 3]) -> Option<u64> {
     let p = [c.x - min.x, c.y - min.y, c.z - min.z];
@@ -405,7 +420,37 @@ pub fn build_region(
     gpu_distance: bool,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Snapshot, String> {
+    build_region_options(
+        world,
+        min,
+        dims,
+        limit,
+        stage,
+        cached,
+        gpu_distance,
+        cancel,
+        prepare_profile::enabled(),
+        prepare_profile::stack_blocks(),
+        prepare_profile::column_extrema(),
+    )
+}
+
+fn build_region_options(
+    world: &World,
+    min: Cell,
+    dims: [usize; 3],
+    limit: usize,
+    stage: &AtomicU32,
+    cached: Option<&(dyn Fn(i64, i64) -> Option<ColumnSummary> + Sync)>,
+    gpu_distance: bool,
+    cancel: &(dyn Fn() -> bool + Sync),
+    profiling: bool,
+    stack_blocks: bool,
+    column_extrema: bool,
+) -> Result<Snapshot, String> {
     let start = Instant::now();
+    let mut profile = Collector::with_enabled(profiling);
+    let phase = profile.start();
     if dims.iter().any(|v| *v == 0 || *v > 512) {
         return Err("invalid NAADF region dimensions".into());
     }
@@ -428,6 +473,7 @@ pub fn build_region(
         voxels: vec![],
         palette: palette(),
         build_ms: 0.,
+        cpu_profile: None,
         source_revision: world.revision(),
         mixed_chunks: 0,
         unique_blocks: 0,
@@ -437,6 +483,8 @@ pub fn build_region(
     let mut pigments = HashMap::new();
     let mut overlay = Vec::<u128>::new();
     stage.store(1, Ordering::Relaxed);
+    profile.end(Stage::Initialization, phase);
+    let phase = profile.start();
     let pad = vegetation::MAX_PLANT_RADIUS_CELLS;
     let mut records = world.vegetation_records(
         [min.x - pad, min.z - pad],
@@ -456,6 +504,7 @@ pub fn build_region(
             p.seed,
         )
     });
+    profile.end(Stage::VegetationEnumeration, phase);
     for record in records {
         if cancel() {
             return Err("NAADF build superseded".into());
@@ -479,22 +528,27 @@ pub fn build_region(
         {
             continue;
         }
+        let phase = profile.start();
         let Some(model) = vegetation::model_for_cancellable(&record, &cancel) else {
             return Err("NAADF build superseded".into());
         };
+        profile.end(Stage::VegetationModels, phase);
+        let phase = profile.start();
         for v in &model.voxels {
             if let Some(a) = address(record.world_cell(v.cell), min, dims) {
                 let ty = pigment(&mut out.palette, &mut pigments, v.color, v.material)?;
                 overlay.push(((a as u128) << 32) | ty as u128);
             }
         }
-        budget(
+        profile.workspace(budget(
             &out,
             overlay.capacity(),
             pigments.capacity().saturating_mul(32),
             limit,
-        )?;
+        )?);
+        profile.end(Stage::VegetationAssembly, phase);
     }
+    let phase = profile.start();
     overlay.sort_unstable();
     let mut compact = 0;
     let mut i = 0;
@@ -521,6 +575,8 @@ pub fn build_region(
     }
     overlay.truncate(compact);
     out.plant_cells = compact;
+    profile.end(Stage::VegetationOverlap, phase);
+    let phase = profile.start();
     // Explicit edits override both terrain and plants. Material-only edited
     // cells use the ordinary semantic palette, matching canonical material.
     let edits: HashMap<u64, u32> = world
@@ -537,6 +593,7 @@ pub fn build_region(
         })
         .map(|c| (c.x.div_euclid(16), c.z.div_euclid(16)))
         .collect();
+    profile.end(Stage::EditIndex, phase);
     let mut leaves = LeafIndex::default();
     let mut cursor = 0;
     stage.store(2, Ordering::Relaxed);
@@ -561,6 +618,7 @@ pub fn build_region(
                     continue;
                 }
             }
+            let phase = profile.start();
             let columns: Vec<_> = (0..16)
                 .flat_map(|z| (0..16).map(move |x| (x, z)))
                 .map(|(x, z)| {
@@ -582,6 +640,14 @@ pub fn build_region(
                     ]
                 })
                 .collect();
+            profile.end(Stage::ColumnSampling, phase);
+            if let Some(m) = &mut profile.metrics {
+                m.column_vec_allocations += 3;
+                m.column_vec_bytes += (columns.capacity() * std::mem::size_of_val(&columns[0])
+                    + heights.capacity() * std::mem::size_of_val(&heights[0])
+                    + bands.capacity() * std::mem::size_of_val(&bands[0]))
+                    as u64;
+            }
             out.sampled_columns += 256;
             let fast = world.fbm_terrain().is_some()
                 && !world.volume_owned(Cell {
@@ -597,16 +663,21 @@ pub fn build_region(
                 && heights
                     .iter()
                     .all(|h| *h > min.y + 1 && *h < min.y + ny as i64 * 16 - 1);
+            let low_height = *heights.iter().min().unwrap();
+            let high_height = *heights.iter().max().unwrap();
+            let uniform_deep = bands.iter().all(|b| b[2] == bands[0][2]);
             out.columns[cz * nx + cx] = ColumnSummary {
-                low: *heights.iter().min().unwrap(),
-                high: *heights.iter().max().unwrap(),
-                deep: if bands.iter().all(|b| b[2] == bands[0][2]) {
-                    bands[0][2]
-                } else {
-                    0
-                },
+                low: low_height,
+                high: high_height,
+                deep: if uniform_deep { bands[0][2] } else { 0 },
                 fast,
             };
+            let chunk_stages = [
+                Stage::NativeCellAssembly,
+                Stage::LeafHierarchyDedup,
+                Stage::BlockProofs,
+            ];
+            let chunk_loop = profile.exclusive_start(&chunk_stages);
             for cy in 0..ny {
                 let ci = (cz * nx + cx) * ny + cy;
                 let y0 = min.y + (cy * 16) as i64;
@@ -615,17 +686,29 @@ pub fn build_region(
                     cursor += 1;
                 }
                 let clean = cursor == plant_start && edits.is_empty();
-                if fast && clean && heights.iter().all(|h| y0 >= *h) {
+                if fast
+                    && clean
+                    && (if column_extrema {
+                        y0 >= high_height
+                    } else {
+                        heights.iter().all(|h| y0 >= *h)
+                    })
+                {
                     continue;
                 }
                 if fast
                     && clean
-                    && heights.iter().all(|h| y0 + 15 < *h - 12)
-                    && bands.iter().all(|b| b[2] == bands[0][2])
+                    && (if column_extrema {
+                        y0 + 15 < low_height - 12 && uniform_deep
+                    } else {
+                        heights.iter().all(|h| y0 + 15 < *h - 12)
+                            && bands.iter().all(|b| b[2] == bands[0][2])
+                    })
                 {
                     out.chunks[ci] = FULL | bands[0][2] as u32;
                     continue;
                 }
+                let phase = profile.start();
                 let mut cells = [0u32; 4096];
                 for z in 0..16 {
                     for x in 0..16 {
@@ -663,6 +746,7 @@ pub fn build_region(
                         }
                     }
                 }
+                profile.end(Stage::NativeCellAssembly, phase);
                 if cells.iter().all(|c| *c == cells[0]) {
                     out.chunks[ci] = if cells[0] == 0 {
                         0
@@ -671,7 +755,14 @@ pub fn build_region(
                     };
                     continue;
                 }
-                let mut blocks = vec![0u32; 64];
+                let phase = profile.start();
+                let mut storage = if stack_blocks {
+                    ChunkBlocks::Stack([0; 64])
+                } else {
+                    ChunkBlocks::Heap(vec![0; 64])
+                };
+                let blocks = storage.words();
+                let mut leaf_requests = 0;
                 for bz in 0..4 {
                     for by in 0..4 {
                         for bx in 0..4 {
@@ -689,6 +780,7 @@ pub fn build_region(
                                 };
                                 continue;
                             }
+                            leaf_requests += 1;
                             let mut hash = DefaultHasher::new();
                             values.hash(&mut hash);
                             let pointer = leaves.intern(hash.finish(), values, &mut out.voxels)?;
@@ -696,22 +788,47 @@ pub fn build_region(
                         }
                     }
                 }
-                bounds(&mut blocks, [4; 3], [1, 4, 16], 2, &cancel)?;
+                profile.end(Stage::LeafHierarchyDedup, phase);
+                let phase = profile.start();
                 let p =
                     u32::try_from(out.blocks.len()).map_err(|_| "NAADF block address overflow")?;
                 if p >= FULL {
                     return Err("NAADF block address exhausted".into());
                 }
-                out.blocks.extend(blocks);
+                match storage {
+                    ChunkBlocks::Stack(nodes) => {
+                        if cancel() {
+                            return Err("NAADF build superseded".into());
+                        }
+                        out.blocks.extend(pack_block(nodes));
+                    }
+                    ChunkBlocks::Heap(mut nodes) => {
+                        bounds(&mut nodes, [4; 3], [1, 4, 16], 2, &cancel)?;
+                        out.blocks.extend(nodes);
+                    }
+                }
+                profile.end(Stage::BlockProofs, phase);
+                if let Some(m) = &mut profile.metrics {
+                    m.requested_leaves += leaf_requests;
+                    if !stack_blocks {
+                        m.block_vec_allocations += 2;
+                        m.block_vec_bytes += 2 * 64 * 4;
+                    }
+                }
                 out.chunks[ci] = CHILD | p;
                 out.mixed_chunks += 1;
             }
-            budget(
+            profile.exclusive_end(
+                Stage::ChunkDispatchClassification,
+                chunk_loop,
+                &chunk_stages,
+            );
+            profile.workspace(budget(
                 &out,
                 overlay.capacity(),
                 leaves.workspace_bytes() + pigments.capacity().saturating_mul(32),
                 limit,
-            )?;
+            )?);
             stage.store(
                 10 + ((cz * nx + cx) * 70 / (nx * nz)) as u32,
                 Ordering::Relaxed,
@@ -725,9 +842,12 @@ pub fn build_region(
     stage.store(85, Ordering::Relaxed);
     // GPU mode publishes exact roots first. An empty root itself is a
     // conservative one-chunk skip; block and leaf proofs are unchanged.
+    let phase = profile.start();
     if !gpu_distance {
         bounds(&mut out.chunks, dims, [ny, 1, nx * ny], 5, &cancel)?;
     }
+    profile.end(Stage::RootProofs, phase);
+    let phase = profile.start();
     if nx == nz {
         out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
             out.bounds(),
@@ -735,6 +855,18 @@ pub fn build_region(
             &safe_columns,
         ));
     }
+    profile.end(Stage::Ownership, phase);
+    if let Some(m) = &mut profile.metrics {
+        m.region_worker_wall_ms = start.elapsed().as_secs_f64() * 1000.;
+        m.region_unclassified_wall_ms = (m.region_worker_wall_ms
+            - m.ms[..=Stage::Ownership as usize].iter().sum::<f64>())
+        .max(0.);
+        m.regions = 1;
+        m.sampled_columns = out.sampled_columns as u64;
+        m.mixed_chunks = out.mixed_chunks as u64;
+        m.unique_leaves = out.unique_blocks as u64;
+    }
+    out.cpu_profile = profile.metrics;
     out.build_ms = start.elapsed().as_secs_f64() * 1000.;
     stage.store(100, Ordering::Relaxed);
     Ok(out)
@@ -906,5 +1038,285 @@ mod tests {
         )
         .unwrap_err()
         .contains("top grid"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn stack_block_proofs_match_heap_jacobi_words_exactly() {
+    for seed in 0..64_u64 {
+        let mut rng = seed + 1;
+        let nodes: [u32; 64] = std::array::from_fn(|_| {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            match rng >> 61 {
+                0 => FULL | 5,
+                1 => CHILD | 64,
+                _ => 0,
+            }
+        });
+        let mut heap = nodes.to_vec();
+        bounds(&mut heap, [4; 3], [1, 4, 16], 2, &|| false).unwrap();
+        assert_eq!(pack_block(nodes).as_slice(), heap);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_profiling_and_stack_scratch_preserve_exact_snapshot() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Legacy,
+            amplitude: 2.,
+            horizontal_scale: 30.,
+            octaves: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .with_vegetation();
+    let height = (world.height_m(-1., -3.) * 16.) as i64;
+    let min = Cell {
+        x: -32,
+        y: height.div_euclid(16) * 16 - 32,
+        z: -64,
+    };
+    let build = |profiling, stack| {
+        build_region_options(
+            &world,
+            min,
+            [4, 4, 3],
+            128 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+            profiling,
+            stack,
+            false,
+        )
+        .unwrap()
+    };
+    let baseline = build(false, false);
+    assert!(baseline.cpu_profile.is_none());
+    let profiled = build(true, false);
+    let optimized = build(true, true);
+    for snapshot in [&profiled, &optimized] {
+        assert_eq!(snapshot.chunks, baseline.chunks);
+        assert_eq!(snapshot.blocks, baseline.blocks);
+        assert_eq!(snapshot.voxels, baseline.voxels);
+        assert_eq!(
+            bytemuck::cast_slice::<Pigment, u8>(&snapshot.palette),
+            bytemuck::cast_slice::<Pigment, u8>(&baseline.palette)
+        );
+        assert_eq!(snapshot.sampled_columns, baseline.sampled_columns);
+        assert_eq!(snapshot.plant_cells, baseline.plant_cells);
+    }
+    let baseline_metrics = profiled.cpu_profile.as_ref().unwrap();
+    let optimized_metrics = optimized.cpu_profile.as_ref().unwrap();
+    assert!(baseline.mixed_chunks > 0);
+    assert_eq!(
+        baseline_metrics.block_vec_allocations,
+        2 * baseline.mixed_chunks as u64
+    );
+    assert_eq!(optimized_metrics.block_vec_allocations, 0);
+    assert!(baseline_metrics
+        .ms
+        .iter()
+        .all(|ms| ms.is_finite() && *ms >= 0.));
+    assert!(baseline_metrics.region_unclassified_wall_ms >= 0.);
+    assert_eq!(
+        baseline_metrics.column_vec_allocations,
+        baseline.sampled_columns as u64 / 256 * 3
+    );
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "bounded CPU preparation fixture; run only with GPU timings idle"]
+fn profile_region_preparation_stages() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Alpine,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .with_vegetation();
+    let x = -48.;
+    let z = -250.;
+    let y = (world.height_m(x, z).floor() as i64 - 16) * 16;
+    let min = Cell {
+        x: x as i64 * 16,
+        y,
+        z: z as i64 * 16,
+    };
+    for pass in 0..2 {
+        for stack in if pass == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let snapshot = build_region_options(
+                &world,
+                min,
+                [32, 32, 2],
+                128 * 1048576,
+                &AtomicU32::new(0),
+                None,
+                false,
+                &|| false,
+                true,
+                stack,
+                false,
+            )
+            .unwrap();
+            eprintln!(
+                "{{\"test\":\"profile_region_preparation_stages\",\"seed\":7,\"recipe\":\"Alpine\",\"dims_m\":[32,32,2],\"origin_cell\":[{},{},{}],\"pass\":{},\"stack_blocks\":{},\"build_wall_ms\":{},\"profile\":{}}}",
+                min.x, min.y, min.z, pass, stack, snapshot.build_ms,
+                snapshot.cpu_profile.as_ref().unwrap().json(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn column_extrema_rejection_matches_full_height_and_band_scans() {
+    let mut rng = 7123_u64;
+    for _ in 0..64 {
+        let heights: [i64; 256] = std::array::from_fn(|_| {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng >> 32) as i32 as i64 / 1024
+        });
+        let low = *heights.iter().min().unwrap();
+        let high = *heights.iter().max().unwrap();
+        for y0 in [low - 16, low - 12, low, high - 1, high, high + 16] {
+            assert_eq!(y0 >= high, heights.iter().all(|h| y0 >= *h));
+            assert_eq!(
+                y0 + 15 < low - 12,
+                heights.iter().all(|h| y0 + 15 < *h - 12)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_sources() {
+    use frontier_world::{FbmParams, FbmRecipe};
+    for recipe in [
+        FbmRecipe::Legacy,
+        FbmRecipe::Alpine,
+        FbmRecipe::Regional,
+        FbmRecipe::RegionalUnwarped,
+    ] {
+        for seed in [7, 91] {
+            for plants in [false, true] {
+                let base = World::fbm(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let base = if plants { base.with_vegetation() } else { base };
+                for edited in [false, true] {
+                    let mut world = base.clone();
+                    let x = -41.;
+                    let z = -250.;
+                    let height = (world.height_m(x, z) * 16.).floor() as i64;
+                    let min = Cell {
+                        x: -42 * 16,
+                        y: height.div_euclid(16) * 16 - 32,
+                        z: -251 * 16,
+                    };
+                    if edited {
+                        world.set(
+                            Cell {
+                                x: min.x + 20,
+                                y: height,
+                                z: min.z + 20,
+                            },
+                            Material::Wood,
+                        );
+                        world.set(
+                            Cell {
+                                x: min.x + 21,
+                                y: height - 1,
+                                z: min.z + 20,
+                            },
+                            Material::Air,
+                        );
+                    }
+                    let build = |extrema| {
+                        build_region_options(
+                            &world,
+                            min,
+                            [4; 3],
+                            128 * 1048576,
+                            &AtomicU32::new(0),
+                            None,
+                            false,
+                            &|| false,
+                            true,
+                            false,
+                            extrema,
+                        )
+                        .unwrap()
+                    };
+                    let baseline = build(false);
+                    let optimized = build(true);
+                    assert_eq!(
+                        optimized.chunks, baseline.chunks,
+                        "{recipe:?} seed{seed} plants{plants} edits{edited}"
+                    );
+                    assert_eq!(optimized.blocks, baseline.blocks);
+                    assert_eq!(optimized.voxels, baseline.voxels);
+                    assert_eq!(
+                        bytemuck::cast_slice::<Pigment, u8>(&optimized.palette),
+                        bytemuck::cast_slice::<Pigment, u8>(&baseline.palette)
+                    );
+                    assert_eq!(
+                        optimized
+                            .columns
+                            .iter()
+                            .map(|c| (c.low, c.high, c.deep, c.fast))
+                            .collect::<Vec<_>>(),
+                        baseline
+                            .columns
+                            .iter()
+                            .map(|c| (c.low, c.high, c.deep, c.fast))
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(optimized.mixed_chunks, baseline.mixed_chunks);
+                    let mut rng = seed;
+                    for _ in 0..256 {
+                        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let p = [
+                            (rng & 63) as usize,
+                            ((rng >> 9) & 63) as usize,
+                            ((rng >> 18) & 63) as usize,
+                        ];
+                        let word = optimized.material(p);
+                        let actual = if word & FULL == 0 {
+                            0
+                        } else {
+                            optimized.palette[(word & (FULL - 1)) as usize].material
+                        };
+                        assert_eq!(
+                            actual,
+                            id(world.material(Cell {
+                                x: min.x + p[0] as i64,
+                                y: min.y + p[1] as i64,
+                                z: min.z + p[2] as i64,
+                            }))
+                        );
+                    }
+                }
+            }
+        }
     }
 }

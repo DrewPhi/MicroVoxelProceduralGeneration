@@ -1,6 +1,9 @@
 //! GPU-only leaf encoding. Keep canonical build words and all child addresses
 //! in their existing format; pack two leaves into each storage-buffer word.
-use super::data::Snapshot;
+use super::{
+    data::Snapshot,
+    prepare_profile::{Collector, Stage},
+};
 
 const FULL: u32 = 1 << 30;
 const COMPACT_FULL: u32 = 1 << 15;
@@ -82,6 +85,10 @@ pub(super) struct Prepared {
 impl Prepared {
     pub(super) fn new(mut snapshot: Snapshot, force_wide: bool) -> Self {
         let wide_bytes = snapshot.bytes();
+        let mut profile = Collector {
+            metrics: snapshot.cpu_profile.take(),
+        };
+        let phase = profile.start();
         let encoding = if !force_wide
             && snapshot.voxels.len() % 2 == 0
             && snapshot.voxels.iter().all(|&word| compact(word).is_some())
@@ -92,6 +99,8 @@ impl Prepared {
         } else {
             Encoding::Wide32
         };
+        profile.end(Stage::LeafEncoding, phase);
+        snapshot.cpu_profile = profile.metrics;
         Self {
             snapshot,
             encoding,
@@ -105,11 +114,17 @@ impl Prepared {
         if self.snapshot.gpu_distance {
             return;
         }
+        let mut profile = Collector {
+            metrics: self.snapshot.cpu_profile.take(),
+        };
+        let phase = profile.start();
         if let Some((words, dims)) = super::sparse_roots::atlas(&self.snapshot.chunks, n, cancel) {
             self.wide_bytes -= (self.snapshot.chunks.len() - words.len()) * 4;
             self.snapshot.chunks = words;
             self.sparse_root_dims = Some(dims);
         }
+        profile.end(Stage::SparseRoots, phase);
+        self.snapshot.cpu_profile = profile.metrics;
     }
 }
 

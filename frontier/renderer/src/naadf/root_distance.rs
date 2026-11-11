@@ -17,10 +17,15 @@ const SIDE: u32 = 32;
 const MAX_EDGE: u32 = 128;
 const UNIFORM_BYTES: usize = 128;
 const FEEDBACK_BYTES: u64 = 64 * 4;
+#[cfg(test)]
+pub(super) const REPAIRED_ROOT_TAG: u32 = 0xc0000000;
 const SCRATCH_BYTES: usize = SIDE.pow(3) as usize * 4;
 
 pub(super) struct Cache {
+    pub stages: Option<Arc<super::gpu_stages::Profiler>>,
     plan: Plan,
+    publisher: Option<Publisher>,
+    repair: bool,
     mode: Mode,
     aspect: Cell<f32>,
     counters: Counters,
@@ -35,10 +40,33 @@ pub(super) struct Cache {
     kernels: Option<[wgpu::ComputePipeline; 5]>,
 }
 
+/// Direct roots contain the finished proof; traversal needs no optional lookup.
+pub(super) fn direct_publication() -> bool {
+    static DIRECT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DIRECT
+        .get_or_init(|| std::env::var_os("FRONTIER_NAADF_DIRECT_ROOTS").is_some_and(|v| v == "1"))
+}
+
+pub(super) fn settle_capture() -> bool {
+    static SETTLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTLE.get_or_init(|| {
+        std::env::var_os("FRONTIER_NAADF_SETTLE_ROOT_DISTANCE").is_some_and(|v| v == "1")
+    })
+}
+
+pub(super) fn local_repair() -> bool {
+    static REPAIR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REPAIR.get_or_init(|| {
+        direct_publication()
+            || std::env::var_os("FRONTIER_NAADF_ROOT_REPAIR").is_some_and(|v| v == "1")
+    })
+}
+
 pub(super) fn cpu_fallback() -> bool {
     static FALLBACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FALLBACK.get_or_init(|| {
-        std::env::var_os("FRONTIER_NAADF_DISTANCE_CPU_FALLBACK").is_some_and(|v| v == "1")
+        local_repair()
+            || std::env::var_os("FRONTIER_NAADF_DISTANCE_CPU_FALLBACK").is_some_and(|v| v == "1")
     })
 }
 
@@ -47,8 +75,16 @@ pub(super) fn edge(n: u32) -> u32 {
 }
 
 pub(super) fn bytes(n: u32) -> usize {
-    4 * edge(n).pow(3) as usize
-        + 2 * SCRATCH_BYTES
+    4 * if direct_publication() {
+        1
+    } else {
+        edge(n).pow(3) as usize
+    } + 2 * SCRATCH_BYTES
+        + if direct_publication() {
+            SCRATCH_BYTES
+        } else {
+            4
+        }
         + UNIFORM_BYTES
         + FEEDBACK_BYTES as usize * (1 + usize::from(Mode::requested() == Mode::Feedback))
 }
@@ -118,6 +154,7 @@ pub(super) struct Counters {
     pub(super) retained: u64,
     pub(super) invalidated: u64,
     pub(super) submitted: u64,
+    pub(super) direct_publications: u64,
     pub(super) ray_ranked: u64,
     pub(super) rank_cpu_ns: u64,
     pub(super) feedback_dispatches: u64,
@@ -328,6 +365,88 @@ impl Feedback {
     }
 }
 
+/// Separate bind group avoids binding the root texture for sampling and
+/// storage in the same pass. A pass boundary orders the final scratch writes
+/// before publication; queue order places publication before later rays/shifts.
+struct Publisher {
+    pipeline: wgpu::ComputePipeline,
+    groups: [wgpu::BindGroup; 2],
+}
+impl Publisher {
+    fn new(
+        device: &wgpu::Device,
+        scratch: &[wgpu::Buffer; 2],
+        original: &wgpu::Buffer,
+        uniform: &wgpu::Buffer,
+        roots: &wgpu::TextureView,
+    ) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("NAADF direct root publication resources"),
+            entries: &[
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::R32Uint,
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                },
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(binding, ty)| wgpu::BindGroupLayoutEntry {
+                binding: binding as u32,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty,
+                count: None,
+            })
+            .collect::<Vec<_>>(),
+        });
+        let groups = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("NAADF direct root publication"),
+                layout: &layout,
+                entries: &[
+                    scratch[i].as_entire_binding(),
+                    uniform.as_entire_binding(),
+                    wgpu::BindingResource::TextureView(roots),
+                    original.as_entire_binding(),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(binding, resource)| wgpu::BindGroupEntry {
+                    binding: binding as u32,
+                    resource,
+                })
+                .collect::<Vec<_>>(),
+            })
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("NAADF direct root publication"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("NAADF direct root publication"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("root_publish.wgsl").into()),
+        });
+        let pipeline = make_kernel(device, &pipeline_layout, &shader, "publish_roots");
+        Self { pipeline, groups }
+    }
+}
+
 impl Cache {
     pub(super) fn new(
         device: &wgpu::Device,
@@ -335,10 +454,32 @@ impl Cache {
         region: Region,
         roots: &wgpu::TextureView,
     ) -> (Self, wgpu::TextureView) {
+        Self::new_configured(
+            device,
+            n,
+            region,
+            roots,
+            direct_publication(),
+            local_repair(),
+        )
+    }
+
+    fn new_configured(
+        device: &wgpu::Device,
+        n: u32,
+        region: Region,
+        roots: &wgpu::TextureView,
+        direct: bool,
+        repair: bool,
+    ) -> (Self, wgpu::TextureView) {
+        assert!(
+            !direct || repair,
+            "direct publication must preserve existing proofs"
+        );
         let edge = edge(n);
         let texture = texture(
             device,
-            edge,
+            if direct { 1 } else { edge },
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | if cfg!(test) {
@@ -355,6 +496,12 @@ impl Cache {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             })
+        });
+        let original = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("NAADF direct proof provenance snapshot"),
+            size: if direct { SCRATCH_BYTES as u64 } else { 4 },
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("NAADF distance tile coordinates"),
@@ -391,6 +538,7 @@ impl Cache {
                 },
                 buffer(wgpu::BufferBindingType::Uniform),
                 buffer(wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer(wgpu::BufferBindingType::Storage { read_only: false }),
             ]
             .into_iter()
             .enumerate()
@@ -413,6 +561,7 @@ impl Cache {
                     wgpu::BindingResource::TextureView(&view),
                     uniform.as_entire_binding(),
                     feedback_counts.as_entire_binding(),
+                    original.as_entire_binding(),
                 ]
                 .into_iter()
                 .enumerate()
@@ -445,9 +594,14 @@ impl Cache {
                 last_probe: None,
             }
         });
+        let publisher =
+            direct.then(|| Publisher::new(device, &scratch, &original, &uniform, roots));
         (
             Self {
+                stages: None,
                 plan: Plan::new(region, edge / SIDE),
+                publisher,
+                repair,
                 mode,
                 feedback,
                 feedback_counts,
@@ -493,6 +647,14 @@ impl Cache {
         self.plan.uniforms()
     }
 
+    pub(super) fn is_direct(&self) -> bool {
+        self.publisher.is_some()
+    }
+
+    pub(super) fn repairs_roots(&self) -> bool {
+        self.repair
+    }
+
     pub(super) fn counters(&self) -> Counters {
         self.counters
     }
@@ -524,6 +686,7 @@ impl Cache {
         let mut params = [0u32; UNIFORM_BYTES / 4];
         params[0] = n;
         params[4..7].copy_from_slice(&ring);
+        params[7] = u32::from(self.publisher.is_some()) << 1;
         params[8] = u32::from(cpu_fallback());
         params[12..16].copy_from_slice(&self.plan.uniforms());
         params[16..20].copy_from_slice(bytemuck::cast_slice(&eye));
@@ -535,10 +698,14 @@ impl Cache {
             label: Some("NAADF sampled ray feedback"),
         });
         encoder.clear_buffer(&self.feedback_counts, 0, None);
+        let timing = self
+            .stages
+            .as_ref()
+            .and_then(|p| p.begin(super::gpu_stages::Stage::Feedback));
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NAADF sampled primary root rays"),
-                timestamp_writes: None,
+                timestamp_writes: timing.as_ref().map(|t| t.writes(true, true)),
             });
             pass.set_pipeline(&feedback.kernel);
             pass.set_bind_group(0, &self.groups[0], &[]);
@@ -551,7 +718,13 @@ impl Cache {
             0,
             FEEDBACK_BYTES,
         );
+        if let Some(t) = &timing {
+            t.resolve(&mut encoder);
+        }
         queue.submit(Some(encoder.finish()));
+        if let Some(t) = timing {
+            t.submitted();
+        }
         let (tx, result) = mpsc::channel();
         feedback
             .buffer
@@ -616,8 +789,18 @@ impl Cache {
             &self.uniform,
             0,
             bytemuck::cast_slice(&[
-                n, slot[0], slot[1], slot[2], ring[0], ring[1], ring[2], 0, base[0], base[1],
-                base[2], 0,
+                n,
+                slot[0],
+                slot[1],
+                slot[2],
+                ring[0],
+                ring[1],
+                ring[2],
+                u32::from(self.repair) | (u32::from(self.publisher.is_some()) << 1),
+                base[0],
+                base[1],
+                base[2],
+                0,
             ]),
         );
         let kernels = self.kernels.get_or_insert_with(|| {
@@ -630,22 +813,46 @@ impl Cache {
         });
         // One seed, five rounds of three-axis Jacobi, one publication. A
         // 32-cube has a maximum face span of 31 root cells.
+        let timing = self
+            .stages
+            .as_ref()
+            .and_then(|p| p.begin(super::gpu_stages::Stage::RootRepair));
         let mut ping = 0;
-        for kernel in std::iter::once(0)
+        for (step, kernel) in std::iter::once(0)
             .chain((0..5).flat_map(|_| 1..=3))
-            .chain(std::iter::once(4))
+            .chain(self.publisher.is_none().then_some(4))
+            .enumerate()
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NAADF distance stage"),
-                timestamp_writes: None,
+                timestamp_writes: timing
+                    .as_ref()
+                    .filter(|_| step == 0 || (self.publisher.is_none() && step == 16))
+                    .map(|t| t.writes(step == 0, self.publisher.is_none() && step == 16)),
             });
             pass.set_pipeline(&kernels[kernel]);
             pass.set_bind_group(0, &self.groups[ping], &[]);
             pass.dispatch_workgroups(SIDE / 4, SIDE / 4, SIDE / 4);
             ping ^= 1;
         }
+        if let Some(publisher) = &self.publisher {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NAADF publish improved root words"),
+                timestamp_writes: timing.as_ref().map(|t| t.writes(false, true)),
+            });
+            pass.set_pipeline(&publisher.pipeline);
+            pass.set_bind_group(0, &publisher.groups[ping], &[]);
+            pass.dispatch_workgroups(SIDE / 4, SIDE / 4, SIDE / 4);
+            self.counters.direct_publications += 1;
+        }
+        if let Some(t) = &timing {
+            t.resolve(&mut encoder);
+        }
         self.in_flight.store(true, Ordering::Release);
         queue.submit(Some(encoder.finish()));
+        if let Some(t) = timing {
+            t.submitted();
+        }
         let in_flight = Arc::clone(&self.in_flight);
         queue.on_submitted_work_done(move || in_flight.store(false, Ordering::Release));
         // Later render submissions can use the tile immediately by queue order.
@@ -805,6 +1012,16 @@ mod tests {
     #[test]
     #[ignore = "explicit hardware GPU oracle: retained root proofs across physical tile and root ring wrap"]
     fn retained_gpu_tiles_remain_conservative_across_wraps() {
+        gpu_tiles_remain_conservative_across_wraps(false);
+    }
+
+    #[test]
+    #[ignore = "explicit hardware GPU oracle: direct root proofs, occupied pointers, movement and queued shift races"]
+    fn direct_gpu_root_proofs_survive_wrap_and_pending_shift_publication() {
+        gpu_tiles_remain_conservative_across_wraps(true);
+    }
+
+    fn gpu_tiles_remain_conservative_across_wraps(direct: bool) {
         use super::*;
         pollster::block_on(async {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -821,7 +1038,10 @@ mod tests {
             let roots = texture(
                 &device,
                 n,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::STORAGE_BINDING,
             );
             let region_at = |lo: Point| Region {
                 lo,
@@ -830,11 +1050,24 @@ mod tests {
             let occupied = |[x, y, z]: Point| {
                 x.rem_euclid(11) == 1 || y.rem_euclid(13) == 3 || z.rem_euclid(17) == 8
             };
-            let (mut cache, _) = Cache::new(
+            let source_word = |p: Point| {
+                if !occupied(p) {
+                    return 0u32;
+                }
+                let payload = ((p[0] * 73 + p[1] * 17 + p[2] * 31).rem_euclid(16384) as u32) + 1;
+                if p[0].rem_euclid(2) == 0 {
+                    0x80000000 | payload
+                } else {
+                    0x40000000 | payload
+                }
+            };
+            let (mut cache, _) = Cache::new_configured(
                 &device,
                 n,
                 region_at(origin),
                 &roots.create_view(&Default::default()),
+                direct,
+                direct,
             );
             cache.mode = Mode::Retain;
             let extent = wgpu::Extent3d {
@@ -854,11 +1087,11 @@ mod tests {
                 mapped_at_creation: false,
             });
             let camera = Camera::fixture();
-            let verify = |cache: &Cache| {
+            let verify = |cache: &Cache, ring: [u32; 3]| {
                 let mut encoder = device.create_command_encoder(&Default::default());
                 encoder.copy_texture_to_buffer(
                     wgpu::TexelCopyTextureInfo {
-                        texture: &cache._texture,
+                        texture: if direct { &roots } else { &cache._texture },
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
@@ -878,41 +1111,117 @@ mod tests {
                 rx.recv().unwrap().unwrap();
                 let view = readback.slice(..).get_mapped_range();
                 let words: &[u32] = bytemuck::cast_slice(&view);
-                for (index, tile) in cache.plan.tiles.iter().enumerate() {
-                    if cache.plan.ready & (1 << index) == 0 {
-                        continue;
+                let check = |p: Point, word: u32, support: Option<Region>| {
+                    if occupied(p) {
+                        assert_eq!(
+                            word,
+                            if direct { source_word(p) } else { 0 },
+                            "occupied metadata at {p:?}"
+                        );
+                        return;
                     }
-                    let tile = tile.unwrap();
-                    let slot = [index % 2, index / 2 % 2, index / 4].map(|x| x * 32);
-                    let Region { lo, hi } = tile.support;
-                    for z in (lo[2]..hi[2]).step_by(7) {
-                        for y in (lo[1]..hi[1]).step_by(5) {
-                            for x in (lo[0]..hi[0]).step_by(3) {
+                    let tagged = word & REPAIRED_ROOT_TAG == REPAIRED_ROOT_TAG;
+                    let word = if direct && tagged {
+                        word & !REPAIRED_ROOT_TAG
+                    } else {
+                        word
+                    };
+                    assert_eq!(word & REPAIRED_ROOT_TAG, 0);
+                    if direct {
+                        // Source air words in this fixture start at zero.
+                        // Exactly the roots whose proofs changed are tagged.
+                        assert_eq!(tagged, word != 0, "false or missing provenance at {p:?}");
+                    }
+                    let a: Point =
+                        std::array::from_fn(|a| p[a] - i64::from((word >> (a * 10)) & 31));
+                    let b: Point =
+                        std::array::from_fn(|a| p[a] + i64::from((word >> (a * 10 + 5)) & 31));
+                    if let Some(support) = support {
+                        assert!((0..3)
+                            .all(|axis| a[axis] >= support.lo[axis] && b[axis] < support.hi[axis]));
+                    }
+                    for z in a[2]..=b[2] {
+                        for y in a[1]..=b[1] {
+                            for x in a[0]..=b[0] {
+                                assert!(
+                                    !occupied([x, y, z]),
+                                    "stale proof at {p:?}: {a:?}..={b:?}"
+                                );
+                            }
+                        }
+                    }
+                };
+                let mut historical_tags = 0usize;
+                if direct {
+                    let region = cache.plan.region;
+                    for z in region.lo[2]..region.hi[2] {
+                        for x in region.lo[0]..region.hi[0] {
+                            for y in region.lo[1]..region.hi[1] {
                                 let p = [x, y, z];
                                 let q: [usize; 3] = std::array::from_fn(|a| {
-                                    slot[a] + (p[a] - tile.base[a]) as usize
+                                    ((p[a] - region.lo[a]) as u32 + ring[a]) as usize % n as usize
                                 });
-                                let word = words[q[0] + n as usize * (q[1] + n as usize * q[2])];
+                                let raw = words[q[1] + n as usize * (q[0] + n as usize * q[2])];
+                                let tagged = raw & REPAIRED_ROOT_TAG == REPAIRED_ROOT_TAG;
                                 if occupied(p) {
-                                    assert_eq!(word, 0, "occupied root {p:?}");
-                                    continue;
+                                    assert_eq!(
+                                        raw,
+                                        source_word(p),
+                                        "occupied pointer overwritten at {p:?}"
+                                    );
+                                } else {
+                                    assert_eq!(
+                                        tagged,
+                                        raw & !REPAIRED_ROOT_TAG != 0,
+                                        "wrong root provenance at {p:?}"
+                                    );
                                 }
-                                let a: [i64; 3] = std::array::from_fn(|a| {
-                                    p[a] - i64::from((word >> (a * 10)) & 31)
+                                if tagged
+                                    && !(0..3).all(|a| {
+                                        p[a] >= cache.plan.first[a] * i64::from(SIDE)
+                                            && p[a]
+                                                < (cache.plan.first[a] + i64::from(cache.plan.side))
+                                                    * i64::from(SIDE)
+                                    })
+                                {
+                                    historical_tags += 1;
+                                }
+                            }
+                        }
+                    }
+                    // Direct root words remain live even after their original
+                    // tile falls outside the new cache plan; check all roots.
+                    let region = cache.plan.region;
+                    for z in (region.lo[2]..region.hi[2]).step_by(7) {
+                        for y in (region.lo[1]..region.hi[1]).step_by(5) {
+                            for x in (region.lo[0]..region.hi[0]).step_by(3) {
+                                let p = [x, y, z];
+                                let q: [usize; 3] = std::array::from_fn(|a| {
+                                    ((p[a] - region.lo[a]) as u32 + ring[a]) as usize % n as usize
                                 });
-                                let b: [i64; 3] = std::array::from_fn(|a| {
-                                    p[a] + i64::from((word >> (a * 10 + 5)) & 31)
-                                });
-                                assert!(
-                                    (0..3).all(|axis| a[axis] >= lo[axis] && b[axis] < hi[axis]),
-                                    "proof {a:?}..={b:?} escapes {tile:?}"
-                                );
-                                for z in a[2]..=b[2] {
-                                    for y in a[1]..=b[1] {
-                                        for x in a[0]..=b[0] {
-                                            assert!(!occupied([x, y, z]), "stale proof at {p:?}");
-                                        }
-                                    }
+                                let word = words[q[1] + n as usize * (q[0] + n as usize * q[2])];
+                                check(p, word, None);
+                            }
+                        }
+                    }
+                } else {
+                    for (index, tile) in cache.plan.tiles.iter().enumerate() {
+                        if cache.plan.ready & (1 << index) == 0 {
+                            continue;
+                        }
+                        let tile = tile.unwrap();
+                        let slot = [index % 2, index / 2 % 2, index / 4].map(|x| x * 32);
+                        let Region { lo, hi } = tile.support;
+                        for z in (lo[2]..hi[2]).step_by(7) {
+                            for y in (lo[1]..hi[1]).step_by(5) {
+                                for x in (lo[0]..hi[0]).step_by(3) {
+                                    let p = [x, y, z];
+                                    let q: [usize; 3] = std::array::from_fn(|a| {
+                                        slot[a] + (p[a] - tile.base[a]) as usize
+                                    });
+                                    let word =
+                                        words[q[0] + n as usize * (q[1] + n as usize * q[2])];
+                                    check(p, word, Some(tile.support));
                                 }
                             }
                         }
@@ -920,7 +1229,10 @@ mod tests {
                 }
                 drop(view);
                 readback.unmap();
+                historical_tags
             };
+            let mut previous = None;
+            let mut historical_tags = 0;
             for (step, lo) in [
                 origin,
                 [-16, -32, -32],
@@ -932,55 +1244,98 @@ mod tests {
             .into_iter()
             .enumerate()
             {
+                let region = region_at(lo);
                 let ring: [u32; 3] =
                     std::array::from_fn(|a| (lo[a] - origin[a]).rem_euclid(i64::from(n)) as u32);
-                let mut words = vec![0u32; n.pow(3) as usize];
                 for z in 0..n {
                     for x in 0..n {
-                        for y in 0..n {
-                            let p: Point = std::array::from_fn(|a| lo[a] + i64::from([x, y, z][a]));
-                            let [rx, ry, rz] =
-                                [(x + ring[0]) % n, (y + ring[1]) % n, (z + ring[2]) % n];
-                            words[(ry + n * (rx + n * rz)) as usize] =
-                                if occupied(p) { 1 << 30 } else { 0 };
+                        let world_x = lo[0] + i64::from(x);
+                        let world_z = lo[2] + i64::from(z);
+                        if previous.is_some_and(|old: Region| {
+                            world_x >= old.lo[0]
+                                && world_x < old.hi[0]
+                                && world_z >= old.lo[2]
+                                && world_z < old.hi[2]
+                        }) {
+                            continue;
                         }
+                        // Only newly incoming columns are uploaded; retained
+                        // GPU root words survive in their physical ring slots.
+                        let row: Vec<u32> = (0..n)
+                            .map(|y| source_word([world_x, lo[1] + i64::from(y), world_z]))
+                            .collect();
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &roots,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d {
+                                    x: 0,
+                                    y: (x + ring[0]) % n,
+                                    z: (z + ring[2]) % n,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            bytemuck::cast_slice(&row),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(n * 4),
+                                rows_per_image: Some(1),
+                            },
+                            wgpu::Extent3d {
+                                width: n,
+                                height: 1,
+                                depth_or_array_layers: 1,
+                            },
+                        );
                     }
                 }
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &roots,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytemuck::cast_slice(&words),
-                    layout,
-                    extent,
-                );
                 queue.submit(std::iter::empty());
                 if step > 0 {
-                    cache.retarget(region_at(lo));
+                    cache.retarget(region);
                     let (ready, total) = cache.progress();
                     assert!(ready > 0 && ready < total);
-                    verify(&cache);
+                    historical_tags = historical_tags.max(verify(&cache, ring));
                 }
                 while cache.progress().0 < cache.progress().1 {
                     cache.advance(&device, &queue, n, ring, camera);
                     device.poll(wgpu::Maintain::Wait);
                 }
-                verify(&cache);
+                historical_tags = historical_tags.max(verify(&cache, ring));
+                // Queue one more old-region improvement without waiting.
+                // The next incoming strip publication must supersede writes
+                // to reused physical roots, while retained proofs stay valid.
+                cache.plan.ready &= !(1 << cache.plan.order[0]);
+                cache.advance(&device, &queue, n, ring, camera);
+                previous = Some(region);
+            }
+            device.poll(wgpu::Maintain::Wait);
+            if direct {
+                assert!(cache.counters.direct_publications > 8);
+                assert!(
+                    historical_tags > 0,
+                    "provenance must survive beyond the current cache plan"
+                );
             }
         });
     }
 
     #[test]
     fn compute_shader_validates() {
-        let shader = naga::front::wgsl::parse_str(include_str!("root_distance.wgsl")).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&shader)
-        .unwrap();
+        for source in [
+            include_str!("root_distance.wgsl"),
+            include_str!("root_publish.wgsl"),
+        ] {
+            let shader = naga::front::wgsl::parse_str(source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&shader)
+            .unwrap();
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "root_publish_test.rs"]
+mod direct_tests;

@@ -15,7 +15,7 @@ impl Gpu {
             self.queue.submit(std::iter::empty());
             self.device.poll(wgpu::Maintain::Poll);
             let n = self.naadf.as_ref().unwrap();
-            if n.ready() {
+            if n.ready_for_capture() {
                 return Ok(());
             }
             if let Some(e) = &n.error {
@@ -28,6 +28,9 @@ impl Gpu {
         }
     }
     pub(super) fn update_naadf(&mut self, world: &World, camera: Camera) {
+        if let Some(stages) = &self.naadf_gpu_stages {
+            stages.poll(&self.device);
+        }
         if self.naadf.is_none()
             && self
                 .visual_settings

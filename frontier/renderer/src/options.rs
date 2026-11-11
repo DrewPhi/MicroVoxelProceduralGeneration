@@ -476,8 +476,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     Some("stop-resume") => frontier_runtime::routes::Route::StopResume,
                     Some("turn-return") => frontier_runtime::routes::Route::TurnReturn,
                     Some("walk-stop-resume") => frontier_runtime::routes::Route::WalkStopResume,
+                    Some("walk-circuit") => frontier_runtime::routes::Route::WalkCircuit,
                     Some("walk-turn-return") => frontier_runtime::routes::Route::WalkTurnReturn,
-                    _ => return Err("--route requires static|fly|stop-resume|turn-return|walk-stop-resume|walk-turn-return".into()),
+                    _ => return Err("--route requires static|fly|stop-resume|turn-return|walk-stop-resume|walk-turn-return|walk-circuit".into()),
                 }
             }
             "--seconds" => {

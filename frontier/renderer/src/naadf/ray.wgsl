@@ -38,6 +38,16 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     if traversal_beam {
         let steps=textureLoad(beam_prefix,vec2<i32>(vec2<u32>(point)/8u),0).x;
         prefix=max(minimum,f32(steps)/cosine);
+        if traversal_metrics {
+            let interval=voxel_interval(o,d);
+            let ordinary=max(minimum,max(0.,interval.x));
+            trace_metric(2u,10u,1u);
+            if prefix>ordinary && ordinary<interval.y {
+                trace_metric(2u,9u,1u);
+                if prefix>=interval.y {trace_metric(2u,11u,1u);}
+                trace_distance(2u,17u,max(0.,min(prefix,interval.y)-ordinary));
+            }
+        }
     }
     let h=trace_prefixed(o,d,minimum,prefix,false,traversal_diagnostic);
     if traversal_diagnostic {

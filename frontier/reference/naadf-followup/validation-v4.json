@@ -1,0 +1,112 @@
+{
+  "binary_sha256": "6e1a1cd7813378267fa7b64a3cf78774ab4ec5ba6333ed1dda9181fce6cb0651",
+  "renderer_tests": {
+    "passed": 460,
+    "ignored": 28
+  },
+  "runtime_tests": {
+    "passed": 35,
+    "ignored": 0
+  },
+  "python_tests": 6,
+  "shader_source_equality": {
+    "trace.wgsl": {
+      "sha256": "d38d48908ddc423303af3729c2a81ff03236bdf7454d5aabb3348403a5fcd453",
+      "exact_span_in_frozen_v3": true
+    },
+    "ray.wgsl": {
+      "sha256": "d61579a1925c316401228fc8a29ada79ec9a14700cf2d79346e48d6f1230dc89",
+      "exact_span_in_frozen_v3": true
+    },
+    "beam.wgsl": {
+      "sha256": "0ad9d1fe28569f9efc3656d9da335a6ad3607cc72c66c426fde454114e6bd105",
+      "exact_span_in_frozen_v3": true
+    },
+    "height_bounds.wgsl": {
+      "sha256": "de7a3d762c28be079e248f602f6316109c95ea7c3b2901f73336b20731dcdff8",
+      "exact_span_in_frozen_v3": true
+    },
+    "height_reduce.wgsl": {
+      "sha256": "b51e39ca602e16bbe2a66d29059fcd76b395e110b97e4a5482d7770d49820611",
+      "exact_span_in_frozen_v3": true
+    },
+    "scatter.wgsl": {
+      "sha256": "4839c6b3eecc20aea96853d1d196f1fb605be11379f555bbc2eb3cbd242775d8",
+      "exact_span_in_frozen_v3": true
+    },
+    "root_distance.wgsl": {
+      "sha256": "81de831464c6e60d2cc66e8fe6686e11fd7b469c53614021b5f633b21dc1a76f",
+      "exact_span_in_frozen_v3": true
+    },
+    "root_publish.wgsl": {
+      "sha256": "df9de3abbcc25f693333a1049c3489f2a894d59861ab35152bbed1ceae73b8f9",
+      "exact_span_in_frozen_v3": true
+    }
+  },
+  "timestamp_feature_gate": "TIMESTAMP_QUERY only; dispatch counter8 unchanged; all6real compute families sampled; canonical163840 decisions plus covered material/depth/shadow checks",
+  "new_gpu_hooks_oracle_decisions": 163840,
+  "core_shader_validation": "v3 native11case fixture +144batches (4,718,592 coverage decisions) carried with all8coreWGSLfiles unchanged",
+  "default_off_captures": {
+    "control": {
+      "linear_rgb": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      },
+      "depth": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      }
+    },
+    "direct": {
+      "linear_rgb": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      },
+      "depth": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      }
+    },
+    "local-direct": {
+      "linear_rgb": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      },
+      "depth": {
+        "equal": true,
+        "different_values": 0,
+        "max_absolute_error": 0.0,
+        "rmse": 0.0
+      }
+    }
+  },
+  "enabled_capture_flush": {
+    "passed": true,
+    "pending": 0,
+    "encoded_not_submitted": 0,
+    "stage_samples": {
+      "height_base": 1,
+      "height_reduce_chain": 1,
+      "beam_prepass": 1,
+      "root_cache_compute_batch": 1,
+      "feedback_dispatch": 0,
+      "scatter_dispatch": 0
+    }
+  },
+  "legacy_primary_visual": {
+    "png": true,
+    "linear_rgb.f32": true,
+    "depth.f32": true
+  },
+  "scope": "CPU renderer/runtime tests include intentionally ignored hardware fixtures; explicitly executed hardware gates are listed separately. All reports preserve source hashes and original v1/v2 failures."
+}

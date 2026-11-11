@@ -1,0 +1,193 @@
+{
+  "scope": "Correctness smoke fixtures only; not representative performance measurements",
+  "binary_sha256": "6e1a1cd7813378267fa7b64a3cf78774ab4ec5ba6333ed1dda9181fce6cb0651",
+  "hardware": "AMD Radeon760M Vulkan RADV Mesa25.2.8",
+  "flag_environment": {
+    "FRONTIER_NAADF_GPU_STAGES": "1",
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
+    "FRONTIER_NAADF_DISTANCE_SCHEDULE": "feedback"
+  },
+  "timestamp_only_device_features": [
+    "TIMESTAMP_QUERY"
+  ],
+  "original_counter_dispatches": 8,
+  "actual_canonical_coverage_decisions": 163840,
+  "timestamp_only_counter": {
+    "requested": true,
+    "supported": true,
+    "enabled": true,
+    "pool_capacity": 24,
+    "pending": 0,
+    "encoded_not_submitted": 0,
+    "query_count": 48,
+    "gpu_buffer_bytes": 6528,
+    "cpu_sample_capacity_bytes": 480000,
+    "query_backend_storage_bytes_not_exposed": true,
+    "sample_policy": "bounded rolling 10000 per stage; includes startup and warmup; unpaired with frame statistics",
+    "scope": "compute pass timestamps only; uploads, GPU copies, CPU work and query resolve/readback excluded",
+    "primary_shadow_split": "no per-ray timestamps; use matched full/primary/voxel-shadows/mesh-shadows ablations for marginal costs, which include changed branch divergence and are not independent additive timings",
+    "stages": {
+      "height_base": {
+        "scope": "actual occupied-height base compute pass; excludes settings queue upload",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.0014427412261962891,
+        "p95_ms": 0.0014427412261962891,
+        "p99_ms": 0.0014427412261962891
+      },
+      "height_reduce_chain": {
+        "scope": "first reduction pass begin through last reduction pass end",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.02232241286087036,
+        "p95_ms": 0.02232241286087036,
+        "p99_ms": 0.02232241286087036
+      },
+      "beam_prepass": {
+        "scope": "actual beam compute pass; excludes CPU target allocation and queue uploads",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.0013225127906799315,
+        "p95_ms": 0.0013225127906799315,
+        "p99_ms": 0.0013225127906799315
+      },
+      "root_cache_compute_batch": {
+        "scope": "seed/Jacobi through final cache/direct publication compute pass; one tile batch",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.0013225127906799315,
+        "p95_ms": 0.0013225127906799315,
+        "p99_ms": 0.0013225127906799315
+      },
+      "feedback_dispatch": {
+        "scope": "sampled feedback compute pass; excludes clear, GPU readback copy and mapping",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.0013625889358520509,
+        "p95_ms": 0.0013625889358520509,
+        "p99_ms": 0.0013625889358520509
+      },
+      "scatter_dispatch": {
+        "scope": "actual scatter compute pass; excludes host upload and queue staging copy",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.0013225127906799315,
+        "p95_ms": 0.0013225127906799315,
+        "p99_ms": 0.0013225127906799315
+      }
+    }
+  },
+  "actual_hooks": {
+    "requested": true,
+    "supported": true,
+    "enabled": true,
+    "pool_capacity": 24,
+    "pending": 0,
+    "encoded_not_submitted": 0,
+    "query_count": 48,
+    "gpu_buffer_bytes": 6528,
+    "cpu_sample_capacity_bytes": 480000,
+    "query_backend_storage_bytes_not_exposed": true,
+    "sample_policy": "bounded rolling 10000 per stage; includes startup and warmup; unpaired with frame statistics",
+    "scope": "compute pass timestamps only; uploads, GPU copies, CPU work and query resolve/readback excluded",
+    "primary_shadow_split": "no per-ray timestamps; use matched full/primary/voxel-shadows/mesh-shadows ablations for marginal costs, which include changed branch divergence and are not independent additive timings",
+    "stages": {
+      "height_base": {
+        "scope": "actual occupied-height base compute pass; excludes settings queue upload",
+        "attempted": 2,
+        "samples": 2,
+        "recorded_total": 2,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.006732792388916015,
+        "p95_ms": 0.006853020824432373,
+        "p99_ms": 0.006853020824432373
+      },
+      "height_reduce_chain": {
+        "scope": "first reduction pass begin through last reduction pass end",
+        "attempted": 2,
+        "samples": 2,
+        "recorded_total": 2,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.01346558477783203,
+        "p95_ms": 0.015108706729888916,
+        "p99_ms": 0.015108706729888916
+      },
+      "beam_prepass": {
+        "scope": "actual beam compute pass; excludes CPU target allocation and queue uploads",
+        "attempted": 40,
+        "samples": 40,
+        "recorded_total": 40,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.008015229034423829,
+        "p95_ms": 0.01066025461578369,
+        "p99_ms": 0.011101092212677003
+      },
+      "root_cache_compute_batch": {
+        "scope": "seed/Jacobi through final cache/direct publication compute pass; one tile batch",
+        "attempted": 2,
+        "samples": 2,
+        "recorded_total": 2,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.27123535052490233,
+        "p95_ms": 0.36609558614730836,
+        "p99_ms": 0.36609558614730836
+      },
+      "feedback_dispatch": {
+        "scope": "sampled feedback compute pass; excludes clear, GPU readback copy and mapping",
+        "attempted": 2,
+        "samples": 2,
+        "recorded_total": 2,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.017633503875732422,
+        "p95_ms": 0.022763250457763673,
+        "p99_ms": 0.022763250457763673
+      },
+      "scatter_dispatch": {
+        "scope": "actual scatter compute pass; excludes host upload and queue staging copy",
+        "attempted": 1,
+        "samples": 1,
+        "recorded_total": 1,
+        "dropped_pool_full": 0,
+        "invalid_or_map_failed": 0,
+        "canceled_before_submit": 0,
+        "p50_ms": 0.018996092811584472,
+        "p95_ms": 0.018996092811584472,
+        "p99_ms": 0.018996092811584472
+      }
+    }
+  }
+}

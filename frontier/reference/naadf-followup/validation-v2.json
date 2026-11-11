@@ -1,0 +1,49 @@
+{
+  "binary": "/tmp/frontier-naadf-followup-v2",
+  "sha256": "8665497fcc5ee1b532d8c58e9333e8352ce3c0ec616c60ca01727953e63adfd8",
+  "adapter": "AMD Radeon760M / RADV Mesa25.2.8",
+  "traversal_oracle": {
+    "passed": true,
+    "configurations": 11,
+    "batches": 66,
+    "coverage_decisions": 2162688,
+    "checks": [
+      "canonical material",
+      "hit depth",
+      "primary coverage",
+      "shadow visibility",
+      "dense and sparse roots",
+      "cold and warm acceleration",
+      "staged and published wrapped windows",
+      "one selected mip fetch per query"
+    ],
+    "seconds": 28.06,
+    "command": "XDG_RUNTIME_DIR=/run/user/1000 target/release/deps/frontier_renderer-599235f544320d82 naadf_traversal_variants_match_canonical_rays --ignored --nocapture",
+    "log": "output/naadf-followup/v2/traversal-gpu-corrected.log",
+    "test_only_correction": "Initial v2 run stopped at an assertion requiring beam counters in an instrumented probe case with beam disabled. Assertion now conditions on options.beam. Production shader/launcher did not change; all66batches were rerun."
+  },
+  "exact_corner": {
+    "passed": true,
+    "log": "output/naadf-followup/v2/traversal-gpu.log"
+  },
+  "diagnostic_pipeline_smoke": {
+    "passed": true,
+    "metadata": "output/naadf-followup/v2/diagnostic-smoke/frame.capture.json",
+    "global_flags": [
+      "DIAGNOSTICS=1",
+      "HEIGHT_MIPS=1",
+      "HEIGHT_GATE=1",
+      "HEIGHT_PROBE_LEVEL=2",
+      "BEAM=1"
+    ],
+    "scope": "Actual primary,adaptive/vegetation shadow and beam pipelines plus blocking counter readback;64x64,radius4m"
+  },
+  "selected_probe_128m": {
+    "passed": true,
+    "level": 2,
+    "linear_rgb_equal": true,
+    "depth_equal": true,
+    "one_fetch_per_query": true,
+    "artifact": "reference/naadf-followup/counters-probe-level2.json"
+  }
+}

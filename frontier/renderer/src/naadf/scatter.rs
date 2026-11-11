@@ -105,6 +105,7 @@ pub(super) struct Scatter {
     bind: wgpu::BindGroup,
     words: RefCell<Vec<u32>>,
     pub limits: Limits,
+    pub stages: Option<std::sync::Arc<super::gpu_stages::Profiler>>,
 }
 impl Scatter {
     pub fn new(device: &wgpu::Device, arenas: [&wgpu::Buffer; 3], allowance: usize) -> Self {
@@ -155,6 +156,7 @@ impl Scatter {
             .collect::<Vec<_>>(),
         });
         Self {
+            stages: None,
             pipeline,
             staging,
             bind,
@@ -183,15 +185,28 @@ impl Scatter {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("NAADF scatter upload submission"),
         });
+        let timing = self
+            .stages
+            .as_ref()
+            .and_then(|p| p.begin(super::gpu_stages::Stage::Scatter));
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NAADF scatter upload"),
+                timestamp_writes: timing.as_ref().map(|t| t.writes(true, true)),
+            });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
             pass.dispatch_workgroups(packet.descriptors() as u32, 1, 1);
         }
         // Submit each packet before reusing its staging buffer. This places
         // the SSBO upload before scatter, and scatter before root publication.
+        if let Some(t) = &timing {
+            t.resolve(&mut encoder);
+        }
         queue.submit([encoder.finish()]);
+        if let Some(t) = timing {
+            t.submitted();
+        }
         pack_ms
     }
 }

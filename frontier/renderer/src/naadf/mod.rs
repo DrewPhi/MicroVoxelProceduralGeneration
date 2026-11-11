@@ -1,9 +1,15 @@
 //! Optional exact NAADF window. Leading strips are generated and uploaded
 //! asynchronously; the existing renderer covers the exterior and handoff.
 mod data;
+mod diagnostics;
+pub(crate) mod gpu_stages;
 mod leaf;
+#[cfg(test)]
+mod local_exit_test;
 pub(crate) mod ownership;
+mod prepare_profile;
 mod root_distance;
+mod scatter;
 mod sparse_roots;
 mod stream;
 #[cfg(test)]
@@ -12,7 +18,6 @@ mod traversal;
 #[cfg(test)]
 mod traversal_boundary_test;
 mod upload;
-mod scatter;
 use super::{Camera, Gpu};
 use bytemuck::{Pod, Zeroable};
 use data::Snapshot;
@@ -203,6 +208,7 @@ struct Volume {
     ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
     height: Option<traversal::Height>,
+    diagnostics: diagnostics::Diagnostics,
     beam: traversal::Beam,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -227,6 +233,7 @@ struct Volume {
     revision: u64,
     stats: [usize; 5],
     build_ms: f64,
+    cpu_profile: Option<prepare_profile::Metrics>,
 }
 impl Volume {
     fn traversal_flags(&self) -> u32 {
@@ -250,6 +257,7 @@ impl Volume {
                 self.n,
                 self.sparse_roots,
                 self.ring,
+                gpu.naadf_gpu_stages.as_ref(),
             );
         }
         if primary {
@@ -258,7 +266,9 @@ impl Volume {
                 encoder,
                 &self.uniform,
                 &self.resources.height,
+                &self.diagnostics.buffer,
                 viewport,
+                gpu.naadf_gpu_stages.as_ref(),
             );
         }
     }
@@ -353,7 +363,8 @@ impl Pending {
         }
         // Snapshot CPU data is still live at this point. Check the actual
         // arena capacities, including follow-mode slack, before allocating.
-        let upload_bytes = root_bytes + capacities.iter().sum::<usize>()
+        let upload_bytes = root_bytes
+            + capacities.iter().sum::<usize>()
             + upload::scatter_allowance().unwrap_or(0);
         if let Some(headroom) = headroom {
             if upload_bytes > headroom {
@@ -375,7 +386,13 @@ impl Pending {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Uint,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | if snapshot.gpu_distance && root_distance::direct_publication() {
+                    wgpu::TextureUsages::STORAGE_BINDING
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             view_formats: &[],
         });
         let buffer = |bytes: usize, label: &'static str| {
@@ -402,8 +419,9 @@ impl Pending {
             && headroom.is_none_or(|bytes| upload_bytes + root_distance::bytes(n) <= bytes);
         let (root_distance, distance_view) = if build_distance {
             let [lo, hi] = snapshot.bounds().map(|p| p.map(|v| v as i64));
-            let (cache, view) =
+            let (mut cache, view) =
                 root_distance::Cache::new(&gpu.device, n, stream::Region { lo, hi }, &view);
+            cache.stages = gpu.naadf_gpu_stages.clone();
             (Some(cache), view)
         } else {
             (None, root_distance::empty(&gpu.device))
@@ -416,11 +434,13 @@ impl Pending {
         };
         let beam = traversal::Beam::new(&gpu.device, options);
         let pipeline = make_pipeline(gpu, &layout, beam.layout(), options);
+        let diagnostics = diagnostics::Diagnostics::new(&gpu.device, options.diagnostics);
         let resources = Bindings {
             uniform: uniform.clone(),
             chunks: view,
             distance: distance_view,
             height: height_view,
+            diagnostics: diagnostics.buffer.clone(),
             blocks: blocks.clone(),
             voxels: voxels.clone(),
             palette: palette.clone(),
@@ -431,13 +451,17 @@ impl Pending {
             entries: &resources.entries(0),
         });
         let scatter = upload::scatter_allowance().map(|allowance| {
-            scatter::Scatter::new(&gpu.device, [&blocks, &voxels, &palette], allowance)
+            let mut scatter =
+                scatter::Scatter::new(&gpu.device, [&blocks, &voxels, &palette], allowance);
+            scatter.stages = gpu.naadf_gpu_stages.clone();
+            scatter
         });
         let volume = Volume {
             resources,
             ownership: snapshot.ownership.clone(),
             pipeline,
             height,
+            diagnostics,
             beam,
             bind,
             uniform,
@@ -468,6 +492,7 @@ impl Pending {
                 snapshot.palette.len(),
             ],
             build_ms: snapshot.build_ms,
+            cpu_profile: snapshot.cpu_profile.clone(),
         };
         Ok(Self {
             volume,
@@ -626,6 +651,7 @@ pub struct Experiment {
     strip_shared_leaves: usize,
     shift_timing: ShiftTiming,
     shift_samples: std::collections::VecDeque<[f64; 4]>,
+    prepare_samples: std::collections::VecDeque<(f64, prepare_profile::Metrics)>,
     last_eye: Option<(Instant, DVec3)>,
     eye_velocity: DVec3,
     camera_margin_m: f64,
@@ -659,6 +685,7 @@ impl Default for Experiment {
             strip_shared_leaves: 0,
             shift_timing: ShiftTiming::default(),
             shift_samples: Default::default(),
+            prepare_samples: Default::default(),
             last_eye: None,
             eye_velocity: DVec3::ZERO,
             camera_margin_m: 0.,
@@ -946,6 +973,13 @@ impl Experiment {
                 self.strip_ms = c.build_ms;
                 self.strip_columns = c.generated_columns;
                 self.strip_shared_leaves = c.shared_leaves;
+                if let Some(profile) = &c.cpu_profile {
+                    if self.prepare_samples.len() == 64 {
+                        self.prepare_samples.pop_front();
+                    }
+                    self.prepare_samples
+                        .push_back((c.build_ms, profile.clone()));
+                }
                 self.worker.send(Job::Finish(c, true));
                 self.shifting = false;
                 self.status = "Ready · following player".into();
@@ -1008,6 +1042,19 @@ impl Experiment {
 
     pub fn ready(&self) -> bool {
         self.active.is_some() && self.published_epoch == self.epoch && self.error.is_none()
+    }
+    /// Opt-in headless capture gate; normal interactive readiness is unchanged.
+    pub(crate) fn ready_for_capture(&self) -> bool {
+        self.ready()
+            && (!root_distance::settle_capture()
+                || self
+                    .active
+                    .as_ref()
+                    .and_then(|v| v.root_distance.as_ref())
+                    .is_none_or(|cache| {
+                        let (ready, total) = cache.progress();
+                        ready == total
+                    }))
     }
     pub fn bounds_for(&self, camera: Camera) -> Option<[[f64; 3]; 2]> {
         let a = self.active.as_ref()?;
@@ -1151,10 +1198,18 @@ impl Experiment {
                 + a.scatter.as_ref().map_or(0, scatter::Scatter::gpu_bytes)
                 + a.height.as_ref().map_or(0, traversal::Height::bytes)
                 + a.beam.bytes()
+                + a.diagnostics.bytes()
         };
         self.active.as_ref().map_or(0, allocated)
             + self.pending.as_ref().map_or(0, |p| allocated(&p.volume))
     }
+    pub(crate) fn traversal_diagnostics(&self, gpu: &Gpu) -> Result<Option<String>, String> {
+        match &self.active {
+            Some(a) => a.diagnostics.read(&gpu.device, &gpu.queue),
+            None => Ok(None),
+        }
+    }
+
     pub fn json(&self) -> String {
         let a = self.active.as_ref();
         let bounds = a.map(|a| a.bounds);
@@ -1173,12 +1228,45 @@ impl Experiment {
         json.pop();
         use std::fmt::Write;
         let options = traversal::options();
+        write!(
+            json,
+            r#","cpu_profile_enabled":{},"stack_block_bounds":{},"column_extrema":{}"#,
+            prepare_profile::enabled(),
+            prepare_profile::stack_blocks(),
+            prepare_profile::column_extrema()
+        )
+        .unwrap();
+        if prepare_profile::enabled() {
+            let initial = a
+                .and_then(|v| v.cpu_profile.as_ref())
+                .map_or("null".into(), prepare_profile::Metrics::json);
+            let samples: Vec<_> = self
+                .prepare_samples
+                .iter()
+                .map(|(wall, profile)| {
+                    format!(
+                        r#"{{"prepare_wall_ms":{wall},"profile":{}}}"#,
+                        profile.json()
+                    )
+                })
+                .collect();
+            write!(
+                json,
+                r#","initial_cpu_prepare_profile":{},"stream_cpu_prepare_samples":[{}]"#,
+                initial,
+                samples.join(",")
+            )
+            .unwrap();
+        }
         write!(json,
-            ",\"node_cache\":{},\"node_cache_mode\":{},\"height_tile_roots\":{},\"height_mips\":{},\"height_gate\":{},\"height_levels\":{},\"height_bounds_bytes\":{},\"beam_prefix\":{},\"beam_prefix_bytes\":{}",
+            ",\"traversal_instrumented\":{},\"local_exit_repair\":{},\"node_cache\":{},\"node_cache_mode\":{},\"height_tile_roots\":{},\"height_mips\":{},\"height_probe_level\":{},\"height_gate\":{},\"height_levels\":{},\"height_bounds_bytes\":{},\"beam_prefix\":{},\"beam_prefix_bytes\":{}",
+            options.diagnostics,
+            options.local_exit_repair,
             options.cache != 0,
             options.cache,
             if options.height_enabled() { options.tile() } else { 0 },
-            options.height_mips,
+            options.mips_enabled(),
+            options.height_probe.map_or("null".into(), |level| level.to_string()),
             options.height_gate,
             a.and_then(|a| a.height.as_ref()).map_or(0, traversal::Height::levels),
             a.and_then(|a| a.height.as_ref()).map_or(0, traversal::Height::bytes),
@@ -1200,6 +1288,13 @@ impl Experiment {
             distance_counters.feedback_prioritized,
             distance_counters.feedback_cpu_ns,
         ).unwrap();
+        write!(json,
+            ",\"gpu_root_distance_direct\":{},\"gpu_root_distance_repair\":{},\"gpu_root_distance_direct_publications\":{},\"gpu_root_distance_settle_capture\":{}",
+            a.and_then(|v| v.root_distance.as_ref()).is_some_and(root_distance::Cache::is_direct),
+            a.and_then(|v| v.root_distance.as_ref()).is_some_and(root_distance::Cache::repairs_roots),
+            distance_counters.direct_publications,
+            root_distance::settle_capture(),
+        ).unwrap();
         let fixed_override = self
             .request
             .filter(|r| !r.follow)
@@ -1211,10 +1306,15 @@ impl Experiment {
         )
         .unwrap();
         write!(json, r#","stream_upload":{}"#, self.stream_upload.json()).unwrap();
-        write!(json, r#","scatter_gpu_staging_bytes":{},"scatter_cpu_pack_bytes":{}"#,
-            a.and_then(|v| v.scatter.as_ref()).map_or(0, scatter::Scatter::gpu_bytes),
-            a.and_then(|v| v.scatter.as_ref()).map_or(0, scatter::Scatter::cpu_bytes),
-        ).unwrap();
+        write!(
+            json,
+            r#","scatter_gpu_staging_bytes":{},"scatter_cpu_pack_bytes":{}"#,
+            a.and_then(|v| v.scatter.as_ref())
+                .map_or(0, scatter::Scatter::gpu_bytes),
+            a.and_then(|v| v.scatter.as_ref())
+                .map_or(0, scatter::Scatter::cpu_bytes),
+        )
+        .unwrap();
         write!(
             json,
             ",\"stream_lead_s\":{},\"stream_stage_ms\":{:?}}}",
@@ -1232,12 +1332,13 @@ pub(crate) struct Bindings {
     pub chunks: wgpu::TextureView,
     pub distance: wgpu::TextureView,
     pub height: wgpu::TextureView,
+    pub diagnostics: wgpu::Buffer,
     pub blocks: wgpu::Buffer,
     pub voxels: wgpu::Buffer,
     pub palette: wgpu::Buffer,
 }
 pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..7)
+    (0..8)
         .map(|i| wgpu::BindGroupLayoutEntry {
             binding: first + i,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1256,6 +1357,11 @@ pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
                     sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
+                },
+                7 => wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
                 _ => wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1304,6 +1410,10 @@ impl Bindings {
                 binding: first + 6,
                 resource: wgpu::BindingResource::TextureView(&self.height),
             },
+            wgpu::BindGroupEntry {
+                binding: first + 7,
+                resource: self.diagnostics.as_entire_binding(),
+            },
         ]
     }
     pub fn empty(device: &wgpu::Device) -> Self {
@@ -1336,6 +1446,7 @@ impl Bindings {
             chunks: texture.create_view(&Default::default()),
             distance: root_distance::empty(device),
             height: traversal::empty_height(device),
+            diagnostics: diagnostics::Diagnostics::new(device, false).buffer,
             blocks: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),

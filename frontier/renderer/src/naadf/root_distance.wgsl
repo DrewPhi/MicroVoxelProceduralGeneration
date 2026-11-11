@@ -1,5 +1,7 @@
 // A scratch tile uses logical coordinates. Wrap only when loading exact roots;
-// expansion never crosses the tile or logical window edge.
+// new expansion only reads neighbors inside the tile. Repair mode may start
+// from larger, independently proven CPU/GPU cuboids crossing a tile boundary;
+// each face update only grows that proof.
 struct Tile {
     root:vec4<u32>, ring:vec4<u32>, base:vec4<u32>,
     schedule:vec4<u32>, eye:vec4<f32>, forward:vec4<f32>,
@@ -11,6 +13,7 @@ struct Tile {
 @group(0) @binding(3) var cache:texture_storage_3d<r32uint,write>;
 @group(0) @binding(4) var<uniform> tile:Tile;
 @group(0) @binding(5) var<storage,read_write> demand:array<atomic<u32>,64>;
+@group(0) @binding(6) var<storage,read_write> original:array<u32>;
 const SIDE:u32=32u;
 const OCCUPIED:u32=0xc0000000u;
 fn index(p:vec3<u32>)->u32 {return p.x+SIDE*(p.y+SIDE*p.z);}
@@ -21,7 +24,13 @@ fn seed(@builtin(global_invocation_id) p:vec3<u32>) {
     var word=OCCUPIED;
     if all(logical>=vec3(0)) && all(logical<vec3<i32>(i32(tile.root.x))) {
         let slot=(vec3<u32>(logical)+tile.ring.xyz)%vec3(tile.root.x);
-        word=textureLoad(exact,vec3<i32>(slot.yxz),0).x&OCCUPIED;
+        let raw=textureLoad(exact,vec3<i32>(slot.yxz),0).x;
+        var exact_word=raw;
+        if (tile.ring.w&2u)!=0u {
+            original[index(p)]=raw;
+            if (raw&OCCUPIED)==OCCUPIED {exact_word=raw&~OCCUPIED;}
+        }
+        word=select(exact_word&OCCUPIED,exact_word,(tile.ring.w&1u)!=0u);
     }
     output[index(p)]=word;
 }
@@ -103,7 +112,8 @@ fn sample_feedback(@builtin(global_invocation_id) sample:vec3<u32>) {
     for(var i=0u; i<3u*n; i++) {
         if any(cp<vec3(0)) || any(cp>=vec3(i32(n))) { break; }
         let root=(vec3<u32>(cp)+tile.ring.xyz)%vec3(n);
-        let word=textureLoad(exact,vec3<i32>(root.yxz),0).x;
+        var word=textureLoad(exact,vec3<i32>(root.yxz),0).x;
+        if (tile.ring.w&2u)!=0u && (word&OCCUPIED)==OCCUPIED {word&=~OCCUPIED;}
         if (word&OCCUPIED)!=0u { break; }
         let p=cp-first;
         var id=64u;

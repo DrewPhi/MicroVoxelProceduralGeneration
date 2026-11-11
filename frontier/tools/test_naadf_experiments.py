@@ -1,4 +1,6 @@
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -7,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from naadf_experiments import compare, environment
+from naadf_experiments import compare, environment, main
 
 
 class ExperimentTests(unittest.TestCase):
@@ -22,6 +24,19 @@ class ExperimentTests(unittest.TestCase):
     def test_rejects_non_experiment_configuration(self):
         with self.assertRaises(ValueError):
             environment({'HOME': '/tmp'})
+
+    def test_timing_rejects_stage_profiling_before_launch_or_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'config.json'
+            output = Path(directory) / 'must-not-be-created'
+            config.write_text(json.dumps({'candidate': {'FRONTIER_NAADF_GPU_STAGES': '1'}}))
+            with patch('sys.argv', ['naadf_experiments', '--config', str(config),
+                                    '--output', str(output)]):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertFalse(output.exists())
 
     def test_comparison_rejects_camera_mismatch_and_detects_depth_change(self):
         with tempfile.TemporaryDirectory() as directory:
