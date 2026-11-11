@@ -354,3 +354,6 @@ documented in [frontier/DISTANT_VEGETATION.md](frontier/DISTANT_VEGETATION.md).
 
 The independent all-vegetation offline image target and reproduction command are
 in [frontier/VEGETATION_REFERENCE.md](frontier/VEGETATION_REFERENCE.md).
+
+A grounded mountain overlook with native vegetation and a matched128m NAADF
+comparison is recorded in [frontier/MOUNTAIN_OVERLOOK_REFERENCE.md](frontier/MOUNTAIN_OVERLOOK_REFERENCE.md).

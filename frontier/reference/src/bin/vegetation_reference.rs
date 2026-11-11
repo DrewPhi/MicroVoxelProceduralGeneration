@@ -28,6 +28,57 @@ fn png(path: PathBuf, w: usize, h: usize, data: &[u8]) -> Result<()> {
     e.write_header()?.write_image_data(data)?;
     Ok(())
 }
+struct PlantView {
+    camera: Camera,
+    forward: [f64; 3],
+    right: [f64; 3],
+    up: [f64; 3],
+    tan_x: f64,
+    tan_y: f64,
+    shadow_margin: f64,
+}
+impl PlantView {
+    fn new(camera: &Camera, width: usize, height: usize, shadow_margin: f64) -> Self {
+        let (forward, right, up) = camera.basis();
+        let tan_y = (camera.fov_y_degrees.to_radians() * 0.5).tan();
+        Self {
+            camera: camera.clone(),
+            forward,
+            right,
+            up,
+            tan_x: tan_y * width as f64 / height as f64,
+            tan_y,
+            shadow_margin,
+        }
+    }
+    fn contains(&self, p: &frontier_world::vegetation::PlantRecord) -> bool {
+        use frontier_world::vegetation::{Species, MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS};
+        let r = if p.species == Species::Rowan {
+            MAX_PLANT_RADIUS_CELLS as f64 * VOXEL_SIZE
+        } else {
+            8. * VOXEL_SIZE
+        };
+        let h = MAX_PLANT_HEIGHT_CELLS as f64 * VOXEL_SIZE;
+        let center = [
+            p.root.x as f64 * VOXEL_SIZE,
+            p.root.y as f64 * VOXEL_SIZE + h * 0.5,
+            p.root.z as f64 * VOXEL_SIZE,
+        ];
+        // Include below-root sphere rasterization, cell extents, and every
+        // potential occluder within the finite32m shadow-ray neighbourhood.
+        let radius =
+            (2. * r * r + (h * 0.5 + r).powi(2)).sqrt() + 2. * VOXEL_SIZE + self.shadow_margin;
+        let delta: [f64; 3] = std::array::from_fn(|a| center[a] - self.camera.eye[a]);
+        let dot = |v: [f64; 3]| (0..3).map(|a| delta[a] * v[a]).sum::<f64>();
+        let z = dot(self.forward);
+        let x = dot(self.right).abs();
+        let y = dot(self.up).abs();
+        z + radius >= self.camera.near
+            && z - radius <= self.camera.far
+            && x - z * self.tan_x <= radius * (1. + self.tan_x * self.tan_x).sqrt()
+            && y - z * self.tan_y <= radius * (1. + self.tan_y * self.tan_y).sqrt()
+    }
+}
 struct Scene {
     terrain: Landscape,
     plants: Vegetation,
@@ -65,8 +116,12 @@ impl Scene {
         far: f64,
         vegetation: bool,
         shadows: bool,
+        legacy: bool,
     ) -> ([f64; 3], f64) {
         let Some((hit, color)) = self.ray(o, d, near, far, vegetation) else {
+            if legacy {
+                return (frontier_reference::SKY, 0.);
+            }
             let h = (d[1] * 0.5 + 0.5).clamp(0., 1.);
             return (
                 std::array::from_fn(|i| {
@@ -88,6 +143,17 @@ impl Scene {
             };
         let leaf = hit.material == 5;
         let sky = 0.5 + 0.5 * n[1];
+        if legacy {
+            return (
+                std::array::from_fn(|i| {
+                    color[i] as f64
+                        * ([0.12, 0.105, 0.085][i] * (1. - sky)
+                            + [0.28, 0.33, 0.40][i] * sky
+                            + [0.78, 0.70, 0.58][i] * cosine.max(0.))
+                }),
+                if hit.material >= 4 { 1. } else { 0. },
+            );
+        }
         let c = std::array::from_fn(|i| {
             color[i] as f64
                 * ([0.17, 0.18, 0.16][i] * (1. - sky)
@@ -114,9 +180,16 @@ fn main() -> Result<()> {
     let mut plants = true;
     let mut shadows = true;
     let mut scan = false;
+    let mut view_cull = false;
+    let mut legacy = false;
+    let mut terrain_cache: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--view-cull" => {
+                view_cull = true;
+                continue;
+            }
             "--scan" => {
                 scan = true;
                 continue;
@@ -130,7 +203,7 @@ fn main() -> Result<()> {
                 continue;
             }
             "--help" => {
-                println!("vegetation_reference --output DIR --width 960 --height 540 --spp 16 --threads 8 --extent 512 --center X,Z --eye X,Y,Z --target X,Y,Z --far 200 [--no-vegetation] [--no-shadows] [--scan]");
+                println!("vegetation_reference --output DIR --width 960 --height 540 --spp 16 --threads 8 --extent 512 --center X,Z --eye X,Y,Z --target X,Y,Z --far 200 [--no-vegetation] [--no-shadows] [--scan] [--view-cull] [--cache FILE] [--lighting reference|legacy]");
                 return Ok(());
             }
             _ => {}
@@ -138,6 +211,14 @@ fn main() -> Result<()> {
         let v = args.next().ok_or("missing option value")?;
         match a.as_str() {
             "--output" => out = v.into(),
+            "--cache" => terrain_cache = Some(v.into()),
+            "--lighting" => {
+                legacy = match v.as_str() {
+                    "legacy" => true,
+                    "reference" => false,
+                    _ => return Err("lighting requires legacy|reference".into()),
+                };
+            }
             "--width" => width = v.parse()?,
             "--height" => height = v.parse()?,
             "--spp" => spp = v.parse()?,
@@ -157,6 +238,14 @@ fn main() -> Result<()> {
             _ => return Err(format!("unknown argument {a}").into()),
         }
     }
+    if legacy {
+        shadows = false;
+    }
+    let lighting_name = if legacy {
+        "matched legacy hemisphere and directional light; no shadows or atmosphere"
+    } else {
+        "reference hemisphere ambient plus directional sun; not matched game beauty"
+    };
     let world = World::fbm(
         7,
         FbmParams {
@@ -166,12 +255,21 @@ fn main() -> Result<()> {
     )?
     .with_vegetation();
     if scan {
-        for z in (-400..=400).step_by(100) {
+        eprintln!(
+            "center height={}, standing eye_y={}",
+            world.height_m(center[0], center[1]),
+            world.height_m(center[0], center[1]) + 1.7
+        );
+        for dz in (-400..=400).step_by(100) {
+            let z = center[1] + dz as f64;
             println!(
                 "z={z}: {:?}",
                 (-400..=400)
                     .step_by(100)
-                    .map(|x| (x, (world.height_m(x as f64, z as f64) * 10.).round() / 10.))
+                    .map(|dx| {
+                        let x = center[0] + dx as f64;
+                        (x, (world.height_m(x, z) * 10.).round() / 10.)
+                    })
                     .collect::<Vec<_>>()
             );
         }
@@ -187,7 +285,7 @@ fn main() -> Result<()> {
         || width > 4096
         || height > 4096
         || !size.is_power_of_two()
-        || !(16..=8192).contains(&size)
+        || !(16..=32768).contains(&size)
         || !eye
             .into_iter()
             .chain(target)
@@ -197,7 +295,7 @@ fn main() -> Result<()> {
         || far <= 0.
     {
         return Err(
-            "invalid parameters; square spp, power-of-two native extent<=512m required".into(),
+            "invalid parameters; square spp, power-of-two native extent<=2048m required".into(),
         );
     }
     std::fs::create_dir_all(&out)?;
@@ -231,18 +329,26 @@ fn main() -> Result<()> {
     }
     let start = Instant::now();
     eprintln!("Building exact native terrain {size}x{size}...");
+    let cache = terrain_cache.unwrap_or_else(|| out.join("terrain.bin"));
     let terrain = Landscape::build(
         world.fbm_terrain().unwrap().clone(),
         min,
         size,
         threads,
-        Some(&out.join("terrain.bin")),
+        Some(&cache),
     )?;
     let terrain_seconds = start.elapsed().as_secs_f64();
     // Shadow rays extend32m; enumerate an additional32m source halo for plants.
     eprintln!("Building actual native grass, edelweiss and Rowan...");
     let vegetation = if plants {
-        Vegetation::build(&world, min.map(|v| v - 512), max.map(|v| v + 512), threads)
+        let view = PlantView::new(&camera, width, height, if shadows { 32. } else { 0. });
+        Vegetation::build_filtered(
+            &world,
+            min.map(|v| v - 512),
+            max.map(|v| v + 512),
+            threads,
+            |p| !view_cull || view.contains(p),
+        )
     } else {
         Vegetation::empty()
     };
@@ -280,7 +386,7 @@ fn main() -> Result<()> {
                                 width,
                                 height,
                             );
-                            let (c, coverage) = scene.sample(eye, d, n, f, plants, shadows);
+                            let (c, coverage) = scene.sample(eye, d, n, f, plants, shadows, legacy);
                             for a in 0..3 {
                                 pixel[a] += c[a] / spp as f64;
                             }
@@ -325,11 +431,73 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
         * 1024;
-    std::fs::write(out.join("manifest.json"),format!("{{\"schema\":\"native_vegetation_reference_v1\",\"seed\":7,\"terrain_recipe\":\"alpine\",\"native_voxel_m\":0.0625,\"width\":{width},\"height\":{height},\"spp\":{spp},\"sample_seed\":83,\"threads\":{threads},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":60,\"far\":{far},\"crop_min_cells\":{min:?},\"crop_max_cells\":{max:?},\"plant_counts_grass_flower_rowan\":{counts:?},\"plant_voxels\":{voxels},\"snapshot_payload_bytes\":{payload},\"peak_process_rss_bytes\":{peak},\"terrain_build_seconds\":{terrain_seconds},\"plant_build_seconds\":{plant_seconds},\"render_seconds\":{render_seconds},\"vegetation_primary\":{plants},\"shadows\":{shadows},\"shadow_distance_m\":32,\"lighting\":\"reference hemisphere ambient plus directional sun; not matched game beauty\",\"geometry\":\"actual native terrain columns and native plant cells; no display LOD\",\"scope\":\"bounded exact primary visibility;32m local hard shadows, terrain shadows clipped to crop; not full-world lighting or real-time FPS benchmark\"}}\n"))?;
+    std::fs::write(out.join("manifest.json"),format!("{{\"schema\":\"native_vegetation_reference_v1\",\"seed\":7,\"terrain_recipe\":\"alpine\",\"native_voxel_m\":0.0625,\"width\":{width},\"height\":{height},\"spp\":{spp},\"sample_seed\":83,\"threads\":{threads},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":60,\"far\":{far},\"crop_min_cells\":{min:?},\"crop_max_cells\":{max:?},\"view_cull\":{view_cull},\"plant_counts_grass_flower_rowan\":{counts:?},\"plant_voxels\":{voxels},\"snapshot_payload_bytes\":{payload},\"peak_process_rss_bytes\":{peak},\"terrain_build_seconds\":{terrain_seconds},\"plant_build_seconds\":{plant_seconds},\"render_seconds\":{render_seconds},\"vegetation_primary\":{plants},\"shadows\":{shadows},\"shadow_distance_m\":32,\"lighting\":\"{lighting_name}\",\"geometry\":\"actual native terrain columns and native plant cells; no display LOD\",\"scope\":\"bounded exact primary visibility; optional32m local hard shadows, terrain shadows clipped to crop; not full-world lighting or real-time FPS benchmark\"}}\n"))?;
     eprintln!(
         "Finished: build {build_seconds:.2}s, render {render_seconds:.2}s, peak RSS {:.1}MiB -> {}",
         peak as f64 / 1048576.,
         out.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn view_filter_keeps_all_sampled_visible_native_cells_and_shadow_occluders() {
+        use frontier_world::{
+            vegetation::{model_for, PlantRecord, Species},
+            Cell,
+        };
+        let camera = Camera {
+            eye: [0., 15., -30.],
+            target: [0., 0., 80.],
+            far: 450.,
+            ..Default::default()
+        };
+        let view = PlantView::new(&camera, 1920, 1080, 32.);
+        let (f, r, u) = camera.basis();
+        let visible = |p: [f64; 3]| {
+            let q: [f64; 3] = std::array::from_fn(|a| p[a] - camera.eye[a]);
+            let dot = |v: [f64; 3]| (0..3).map(|a| q[a] * v[a]).sum::<f64>();
+            let z = dot(f);
+            z >= camera.near
+                && z <= camera.far
+                && dot(r).abs() <= z * view.tan_x
+                && dot(u).abs() <= z * view.tan_y
+        };
+        let sun = normalized([-0.5, 0.8, -0.3]);
+        let mut checked = 0;
+        for species in [Species::Grass, Species::Edelweiss, Species::Rowan] {
+            let mut p = PlantRecord {
+                species,
+                seed: 941,
+                variant: 3,
+                root: Cell::default(),
+                rotation: 1,
+            };
+            let model = model_for(&p);
+            for x in [-4000, -1000, 0, 1000, 4000] {
+                for z in [-1000, 0, 1000, 4000, 8000] {
+                    p.root = Cell { x, y: 0, z };
+                    for voxel in model.voxels.iter().step_by(17) {
+                        let c = p.world_cell(voxel.cell);
+                        let point = [
+                            c.x as f64 * VOXEL_SIZE,
+                            c.y as f64 * VOXEL_SIZE,
+                            c.z as f64 * VOXEL_SIZE,
+                        ];
+                        for distance in [0., 16., 32.] {
+                            let receiver = std::array::from_fn(|a| point[a] - sun[a] * distance);
+                            if visible(receiver) {
+                                checked += 1;
+                                assert!(view.contains(&p));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100);
+    }
 }

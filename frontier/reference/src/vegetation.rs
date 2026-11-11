@@ -230,6 +230,17 @@ impl Vegetation {
         }
     }
     pub fn build(world: &World, min: [i64; 2], max: [i64; 2], threads: usize) -> Self {
+        Self::build_filtered(world, min, max, threads, |_| true)
+    }
+    /// Reject records before materializing native models. The caller must use
+    /// conservative bounds covering both primary and shadow-ray footprints.
+    pub fn build_filtered(
+        world: &World,
+        min: [i64; 2],
+        max: [i64; 2],
+        threads: usize,
+        keep: impl Fn(&PlantRecord) -> bool,
+    ) -> Self {
         let mut result = Self {
             plants: Vec::new(),
             nodes: Vec::new(),
@@ -244,11 +255,12 @@ impl Vegetation {
             } else {
                 8
             };
-            let records = world.vegetation_records_species(
+            let mut records = world.vegetation_records_species(
                 min.map(|v| v - radius),
                 max.map(|v| v + radius),
                 species,
             );
+            records.retain(&keep);
             let base = result.plants.len();
             let batch = records.len().div_ceil(threads.max(1).min(64)).max(1);
             let mut groups = std::thread::scope(|scope| {
