@@ -58,12 +58,27 @@ pub fn difference(a: Region, b: Region) -> Vec<Region> {
         .filter(|r| (0..3).all(|a| r.lo[a] < r.hi[a]))
         .collect()
 }
-pub fn target(region: Region, eye: [f64; 3]) -> Option<Region> {
+pub fn target(region: Region, eye: [f64; 3], velocity: [f64; 3], lead_s: f64) -> Option<Region> {
     let n = region.hi[0] - region.lo[0];
     let step = (n / 16).clamp(2, 32).min(n / 2);
     let delta: Point = std::array::from_fn(|a| {
         let offset = eye[a] - (region.lo[a] + n / 2) as f64;
-        if offset.abs() > step as f64 * 0.5 {
+        // Do not move early toward an opposite-side target or lead far enough
+        // to recenter from rest. Once published, the opposite threshold still
+        // requires actual motion toward that side.
+        let lead = if offset * velocity[a] > 0. {
+            (velocity[a].abs() * lead_s).min(step as f64 * 0.4)
+        } else {
+            0.
+        };
+        let retreating_from_lead =
+            lead_s > 0. && offset.abs() < step as f64 && offset * velocity[a] <= 0.;
+        let threshold = if retreating_from_lead {
+            step as f64
+        } else {
+            step as f64 * 0.5
+        };
+        if offset.abs() + lead > threshold {
             if offset > 0. {
                 step
             } else {
@@ -626,8 +641,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(target(a, [0.; 3]), None);
-        assert!(target(a, [-3., 0., 0.]).unwrap().lo[0] < a.lo[0]);
+        assert_eq!(target(a, [0.; 3], [0.; 3], 0.), None);
+        assert!(target(a, [-3., 0., 0.], [0.; 3], 0.).unwrap().lo[0] < a.lo[0]);
     }
     #[test]
     fn arena_reclaims_and_coalesces() {
@@ -746,4 +761,19 @@ mod tests {
         eprintln!("NAADF seed-7 Alpine radius {radius} m, four wrapped shifts: {shared}/{total} incoming leaves shared ({} bytes avoided, {}-bit leaves)",
             shared * encoding.words_per_brick() * 4, encoding.bits());
     }
+}
+
+#[test]
+fn leading_window_starts_earlier_only_in_the_direction_of_motion() {
+    let r = Region {
+        lo: [-128; 3],
+        hi: [128; 3],
+    };
+    assert!(target(r, [4., 0., 0.], [2.5, 0., 0.], 0.).is_none());
+    assert!(target(r, [4., 0., 0.], [-2.5, 0., 0.], 3.).is_none());
+    let next = target(r, [4., 0., 0.], [2.5, 0., 0.], 3.).unwrap();
+    assert_eq!(next.lo, [-112, -128, -128]);
+    // A predicted target is ahead of the eye. Do not immediately undo it.
+    assert!(target(next, [4., 0., 0.], [2.5, 0., 0.], 3.).is_none());
+    assert!(target(next, [4., 0., 0.], [0.; 3], 3.).is_none());
 }

@@ -848,10 +848,11 @@ impl Gpu {
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
+        let capture_layer = naadf::capture_layer();
         if let Some(t) = &plant_timings {
             t.naadf_start(&mut pass);
         }
-        if naadf_bounds.is_some() {
+        if naadf_bounds.is_some() && capture_layer != naadf::CaptureLayer::Raster {
             if let Some(n) = &self.naadf {
                 n.draw(
                     &mut pass,
@@ -864,6 +865,14 @@ impl Gpu {
         }
         if let Some(t) = &plant_timings {
             t.naadf_end(&mut pass);
+        }
+        if naadf_bounds.is_some()
+            && matches!(
+                capture_layer,
+                naadf::CaptureLayer::Steps | naadf::CaptureLayer::Voxels
+            )
+        {
+            return;
         }
         // Dense opaque vegetation occludes expensive terrain shading here.
         // Keep terrain-first as a diagnostic A/B; it was slower on the laptop.

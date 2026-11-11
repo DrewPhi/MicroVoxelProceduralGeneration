@@ -123,6 +123,25 @@ impl Sparse {
     }
 }
 
+fn page_bounds(
+    table: &mut Vec<u32>,
+    side: usize,
+    cancel: &impl Fn() -> bool,
+) -> Result<(), String> {
+    super::data::bounds(table, [side; 3], [side, 1, side * side], 5, cancel)
+}
+
+#[test]
+fn page_skips_cross_empty_pages_but_never_enter_a_mixed_page() {
+    let side = 8usize;
+    let shape = [side; 3];
+    let mut table = vec![0; side.pow(3)];
+    table[index([5, 0, 0], shape)] = CHILD;
+    page_bounds(&mut table, side, &|| false).unwrap();
+    assert_eq!((table[0] >> 5) & 31, 4);
+    assert_eq!(table[index([5, 0, 0], shape)], CHILD);
+}
+
 /// Pack the table and mixed pages into a texture with no dimension larger
 /// than the original. Preserve the dense texture if padding erases savings.
 pub(super) fn atlas(
@@ -133,7 +152,13 @@ pub(super) fn atlas(
     let n = n as usize;
     let Sparse {
         mut table, pages, ..
-    } = Sparse::build(dense, [n; 3], PAGE_SIDE, dense.len(), cancel)?;
+    } = Sparse::build(dense, [n; 3], PAGE_SIDE, dense.len(), &cancel)?;
+    // Page entries use the same conservative six-face encoding as roots.
+    // Mixed and uniform-solid entries stop expansion exactly like occupied roots.
+    if std::env::var_os("FRONTIER_NAADF_SPARSE_SHORT").as_deref() != Some(std::ffi::OsStr::new("1"))
+    {
+        page_bounds(&mut table, n.div_ceil(PAGE_SIDE), &cancel).ok()?;
+    }
     let len = table.len() + pages.len();
     let width = n.min(len);
     let height = n.min(len.div_ceil(width));
@@ -172,7 +197,10 @@ fn atlas_offsets_decode_original_chunks_and_fall_back_if_not_smaller() {
                         + (ptr & PAYLOAD) as usize
                         + index(cp.map(|v| v % PAGE_SIDE), [PAGE_SIDE; 3])]
                 };
-                assert_eq!(word, dense[index(cp, [n; 3])]);
+                assert_eq!(
+                    classification(word),
+                    classification(dense[index(cp, [n; 3])])
+                );
             }
         }
     }

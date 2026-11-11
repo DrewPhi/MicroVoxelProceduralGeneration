@@ -1,3 +1,4 @@
+override traversal_diagnostic:bool = false;
 @group(1) @binding(0) var far_depth:texture_depth_2d;
 @group(1) @binding(1) var far_sampler:sampler_comparison;
 @vertex fn vs_main(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32>{let p=vec2(f32((i<<1u)&2u),f32(i&2u));return vec4(p*2.-1.,0.,1.);}
@@ -30,7 +31,10 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     let o=naadf.eye.xyz*16.;
     let d=normalize(naadf.forward.xyz+ndc.x*naadf.right.xyz*naadf.right.w+ndc.y*naadf.up.xyz*naadf.up.w);
     let cosine=dot(d,naadf.forward.xyz);
-    let h=trace_voxels(o,d,naadf.projection.x/cosine*16.,false);
+    let h=trace_counted(o,d,naadf.projection.x/cosine*16.,false,traversal_diagnostic);
+    if traversal_diagnostic {
+        return Fragment(vec4(vec3<f32>(h.visits),1.),0.);
+    }
     if !h.found{discard;}
     let hit=(o+d*h.t)*0.0625;
     // Storage has a native-cell apron; raster owns the outermost layer.

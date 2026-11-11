@@ -1,5 +1,8 @@
 # NAADF optimization and walking stability
 
+See [traversal and streaming diagnostics](NAADF_TRAVERSAL.md) for the follow-up
+GPU heatmaps, sparse long skips, depth study and upload timings.
+
 The default moving NAADF window uses exact compact leaves when every pigment
 fits, CPU root distance fields, and a mesh handoff that keeps the published
 tile partition while boundary ownership changes. It keeps the same 6.25 cm

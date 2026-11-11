@@ -511,6 +511,37 @@ impl Pending {
         self.phase >= 4
     }
 }
+#[derive(Default)]
+struct ShiftTiming {
+    start: Option<Instant>,
+    ready: Option<Instant>,
+    upload: Option<Instant>,
+    raster: Option<Instant>,
+}
+impl ShiftTiming {
+    fn sample(&self, published: Instant) -> Option<[f64; 4]> {
+        let start = self.start?;
+        let ready = self.ready?;
+        let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1000.;
+        Some([
+            ms(start, ready),
+            ms(ready, self.upload?),
+            ms(ready, self.raster?),
+            ms(start, published),
+        ])
+    }
+}
+fn stream_lead_seconds() -> f64 {
+    static LEAD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *LEAD.get_or_init(|| {
+        std::env::var("FRONTIER_NAADF_LEAD_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|s| s.is_finite())
+            .unwrap_or(0.)
+            .clamp(0., 8.)
+    })
+}
 pub struct Experiment {
     restoring_raster: bool,
     wide_leaves: bool,
@@ -526,6 +557,10 @@ pub struct Experiment {
     strip_ms: f64,
     strip_columns: usize,
     strip_shared_leaves: usize,
+    shift_timing: ShiftTiming,
+    shift_samples: std::collections::VecDeque<[f64; 4]>,
+    last_eye: Option<(Instant, DVec3)>,
+    eye_velocity: DVec3,
     camera_margin_m: f64,
     min_camera_margin_m: Option<f64>,
     stream_active_frames: u64,
@@ -554,6 +589,10 @@ impl Default for Experiment {
             strip_ms: 0.,
             strip_columns: 0,
             strip_shared_leaves: 0,
+            shift_timing: ShiftTiming::default(),
+            shift_samples: Default::default(),
+            last_eye: None,
+            eye_velocity: DVec3::ZERO,
             camera_margin_m: 0.,
             min_camera_margin_m: None,
             stream_active_frames: 0,
@@ -580,6 +619,18 @@ impl Experiment {
         let Some(s) = &gpu.visual_settings else {
             return;
         };
+        let now = Instant::now();
+        if let Some((previous, eye)) = self.last_eye.replace((now, camera.position)) {
+            let dt = now.duration_since(previous).as_secs_f64();
+            let displacement = camera.position - eye;
+            if dt > 0.5 || displacement.length() > 8. {
+                self.eye_velocity = DVec3::ZERO;
+            } else if dt >= 0.0001 {
+                self.eye_velocity = self
+                    .eye_velocity
+                    .lerp(displacement / dt, 1. - (-dt / 0.25).exp());
+            }
+        }
         for volume in self
             .active
             .iter_mut()
@@ -725,6 +776,7 @@ impl Experiment {
                     }
                 },
                 Ok(Reply::Shifted(c)) => {
+                    self.shift_timing.ready = Some(Instant::now());
                     self.shift = Some(upload::PendingShift::new(gpu, c));
                     self.status =
                         "Uploading leading strips; restoring outgoing mesh coverage".into();
@@ -790,7 +842,20 @@ impl Experiment {
             return;
         }
         if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
-            if p.advance(gpu, v) && raster_restored {
+            let uploaded = p.advance(gpu, v);
+            if uploaded {
+                self.shift_timing.upload.get_or_insert_with(Instant::now);
+            }
+            if raster_restored {
+                self.shift_timing.raster.get_or_insert_with(Instant::now);
+            }
+            if uploaded && raster_restored {
+                if let Some(sample) = self.shift_timing.sample(Instant::now()) {
+                    if self.shift_samples.len() == 64 {
+                        self.shift_samples.pop_front();
+                    }
+                    self.shift_samples.push_back(sample);
+                }
                 let p = self.shift.take().unwrap();
                 let c = p.publish(gpu, v);
                 self.shifts += 1;
@@ -832,7 +897,16 @@ impl Experiment {
                     lo: v.bounds[0].map(|x| x as i64),
                     hi: v.bounds[1].map(|x| x as i64),
                 };
-                if let Some(next) = stream::target(region, eye) {
+                if let Some(next) = stream::target(
+                    region,
+                    eye,
+                    self.eye_velocity.to_array(),
+                    stream_lead_seconds(),
+                ) {
+                    self.shift_timing = ShiftTiming {
+                        start: Some(Instant::now()),
+                        ..Default::default()
+                    };
                     self.shifting = true;
                     self.status = "Building leading strips".into();
                     self.worker.send(Job::Shift(
@@ -977,10 +1051,20 @@ impl Experiment {
         let (distance_tiles_ready, distance_tiles_total) = a
             .and_then(|v| v.root_distance.as_ref())
             .map_or((0, 0), root_distance::Cache::progress);
-        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
+        let mut json = format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
             self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
-            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes))
+            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
+        json.pop();
+        use std::fmt::Write;
+        write!(
+            json,
+            ",\"stream_lead_s\":{},\"stream_stage_ms\":{:?}}}",
+            stream_lead_seconds(),
+            self.shift_samples
+        )
+        .unwrap();
+        json
     }
 }
 
@@ -1107,6 +1191,14 @@ fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipel
             ],
             push_constant_ranges: &[],
         });
+    let constants = std::collections::HashMap::from([(
+        "traversal_diagnostic".into(),
+        if capture_layer() == CaptureLayer::Steps {
+            1.
+        } else {
+            0.
+        },
+    )]);
     gpu.device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("NAADF exact native voxel pass"),
@@ -1120,7 +1212,10 @@ fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipel
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.scene_format,
                     blend: None,
@@ -1142,6 +1237,25 @@ fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipel
             multiview: None,
             cache: None,
         })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureLayer {
+    Scene,
+    Steps,
+    Raster,
+    Voxels,
+}
+pub(crate) fn capture_layer() -> CaptureLayer {
+    static LAYER: std::sync::OnceLock<CaptureLayer> = std::sync::OnceLock::new();
+    *LAYER.get_or_init(
+        || match std::env::var("FRONTIER_NAADF_CAPTURE_LAYER").as_deref() {
+            Ok("steps") => CaptureLayer::Steps,
+            Ok("raster") => CaptureLayer::Raster,
+            Ok("voxels") => CaptureLayer::Voxels,
+            _ => CaptureLayer::Scene,
+        },
+    )
 }
 
 pub(crate) fn ray_profile() -> (bool, bool) {
