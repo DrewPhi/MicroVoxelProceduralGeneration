@@ -1,7 +1,10 @@
 //! Optional exact NAADF window. Leading strips are generated and uploaded
 //! asynchronously; the existing renderer covers the exterior and handoff.
 mod data;
+mod leaf;
 pub(crate) mod ownership;
+mod root_distance;
+mod sparse_roots;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -34,6 +37,9 @@ struct Request {
     serial: u64,
     samples: u32,
     follow: bool,
+    gpu_distance: bool,
+    sparse_roots: bool,
+    wide_leaves: bool,
 }
 
 // The user ceiling can tighten the estimate, never bypass live RAM headroom.
@@ -52,13 +58,13 @@ fn memory_headroom(memory: crate::settings::MemorySnapshot) -> Option<usize> {
 
 enum Job {
     Build(u64, Request, World, [f64; 3]),
-    Install(u64, Snapshot, [usize; 3]),
+    Install(u64, Snapshot, [usize; 3], leaf::Encoding),
     Shift(u64, World, stream::Region, usize),
     Finish(stream::Change, bool),
     Reset,
 }
 enum Reply {
-    Built(Snapshot),
+    Built(leaf::Prepared),
     Shifted(stream::Change),
 }
 struct Worker {
@@ -87,17 +93,29 @@ impl Worker {
                                 continue;
                             }
                             state = None;
-                            let result = data::build(&w, eye, r.radius, r.budget, &s, || {
-                                e.load(Ordering::Relaxed) != g
-                            })
-                            .map(Reply::Built);
+                            let result = data::build_with_root_mode(
+                                &w,
+                                eye,
+                                r.radius,
+                                r.budget,
+                                &s,
+                                r.gpu_distance,
+                                || e.load(Ordering::Relaxed) != g,
+                            )
+                            .map(|s| {
+                                let mut prepared = leaf::Prepared::new(s, r.wide_leaves);
+                                if r.sparse_roots {
+                                    prepared.make_sparse_roots(|| e.load(Ordering::Relaxed) != g);
+                                }
+                                Reply::Built(prepared)
+                            });
                             if e.load(Ordering::Relaxed) == g && output.send((g, result)).is_err() {
                                 break;
                             }
                         }
-                        Job::Install(g, s, c) => {
+                        Job::Install(g, s, c, encoding) => {
                             if e.load(Ordering::Relaxed) == g {
-                                state = Some(stream::State::new(s, c));
+                                state = Some(stream::State::new_with_encoding(s, c, encoding));
                             }
                         }
                         Job::Shift(g, w, r, budget) => {
@@ -179,6 +197,9 @@ struct Volume {
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     _chunks: wgpu::Texture,
+    root_distance: Option<root_distance::Cache>,
+    root_texture_dims: [u32; 3],
+    sparse_roots: bool,
     blocks: wgpu::Buffer,
     voxels: wgpu::Buffer,
     palette: wgpu::Buffer,
@@ -187,10 +208,31 @@ struct Volume {
     capacities: [usize; 3],
     n: u32,
     bytes: usize,
+    wide_bytes: usize,
+    leaf_encoding: leaf::Encoding,
+    leaf_bytes: usize,
     samples: u32,
     revision: u64,
     stats: [usize; 5],
     build_ms: f64,
+}
+impl Volume {
+    fn traversal_flags(&self) -> u32 {
+        u32::from(self.sparse_roots)
+            | (u32::from(self.leaf_encoding.is_compact()) << 1)
+            | self
+                .root_distance
+                .as_ref()
+                .map_or(0, |c| c.progress().0 << 2)
+    }
+
+    fn root_bytes(&self) -> usize {
+        self.root_texture_dims
+            .map(|v| v as usize)
+            .iter()
+            .product::<usize>()
+            * 4
+    }
 }
 struct Pending {
     volume: Volume,
@@ -200,7 +242,13 @@ struct Pending {
     upload_ms: f64,
 }
 impl Pending {
-    fn new(gpu: &Gpu, snapshot: Snapshot) -> Result<Self, String> {
+    fn new(gpu: &Gpu, prepared: leaf::Prepared) -> Result<Self, String> {
+        let leaf::Prepared {
+            snapshot,
+            encoding,
+            wide_bytes,
+            sparse_root_dims,
+        } = prepared;
         let limits = gpu.device.limits();
         let n = snapshot.chunks_per_edge;
         if n > limits.max_texture_dimension_3d {
@@ -235,15 +283,33 @@ impl Pending {
                 used
             }
         };
-        let capacities = [
+        let ordinary_capacities = [
             grow(snapshot.blocks.len() * 4, 2 * 1048576),
-            grow(snapshot.voxels.len() * 4, 4 * 1048576),
+            grow(snapshot.voxels.len() * 4, 4 * 1048576)
+                .min((1usize << 30).saturating_mul(encoding.bits() as usize / 8)),
             grow(snapshot.palette.len() * 16, 2 * 1048576),
         ];
+        let root_texture_dims = sparse_root_dims.unwrap_or([n; 3]);
+        let [root_width, root_height, root_layers] = root_texture_dims;
+        let root_bytes = root_width as usize * root_height as usize * root_layers as usize * 4;
+        let headroom = memory_headroom(crate::settings::MemorySnapshot::detect());
+        let mut capacities = ordinary_capacities;
+        if follow && n >= 32 {
+            // A high start can build an almost empty volume. Reserve room
+            // for the first descent into terrain when measured RAM permits.
+            for (i, floor_mib) in [(0, 8), (1, 24)] {
+                capacities[i] = capacities[i].max((floor_mib * 1048576).min(max & !255));
+            }
+            if !headroom.is_some_and(|available| {
+                root_bytes + capacities.iter().sum::<usize>() + 64 * 1048576 <= available
+            }) {
+                capacities = ordinary_capacities;
+            }
+        }
         // Snapshot CPU data is still live at this point. Check the actual
         // arena capacities, including follow-mode slack, before allocating.
-        let upload_bytes = (n as usize).pow(3) * 4 + capacities.iter().sum::<usize>();
-        if let Some(headroom) = memory_headroom(crate::settings::MemorySnapshot::detect()) {
+        let upload_bytes = root_bytes + capacities.iter().sum::<usize>();
+        if let Some(headroom) = headroom {
             if upload_bytes > headroom {
                 return Err(format!(
                     "NAADF upload needs {} MiB; {} MiB available with system headroom. Try a smaller radius.",
@@ -255,9 +321,9 @@ impl Pending {
         let chunks = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("NAADF exact chunk words"),
             size: wgpu::Extent3d {
-                width: n,
-                height: n,
-                depth_or_array_layers: n,
+                width: root_width,
+                height: root_height,
+                depth_or_array_layers: root_layers,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -286,6 +352,14 @@ impl Pending {
             });
         let layout = layout(&gpu.device);
         let view = chunks.create_view(&Default::default());
+        let build_distance = snapshot.gpu_distance
+            && headroom.is_none_or(|bytes| upload_bytes + root_distance::bytes(n) <= bytes);
+        let (root_distance, distance_view) = if build_distance {
+            let (cache, view) = root_distance::Cache::new(&gpu.device, n, &view);
+            (Some(cache), view)
+        } else {
+            (None, root_distance::empty(&gpu.device))
+        };
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NAADF snapshot"),
             layout: &layout,
@@ -310,12 +384,17 @@ impl Pending {
                     binding: 4,
                     resource: palette.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&distance_view),
+                },
             ],
         });
         let pipeline = make_pipeline(gpu, &layout);
         let resources = Bindings {
             uniform: uniform.clone(),
             chunks: view.clone(),
+            distance: distance_view,
             blocks: blocks.clone(),
             voxels: voxels.clone(),
             palette: palette.clone(),
@@ -327,6 +406,9 @@ impl Pending {
             bind,
             uniform,
             _chunks: chunks,
+            root_distance,
+            root_texture_dims,
+            sparse_roots: sparse_root_dims.is_some(),
             blocks,
             voxels,
             palette,
@@ -335,6 +417,9 @@ impl Pending {
             capacities,
             n,
             bytes: snapshot.bytes(),
+            wide_bytes,
+            leaf_encoding: encoding,
+            leaf_bytes: snapshot.voxels.len().max(1) * 4,
             samples: gpu.sample_count,
             revision: snapshot.source_revision,
             stats: [
@@ -361,9 +446,9 @@ impl Pending {
         let start = Instant::now();
         let allowance = 8 * 1048576;
         if self.phase == 0 {
-            let n = self.volume.n as usize;
-            let plane = n * n * 4;
-            let layers = (allowance / plane).max(1).min(n - self.offset);
+            let [width, height, depth] = self.volume.root_texture_dims;
+            let plane = width as usize * height as usize * 4;
+            let layers = (allowance / plane).max(1).min(depth as usize - self.offset);
             let bytes = bytemuck::cast_slice::<_, u8>(&self.snapshot.chunks);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -379,17 +464,17 @@ impl Pending {
                 &bytes[self.offset * plane..(self.offset + layers) * plane],
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(n as u32 * 4),
-                    rows_per_image: Some(n as u32),
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
                 },
                 wgpu::Extent3d {
-                    width: n as u32,
-                    height: n as u32,
+                    width,
+                    height,
                     depth_or_array_layers: layers as u32,
                 },
             );
             self.offset += layers;
-            if self.offset == n {
+            if self.offset == depth as usize {
                 self.phase = 1;
                 self.offset = 0;
             }
@@ -428,6 +513,7 @@ impl Pending {
 }
 pub struct Experiment {
     restoring_raster: bool,
+    wide_leaves: bool,
     effective_budget_mib: usize,
     worker: Worker,
     request: Option<Request>,
@@ -439,6 +525,7 @@ pub struct Experiment {
     shifts: u64,
     strip_ms: f64,
     strip_columns: usize,
+    strip_shared_leaves: usize,
     camera_margin_m: f64,
     min_camera_margin_m: Option<f64>,
     stream_active_frames: u64,
@@ -454,6 +541,7 @@ impl Default for Experiment {
     fn default() -> Self {
         Self {
             restoring_raster: false,
+            wide_leaves: false,
             effective_budget_mib: 0,
             worker: Worker::new(),
             request: None,
@@ -465,6 +553,7 @@ impl Default for Experiment {
             shifts: 0,
             strip_ms: 0.,
             strip_columns: 0,
+            strip_shared_leaves: 0,
             camera_margin_m: 0.,
             min_camera_margin_m: None,
             stream_active_frames: 0,
@@ -502,6 +591,7 @@ impl Experiment {
             }
         }
         if !s.naadf_enabled {
+            self.wide_leaves = false;
             if self.request.is_some() {
                 self.worker.cancel();
                 self.worker.send(Job::Reset);
@@ -540,6 +630,12 @@ impl Experiment {
             serial,
             samples: 0,
             follow: s.naadf_follow,
+            gpu_distance: s.naadf_gpu_distance,
+            sparse_roots: !s.naadf_follow
+                && !s.naadf_gpu_distance
+                && std::env::var_os("FRONTIER_NAADF_SPARSE_ROOTS").is_some_and(|v| v == "1"),
+            wide_leaves: self.wide_leaves
+                || std::env::var_os("FRONTIER_NAADF_WIDE_LEAVES").is_some_and(|v| v == "1"),
         };
         if self.request != Some(r) {
             self.restoring_raster = self.active.is_some();
@@ -633,6 +729,15 @@ impl Experiment {
                     self.status =
                         "Uploading leading strips; restoring outgoing mesh coverage".into();
                 }
+                Err(e) if e == leaf::WIDEN && !self.wide_leaves => {
+                    // A leading strip introduced a pigment the live format
+                    // cannot address. Rebuild off-thread with wide leaves;
+                    // the active volume remains available during replacement.
+                    self.wide_leaves = true;
+                    self.status = "Preparing 32-bit NAADF leaf fallback".into();
+                    self.shifting = false;
+                    return;
+                }
                 Err(e) => {
                     self.error = Some(e.clone());
                     self.status = e;
@@ -646,8 +751,12 @@ impl Experiment {
                 let p = self.pending.take().unwrap();
                 self.upload_ms = p.upload_ms;
                 if r.follow {
-                    self.worker
-                        .send(Job::Install(self.epoch, p.snapshot, p.volume.capacities));
+                    self.worker.send(Job::Install(
+                        self.epoch,
+                        p.snapshot,
+                        p.volume.capacities,
+                        p.volume.leaf_encoding,
+                    ));
                 }
                 self.active = Some(p.volume);
                 self.restoring_raster = false;
@@ -687,9 +796,17 @@ impl Experiment {
                 self.shifts += 1;
                 self.strip_ms = c.build_ms;
                 self.strip_columns = c.generated_columns;
+                self.strip_shared_leaves = c.shared_leaves;
                 self.worker.send(Job::Finish(c, true));
                 self.shifting = false;
                 self.status = "Ready · following player".into();
+            }
+        }
+        if !self.shifting && !self.restoring_raster && self.published_epoch == self.epoch {
+            if let Some(v) = &mut self.active {
+                if let Some(cache) = &mut v.root_distance {
+                    cache.advance(&gpu.device, &gpu.queue, v.n, v.ring);
+                }
             }
         }
         if let Some(v) = &self.active {
@@ -765,12 +882,24 @@ impl Experiment {
             self.shift.as_ref().map(|s| s.change.retiring.id)
         }
     }
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, far: &'a wgpu::BindGroup) {
+    pub fn draw<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        far: &'a wgpu::BindGroup,
+        camera: Camera,
+        width: u32,
+        height: u32,
+    ) {
         if let Some(a) = &self.active {
+            let Some([x, y, w, h]) = ray_scissor(camera, a.bounds, width, height) else {
+                return;
+            };
+            pass.set_scissor_rect(x, y, w, h);
             pass.set_pipeline(&a.pipeline);
             pass.set_bind_group(0, &a.bind, &[]);
             pass.set_bind_group(1, far, &[]);
             pass.draw(0..3, 0..1);
+            pass.set_scissor_rect(0, 0, width, height);
         }
     }
     pub fn prepare(&self, gpu: &Gpu, camera: Camera, width: u32, height: u32) {
@@ -811,15 +940,15 @@ impl Experiment {
                 right: basis[1],
                 up: basis[2],
                 projection: basis[3],
-                ring: [a.ring[0], a.ring[1], a.ring[2], 0],
+                ring: [a.ring[0], a.ring[1], a.ring[2], a.traversal_flags()],
                 shadow: [
                     if s.terrain_shadows && !s.visibility_benchmark {
                         1.
                     } else {
                         0.
                     },
-                    0.,
-                    0.,
+                    f32::from(u8::from(ray_profile().0)),
+                    f32::from(u8::from(ray_profile().1)),
                     0.,
                 ],
             }),
@@ -831,7 +960,13 @@ impl Experiment {
             .map(|a| (a.ownership.id, a.resources.clone()))
     }
     pub fn gpu_bytes(&self) -> usize {
-        let allocated = |a: &Volume| (a.n as usize).pow(3) * 4 + a.capacities.iter().sum::<usize>();
+        let allocated = |a: &Volume| {
+            a.root_bytes()
+                + a.capacities.iter().sum::<usize>()
+                + a.root_distance
+                    .as_ref()
+                    .map_or(0, |_| root_distance::bytes(a.n))
+        };
         self.active.as_ref().map_or(0, allocated)
             + self.pending.as_ref().map_or(0, |p| allocated(&p.volume))
     }
@@ -839,10 +974,13 @@ impl Experiment {
         let a = self.active.as_ref();
         let bounds = a.map(|a| a.bounds);
         let region = bounds.map_or("null".into(), |b| format!("{:?}", b));
-        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{}}}",
+        let (distance_tiles_ready, distance_tiles_total) = a
+            .and_then(|v| v.root_distance.as_ref())
+            .map_or((0, 0), root_distance::Cache::progress);
+        format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
             self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
-            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX))
+            a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes))
     }
 }
 
@@ -850,12 +988,13 @@ impl Experiment {
 pub(crate) struct Bindings {
     pub uniform: wgpu::Buffer,
     pub chunks: wgpu::TextureView,
+    pub distance: wgpu::TextureView,
     pub blocks: wgpu::Buffer,
     pub voxels: wgpu::Buffer,
     pub palette: wgpu::Buffer,
 }
 pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..5)
+    (0..6)
         .map(|i| wgpu::BindGroupLayoutEntry {
             binding: first + i,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -865,7 +1004,7 @@ pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
-                1 => wgpu::BindingType::Texture {
+                1 | 5 => wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D3,
                     multisampled: false,
@@ -909,6 +1048,10 @@ impl Bindings {
                 binding: first + 4,
                 resource: self.palette.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: first + 5,
+                resource: wgpu::BindingResource::TextureView(&self.distance),
+            },
         ]
     }
     pub fn empty(device: &wgpu::Device) -> Self {
@@ -939,6 +1082,7 @@ impl Bindings {
                 wgpu::BufferUsages::UNIFORM,
             ),
             chunks: texture.create_view(&Default::default()),
+            distance: root_distance::empty(device),
             blocks: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),
@@ -998,6 +1142,74 @@ fn make_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipel
             multiview: None,
             cache: None,
         })
+}
+
+pub(crate) fn ray_profile() -> (bool, bool) {
+    static PROFILE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *PROFILE.get_or_init(
+        || match std::env::var("FRONTIER_NAADF_RAY_PROFILE").as_deref() {
+            Ok("primary") => (true, true),
+            Ok("voxel-shadows") => (false, true),
+            Ok("mesh-shadows") => (true, false),
+            _ => (false, false),
+        },
+    )
+}
+
+// Perspective extrema of an AABB in front of the camera occur at its
+// vertices. If it crosses the eye plane, keep the full viewport.
+fn ray_scissor(camera: Camera, bounds: [[f64; 3]; 2], w: u32, h: u32) -> Option<[u32; 4]> {
+    let origin = DVec3::from_array(bounds[0]);
+    let matrix = camera.matrix(origin, w as f32 / h as f32);
+    let size = (DVec3::from_array(bounds[1]) - origin).as_vec3();
+    let mut lo = glam::Vec2::splat(f32::INFINITY);
+    let mut hi = -lo;
+    for i in 0..8 {
+        let v = glam::Vec4::new(
+            if i & 1 == 0 { 0. } else { size.x },
+            if i & 2 == 0 { 0. } else { size.y },
+            if i & 4 == 0 { 0. } else { size.z },
+            1.,
+        );
+        let clip = matrix * v;
+        if !clip.is_finite() || clip.w <= 0.01 {
+            return Some([0, 0, w, h]);
+        }
+        let p = glam::Vec2::new(clip.x, -clip.y) / clip.w;
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let viewport = glam::Vec2::new(w as f32, h as f32);
+    let xy = ((lo * 0.5 + 0.5) * viewport - 2.)
+        .floor()
+        .clamp(glam::Vec2::ZERO, viewport);
+    let end = ((hi * 0.5 + 0.5) * viewport + 2.)
+        .ceil()
+        .clamp(glam::Vec2::ZERO, viewport);
+    let span = end - xy;
+    (span.x > 0. && span.y > 0.).then_some([xy.x as u32, xy.y as u32, span.x as u32, span.y as u32])
+}
+
+#[test]
+fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
+    let camera = Camera {
+        position: DVec3::ZERO,
+        yaw: 0.,
+        pitch: 0.,
+        fov_y: 60.,
+        far: 300.,
+    };
+    assert_eq!(
+        ray_scissor(camera, [[-1.; 3], [1.; 3]], 1920, 1080),
+        Some([0, 0, 1920, 1080])
+    );
+    assert_eq!(
+        ray_scissor(camera, [[90., -1., 10.], [92., 1., 12.]], 1920, 1080),
+        None
+    );
+    let [x, y, w, h] = ray_scissor(camera, [[-1., -1., 10.], [1., 1., 12.]], 1920, 1080).unwrap();
+    assert!(x < 960 && x + w > 960 && y < 540 && y + h > 540);
+    assert!(w < 250 && h < 250);
 }
 
 fn ray_basis(camera: Camera, aspect: f32) -> [[f32; 4]; 4] {

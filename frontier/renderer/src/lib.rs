@@ -853,7 +853,13 @@ impl Gpu {
         }
         if naadf_bounds.is_some() {
             if let Some(n) = &self.naadf {
-                n.draw(&mut pass, self.adaptive.as_ref().unwrap().far_shadow_bind());
+                n.draw(
+                    &mut pass,
+                    self.adaptive.as_ref().unwrap().far_shadow_bind(),
+                    *camera,
+                    width,
+                    height,
+                );
             }
         }
         if let Some(t) = &plant_timings {
@@ -2308,6 +2314,14 @@ impl Viewer {
             terrain_pending: self.adaptive_view.as_ref().map_or(0, |v| v.pending_count),
             terrain_ready: self.adaptive_view.as_ref().is_none_or(|v| v.quality_ready),
             native_clusters: self.adaptive_view.as_ref().map_or(0, |v| v.native_clusters),
+            terrain_owner: self
+                .adaptive_view
+                .as_ref()
+                .map_or(0, |v| v.published_naadf_owner),
+            watched_tile_cells: self
+                .adaptive_view
+                .as_ref()
+                .and_then(|v| v.watched_tile_cells),
             plant_pending: gpu.vegetation_stats.pending_jobs,
             plant_triangles: gpu.vegetation_stats.triangles,
             plant_tree_lods: gpu.vegetation_stats.tree_lod_histogram,
@@ -3581,6 +3595,11 @@ pub fn run() -> Result<()> {
             if let Some(probe) = &viewer.gpu_probe {
                 let t = probe.naadf_stats.summary();
                 json.pop();
+                let (omit_voxel_shadows, omit_mesh_shadows) = naadf::ray_profile();
+                json.push_str(&format!(
+                    ",\"naadf_ray_profile\":{{\"voxel_shadows\":{},\"mesh_receiver_shadows\":{}}}",
+                    !omit_voxel_shadows, !omit_mesh_shadows
+                ));
                 json.push_str(&format!(",\"naadf_gpu_pass\":{{\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans\"}}}}",t.sample_count,t.p50_ms.map_or("null".into(),|v|v.to_string()),t.p95_ms.map_or("null".into(),|v|v.to_string()),t.p99_ms.map_or("null".into(),|v|v.to_string())));
             }
         }

@@ -319,4 +319,5 @@ budget, status and GPU payload. Apply changes, or use **Rebuild NAADF here** to
 recenter. Start with `./frontier/run.sh --preset alpine --naadf-radius 64`.
 The exact voxel window follows the player by default and reuses overlapping
 strips. Distant terrain retains the existing backend. See the [streaming design
-and measurements](frontier/NAADF_STREAMING.md).
+and measurements](frontier/NAADF_STREAMING.md) and the [mesh handoff, packing,
+and ray profiling results](frontier/NAADF_OPTIMIZATION.md).

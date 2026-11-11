@@ -31,6 +31,8 @@ pub(crate) struct Observation {
     pub terrain_pending: usize,
     pub terrain_ready: bool,
     pub native_clusters: usize,
+    pub terrain_owner: u64,
+    pub watched_tile_cells: Option<u32>,
     pub plant_pending: usize,
     pub plant_triangles: usize,
     pub plant_tree_lods: [usize; 4],
@@ -61,9 +63,9 @@ impl FrameTrace {
     }
     pub fn json(&self) -> String {
         let rows = self.0.iter().map(|x| format!(
-            "{{\"seconds\":{},\"frame_ms\":{},\"prepare_ms\":{},\"terrain_ms\":{},\"vegetation_ms\":{},\"yaw\":{},\"eye\":{:?},\"physical_eye\":{},\"terrain_pending\":{},\"terrain_ready\":{},\"native_clusters\":{},\"plant_pending\":{},\"plant_triangles\":{},\"plant_tree_lods\":{:?},\"plant_lod_changes\":{},\"plant_coarsenings\":{},\"plant_demand\":{:?},\"plant_ready\":{:?},\"shadow_admitted\":{},\"shadow_removed\":{},\"shadow_triangles\":{},\"shadow_lod_changes\":{},\"shadow_lods\":{:?},\"plant_selected_mesh_evictions\":{},\"plant_cpu_bytes\":{}}}",
+            "{{\"seconds\":{},\"frame_ms\":{},\"prepare_ms\":{},\"terrain_ms\":{},\"vegetation_ms\":{},\"yaw\":{},\"eye\":{:?},\"physical_eye\":{},\"terrain_pending\":{},\"terrain_ready\":{},\"native_clusters\":{},\"terrain_owner\":{},\"watched_tile_cells\":{},\"plant_pending\":{},\"plant_triangles\":{},\"plant_tree_lods\":{:?},\"plant_lod_changes\":{},\"plant_coarsenings\":{},\"plant_demand\":{:?},\"plant_ready\":{:?},\"shadow_admitted\":{},\"shadow_removed\":{},\"shadow_triangles\":{},\"shadow_lod_changes\":{},\"shadow_lods\":{:?},\"plant_selected_mesh_evictions\":{},\"plant_cpu_bytes\":{}}}",
             x.seconds,x.frame_ms,x.prepare_ms,x.terrain_ms,x.vegetation_ms,x.yaw,x.eye,x.physical_eye.map_or("null".into(),|p|format!("{p:?}")),
-            x.terrain_pending,x.terrain_ready,x.native_clusters,x.plant_pending,x.plant_triangles,x.plant_tree_lods,x.plant_lod_changes,x.plant_coarsenings,x.plant_demand,x.plant_ready,x.shadow_admitted,x.shadow_removed,x.shadow_triangles,x.shadow_lod_changes,x.shadow_lods,x.plant_selected_mesh_evictions,x.plant_cpu_bytes)).collect::<Vec<_>>().join(",");
+            x.terrain_pending,x.terrain_ready,x.native_clusters,x.terrain_owner,x.watched_tile_cells.map_or("null".into(),|v|v.to_string()),x.plant_pending,x.plant_triangles,x.plant_tree_lods,x.plant_lod_changes,x.plant_coarsenings,x.plant_demand,x.plant_ready,x.shadow_admitted,x.shadow_removed,x.shadow_triangles,x.shadow_lod_changes,x.shadow_lods,x.plant_selected_mesh_evictions,x.plant_cpu_bytes)).collect::<Vec<_>>().join(",");
         format!("{{\"capacity\":3600,\"scope\":\"last presented frames, including startup/warmup; prepare_ms is main-thread wall time before surface acquisition; GPU timestamps are separate asynchronous samples\",\"frames\":[{rows}]}}")
     }
 }

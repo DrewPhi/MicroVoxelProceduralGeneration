@@ -4,7 +4,9 @@ NAADF now follows the player when enabled. The first cube is still a cold CPU
 build. After it publishes, movement shifts the cube in small, integer-meter
 steps and reuses the overlapping data. The existing renderer covers the rest
 of the world. `--naadf-follow off` preserves the fixed-region benchmark mode.
-The **Follow player** setting is also available in the Esc menu.
+The **Follow player** setting is also available in the Esc menu. For the
+latest stable mesh handoff, packed storage and radius tests, see
+[NAADF optimization](NAADF_OPTIMIZATION.md).
 
 From the repository root:
 

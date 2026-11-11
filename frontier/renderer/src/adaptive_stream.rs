@@ -126,6 +126,8 @@ pub(crate) struct PlanningStats {
     pub prepared_batches_without_plan: u64,
     pub obsolete_transaction_preemptions: u64,
     pub obsolete_transaction_pending_jobs: u64,
+    pub naadf_handoff_reused_tiles: u64,
+    pub naadf_handoff_changed_tiles: u64,
 }
 pub struct SelectionFrame {
     pub ownership_id: u64,
@@ -489,6 +491,7 @@ pub struct AdaptiveStream {
     coarsen_targets: HashSet<([i64; 2], u32)>,
     rejected_coarsen: HashMap<([i64; 2], u32, u32), RejectedCoarsen>,
     committed: Vec<Arc<GeometryTile>>,
+    committed_owner_id: u64,
     committed_index: HashMap<([i64; 2], u32), usize>,
     committed_ancestors: HashSet<([i64; 2], u32)>,
     committed_pose: Option<(Camera, u32, u32)>,
@@ -540,6 +543,7 @@ impl AdaptiveStream {
             coarsen_targets: HashSet::new(),
             rejected_coarsen: HashMap::new(),
             committed: vec![],
+            committed_owner_id: 0,
             committed_index: HashMap::new(),
             committed_ancestors: HashSet::new(),
             committed_pose: None,
@@ -604,23 +608,47 @@ impl AdaptiveStream {
         self.finest_cells = cells;
     }
     fn set_naadf_owner(&mut self, owner: Option<Arc<crate::naadf::ownership::Ownership>>) {
+        let old_id = self.owner_id();
         self.cache.set_naadf_owner(owner);
+        if old_id == self.owner_id() {
+            return;
+        }
         self.pending.clear();
-        self.transaction = None;
         self.transaction_refinements.clear();
         self.pending_publication = None;
-        self.committed_publication = None;
-        self.committed.clear();
-        self.committed_index.clear();
-        self.committed_ancestors.clear();
         self.committed_pose = None;
-        self.known_bytes.clear();
-        self.variants.clear();
         self.coarsen_probes.clear();
         self.coarsen_targets.clear();
-        self.rejected_coarsen.clear();
-        self.occlusion = None;
-        self.prediction_occlusion = None;
+        // Keep the previous closed-edge partition as the first replacement
+        // target. Only tiles switching raster/NAADF representation need new
+        // payloads. Ordinary coverage guards still supersede this target on
+        // an uncovered move or teleport.
+        let keys: Vec<_> = self.committed.iter().map(|tile| tile.key).collect();
+        self.transaction = (!keys.is_empty()).then_some(keys);
+        self.transaction_known_bytes = self
+            .transaction
+            .iter()
+            .flatten()
+            .map(|&key| self.target_entry_bytes(key))
+            .fold(0usize, usize::saturating_add);
+        if self.transaction.is_some() {
+            self.next_publication_id = self.next_publication_id.wrapping_add(1);
+            self.pending_publication = Some(PublicationTransaction {
+                id: self.next_publication_id,
+                started: std::time::Instant::now(),
+            });
+        }
+    }
+    fn owner_id(&self) -> u64 {
+        self.cache.naadf_owner.as_ref().map_or(0, |owner| owner.id)
+    }
+    fn target_entry_bytes(&self, key: TileKey) -> usize {
+        let bytes = if self.cache.naadf_owns(key) {
+            0
+        } else {
+            self.known_bytes.get(&key).copied().unwrap_or(0)
+        };
+        GeometryCache::entry_resident_bytes(bytes)
     }
     pub(crate) fn plan(&mut self, camera: &Camera, width: u32, height: u32) -> SelectionFrame {
         let started = std::time::Instant::now();
@@ -638,7 +666,7 @@ impl AdaptiveStream {
         self.coarsen_requested = false;
         self.coarsen_targets.clear();
         let mut frame = SelectionFrame {
-            ownership_id: self.cache.naadf_owner.as_ref().map_or(0, |o| o.id),
+            ownership_id: self.owner_id(),
             epoch: self.epoch,
             preparation: None,
             publication_transaction: None,
@@ -1173,9 +1201,7 @@ impl AdaptiveStream {
         }
         let required_bytes = target_keys
             .iter()
-            .map(|key| {
-                GeometryCache::entry_resident_bytes(self.known_bytes.get(key).copied().unwrap_or(0))
-            })
+            .map(|&key| self.target_entry_bytes(key))
             .fold(0usize, usize::saturating_add);
         let mesh_budget = self.cache.mesh_budget_bytes();
         if required_bytes > mesh_budget {
@@ -1233,7 +1259,8 @@ impl AdaptiveStream {
         } else {
             // Repeated planning can run before the render side polls. Preserve
             // the token for an unchanged cover until that cover is replaced.
-            if target_keys.len() != self.committed.len()
+            if self.committed_owner_id != self.owner_id()
+                || target_keys.len() != self.committed.len()
                 || target_keys
                     .iter()
                     .zip(&self.committed)
@@ -1281,7 +1308,17 @@ impl AdaptiveStream {
         frame
     }
     fn finish_build_memory(&mut self, frame: &mut SelectionFrame) {
-        frame.publication_transaction = self.committed_publication;
+        if self.committed_owner_id != frame.ownership_id {
+            // The previous partition is useful to planning, but only the
+            // render side may keep presenting it with its previous owner.
+            frame.tiles.clear();
+            frame.coverage_ready = false;
+            frame.quality_ready = false;
+            frame.refinement_ready = false;
+            frame.max_visible_error_px = None;
+        } else {
+            frame.publication_transaction = self.committed_publication;
+        }
         let pending: HashSet<_> = self.pending.iter().copied().collect();
         self.build_refused.retain(|key| pending.contains(key));
         let stats = self.cache.stats();
@@ -1484,6 +1521,26 @@ impl AdaptiveStream {
         None
     }
     fn set_committed(&mut self, tiles: Vec<Arc<GeometryTile>>) {
+        if self.committed_owner_id != self.owner_id() {
+            for tile in &tiles {
+                if let Some(&i) = self
+                    .committed_index
+                    .get(&(tile.key.min, tile.key.width_cells))
+                {
+                    let old = &self.committed[i];
+                    if old.key == tile.key {
+                        if old.naadf_owned != tile.naadf_owned {
+                            self.planning.naadf_handoff_changed_tiles += 1;
+                        } else if Arc::ptr_eq(old, tile) {
+                            self.planning.naadf_handoff_reused_tiles += 1;
+                        }
+                    }
+                }
+            }
+            self.committed_owner_id = self.owner_id();
+            self.occlusion = None;
+            self.prediction_occlusion = None;
+        }
         if tiles.len() == self.committed.len()
             && tiles
                 .iter()
@@ -1866,11 +1923,16 @@ impl AdaptiveStream {
             self.committed_index
                 .get(&(key.min, key.width_cells))
                 .map(|&i| &self.committed[i])
-                .filter(|tile| tile.key == key)
+                // The cache serves an ownership placeholder before looking at
+                // raster entries. Its miss must never resurrect an old placeholder.
+                .filter(|tile| tile.key == key && !tile.naadf_owned)
                 .cloned()
         })
     }
     fn record_prepared_tile(&mut self, tile: &GeometryTile) {
+        if tile.naadf_owned {
+            return;
+        }
         let old_bytes = self.known_bytes.insert(tile.key, tile.bytes).unwrap_or(0);
         if self.transaction.is_some() {
             self.transaction_known_bytes = self
@@ -3344,6 +3406,83 @@ mod tests {
         }
     }
     #[test]
+    fn naadf_handoff_preserves_closed_edges_and_rebuilds_only_retired_tiles() {
+        use crate::naadf::ownership::Ownership;
+
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                amplitude: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut camera = Camera::fixture();
+        camera.position = DVec3::new(0.0, 10000.0, 0.0);
+        camera.far = 1.0;
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        stream.plan(&camera, 320, 180);
+        stream.prepare_demand(|| false).unwrap();
+        let before = stream.plan(&camera, 320, 180);
+        assert!(before.coverage_ready && before.tiles.len() > 1);
+        let chosen = before.tiles[0].key;
+        let [x, z] = chosen.min.map(|cell| cell as f64 * VOXEL_SIZE);
+        let side = chosen.width_cells as f64 * VOXEL_SIZE;
+        let n = side as usize + 2;
+        let owner = Arc::new(Ownership::new(
+            [[x - 1., -20., z - 1.], [x + side + 1., 20., z + side + 1.]],
+            n,
+            &vec![true; n * n],
+        ));
+        assert_eq!(
+            before
+                .tiles
+                .iter()
+                .filter(|tile| owner.terrain(tile.key))
+                .count(),
+            1
+        );
+        stream.set_naadf_owner(Some(owner.clone()));
+        let delegated = stream.plan(&camera, 320, 180);
+        assert!(delegated.coverage_ready);
+        assert_eq!(delegated.ownership_id, owner.id);
+        assert_eq!(delegated.pending, 0);
+        assert_eq!(delegated.cache.builds, before.cache.builds);
+        assert!(stream.cache.contains(&chosen));
+        assert!(delegated.tiles[0].naadf_owned);
+        assert_eq!(delegated.planning.naadf_handoff_changed_tiles, 1);
+        assert_eq!(
+            delegated.planning.naadf_handoff_reused_tiles,
+            (before.tiles.len() - 1) as u64
+        );
+        for (old, new) in before.tiles.iter().zip(&delegated.tiles) {
+            assert_eq!(old.key, new.key);
+            if old.key != chosen {
+                assert!(Arc::ptr_eq(old, new));
+            }
+        }
+
+        // A cold retirement restores only the outgoing tile, and cannot
+        // present the old placeholder under the new ownership epoch.
+        stream.cache.clear();
+        stream.set_naadf_owner(None);
+        let waiting = stream.plan(&camera, 320, 180);
+        assert!(!waiting.coverage_ready && waiting.tiles.is_empty());
+        assert_eq!(waiting.pending, 1);
+        assert_eq!(stream.prepare_demand(|| false).unwrap(), 1);
+        let restored = stream.plan(&camera, 320, 180);
+        assert!(restored.coverage_ready);
+        assert_eq!(restored.ownership_id, 0);
+        assert!(!restored.tiles[0].naadf_owned);
+        assert_eq!(restored.tiles.len(), before.tiles.len());
+        for (old, new) in before.tiles.iter().zip(&restored.tiles) {
+            assert_eq!(old.key, new.key);
+            if old.key != chosen {
+                assert!(Arc::ptr_eq(old, new));
+            }
+        }
+    }
+    #[test]
     fn committed_arcs_survive_cache_eviction_without_duplicate_preparation() {
         let world = World::fbm(
             7,
@@ -3756,7 +3895,9 @@ impl Worker {
                     }
                     frame.preparation = s.active_preparation;
                     s.forecast_transactions = stream.forecast_transactions;
-                    if s.epoch == epoch {
+                    if s.pending_owner.is_some() {
+                        // An owner command cannot be relabeled like camera demand.
+                    } else if s.epoch == epoch {
                         s.result = Some(Ok(frame));
                     } else if let Some((latest, camera, width, height)) = s.request.clone() {
                         // Validate complete spatial coverage against CURRENT
@@ -3802,7 +3943,11 @@ impl Worker {
                         return true;
                     }
                     let s = shared.0.lock().unwrap();
-                    if s.stop || s.background_paused || s.pending_settings.is_some() {
+                    if s.stop
+                        || s.background_paused
+                        || s.pending_settings.is_some()
+                        || s.pending_owner.is_some()
+                    {
                         return true;
                     }
                     if checked_epoch.load(Ordering::Relaxed) != s.epoch {

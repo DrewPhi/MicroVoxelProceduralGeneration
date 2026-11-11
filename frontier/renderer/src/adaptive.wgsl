@@ -276,7 +276,9 @@ const MATERIAL_COLORS:array<vec3<f32>,7> = array<vec3<f32>,7>(
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
-    let visibility = min(naadf_sun_visibility(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz),min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz)));
+    var visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));
+    // An opaque raster shadow already proves the sun ray is blocked.
+    if visibility>0. {visibility=min(visibility,naadf_mesh_sun_visibility(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz));}
     let light = terrain_lighting(in.normal,visibility);
     var tint=vec3<f32>(1.);
     let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));

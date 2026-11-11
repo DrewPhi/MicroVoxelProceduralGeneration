@@ -39,8 +39,21 @@ def main():
     parser.add_argument('--atmosphere', choices=['on', 'off'], default='on')
     parser.add_argument('--naadf-budget-mib', type=int,
                         help='Explicit conservative build-estimate ceiling; actual RAM watchdog remains active')
+    parser.add_argument('--ray-profile', choices=['full', 'primary', 'voxel-shadows', 'mesh-shadows'], default='full',
+                        help='Ablation only: primary omits both NAADF shadow query types; other modes keep one')
+    parser.add_argument('--gpu-distance', choices=['on', 'off'], default='off')
+    parser.add_argument('--leaf-format', choices=['auto', 'wide'], default='auto')
+    parser.add_argument('--root-format', choices=['dense', 'sparse'], default='dense',
+                        help='Sparse atlas prototype (fixed cube, CPU root distances only)')
+    parser.add_argument('--watch-xz', help='Track published tile width at fixed world x,z in meters')
+    parser.add_argument('--eye', help='Optional explicit x,y,z start (requires --target)')
+    parser.add_argument('--target', help='Optional explicit x,y,z heading target (requires --eye)')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
+    if args.root_format == 'sparse' and (args.route != 'static' or args.gpu_distance == 'on'):
+        parser.error('sparse roots require a static route and GPU distance off')
+    if (args.eye is None) != (args.target is None):
+        parser.error('--eye and --target must be given together')
     if args.naadf_budget_mib is not None and not 16 <= args.naadf_budget_mib <= 16384:
         parser.error('NAADF estimate ceiling must be 16..16384MiB')
     if not math.isfinite(args.route_speed) or args.route_speed <= 0:
@@ -57,7 +70,7 @@ def main():
     if manifest_path.exists():
         parser.error('use a new directory to preserve measurements')
     initial = memory()
-    reserve = max(768, initial['MemTotal'] // 20)
+    reserve = max(1024, initial['MemTotal'] // 10)
     manifest = {
         'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
         'scope': __doc__, 'initial_memory_mib': initial,
@@ -68,7 +81,10 @@ def main():
                        'pixel_error': 5, 'route': args.route, 'route_speed_mps': args.route_speed,
                        'seconds': args.seconds,
                        'lighting': 'ordinary beauty and sun shadows',
-                       'atmosphere': args.atmosphere,
+                       'atmosphere': args.atmosphere, 'ray_profile': args.ray_profile,
+                       'eye': args.eye, 'target': args.target, 'watch_xz': args.watch_xz,
+                       'gpu_distance': args.gpu_distance, 'leaf_format': args.leaf_format,
+                       'root_format': args.root_format,
                        'naadf_estimate_ceiling_mib': args.naadf_budget_mib,
                        'resource_profile': 'development; available RAM with system headroom'},
         'cases': {},
@@ -115,13 +131,21 @@ def main():
         case['command'] = command
         if args.naadf_budget_mib is not None:
             command += ['--naadf-budget-mib', str(args.naadf_budget_mib)]
+        if args.gpu_distance == 'on':
+            command += ['--naadf-gpu-distance', 'on']
+        if args.eye is not None:
+            command += ['--eye', args.eye, '--target', args.target]
         print(shlex.join(command), flush=True)
         save()
         if not args.run:
             continue
         started = time.monotonic()
         with (out / (name + '.log')).open('w') as log:
-            child = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+            child = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                                     env={**os.environ, 'FRONTIER_NAADF_RAY_PROFILE': args.ray_profile,
+                                          'FRONTIER_NAADF_WIDE_LEAVES': '1' if args.leaf_format == 'wide' else '0',
+                                          'FRONTIER_TERRAIN_WATCH_XZ': args.watch_xz or '',
+                                          'FRONTIER_NAADF_SPARSE_ROOTS': '1' if args.root_format == 'sparse' else '0'})
             low = current['MemAvailable']
             stopped = None
             try:
@@ -140,7 +164,7 @@ def main():
                             child.kill()
                             child.wait()
                         break
-                    time.sleep(.5)
+                    time.sleep(.2)
             finally:
                 if child.poll() is None:
                     child.terminate()
@@ -152,8 +176,24 @@ def main():
             data = json.loads(report.read_text())
             case['measurements'] = {k: data.get(k) for k in
                                     ('adapter', 'frames', 'process_memory', 'naadf',
-                                     'gpu_full_render', 'naadf_gpu_pass', 'hybrid_mesh_residency',
-                                     'camera_start', 'projection', 'adaptive_route_quality')}
+                                     'gpu_full_render', 'naadf_gpu_pass', 'naadf_ray_profile',
+                                     'hybrid_mesh_residency',
+                                     'camera_start', 'projection', 'adaptive_route_quality', 'adaptive')}
+            trace = data.get('frame_observations', {}).get('frames', [])
+            if trace:
+                end = trace[-1].get('physical_eye') or trace[-1]['eye']
+                start = data['camera_start']['position']
+                case['motion'] = {'start_eye': start, 'end_eye': end,
+                                  'horizontal_displacement_m': math.dist(start[::2], end[::2]),
+                                  'elapsed_seconds': data.get('route_elapsed_seconds')}
+            if args.watch_xz is not None:
+                events = []
+                for frame in trace:
+                    width = frame.get('watched_tile_cells')
+                    if not events or width != events[-1]['tile_width_cells']:
+                        events.append({'seconds': frame['seconds'], 'tile_width_cells': width,
+                                       'terrain_owner': frame.get('terrain_owner')})
+                case['watched_tile'] = {'world_xz_m': args.watch_xz, 'events': events}
             snapshot = data.get('naadf', {})
             if child.returncode == 0 and snapshot.get('resident_radius_m') != radius:
                 case['status'] = 'invalid_unpublished_requested_radius'

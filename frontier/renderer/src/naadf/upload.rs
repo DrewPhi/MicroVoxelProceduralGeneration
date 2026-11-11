@@ -145,6 +145,9 @@ impl PendingShift {
         gpu.queue.submit(Some(encoder.finish()));
         v.bounds = self.change.region.bounds();
         v.ring = self.change.ring;
+        if let Some(cache) = &mut v.root_distance {
+            cache.invalidate();
+        }
         v.ownership = self.change.owner.clone();
         self.change
     }

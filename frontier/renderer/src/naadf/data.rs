@@ -7,7 +7,8 @@ use frontier_world::{
     Cell, Material, World, VOXEL_SIZE,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
     sync::atomic::{AtomicU32, Ordering},
     time::Instant,
 };
@@ -33,6 +34,7 @@ pub struct Snapshot {
     pub chunks_per_edge: u32,
     pub dims: [usize; 3],
     pub columns: Vec<ColumnSummary>,
+    pub gpu_distance: bool,
     /// Y-fast layout: (z*n+x)*n+y. Texture coordinates are (y,x,z).
     pub chunks: Vec<u32>,
     pub blocks: Vec<u32>,
@@ -224,22 +226,88 @@ pub fn bounds(
     }
     Ok(())
 }
-fn pack_block(input: [u32; 64]) -> [u32; 64] {
-    let mut nodes = input.to_vec();
-    bounds(&mut nodes, [4; 3], [1, 4, 16], 2, &|| false).unwrap();
-    nodes.try_into().unwrap()
+fn pack_block(mut nodes: [u32; 64]) -> [u32; 64] {
+    let mut scratch = [0; 64];
+    for _ in 0..3 {
+        let mut changed = false;
+        for axis in 0..3 {
+            for i in 0..64 {
+                scratch[i] = expand(&nodes, [4; 3], [1, 4, 16], i, axis, 2);
+                changed |= scratch[i] != nodes[i];
+            }
+            std::mem::swap(&mut nodes, &mut scratch);
+        }
+        if !changed {
+            break;
+        }
+    }
+    nodes
 }
-fn budget(s: &Snapshot, overlay: usize, hash_capacity: usize, limit: usize) -> Result<(), String> {
+
+#[derive(Default)]
+struct LeafIndex {
+    first: HashMap<u64, u32>,
+    collisions: HashMap<u64, Vec<u32>>,
+    collision_entries: usize,
+}
+impl LeafIndex {
+    fn intern(
+        &mut self,
+        fingerprint: u64,
+        values: [u32; 64],
+        voxels: &mut Vec<u32>,
+    ) -> Result<u32, String> {
+        let same = |p: u32| {
+            voxels[p as usize..p as usize + 64]
+                .iter()
+                .zip(&values)
+                .all(|(&stored, &raw)| if stored & FULL != 0 { stored } else { 0 } == raw)
+        };
+        let first = self.first.get(&fingerprint).copied();
+        if let Some(p) = first {
+            if same(p) {
+                return Ok(p);
+            }
+            if let Some(p) = self
+                .collisions
+                .get(&fingerprint)
+                .and_then(|v| v.iter().copied().find(|&p| same(p)))
+            {
+                return Ok(p);
+            }
+        }
+        let p = u32::try_from(voxels.len()).map_err(|_| "NAADF voxel buffer address overflow")?;
+        if p >= FULL {
+            return Err("NAADF voxel address exhausted".into());
+        }
+        voxels.extend(pack_block(values));
+        if first.is_some() {
+            self.collisions.entry(fingerprint).or_default().push(p);
+            self.collision_entries += 1;
+        } else {
+            self.first.insert(fingerprint, p);
+        }
+        Ok(p)
+    }
+
+    fn workspace_bytes(&self) -> usize {
+        // Includes hash buckets, control bytes and spare collision capacity.
+        self.first.capacity().saturating_mul(24)
+            + self.collisions.capacity().saturating_mul(48)
+            + self.collision_entries.saturating_mul(16)
+    }
+}
+fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Result<(), String> {
     // New CPU + GPU payload, top-level Jacobi scratch and hash table workspace.
     // Includes capacity slack; resident old snapshot is reported separately.
     let estimate = s
         .chunks
         .capacity()
-        .saturating_mul(12)
+        .saturating_mul(if s.gpu_distance { 8 } else { 12 })
         .saturating_add((s.blocks.capacity() + s.voxels.capacity()).saturating_mul(8))
         .saturating_add(s.palette.capacity().saturating_mul(32))
         .saturating_add(overlay.saturating_mul(16))
-        .saturating_add(hash_capacity.saturating_mul(304));
+        .saturating_add(hash_bytes);
     if estimate > limit {
         return Err(format!(
             "NAADF build estimate {} MiB exceeds {} MiB working budget",
@@ -267,12 +335,25 @@ fn cell_at(a: u64, min: Cell, dims: [usize; 3]) -> Cell {
         z: min.z + (c as usize / (dims[0] * dims[1]) * 16) as i64 + (v / 256) as i64,
     }
 }
+#[cfg(test)]
 pub fn build(
     world: &World,
     eye: [f64; 3],
     radius: u32,
     limit: usize,
     stage: &AtomicU32,
+    cancel: impl Fn() -> bool + Sync,
+) -> Result<Snapshot, String> {
+    build_with_root_mode(world, eye, radius, limit, stage, false, cancel)
+}
+
+pub fn build_with_root_mode(
+    world: &World,
+    eye: [f64; 3],
+    radius: u32,
+    limit: usize,
+    stage: &AtomicU32,
+    gpu_distance: bool,
     cancel: impl Fn() -> bool + Sync,
 ) -> Result<Snapshot, String> {
     if eye.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
@@ -283,10 +364,15 @@ pub fn build(
         return Err("NAADF radius must be 1..256 metres".into());
     }
     let count = n.checked_pow(3).ok_or("NAADF chunk count overflow")?;
-    if count.checked_mul(12).is_none_or(|v| v > limit) {
+    if count
+        .checked_mul(if gpu_distance { 8 } else { 12 })
+        .is_none_or(|v| v > limit)
+    {
         return Err(format!(
             "NAADF top grid plus build/copy workspace alone needs {} MiB",
-            count.saturating_mul(12).div_ceil(1048576)
+            count
+                .saturating_mul(if gpu_distance { 8 } else { 12 })
+                .div_ceil(1048576)
         ));
     }
     let centre = Cell::from_meters(eye);
@@ -296,7 +382,16 @@ pub fn build(
         y: centre.y.div_euclid(16) * 16 - r,
         z: centre.z.div_euclid(16) * 16 - r,
     };
-    build_region(world, min, [n; 3], limit, stage, None, &cancel)
+    build_region(
+        world,
+        min,
+        [n; 3],
+        limit,
+        stage,
+        None,
+        gpu_distance,
+        &cancel,
+    )
 }
 
 pub fn build_region(
@@ -306,6 +401,7 @@ pub fn build_region(
     limit: usize,
     stage: &AtomicU32,
     cached: Option<&(dyn Fn(i64, i64) -> Option<ColumnSummary> + Sync)>,
+    gpu_distance: bool,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Snapshot, String> {
     let start = Instant::now();
@@ -314,7 +410,7 @@ pub fn build_region(
     }
     let [nx, ny, nz] = dims;
     let count = nx * ny * nz;
-    if count.saturating_mul(12) > limit {
+    if count.saturating_mul(if gpu_distance { 8 } else { 12 }) > limit {
         return Err("NAADF strip exceeds build budget".into());
     }
     let mut safe_columns = vec![false; nx * nz];
@@ -324,6 +420,7 @@ pub fn build_region(
         chunks_per_edge: nx as u32,
         dims,
         columns: vec![ColumnSummary::default(); nx * nz],
+        gpu_distance,
         chunks: vec![0; count],
         blocks: vec![],
         voxels: vec![],
@@ -389,7 +486,12 @@ pub fn build_region(
                 overlay.push(((a as u128) << 32) | ty as u128);
             }
         }
-        budget(&out, overlay.capacity(), pigments.capacity(), limit)?;
+        budget(
+            &out,
+            overlay.capacity(),
+            pigments.capacity().saturating_mul(32),
+            limit,
+        )?;
     }
     overlay.sort_unstable();
     let mut compact = 0;
@@ -433,7 +535,7 @@ pub fn build_region(
         })
         .map(|c| (c.x.div_euclid(16), c.z.div_euclid(16)))
         .collect();
-    let mut leaves = HashMap::<[u32; 64], u32>::new();
+    let mut leaves = LeafIndex::default();
     let mut cursor = 0;
     stage.store(2, Ordering::Relaxed);
     for cz in 0..nz {
@@ -585,19 +687,9 @@ pub fn build_region(
                                 };
                                 continue;
                             }
-                            let values = pack_block(values);
-                            let pointer = if let Some(&p) = leaves.get(&values) {
-                                p
-                            } else {
-                                let p = u32::try_from(out.voxels.len())
-                                    .map_err(|_| "NAADF voxel buffer address overflow")?;
-                                if p >= FULL {
-                                    return Err("NAADF voxel address exhausted".into());
-                                }
-                                out.voxels.extend(values);
-                                leaves.insert(values, p);
-                                p
-                            };
+                            let mut hash = DefaultHasher::new();
+                            values.hash(&mut hash);
+                            let pointer = leaves.intern(hash.finish(), values, &mut out.voxels)?;
                             blocks[bi] = CHILD | pointer;
                         }
                     }
@@ -615,7 +707,7 @@ pub fn build_region(
             budget(
                 &out,
                 overlay.capacity(),
-                leaves.capacity() + pigments.capacity(),
+                leaves.workspace_bytes() + pigments.capacity().saturating_mul(32),
                 limit,
             )?;
             stage.store(
@@ -624,12 +716,16 @@ pub fn build_region(
             );
         }
     }
-    out.unique_blocks = leaves.len();
+    out.unique_blocks = out.voxels.len() / 64;
     drop(leaves);
     drop(overlay);
     drop(pigments);
     stage.store(85, Ordering::Relaxed);
-    bounds(&mut out.chunks, dims, [ny, 1, nx * ny], 5, &cancel)?;
+    // GPU mode publishes exact roots first. An empty root itself is a
+    // conservative one-chunk skip; block and leaf proofs are unchanged.
+    if !gpu_distance {
+        bounds(&mut out.chunks, dims, [ny, 1, nx * ny], 5, &cancel)?;
+    }
     if nx == nz {
         out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
             out.bounds(),
@@ -644,6 +740,21 @@ pub fn build_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_leaf_index_resolves_collisions_exactly() {
+        let mut index = LeafIndex::default();
+        let mut words = Vec::new();
+        let mut a = [0; 64];
+        let mut b = [0; 64];
+        a[0] = FULL | 7;
+        b[0] = FULL | 8;
+        let a_ptr = index.intern(0, a, &mut words).unwrap();
+        let b_ptr = index.intern(0, b, &mut words).unwrap();
+        assert_ne!(a_ptr, b_ptr);
+        assert_eq!(index.intern(0, a, &mut words).unwrap(), a_ptr);
+        assert_eq!(index.intern(0, b, &mut words).unwrap(), b_ptr);
+        assert_eq!(words.len(), 128);
+    }
     #[test]
     fn rgb10_pigments_and_leaf_words_survive_more_than_32767_colors() {
         let mut palette = palette();

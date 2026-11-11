@@ -48,6 +48,28 @@ fn shader_is_valid() {
 #[test]
 #[ignore = "explicit hardware GPU parity: NAADF first-hit cells versus independent canonical DDA"]
 fn naadf_gpu_matches_canonical_rays() {
+    gpu_matches_canonical_rays(false, false, false);
+}
+
+#[test]
+#[ignore = "explicit hardware GPU parity: NAADF 32-bit leaf fallback"]
+fn naadf_wide_gpu_matches_canonical_rays() {
+    gpu_matches_canonical_rays(true, false, false);
+}
+
+#[test]
+#[ignore = "explicit hardware GPU parity: cold and warm GPU root cache, before and after ring shift"]
+fn naadf_gpu_distance_matches_canonical_rays() {
+    gpu_matches_canonical_rays(false, true, false);
+}
+
+#[test]
+#[ignore = "explicit hardware GPU parity: sparse roots and whole uniform pages"]
+fn naadf_sparse_roots_match_canonical_rays() {
+    gpu_matches_canonical_rays(false, false, true);
+}
+
+fn gpu_matches_canonical_rays(force_wide_pigment: bool, gpu_distance: bool, sparse_roots: bool) {
     use glam::{Vec3, Vec4};
     pollster::block_on(async {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -60,7 +82,7 @@ fn naadf_gpu_matches_canonical_rays() {
             origin: frontier_world::Cell::default(),
             exposed_native_faces: 0,
         };
-        let gpu = Gpu::new(
+        let mut gpu = Gpu::new(
             &instance,
             None,
             Some(wgpu::TextureFormat::Rgba8Unorm),
@@ -71,6 +93,9 @@ fn naadf_gpu_matches_canonical_rays() {
         )
         .await
         .unwrap();
+        if gpu_distance {
+            gpu.visual_settings = Some(crate::settings::VisualSettings::default());
+        }
         let world = World::fbm(
             7,
             frontier_world::FbmParams {
@@ -91,21 +116,48 @@ fn naadf_gpu_matches_canonical_rays() {
             yaw: 0.,
             pitch: 0.,
         };
-        let snapshot = data::build(
+        let mut snapshot = data::build_with_root_mode(
             &world,
             eye.to_array(),
-            4,
+            if sparse_roots { 8 } else { 4 },
             128 * 1048576,
             &AtomicU32::new(0),
+            gpu_distance,
             || false,
         )
         .unwrap();
-        let bounds = snapshot.bounds();
-        let mut pending = Pending::new(&gpu, snapshot).unwrap();
+        if force_wide_pigment {
+            let word = *snapshot
+                .voxels
+                .iter()
+                .find(|&&v| v & (1 << 30) != 0)
+                .unwrap();
+            let pigment = snapshot.palette[(word ^ (1 << 30)) as usize];
+            snapshot.palette.resize(32769, pigment);
+            for v in &mut snapshot.voxels {
+                if *v == word {
+                    *v = (1 << 30) | 32768;
+                }
+            }
+        }
+        let mut prepared = leaf::Prepared::new(snapshot, false);
+        if sparse_roots {
+            prepared.make_sparse_roots(|| false);
+            assert!(prepared.sparse_root_dims.is_some());
+        }
+        assert_eq!(prepared.encoding.is_compact(), !force_wide_pigment);
+        let mut pending = Pending::new(&gpu, prepared).unwrap();
         while !pending.advance(&gpu.queue) {}
         gpu.queue.submit(std::iter::empty());
         gpu.device.poll(wgpu::Maintain::Wait);
-        let volume = pending.volume;
+        let mut volume = pending.volume;
+        let mut state = gpu_distance.then(|| {
+            stream::State::new_with_encoding(
+                pending.snapshot,
+                volume.capacities,
+                volume.leaf_encoding,
+            )
+        });
         let shadow_source = crate::adaptive_gpu::AdaptiveGpu::new(&gpu.device, gpu.scene_format, 1);
         let texture = |format| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -137,183 +189,232 @@ fn naadf_gpu_matches_canonical_rays() {
                 })
             })
             .collect();
-        let mut tested = 0;
-        for (yaw, pitch, shadows) in [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3., 0.3)]
-            .into_iter()
-            .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
-        {
-            camera.yaw = yaw;
-            camera.pitch = pitch;
-            let matrix = camera.matrix(DVec3::from_array(bounds[0]), 1.);
-            let inverse = matrix.inverse();
-            let basis = ray_basis(camera, 1.);
-            let local = (eye - DVec3::from_array(bounds[0])).as_vec3();
-            gpu.queue.write_buffer(
-                &volume.uniform,
-                0,
-                bytemuck::bytes_of(&Uniform {
-                    matrix: matrix.to_cols_array_2d(),
-                    inverse: inverse.to_cols_array_2d(),
-                    eye: local.extend(0.).to_array(),
-                    extent: [volume.n * 16, volume.n * 16, volume.n * 16, volume.n],
-                    viewport: [64., 64., 1., if shadows { 2. } else { 1. }],
-                    sun: [-0.5, 0.8, -0.3, 0.],
-                    sky: [0.; 4],
-                    far_matrix: [[0.; 4]; 4],
-                    shadow: [0.; 4],
-                    forward: basis[0],
-                    right: basis[1],
-                    up: basis[2],
-                    projection: basis[3],
-                    ring: [0; 4],
-                }),
-            );
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let mut check_rays = |volume: &Volume| {
+            let bounds = volume.bounds;
+            let mut tested = 0;
+            for (yaw, pitch, shadows) in [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3., 0.3)]
+                .into_iter()
+                .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
             {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("NAADF oracle"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &cv,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &dv,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
+                camera.yaw = yaw;
+                camera.pitch = pitch;
+                let matrix = camera.matrix(DVec3::from_array(bounds[0]), 1.);
+                let inverse = matrix.inverse();
+                let basis = ray_basis(camera, 1.);
+                let local = (eye - DVec3::from_array(bounds[0])).as_vec3();
+                gpu.queue.write_buffer(
+                    &volume.uniform,
+                    0,
+                    bytemuck::bytes_of(&Uniform {
+                        matrix: matrix.to_cols_array_2d(),
+                        inverse: inverse.to_cols_array_2d(),
+                        eye: local.extend(0.).to_array(),
+                        extent: [volume.n * 16, volume.n * 16, volume.n * 16, volume.n],
+                        viewport: [64., 64., 1., if shadows { 2. } else { 1. }],
+                        sun: [-0.5, 0.8, -0.3, 0.],
+                        sky: [0.; 4],
+                        far_matrix: [[0.; 4]; 4],
+                        shadow: [0.; 4],
+                        forward: basis[0],
+                        right: basis[1],
+                        up: basis[2],
+                        projection: basis[3],
+                        ring: [
+                            volume.ring[0],
+                            volume.ring[1],
+                            volume.ring[2],
+                            volume.traversal_flags(),
+                        ],
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(&volume.pipeline);
-                pass.set_bind_group(0, &volume.bind, &[]);
-                pass.set_bind_group(1, shadow_source.far_shadow_bind(), &[]);
-                pass.draw(0..3, 0..1);
-            }
-            for (tex, buffer) in [(&color, &buffers[0]), (&depth, &buffers[1])] {
-                encoder.copy_texture_to_buffer(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyBufferInfo {
-                        buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(256),
-                            rows_per_image: Some(64),
-                        },
-                    },
-                    wgpu::Extent3d {
-                        width: 64,
-                        height: 64,
-                        depth_or_array_layers: 1,
-                    },
                 );
-            }
-            gpu.queue.submit(Some(encoder.finish()));
-            let mut results = Vec::new();
-            for buffer in &buffers {
-                let (tx, rx) = mpsc::channel();
-                buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                    tx.send(r).unwrap();
-                });
-                gpu.device.poll(wgpu::Maintain::Wait);
-                rx.recv().unwrap().unwrap();
-                results.push(buffer.slice(..).get_mapped_range().to_vec());
-                buffer.unmap();
-            }
-            let depths: Vec<f32> = results[1]
-                .chunks_exact(4)
-                .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
-                .collect();
-            for y in 0..64 {
-                for x in 0..64 {
-                    let ndc = Vec4::new(
-                        (x as f32 + 0.5) / 32. - 1.,
-                        1. - (y as f32 + 0.5) / 32.,
-                        0.5,
-                        1.,
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("NAADF oracle"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &cv,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &dv,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&volume.pipeline);
+                    pass.set_bind_group(0, &volume.bind, &[]);
+                    pass.set_bind_group(1, shadow_source.far_shadow_bind(), &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                for (tex, buffer) in [(&color, &buffers[0]), (&depth, &buffers[1])] {
+                    encoder.copy_texture_to_buffer(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: tex,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyBufferInfo {
+                            buffer,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(256),
+                                rows_per_image: Some(64),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: 64,
+                            height: 64,
+                            depth_or_array_layers: 1,
+                        },
                     );
-                    let direction = (Vec3::from_array(basis[0][..3].try_into().unwrap())
-                        + ndc.x
-                            * Vec3::from_array(basis[1][..3].try_into().unwrap())
-                            * basis[1][3]
-                        + ndc.y
-                            * Vec3::from_array(basis[2][..3].try_into().unwrap())
-                            * basis[2][3])
-                        .normalize();
-                    let d = direction.as_dvec3();
-                    let max = (0..3)
-                        .filter_map(|a| {
-                            if d[a] > 0. {
-                                Some((bounds[1][a] - eye[a]) / d[a])
-                            } else if d[a] < 0. {
-                                Some((bounds[0][a] - eye[a]) / d[a])
+                }
+                gpu.queue.submit(Some(encoder.finish()));
+                let mut results = Vec::new();
+                for buffer in &buffers {
+                    let (tx, rx) = mpsc::channel();
+                    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                        tx.send(r).unwrap();
+                    });
+                    gpu.device.poll(wgpu::Maintain::Wait);
+                    rx.recv().unwrap().unwrap();
+                    results.push(buffer.slice(..).get_mapped_range().to_vec());
+                    buffer.unmap();
+                }
+                let depths: Vec<f32> = results[1]
+                    .chunks_exact(4)
+                    .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
+                    .collect();
+                for y in 0..64 {
+                    for x in 0..64 {
+                        let ndc = Vec4::new(
+                            (x as f32 + 0.5) / 32. - 1.,
+                            1. - (y as f32 + 0.5) / 32.,
+                            0.5,
+                            1.,
+                        );
+                        let direction = (Vec3::from_array(basis[0][..3].try_into().unwrap())
+                            + ndc.x
+                                * Vec3::from_array(basis[1][..3].try_into().unwrap())
+                                * basis[1][3]
+                            + ndc.y
+                                * Vec3::from_array(basis[2][..3].try_into().unwrap())
+                                * basis[2][3])
+                            .normalize();
+                        let d = direction.as_dvec3();
+                        let max = (0..3)
+                            .filter_map(|a| {
+                                if d[a] > 0. {
+                                    Some((bounds[1][a] - eye[a]) / d[a])
+                                } else if d[a] < 0. {
+                                    Some((bounds[0][a] - eye[a]) / d[a])
+                                } else {
+                                    None
+                                }
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        let hit =
+                            frontier_world::raycast(&world, eye.to_array(), d.to_array(), max)
+                                .filter(|h| {
+                                    let p = h.cell.center_m();
+                                    (0..3).all(|a| p[a] >= bounds[0][a] && p[a] < bounds[1][a])
+                                });
+                        let i = y * 64 + x;
+                        assert_eq!(
+                            results[0][i * 4 + 3] != 0,
+                            hit.is_some(),
+                            "coverage pixel {x},{y}, yaw{yaw},pitch{pitch}"
+                        );
+                        if let Some(hit) = hit {
+                            if shadows {
+                                let sun = Vec3::new(-0.5, 0.8, -0.3).normalize().as_dvec3();
+                                let origin = eye
+                                    + d * hit.distance
+                                    + DVec3::from_array(hit.normal.map(|v| v as f64)) * 0.001;
+                                let limit = (0..3)
+                                    .map(|a| {
+                                        if sun[a] > 0. {
+                                            (bounds[1][a] - origin[a]) / sun[a]
+                                        } else {
+                                            (bounds[0][a] - origin[a]) / sun[a]
+                                        }
+                                    })
+                                    .fold(f64::INFINITY, f64::min);
+                                let blocked = frontier_world::raycast(
+                                    &world,
+                                    origin.to_array(),
+                                    sun.to_array(),
+                                    (limit - 1e-7).max(0.),
+                                )
+                                .is_some();
+                                assert_eq!(
+                                    results[0][i * 4] != 0,
+                                    blocked,
+                                    "shadow {x},{y}, yaw{yaw}"
+                                );
                             } else {
-                                None
+                                assert_eq!(
+                                    results[0][i * 4],
+                                    data::id(hit.material) as u8,
+                                    "material {x},{y}"
+                                );
                             }
-                        })
-                        .fold(f64::INFINITY, f64::min);
-                    let hit = frontier_world::raycast(&world, eye.to_array(), d.to_array(), max)
-                        .filter(|h| {
-                            let p = h.cell.center_m();
-                            (0..3).all(|a| p[a] >= bounds[0][a] && p[a] < bounds[1][a])
-                        });
-                    let i = y * 64 + x;
-                    assert_eq!(
-                        results[0][i * 4 + 3] != 0,
-                        hit.is_some(),
-                        "coverage pixel {x},{y}, yaw{yaw},pitch{pitch}"
-                    );
-                    if let Some(hit) = hit {
-                        if shadows {
-                            let sun = Vec3::new(-0.5, 0.8, -0.3).normalize().as_dvec3();
-                            let origin = eye
-                                + d * hit.distance
-                                + DVec3::from_array(hit.normal.map(|v| v as f64)) * 0.001;
-                            let limit = (0..3)
-                                .map(|a| {
-                                    if sun[a] > 0. {
-                                        (bounds[1][a] - origin[a]) / sun[a]
-                                    } else {
-                                        (bounds[0][a] - origin[a]) / sun[a]
-                                    }
-                                })
-                                .fold(f64::INFINITY, f64::min);
-                            let blocked = frontier_world::raycast(
-                                &world,
-                                origin.to_array(),
-                                sun.to_array(),
-                                (limit - 1e-7).max(0.),
-                            )
-                            .is_some();
-                            assert_eq!(results[0][i * 4] != 0, blocked, "shadow {x},{y}, yaw{yaw}");
-                        } else {
-                            assert_eq!(
-                                results[0][i * 4],
-                                data::id(hit.material) as u8,
-                                "material {x},{y}"
-                            );
-                        }
 
-                        let point = local + direction * hit.distance as f32;
-                        let clip = matrix * point.extend(1.);
-                        assert!((depths[i] - clip.z / clip.w).abs() < 2e-6, "depth {x},{y}");
-                        tested += 1;
+                            let point = local + direction * hit.distance as f32;
+                            let clip = matrix * point.extend(1.);
+                            assert!((depths[i] - clip.z / clip.w).abs() < 2e-6, "depth {x},{y}");
+                            tested += 1;
+                        }
                     }
                 }
             }
+            eprintln!("NAADF GPU oracle: {tested} covered primary/shadow samples across four headings; 32768 coverage decisions checked");
+            assert!(tested > 1000);
+        };
+        check_rays(&volume);
+        if let Some(state) = &mut state {
+            let warm = |volume: &mut Volume| {
+                let cache = volume
+                    .root_distance
+                    .as_mut()
+                    .expect("root cache must be allocated");
+                assert_eq!(cache.progress().0, 0);
+                cache.advance(&gpu.device, &gpu.queue, volume.n, volume.ring);
+                assert_eq!(cache.progress().0, 0);
+                cache.advance(&gpu.device, &gpu.queue, volume.n, volume.ring);
+                gpu.device.poll(wgpu::Maintain::Wait);
+                assert_eq!(cache.progress(), (1, 1));
+            };
+            warm(&mut volume);
+            check_rays(&volume);
+            let delta = [-2, 0, 1];
+            let next = stream::Region {
+                lo: std::array::from_fn(|a| state.region.lo[a] + delta[a]),
+                hi: std::array::from_fn(|a| state.region.hi[a] + delta[a]),
+            };
+            let change = state
+                .prepare(&world, next, 128 * 1048576, &|| false)
+                .unwrap();
+            let mut shift = upload::PendingShift::new(&gpu, change);
+            while !shift.advance(&gpu, &volume) {}
+            let change = shift.publish(&gpu, &mut volume);
+            state.finish(change, true);
+            assert_eq!(volume.ring, [6, 0, 1]);
+            assert_eq!(volume.root_distance.as_ref().unwrap().progress().0, 0);
+            check_rays(&volume);
+            warm(&mut volume);
+            check_rays(&volume);
         }
-        eprintln!("NAADF GPU oracle: {tested} covered primary/shadow samples across4headings;32768coverage decisions checked");
-        assert!(tested > 1000);
+        eprintln!("NAADF GPU memory: {}-bit leaves, {} leaf bytes, {} initial payload bytes ({} with wide leaves)",
+            volume.leaf_encoding.bits(), volume.leaf_bytes, volume.bytes, volume.wide_bytes);
     });
 }

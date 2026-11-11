@@ -2,11 +2,13 @@
 //! demand. New arena slots remain unreachable until an atomic root publication.
 use super::{
     data::{self, ColumnSummary, Pigment, Snapshot},
+    leaf::Encoding,
     ownership::Ownership,
 };
 use frontier_world::{Cell, World};
 use std::{
     collections::{BTreeMap, HashMap},
+    hash::{DefaultHasher, Hash, Hasher},
     sync::{atomic::AtomicU32, Arc},
     time::Instant,
 };
@@ -146,6 +148,7 @@ pub struct Change {
     pub retiring: Arc<Ownership>,
     pub build_ms: f64,
     pub generated_columns: usize,
+    pub shared_leaves: usize,
     palette_base: usize,
     leaf_slots: Vec<usize>,
     block_slots: Vec<usize>,
@@ -155,11 +158,16 @@ pub struct State {
     pub region: Region,
     n: usize,
     ring: [usize; 3],
+    // Retirement only needs the mixed roots that own arena allocations.
+    mixed_roots: HashMap<u32, u32>,
+    #[cfg(test)]
     chunks: Vec<u32>,
+    gpu_distance: bool,
     blocks: Vec<u32>,
     columns: Vec<ColumnSummary>,
     refs: Vec<u32>,
     leaves: Arena,
+    leaf_encoding: Encoding,
     block_slots: Arena,
     palette: Vec<Pigment>,
     pigments: HashMap<[u32; 4], u32>,
@@ -181,13 +189,14 @@ fn cell(p: Point) -> Cell {
     }
 }
 impl State {
-    pub fn new(s: Snapshot, capacities: [usize; 3]) -> Self {
+    pub fn new_with_encoding(s: Snapshot, capacities: [usize; 3], leaf_encoding: Encoding) -> Self {
         let bounds = s.bounds();
         let region = Region {
             lo: bounds[0].map(|v| v as i64),
             hi: bounds[1].map(|v| v as i64),
         };
-        let mut refs = vec![0u32; s.voxels.len() / 64];
+        let words_per_leaf = leaf_encoding.words_per_brick();
+        let mut refs = vec![0u32; s.voxels.len() / words_per_leaf];
         for v in &s.blocks {
             if v & CHILD != 0 {
                 refs[(v & MASK) as usize / 64] += 1;
@@ -199,13 +208,26 @@ impl State {
             .enumerate()
             .map(|(i, p)| (key(p), i as u32))
             .collect();
+        let mut mixed_roots = HashMap::with_capacity(s.mixed_chunks);
+        for (index, &word) in s.chunks.iter().enumerate() {
+            if word & CHILD != 0 {
+                mixed_roots.insert(index as u32, word);
+            }
+        }
         Self {
             region,
             n: s.chunks_per_edge as usize,
             ring: [0; 3],
+            mixed_roots,
+            #[cfg(test)]
             chunks: s.chunks,
+            gpu_distance: s.gpu_distance,
             columns: s.columns,
-            leaves: Arena::new(s.voxels.len() / 64, capacities[1] / 256),
+            leaves: Arena::new(
+                s.voxels.len() / words_per_leaf,
+                capacities[1] / (words_per_leaf * 4),
+            ),
+            leaf_encoding,
             block_slots: Arena::new(s.blocks.len() / 64, capacities[0] / 256),
             blocks: s.blocks,
             refs,
@@ -273,6 +295,7 @@ impl State {
             }
         }
         let cached = |x, z| self.summary(x, z);
+        let gpu_distance = self.gpu_distance;
         let mut snapshots = vec![];
         for batch in regions.chunks(4) {
             if cancel() {
@@ -291,6 +314,7 @@ impl State {
                                 limit / 4,
                                 &AtomicU32::new(0),
                                 Some(cached),
+                                gpu_distance,
                                 cancel,
                             )
                         })
@@ -317,7 +341,9 @@ impl State {
         let old_palette = self.palette.len();
         let result = (|| {
             let mut roots = vec![];
-            let mut writes = vec![];
+            let mut writes: Vec<Write> = vec![];
+            let mut leaf_index = HashMap::<u64, (usize, usize)>::new();
+            let mut shared_leaves = 0;
             let mut columns = HashMap::new();
             let mut generated = 0;
             for (region, mut s) in regions.into_iter().zip(snapshots) {
@@ -338,14 +364,58 @@ impl State {
                     };
                     map.push(id);
                 }
-                let ls = self.leaves.take(s.voxels.len() / 64)?;
-                leaf_alloc.extend_from_slice(&ls);
                 let bs = self.block_slots.take(s.blocks.len() / 64)?;
                 block_alloc.extend_from_slice(&bs);
                 for v in &mut s.voxels {
                     if *v & FULL != 0 {
                         *v = FULL | map[(*v & MASK) as usize];
                     }
+                }
+                self.leaf_encoding.pack(&mut s.voxels)?;
+                // Share equal leaves across leading strips in the same
+                // transaction. A hash only selects a candidate; equality
+                // checks every packed word, including empty face distances.
+                let words = self.leaf_encoding.words_per_brick();
+                let mut ls = Vec::with_capacity(s.voxels.len() / words);
+                let mut fresh = Vec::new();
+                for leaf in s.voxels.chunks_exact(words) {
+                    let mut hasher = DefaultHasher::new();
+                    leaf.hash(&mut hasher);
+                    let hash = hasher.finish();
+                    let prior = leaf_index.get(&hash).and_then(|&(w, i)| {
+                        (writes[w].data[i..i + words] == *leaf)
+                            .then_some((writes[w].word + i) / words)
+                    });
+                    if let Some(slot) = prior {
+                        ls.push(slot);
+                        shared_leaves += 1;
+                    } else {
+                        fresh.push((ls.len(), hash));
+                        ls.push(0);
+                    }
+                }
+                let allocated = self.leaves.take(fresh.len())?;
+                leaf_alloc.extend_from_slice(&allocated);
+                let mut first = 0;
+                while first < fresh.len() {
+                    let mut last = first + 1;
+                    while last < fresh.len() && allocated[last] == allocated[last - 1] + 1 {
+                        last += 1;
+                    }
+                    let mut data = Vec::with_capacity((last - first) * words);
+                    for (&(local, hash), &slot) in
+                        fresh[first..last].iter().zip(&allocated[first..last])
+                    {
+                        ls[local] = slot;
+                        leaf_index.entry(hash).or_insert((writes.len(), data.len()));
+                        data.extend_from_slice(&s.voxels[local * words..(local + 1) * words]);
+                    }
+                    writes.push(Write {
+                        kind: 1,
+                        word: allocated[first] * words,
+                        data,
+                    });
+                    first = last;
                 }
                 for v in &mut s.blocks {
                     if *v & CHILD != 0 {
@@ -366,7 +436,8 @@ impl State {
                     self.blocks[slot * 64..slot * 64 + 64]
                         .copy_from_slice(&s.blocks[local * 64..local * 64 + 64]);
                 }
-                for (kind, slots, values) in [(0, bs, s.blocks), (1, ls, s.voxels)] {
+                {
+                    let (slots, values, words) = (bs, s.blocks, 64);
                     let mut i = 0;
                     while i < slots.len() {
                         let mut j = i + 1;
@@ -374,9 +445,9 @@ impl State {
                             j += 1;
                         }
                         writes.push(Write {
-                            kind,
-                            word: slots[i] * 64,
-                            data: values[i * 64..j * 64].to_vec(),
+                            kind: 0,
+                            word: slots[i] * words,
+                            data: values[i * words..j * words].to_vec(),
                         });
                         i = j;
                     }
@@ -421,6 +492,7 @@ impl State {
                 retiring,
                 build_ms: start.elapsed().as_secs_f64() * 1000.,
                 generated_columns: generated,
+                shared_leaves,
                 palette_base: old_palette,
                 leaf_slots: leaf_alloc.clone(),
                 block_slots: block_alloc.clone(),
@@ -453,28 +525,32 @@ impl State {
             }
             return;
         }
-        for r in difference(self.region, change.region) {
-            for z in r.lo[2]..r.hi[2] {
-                for x in r.lo[0]..r.hi[0] {
-                    for y in r.lo[1]..r.hi[1] {
-                        let v = self.chunks[self.index([x, y, z])];
-                        if v & CHILD == 0 {
-                            continue;
-                        }
-                        let slot = (v & MASK) as usize / 64;
-                        for word in &self.blocks[slot * 64..slot * 64 + 64] {
-                            if word & CHILD != 0 {
-                                let p = (*word & MASK) as usize / 64;
-                                self.refs[p] -= 1;
-                                if self.refs[p] == 0 {
-                                    self.leaves.release(p, 1);
-                                }
-                            }
-                        }
-                        self.block_slots.release(slot, 1);
+        let n = self.n;
+        let old = self.region;
+        let ring = self.ring;
+        let new = change.region;
+        for (_, word) in self.mixed_roots.extract_if(|&index, _| {
+            let index = index as usize;
+            let slot = [(index / n) % n, index % n, index / (n * n)];
+            (0..3).any(|axis| {
+                if old.lo[axis] == new.lo[axis] {
+                    return false;
+                }
+                let cell = old.lo[axis] + ((slot[axis] + n - ring[axis]) % n) as i64;
+                cell < new.lo[axis] || cell >= new.hi[axis]
+            })
+        }) {
+            let slot = (word & MASK) as usize / 64;
+            for word in &self.blocks[slot * 64..slot * 64 + 64] {
+                if word & CHILD != 0 {
+                    let p = (*word & MASK) as usize / 64;
+                    self.refs[p] -= 1;
+                    if self.refs[p] == 0 {
+                        self.leaves.release(p, 1);
                     }
                 }
             }
+            self.block_slots.release(slot, 1);
         }
         self.refs.resize(self.leaves.top, 0);
         for &slot in &change.block_slots {
@@ -489,13 +565,24 @@ impl State {
             for z in 0..nz {
                 for x in 0..nx {
                     for y in 0..ny {
+                        let word = r.nodes[(z * nx + x) * ny + y];
+                        if !cfg!(test) && word & CHILD == 0 {
+                            continue;
+                        }
                         let p = [
                             r.region.lo[0] + x as i64,
                             r.region.lo[1] + y as i64,
                             r.region.lo[2] + z as i64,
                         ];
                         let index = self.index(p);
-                        self.chunks[index] = r.nodes[(z * nx + x) * ny + y];
+                        if word & CHILD != 0 {
+                            debug_assert!(!self.mixed_roots.contains_key(&(index as u32)));
+                            self.mixed_roots.insert(index as u32, word);
+                        }
+                        #[cfg(test)]
+                        {
+                            self.chunks[index] = word;
+                        }
                     }
                 }
             }
@@ -553,6 +640,13 @@ mod tests {
     }
     #[test]
     fn shifted_window_matches_fresh_voxels_and_pigments_across_wraps() {
+        shifted_window_matches_fresh_voxels_and_pigments(false, 3);
+    }
+    #[test]
+    fn shifted_wide_window_matches_fresh_voxels_and_pigments_across_wraps() {
+        shifted_window_matches_fresh_voxels_and_pigments(true, 3);
+    }
+    fn shifted_window_matches_fresh_voxels_and_pigments(force_wide: bool, radius: u32) {
         let world = World::fbm(
             7,
             frontier_world::FbmParams {
@@ -562,7 +656,6 @@ mod tests {
         )
         .unwrap()
         .with_vegetation();
-        let radius = 3;
         let eye = [-41., world.height_m(-41., -250.) + 1.7, -250.];
         let build = |eye| {
             data::build(
@@ -575,9 +668,15 @@ mod tests {
             )
             .unwrap()
         };
-        let first = build(eye);
+        let prepared = super::super::leaf::Prepared::new(build(eye), force_wide);
+        let encoding = prepared.encoding;
+        assert_eq!(encoding.is_compact(), !force_wide);
+        let first = prepared.snapshot;
         let mut voxels = first.voxels.clone();
-        let mut state = State::new(first, [16 * 1048576, 32 * 1048576, 1048576]);
+        let mut state =
+            State::new_with_encoding(first, [16 * 1048576, 32 * 1048576, 1048576], encoding);
+        let mut shared = 0;
+        let mut total = 0;
         for delta in [[2, 0, -2], [-2, 2, 2], [-2, -2, 2], [2, 0, -2]] {
             let next = Region {
                 lo: std::array::from_fn(|a| state.region.lo[a] + delta[a]),
@@ -593,8 +692,11 @@ mod tests {
             if delta[1] == 0 {
                 assert!(c.generated_columns < (state.n * 16).pow(2));
             }
+            shared += c.shared_leaves;
+            total += c.shared_leaves;
             for w in &c.writes {
                 if w.kind == 1 {
+                    total += w.data.len() / encoding.words_per_brick();
                     voxels.resize(voxels.len().max(w.word + w.data.len()), 0);
                     voxels[w.word..w.word + w.data.len()].copy_from_slice(&w.data);
                 }
@@ -610,13 +712,21 @@ mod tests {
                             next.lo[1] + (y / 16) as i64,
                             next.lo[2] + (z / 16) as i64,
                         ];
-                        let mut v = state.chunks[state.index(global)];
+                        let index = state.index(global);
+                        let mut v = state.chunks[index];
+                        assert_eq!(
+                            state.mixed_roots.get(&(index as u32)).copied(),
+                            (v & CHILD != 0).then_some(v)
+                        );
                         if v & CHILD != 0 {
                             v = state.blocks[(v & MASK) as usize
                                 + (x % 16) / 4
                                 + 4 * ((y % 16) / 4 + 4 * ((z % 16) / 4))];
                             if v & CHILD != 0 {
-                                v = voxels[(v & MASK) as usize + x % 4 + 4 * (y % 4 + 4 * (z % 4))];
+                                v = encoding.load(
+                                    &voxels,
+                                    (v & MASK) as usize + x % 4 + 4 * (y % 4 + 4 * (z % 4)),
+                                );
                             }
                         }
                         let expected = reference.material([x, y, z]);
@@ -632,5 +742,8 @@ mod tests {
                 }
             }
         }
+        assert!(shared > 0);
+        eprintln!("NAADF seed-7 Alpine radius {radius} m, four wrapped shifts: {shared}/{total} incoming leaves shared ({} bytes avoided, {}-bit leaves)",
+            shared * encoding.words_per_brick() * 4, encoding.bits());
     }
 }

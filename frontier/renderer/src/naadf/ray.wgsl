@@ -45,7 +45,10 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     }
     if naadf.viewport.w>0.5{return Fragment(vec4(f32(pigment.material)/255.,0.,0.,1.),depth);}
     if naadf.sky.w>0.5{return Fragment(vec4(vec3(0.8)*(0.3+0.7*max(dot(h.normal,normalize(vec3(-0.5,0.8,-0.3))),0.)),1.),depth);}
-    var visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);
-    if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
+    var visibility=1.;
+    if naadf.sun.w>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
+        if naadf.shadow.y<0.5{visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
+        if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
+    }
     return Fragment(vec4(pigment.rgb*light(h.normal,visibility),1.),depth);
 }

@@ -185,7 +185,8 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
         if f32(h&65535u)/65536.>=i.fade { discard; }
     }
     let ao=mix(1.,i.ao,lighting.sky.y);
-    let visibility=min(naadf_sun_visibility(i.local-camera.eye.xyz,normalize(i.normal),lighting.sun.xyz),plant_shadow(i.local,i.normal,lighting.sun.xyz));
+    var visibility=plant_shadow(i.local,i.normal,lighting.sun.xyz);
+    if visibility>0. {visibility=min(visibility,naadf_mesh_sun_visibility(i.local-camera.eye.xyz,normalize(i.normal),lighting.sun.xyz));}
     if lighting.sky.y>0.5 && lighting.sun.w>0.5 {
         return vec4<f32>(i.color*beauty_plant_lighting(i,visibility,ao),1.);
     }

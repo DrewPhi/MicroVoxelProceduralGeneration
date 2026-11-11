@@ -3231,23 +3231,14 @@ impl GeometryCache {
         &mut self,
         owner: Option<Arc<crate::naadf::ownership::Ownership>>,
     ) {
-        if let Some(o) = &owner {
-            let remove: Vec<_> = self
-                .entries
-                .keys()
-                .filter(|k| o.terrain(**k))
-                .copied()
-                .collect();
-            for key in remove {
-                self.unlink(key);
-                let e = self.entries.remove(&key).unwrap();
-                self.mesh_bytes -= e.tile.bytes;
-            }
-        }
+        // Ownership masks immutable raster payloads, which remain reusable
+        // on retirement subject to the ordinary bounded LRU.
         self.naadf_owner = owner;
-        self.stats.resident_bytes = self.mesh_bytes
-            + self.lru_metadata_bytes()
-            + self.samples.pages.snapshot().source_cache_bytes;
+    }
+    pub(crate) fn naadf_owns(&self, key: TileKey) -> bool {
+        self.naadf_owner
+            .as_ref()
+            .is_some_and(|owner| owner.terrain(key))
     }
     pub fn get(&mut self, key: TileKey) -> Option<Arc<GeometryTile>> {
         if let Some(owner) = self.naadf_owner.as_ref().filter(|o| o.terrain(key)) {

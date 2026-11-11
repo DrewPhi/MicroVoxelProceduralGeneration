@@ -12,6 +12,8 @@ pub struct AdaptiveView {
     desired_naadf_owner: u64,
     pub published_naadf_owner: u64,
     pub naadf_owned_tiles: usize,
+    pub watched_tile_cells: Option<u32>,
+    watch_xz: Option<[i64; 2]>,
     upload_budget: u64,
     background_paused: bool,
     stream_settings: StreamSettings,
@@ -182,6 +184,16 @@ impl AdaptiveView {
             desired_naadf_owner: 0,
             published_naadf_owner: 0,
             naadf_owned_tiles: 0,
+            watched_tile_cells: None,
+            watch_xz: std::env::var("FRONTIER_TERRAIN_WATCH_XZ")
+                .ok()
+                .and_then(|s| {
+                    let (x, z) = s.split_once(',')?;
+                    Some([x.parse::<f64>().ok()?, z.parse::<f64>().ok()?])
+                })
+                .filter(|v| v.iter().all(|x| x.is_finite()))
+                .map(|v| v.map(|x| (x / crate::VOXEL_SIZE).floor() as i64)),
+
             upload_budget: 2 * 1024 * 1024,
             background_paused: false,
             stream_settings,
@@ -301,7 +313,7 @@ impl AdaptiveView {
         }
         if let Some(result) = self.worker.poll() {
             let frame = result?;
-            if frame.epoch == epoch {
+            if frame.epoch == epoch && frame.ownership_id == self.desired_naadf_owner {
                 self.pending_count = frame.pending;
                 self.cpu_quality_ready = frame.quality_ready;
                 self.cpu_refinement_ready = frame.refinement_ready;
@@ -446,6 +458,17 @@ impl AdaptiveView {
                         .filter(|tile| !tile.naadf_owned)
                         .map(|tile| (tile.key, tile.conservative_surface_bounds))
                         .collect();
+                    self.watched_tile_cells = self.watch_xz.and_then(|point| {
+                        keys.iter()
+                            .find(|k| {
+                                (0..2).all(|i| {
+                                    point[i] >= k.min[i]
+                                        && point[i]
+                                            < k.min[i].saturating_add(i64::from(k.width_cells))
+                                })
+                            })
+                            .map(|k| k.width_cells)
+                    });
                     self.owners = keys;
                     self.retain_dirty = true;
                     if let Some(transaction) = frame.publication_transaction {
@@ -638,8 +661,9 @@ impl AdaptiveView {
         let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved,self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
         json.pop();
         json.push_str(&format!(
-            ",\"naadf_owned_tiles\":{},\"naadf_ownership_id\":{}}}",
-            self.naadf_owned_tiles, self.published_naadf_owner
+            ",\"naadf_owned_tiles\":{},\"naadf_ownership_id\":{},\"naadf_handoff_reused_tiles\":{},\"naadf_handoff_changed_tiles\":{}}}",
+            self.naadf_owned_tiles, self.published_naadf_owner,
+            self.planning.naadf_handoff_reused_tiles, self.planning.naadf_handoff_changed_tiles
         ));
         json.pop();
         json.push_str(&format!(
