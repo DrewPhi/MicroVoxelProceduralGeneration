@@ -14,8 +14,11 @@ use std::{
     thread,
     time::Instant,
 };
+#[path = "distant_vegetation.rs"]
+mod distant_vegetation;
 #[path = "shadow_lifecycle.rs"]
 mod shadow_lifecycle;
+use distant_vegetation::{distant_tree_mesh, distant_tree_radius, tree_baseline};
 use shadow_lifecycle::ShadowLifecycle;
 pub use shadow_lifecycle::{ShadowCoverage, ShadowInspection, ShadowReason, ShadowTransition};
 
@@ -36,7 +39,7 @@ pub struct MeshKey {
     pub seed: u64,
     /// Global native-grid ground-cover tile; zero for individual trees.
     pub tile: [i64; 2],
-    /// Native-cell stride: 1,2,4,8.
+    /// Native-cell stride: 1,2,4,8; 16 is a recipe-derived distant tree.
     pub lod: u8,
     pub edit_id: u64,
 }
@@ -60,6 +63,7 @@ pub struct VegetationBatch {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VegetationStats {
     pub resident_tiles: usize,
+    pub tree_radius_m: f64,
     pub resident_meshes: usize,
     pub pending_jobs: usize,
     pub selected_instances: usize,
@@ -100,9 +104,9 @@ pub struct VegetationStats {
     pub tree_lod_changes: usize,
     pub tree_refinements: usize,
     pub tree_coarsenings: usize,
-    /// Selected color trees, strides 1, 2, 4, 8.
-    pub tree_lod_histogram: [usize; 4],
-    pub shadow_lod_histogram: [usize; 4],
+    /// Selected color trees, strides 1, 2, 4, 8, 16.
+    pub tree_lod_histogram: [usize; 5],
+    pub shadow_lod_histogram: [usize; 5],
     pub shadow_lod_changes: usize,
     pub explicit_shadow_instances: usize,
     pub explicit_shadow_triangles: usize,
@@ -219,10 +223,10 @@ impl Default for VegetationConfig {
         Self {
             grass_radius_m: 28.,
             flower_radius_m: 56.,
-            tree_radius_m: 220.,
+            tree_radius_m: distant_tree_radius(),
             pixel_error: 1.25,
-            max_tiles: 384,
-            max_meshes: 512,
+            max_tiles: 2304,
+            max_meshes: 2048,
             max_instances: 12_000,
             max_triangles: 1_000_000,
             reference: false,
@@ -700,6 +704,17 @@ impl VegetationStream {
                                         w.vegetation_records_species(min, max, species(t.species)),
                                     )
                                 }
+                                Job::Mesh(key, p, w, _) if key.lod == 16 && key.edit_id == 0 => {
+                                    let start = Instant::now();
+                                    let mesh = distant_tree_mesh(p.seed, p.variant, || {
+                                        generation != cancel.load(Ordering::Relaxed)
+                                    });
+                                    counters.mesh_nanos[kind].fetch_add(
+                                        start.elapsed().as_nanos() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    Done::Mesh(key, w.revision(), Arc::new(mesh))
+                                }
                                 Job::Mesh(key, p, w, _) => {
                                     let assembly_start = Instant::now();
                                     let Some(model) = vegetation::model_for_cancellable(&p, || {
@@ -1107,6 +1122,7 @@ impl VegetationStream {
         }
         self.ground_inspection.clear();
         let mut stats = VegetationStats {
+            tree_radius_m: self.config.tree_radius_m,
             shadow_lifecycle_enabled: self.shadow_transitions_enabled,
             prediction_horizon_ms: self.prediction.horizon() * 1000.,
             prediction_lead_m: lead[0].hypot(lead[1]),
@@ -1137,7 +1153,7 @@ impl VegetationStream {
         ];
         let mut demand = Vec::new();
         for s in 0..3u8 {
-            let radius = radii[s as usize].clamp(0., 512.);
+            let radius = radii[s as usize].clamp(0., 1024.);
             // Predict placement only. Mesh generation still follows final
             // budget admission below, preventing speculative variant churn.
             // Bound enumeration by the existing tile budget even at aircraft speed.
@@ -1520,7 +1536,7 @@ impl VegetationStream {
         let mut tree_current_costs = Vec::new();
         let tree_budget = selection_config.max_triangles.saturating_mul(65) / 100;
         let mut tree_coverage_ready = true;
-        for (_, p) in plants
+        for (distance, p) in plants
             .iter()
             .filter(|(_, p)| !self.config.reference && p.species == Species::Rowan)
         {
@@ -1529,7 +1545,7 @@ impl VegetationStream {
                 variant: p.variant,
                 seed: p.seed,
                 tile: [0; 2],
-                lod: 8,
+                lod: tree_baseline(*distance),
                 edit_id: plant_edit_id(p, edits, self.world.revision()),
             };
             let current = resident_coverage_key(
@@ -1548,9 +1564,9 @@ impl VegetationStream {
                     tree_current_costs.push((tree_identity(key), cost));
                 }
                 // First preserve the cheapest already resident representation
-                // for every feasible tree. Four direct lookups avoid scanning
+                // for every feasible tree. Five direct lookups avoid scanning
                 // the cache or requiring historical LOD8 meshes to be rebuilt.
-                let baseline = [1, 2, 4, 8]
+                let baseline = [1, 2, 4, 8, 16]
                     .into_iter()
                     .filter_map(|lod| {
                         self.meshes
@@ -1563,7 +1579,8 @@ impl VegetationStream {
                 let reserved = if baseline <= room { baseline } else { 0 };
                 tree_reservations.insert(tree_identity(key), reserved);
                 remaining_tree_coarse = remaining_tree_coarse.saturating_add(reserved);
-            } else {
+            } else if *distance <= 220. {
+                // Distant coverage must not freeze nearby refinement.
                 tree_coverage_ready = false;
             }
         }
@@ -1646,7 +1663,11 @@ impl VegetationStream {
             let mut lod = selected_stride(distance, projection, &self.config);
             // More conservative tree contour than ground cover.
             if s == 2 {
-                lod = lod.min(4);
+                lod = if distance > 220. && !self.config.reference {
+                    16
+                } else {
+                    lod.min(4)
+                };
             }
             let edit_id = if s == 2 {
                 plant_edit_id(&p, edits, self.world.revision())
@@ -1671,7 +1692,11 @@ impl VegetationStream {
             if s == 2 && !self.config.reference {
                 key.lod = hysteretic_stride(
                     key.lod,
-                    selected_stride(distance * 0.9, projection, &self.config).min(4),
+                    if distance * 0.9 > 220. {
+                        16
+                    } else {
+                        selected_stride(distance * 0.9, projection, &self.config).min(4)
+                    },
                     previous,
                 );
             }
@@ -1681,7 +1706,10 @@ impl VegetationStream {
                 key.lod = 1;
                 stats.requested_native_unresolved += 1;
             }
-            let coarse_key = MeshKey { lod: 8, ..key };
+            let coarse_key = MeshKey {
+                lod: if s == 2 { tree_baseline(distance) } else { 8 },
+                ..key
+            };
             let ground_headroom = if s != 2 && !self.config.reference {
                 remaining_ground_coarse = remaining_ground_coarse.saturating_sub(
                     ground_reservations
@@ -1749,7 +1777,7 @@ impl VegetationStream {
             };
             let mut request_key = key;
             if s == 2 && !self.config.reference && !force_native {
-                if !tree_coverage_ready {
+                if !tree_coverage_ready && distance <= 220. {
                     request_key = resident_coverage_key(&self.meshes, coarse_key, previous)
                         .unwrap_or(coarse_key);
                 } else {
@@ -2199,7 +2227,7 @@ impl VegetationStream {
                         .is_some_and(|old| old != entry.1)
                 })
                 .count();
-            stats.shadow_lod_histogram = [0; 4];
+            stats.shadow_lod_histogram = [0; 5];
             for lod in primary.values() {
                 stats.shadow_lod_histogram[lod.ilog2() as usize] += 1;
             }
@@ -3679,6 +3707,75 @@ pub(crate) fn mesh_cells_scaled_reference(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn distant_tree_uses_cached_proxy_beyond_old_horizon_and_invalidates_for_edits() {
+        use super::*;
+        let world = World::new(7);
+        let mut stream = VegetationStream::new(
+            world.clone(),
+            VegetationConfig {
+                grass_radius_m: 0.,
+                flower_radius_m: 0.,
+                tree_radius_m: 400.,
+                ..Default::default()
+            },
+        );
+        for x in -15..=15 {
+            for z in -15..=15 {
+                stream
+                    .tiles
+                    .insert(Tile { species: 2, x, z }, (Vec::new(), 0));
+            }
+        }
+        let p = PlantRecord {
+            species: Species::Rowan,
+            seed: 941,
+            variant: 3,
+            root: Cell {
+                x: 0,
+                y: 0,
+                z: 4800,
+            },
+            rotation: 0,
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 0,
+                z: 9,
+            })
+            .unwrap()
+            .0
+            .push(p);
+        let key = MeshKey {
+            species: 2,
+            seed: p.seed,
+            variant: p.variant,
+            tile: [0; 2],
+            lod: 16,
+            edit_id: 0,
+        };
+        let mesh = Arc::new(distant_tree_mesh(p.seed, p.variant, || false));
+        stream.mesh_costs.insert(key, (mesh.indices.len() / 3, 0));
+        stream.meshes.insert(key, (mesh, 0));
+        let frame = stream.update_view(
+            [0., 1.7, 0.],
+            1080,
+            1.,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert!(frame.batches.iter().any(|b| b.key == key));
+        assert_eq!(frame.stats.tree_lod_histogram[4], 1);
+        assert!(
+            !stream.pending_meshes.contains(&key),
+            "cached proxy must not regenerate"
+        );
+        assert_ne!(plant_edit_id(&p, &[p.root], 9), 0);
+        assert_eq!(plant_edit_id(&p, &[Cell { x: 0, y: 0, z: 0 }], 9), 0);
+    }
     #[test]
     fn delegated_instance_cannot_evict_a_shared_outside_tree_template() {
         use super::*;

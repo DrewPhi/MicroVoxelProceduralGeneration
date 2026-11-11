@@ -35,7 +35,7 @@ pub(crate) struct Observation {
     pub watched_tile_cells: Option<u32>,
     pub plant_pending: usize,
     pub plant_triangles: usize,
-    pub plant_tree_lods: [usize; 4],
+    pub plant_tree_lods: [usize; 5],
     pub plant_lod_changes: usize,
     pub plant_coarsenings: usize,
     pub plant_demand: [usize; 3],
@@ -44,7 +44,7 @@ pub(crate) struct Observation {
     pub shadow_removed: usize,
     pub shadow_triangles: usize,
     pub shadow_lod_changes: usize,
-    pub shadow_lods: [usize; 4],
+    pub shadow_lods: [usize; 5],
     pub plant_selected_mesh_evictions: usize,
     pub plant_cpu_bytes: usize,
 }

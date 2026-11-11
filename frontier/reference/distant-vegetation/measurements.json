@@ -1,0 +1,822 @@
+{
+  "scope": "Single sequential matched 1080p static comparison on final executable; full lighting/vegetation/atmosphere, NAADF radius64. Not a 256m or sustained-motion FPS acceptance. No compilation/recording during these measurements.",
+  "runs": {
+    "timing-control": {
+      "binary_sha256": "9b8c2fefbba9a49a423ec4955ea5aeb26b47bc03b0660a6dc62f6f00185e8438",
+      "environment": {
+        "FRONTIER_VEGETATION_FAR_RADIUS_M": "220"
+      },
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "static",
+        "route_speed_mps": 2.5,
+        "seconds": 10.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": "-41,55,-250",
+        "target": "-39,15,200",
+        "watch_xz": null,
+        "start_xz": null,
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "dense",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--msaa",
+        "1",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--pixel-error",
+        "5",
+        "--atmosphere",
+        "on",
+        "--native-radius",
+        "4",
+        "--vegetation-near",
+        "32",
+        "--resource-profile",
+        "development",
+        "--adaptive-workers",
+        "10",
+        "--adaptive-refinements",
+        "32",
+        "--upload-mib",
+        "16",
+        "--no-adaptive-disk-cache",
+        "--adaptive-wait-quality",
+        "--benchmark-input-lock",
+        "--uncapped",
+        "--warmup",
+        "30",
+        "--seconds",
+        "10.0",
+        "--route",
+        "static",
+        "--route-clock",
+        "realtime",
+        "--route-speed",
+        "2.5",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/distant-vegetation/timing-control/r64.json",
+        "--capture-on-exit",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/distant-vegetation/timing-control/r64.png",
+        "--eye",
+        "-41,55,-250",
+        "--target",
+        "-39,15,200"
+      ],
+      "status": "ok",
+      "wall_seconds": 31.674368208972737,
+      "minimum_available_system_ram_mib": 8466,
+      "report": {
+        "schema": 1,
+        "scene": "adaptive",
+        "seed": 7,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "frames": {
+          "sample_count": 586,
+          "accepted_frames": 586,
+          "missed_budget_frames": 156,
+          "rejected_inputs": 0,
+          "p50_ms": 15.655939,
+          "p95_ms": 19.050472999999997,
+          "p99_ms": 19.378172
+        },
+        "process_memory": {
+          "rss_bytes": 1180434432,
+          "peak_rss_bytes": 1201242112,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "source": {
+          "version": 4,
+          "native_voxel_m": 0.0625,
+          "horizontal_scale_m": 1800,
+          "amplitude_m": 1000,
+          "octaves": 8,
+          "roughness": 0.5
+        },
+        "representation": {
+          "name": "adaptive_pooled_canonical_clusters",
+          "surface_only": true,
+          "fixed_center": false,
+          "half_extent_m": 6000,
+          "finest_spacing_m": 0.0625,
+          "levels": 1,
+          "triangles": 900536,
+          "gpu_page_bytes": 0
+        },
+        "camera_start": {
+          "position": [
+            -41,
+            55,
+            -250
+          ],
+          "yaw": 0.004444415,
+          "pitch": -0.08865501
+        },
+        "terrain_recipe": "Alpine",
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        },
+        "msaa_samples": 1,
+        "voxel_filter": true,
+        "vegetation": {
+          "enabled": true,
+          "source_version": 3,
+          "instance_units": "ground_tiles_and_individual_trees",
+          "model_generation": "native_near_recipe_proxy_far",
+          "resident_tiles": 210,
+          "resident_templates": 150,
+          "pending_jobs": 0,
+          "missing_tiles": 0,
+          "missing_templates": 0,
+          "selected_instances": 55,
+          "triangles": 1371686,
+          "budget_rejected": 0,
+          "culled_instances": 148,
+          "coverage_fallbacks": 0,
+          "coverage_unresolved": 0,
+          "selected_by_species": [
+            0,
+            0,
+            55
+          ],
+          "triangles_by_species": [
+            0,
+            0,
+            1371686
+          ],
+          "rejected_by_species": [
+            0,
+            0,
+            0
+          ],
+          "draw_calls": 53,
+          "gpu_bytes": 39431236,
+          "uploaded_bytes_last_update": 0,
+          "grass_radius_m": 28,
+          "flower_radius_m": 56,
+          "tree_radius_m": 220,
+          "shadow_casters": true,
+          "shadow_instances": 22,
+          "shadow_triangles": 134560,
+          "reference_mode": false,
+          "reference_budget_exceeded": false,
+          "cpu_geometry_budget_bytes": 576716800,
+          "gpu_budget_bytes": 866123776,
+          "gpu_actual_budget_bytes": 866123776,
+          "shadow_only_instances": 18,
+          "shadow_only_triangles": 118416,
+          "retained_ground_detail": 0,
+          "canonical_voxel_m": 0.0625,
+          "naadf_omitted_groups": 361,
+          "requested_native_unresolved": 0,
+          "naadf_retire_unresolved": 0,
+          "gpu_representation": "compact",
+          "tree_lod_changes": 0,
+          "tree_refinements": 0,
+          "tree_coarsenings": 0,
+          "tree_lod_histogram": [
+            7,
+            28,
+            20,
+            0,
+            0
+          ],
+          "demanded_by_species": [
+            0,
+            0,
+            55
+          ],
+          "ready_by_species": [
+            0,
+            0,
+            55
+          ],
+          "shadow_admitted": 0,
+          "shadow_removed": 0,
+          "shadow_budget_rejected": 0,
+          "shadow_stream_budget_rejected": 0,
+          "tree_shadow_triangle_budget": 150000,
+          "total_shadow_triangle_budget": 200000,
+          "explicit_shadow_instances": 22,
+          "explicit_shadow_triangles": 134560,
+          "shadow_lod_histogram": [
+            0,
+            0,
+            4,
+            18,
+            0
+          ],
+          "shadow_lod_changes": 0,
+          "selected_cpu_geometry_bytes": 150624600,
+          "total_cpu_geometry_bytes": 204623800,
+          "cpu_cache_geometry_bytes": 204623800,
+          "selected_cpu_meshes": 77,
+          "selected_mesh_evictions": 0,
+          "selected_mesh_evicted_bytes": 0,
+          "ground_assembly_cache": {
+            "hits": 309,
+            "misses": 140,
+            "accounted_bytes": 24045448,
+            "budget_bytes": 67108864,
+            "entries": 140,
+            "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+          },
+          "jobs": {
+            "workers": 4,
+            "started": [
+              210,
+              187,
+              449
+            ],
+            "completed": [
+              210,
+              187,
+              449
+            ],
+            "cancelled": [
+              0,
+              0,
+              0
+            ],
+            "worker_wall_nanos": [
+              177225806,
+              4213499177,
+              915361858
+            ],
+            "max_job_nanos": [
+              25864475,
+              48352225,
+              25361053
+            ],
+            "assembly_nanos": [
+              0,
+              3297036675,
+              416457937
+            ],
+            "mesh_nanos": [
+              0,
+              915108971,
+              496027067
+            ],
+            "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+          },
+          "shadow_transition_pairs": 0,
+          "shadow_transition_triangles": 0,
+          "shadow_fading_casters": 0,
+          "prediction_horizon_ms": 206.073556,
+          "prediction_lead_m": 0,
+          "predicted_tiles": 0,
+          "pooled_reserved_bytes": 0,
+          "pooled_used_bytes": 0,
+          "cull_clusters_submitted": 0,
+          "gpu_frustum_culling": false,
+          "shadow_lifecycle_enabled": true,
+          "near_shadow_cache_reused": true,
+          "far_shadow_cache_reused": false,
+          "shadow_cascades_enabled": false,
+          "ground_decisions": {
+            "selected": 0,
+            "missing_mesh": 0,
+            "budget_rejected": 0,
+            "retained": 0,
+            "coarse_fallback": 0
+          },
+          "ground_inspection_limit": 256,
+          "ground_inspection": []
+        },
+        "adaptive_route_quality": {
+          "measured_frames": 586,
+          "coverage_ready_frames": 586,
+          "quality_ready_frames": 586,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9825134327121514,
+          "peak_unresolved_clusters": 0
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 437,
+          "p50_ms": 14.723214289478301,
+          "p95_ms": 14.936900295536041,
+          "p99_ms": 15.043021927951813,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 437,
+          "p50_ms": 3.5990782933273318,
+          "p95_ms": 3.6662859887809756,
+          "p99_ms": 3.7005911690483093,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "naadf_gpu_stages": {
+          "requested": false,
+          "supported": true,
+          "enabled": false,
+          "query_count": 0,
+          "gpu_buffer_bytes": 0
+        },
+        "development_resources": {
+          "profile": "Custom",
+          "available_mib": 8526,
+          "process_mib": 1115.15234375,
+          "background_paused": false,
+          "native_radius_m": 4,
+          "vegetation_near_m": 32,
+          "terrain_cpu_mib": 2065,
+          "build_mib": 2065,
+          "terrain_gpu_mib": 1376,
+          "plant_cpu_mib": 550,
+          "plant_gpu_mib": 826,
+          "plant_triangle_budget": 4000000,
+          "native_geometry": "conforming-v1"
+        }
+      }
+    },
+    "timing-expanded": {
+      "binary_sha256": "9b8c2fefbba9a49a423ec4955ea5aeb26b47bc03b0660a6dc62f6f00185e8438",
+      "environment": {
+        "FRONTIER_VEGETATION_FAR_RADIUS_M": "768"
+      },
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "static",
+        "route_speed_mps": 2.5,
+        "seconds": 10.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": "-41,55,-250",
+        "target": "-39,15,200",
+        "watch_xz": null,
+        "start_xz": null,
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "dense",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--msaa",
+        "1",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--pixel-error",
+        "5",
+        "--atmosphere",
+        "on",
+        "--native-radius",
+        "4",
+        "--vegetation-near",
+        "32",
+        "--resource-profile",
+        "development",
+        "--adaptive-workers",
+        "10",
+        "--adaptive-refinements",
+        "32",
+        "--upload-mib",
+        "16",
+        "--no-adaptive-disk-cache",
+        "--adaptive-wait-quality",
+        "--benchmark-input-lock",
+        "--uncapped",
+        "--warmup",
+        "30",
+        "--seconds",
+        "10.0",
+        "--route",
+        "static",
+        "--route-clock",
+        "realtime",
+        "--route-speed",
+        "2.5",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/distant-vegetation/timing-expanded/r64.json",
+        "--capture-on-exit",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/distant-vegetation/timing-expanded/r64.png",
+        "--eye",
+        "-41,55,-250",
+        "--target",
+        "-39,15,200"
+      ],
+      "status": "ok",
+      "wall_seconds": 40.497827626997605,
+      "minimum_available_system_ram_mib": 8335,
+      "report": {
+        "schema": 1,
+        "scene": "adaptive",
+        "seed": 7,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "frames": {
+          "sample_count": 566,
+          "accepted_frames": 566,
+          "missed_budget_frames": 237,
+          "rejected_inputs": 0,
+          "p50_ms": 16.209227,
+          "p95_ms": 19.601387000000003,
+          "p99_ms": 20.047818
+        },
+        "process_memory": {
+          "rss_bytes": 1176875008,
+          "peak_rss_bytes": 1198153728,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "source": {
+          "version": 4,
+          "native_voxel_m": 0.0625,
+          "horizontal_scale_m": 1800,
+          "amplitude_m": 1000,
+          "octaves": 8,
+          "roughness": 0.5
+        },
+        "representation": {
+          "name": "adaptive_pooled_canonical_clusters",
+          "surface_only": true,
+          "fixed_center": false,
+          "half_extent_m": 6000,
+          "finest_spacing_m": 0.0625,
+          "levels": 1,
+          "triangles": 900536,
+          "gpu_page_bytes": 0
+        },
+        "camera_start": {
+          "position": [
+            -41,
+            55,
+            -250
+          ],
+          "yaw": 0.004444415,
+          "pitch": -0.08865501
+        },
+        "terrain_recipe": "Alpine",
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        },
+        "msaa_samples": 1,
+        "voxel_filter": true,
+        "vegetation": {
+          "enabled": true,
+          "source_version": 3,
+          "instance_units": "ground_tiles_and_individual_trees",
+          "model_generation": "native_near_recipe_proxy_far",
+          "resident_tiles": 1947,
+          "resident_templates": 890,
+          "pending_jobs": 0,
+          "missing_tiles": 0,
+          "missing_templates": 0,
+          "selected_instances": 796,
+          "triangles": 1794950,
+          "budget_rejected": 0,
+          "culled_instances": 2254,
+          "coverage_fallbacks": 0,
+          "coverage_unresolved": 0,
+          "selected_by_species": [
+            0,
+            0,
+            796
+          ],
+          "triangles_by_species": [
+            0,
+            0,
+            1794950
+          ],
+          "rejected_by_species": [
+            0,
+            0,
+            0
+          ],
+          "draw_calls": 784,
+          "gpu_bytes": 48756588,
+          "uploaded_bytes_last_update": 0,
+          "grass_radius_m": 28,
+          "flower_radius_m": 56,
+          "tree_radius_m": 768,
+          "shadow_casters": true,
+          "shadow_instances": 22,
+          "shadow_triangles": 134560,
+          "reference_mode": false,
+          "reference_budget_exceeded": false,
+          "cpu_geometry_budget_bytes": 585105408,
+          "gpu_budget_bytes": 878706688,
+          "gpu_actual_budget_bytes": 878706688,
+          "shadow_only_instances": 18,
+          "shadow_only_triangles": 118416,
+          "retained_ground_detail": 0,
+          "canonical_voxel_m": 0.0625,
+          "naadf_omitted_groups": 361,
+          "requested_native_unresolved": 0,
+          "naadf_retire_unresolved": 0,
+          "gpu_representation": "compact",
+          "tree_lod_changes": 0,
+          "tree_refinements": 0,
+          "tree_coarsenings": 0,
+          "tree_lod_histogram": [
+            7,
+            28,
+            20,
+            0,
+            741
+          ],
+          "demanded_by_species": [
+            0,
+            0,
+            796
+          ],
+          "ready_by_species": [
+            0,
+            0,
+            796
+          ],
+          "shadow_admitted": 0,
+          "shadow_removed": 0,
+          "shadow_budget_rejected": 0,
+          "shadow_stream_budget_rejected": 0,
+          "tree_shadow_triangle_budget": 150000,
+          "total_shadow_triangle_budget": 200000,
+          "explicit_shadow_instances": 22,
+          "explicit_shadow_triangles": 134560,
+          "shadow_lod_histogram": [
+            0,
+            0,
+            4,
+            18,
+            0
+          ],
+          "shadow_lod_changes": 0,
+          "selected_cpu_geometry_bytes": 211373400,
+          "total_cpu_geometry_bytes": 265372600,
+          "cpu_cache_geometry_bytes": 265372600,
+          "selected_cpu_meshes": 817,
+          "selected_mesh_evictions": 0,
+          "selected_mesh_evicted_bytes": 0,
+          "ground_assembly_cache": {
+            "hits": 174,
+            "misses": 140,
+            "accounted_bytes": 24045448,
+            "budget_bytes": 67108864,
+            "entries": 140,
+            "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+          },
+          "jobs": {
+            "workers": 4,
+            "started": [
+              1947,
+              927,
+              314
+            ],
+            "completed": [
+              1947,
+              927,
+              314
+            ],
+            "cancelled": [
+              0,
+              0,
+              0
+            ],
+            "worker_wall_nanos": [
+              544900494,
+              11646825076,
+              1136374659
+            ],
+            "max_job_nanos": [
+              26633856,
+              46669800,
+              28803080
+            ],
+            "assembly_nanos": [
+              0,
+              3101261443,
+              695111339
+            ],
+            "mesh_nanos": [
+              0,
+              8540839296,
+              439261511
+            ],
+            "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+          },
+          "shadow_transition_pairs": 0,
+          "shadow_transition_triangles": 0,
+          "shadow_fading_casters": 0,
+          "prediction_horizon_ms": 175.36602100000002,
+          "prediction_lead_m": 0,
+          "predicted_tiles": 0,
+          "pooled_reserved_bytes": 0,
+          "pooled_used_bytes": 0,
+          "cull_clusters_submitted": 0,
+          "gpu_frustum_culling": false,
+          "shadow_lifecycle_enabled": true,
+          "near_shadow_cache_reused": true,
+          "far_shadow_cache_reused": false,
+          "shadow_cascades_enabled": false,
+          "ground_decisions": {
+            "selected": 0,
+            "missing_mesh": 0,
+            "budget_rejected": 0,
+            "retained": 0,
+            "coarse_fallback": 0
+          },
+          "ground_inspection_limit": 256,
+          "ground_inspection": []
+        },
+        "adaptive_route_quality": {
+          "measured_frames": 566,
+          "coverage_ready_frames": 566,
+          "quality_ready_frames": 566,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9825134327121514,
+          "peak_unresolved_clusters": 0
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 422,
+          "p50_ms": 15.258110599090577,
+          "p95_ms": 15.65550565461731,
+          "p99_ms": 16.187556557922363,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 422,
+          "p50_ms": 3.590862683567047,
+          "p95_ms": 3.694018681240082,
+          "p99_ms": 3.8429817128448485,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "naadf_gpu_stages": {
+          "requested": false,
+          "supported": true,
+          "enabled": false,
+          "query_count": 0,
+          "gpu_buffer_bytes": 0
+        },
+        "development_resources": {
+          "profile": "Custom",
+          "available_mib": 8413,
+          "process_mib": 1111.5703125,
+          "background_paused": false,
+          "native_radius_m": 4,
+          "vegetation_near_m": 32,
+          "terrain_cpu_mib": 2095,
+          "build_mib": 2095,
+          "terrain_gpu_mib": 1397,
+          "plant_cpu_mib": 558,
+          "plant_gpu_mib": 838,
+          "plant_triangle_budget": 4000000,
+          "native_geometry": "conforming-v1"
+        }
+      }
+    }
+  },
+  "walking": {
+    "command": [
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+      "--preset",
+      "alpine",
+      "--width",
+      "1280",
+      "--height",
+      "720",
+      "--seconds",
+      "58.0",
+      "--report",
+      "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/distant-vegetation/walking-approved/game.json",
+      "--start-xz",
+      "-57,-47",
+      "--naadf-radius",
+      "64",
+      "--msaa",
+      "1",
+      "--resource-profile",
+      "development",
+      "--uncapped"
+    ],
+    "binary_sha256": "9b8c2fefbba9a49a423ec4955ea5aeb26b47bc03b0660a6dc62f6f00185e8438",
+    "settle_seconds": 30.0,
+    "movement": {
+      "max_displacement_m": 22.32403746590514,
+      "yaw_range_radians": 1.279999831,
+      "walk_verified": true,
+      "turn_verified": true
+    },
+    "turn_only": false,
+    "failure": null,
+    "events": [
+      {
+        "seconds_from_launch": 0.7582,
+        "action": "settle_begin"
+      },
+      {
+        "seconds_from_launch": 30.7584,
+        "action": "settle_end"
+      },
+      {
+        "seconds_from_launch": 30.7584,
+        "action": "record_start"
+      },
+      {
+        "seconds_from_launch": 31.8972,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 34.9788,
+        "action": "hold_None"
+      },
+      {
+        "seconds_from_launch": 37.0997,
+        "action": "hold_w"
+      },
+      {
+        "seconds_from_launch": 40.2039,
+        "action": "mouse_turn"
+      },
+      {
+        "seconds_from_launch": 41.8902,
+        "action": "walk_after_turn"
+      },
+      {
+        "seconds_from_launch": 44.8903,
+        "action": "stop_after_turn"
+      },
+      {
+        "seconds_from_launch": 51.4225,
+        "action": "record_end"
+      }
+    ],
+    "scope": "Actual X11 walking or stationary full yaw/pitch inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+  },
+  "walking_report": {
+    "frames": {
+      "sample_count": 3777,
+      "accepted_frames": 3777,
+      "missed_budget_frames": 990,
+      "rejected_inputs": 0,
+      "p50_ms": 12.477495999999999,
+      "p95_ms": 31.987460000000002,
+      "p99_ms": 48.481643
+    },
+    "process_memory": {
+      "rss_bytes": 1653686272,
+      "peak_rss_bytes": 1653686272,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "stream_shifts": 4,
+    "stream_outside_frames": 0,
+    "timing_caveat": "720p recording includes recording overhead and startup; not clean timing evidence."
+  },
+  "validation": {
+    "renderer_tests_passed": 465,
+    "renderer_tests_ignored": 28,
+    "primary_visual": "Unchanged Legacy spiky source/camera against existing exact256spp reference; inspected output/distant-vegetation/primary/side-by-side.png",
+    "rejected_experiments": [
+      "Initial unconverted sRGB proxy colors (fixed)",
+      "Ecological grass/flower top-profile bake: highlighted patch boundaries (removed)"
+    ]
+  }
+}

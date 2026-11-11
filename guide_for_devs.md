@@ -348,3 +348,6 @@ records shader specialization, bounded exact column caching, lighting and brick/
 experiments, matched 1080p walking gates, and the shared-instance vegetation
 cache-eviction fix. New performance modes remain opt-in; the ownership fix is
 active. The hardware lab is a standalone workspace, not a game dependency upgrade.
+
+Distant procedural tree coverage and the rejected ground-cover experiment are
+documented in [frontier/DISTANT_VEGETATION.md](frontier/DISTANT_VEGETATION.md).
