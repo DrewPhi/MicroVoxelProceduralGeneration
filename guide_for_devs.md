@@ -351,3 +351,6 @@ active. The hardware lab is a standalone workspace, not a game dependency upgrad
 
 Distant procedural tree coverage and the rejected ground-cover experiment are
 documented in [frontier/DISTANT_VEGETATION.md](frontier/DISTANT_VEGETATION.md).
+
+The independent all-vegetation offline image target and reproduction command are
+in [frontier/VEGETATION_REFERENCE.md](frontier/VEGETATION_REFERENCE.md).

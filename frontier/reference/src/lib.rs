@@ -2,6 +2,7 @@
 //! Exact canonical material snapshots and halo face ownership; no display LOD.
 use frontier_world::{Material, World, VOXEL_SIZE};
 pub mod landscape;
+pub mod vegetation;
 
 pub const FIXTURE_MIN: [i64; 3] = [-128, -32, -128];
 pub const FIXTURE_SIZE: [usize; 3] = [256, 224, 256];
