@@ -206,8 +206,19 @@ fn cell(p: Point) -> Cell {
     }
 }
 impl State {
+    #[cfg(test)]
     pub fn new_with_encoding(s: Snapshot, capacities: [usize; 3], leaf_encoding: Encoding) -> Self {
+        let n = s.chunks_per_edge as usize;
+        Self::with_storage(s, capacities, leaf_encoding, n)
+    }
+    pub fn with_storage(
+        s: Snapshot,
+        capacities: [usize; 3],
+        leaf_encoding: Encoding,
+        n: usize,
+    ) -> Self {
         let bounds = s.bounds();
+        assert!(s.dims.iter().all(|&d| d <= n));
         let region = Region {
             lo: bounds[0].map(|v| v as i64),
             hi: bounds[1].map(|v| v as i64),
@@ -226,20 +237,37 @@ impl State {
             .map(|(i, p)| (key(p), i as u32))
             .collect();
         let mut mixed_roots = HashMap::with_capacity(s.mixed_chunks);
-        for (index, &word) in s.chunks.iter().enumerate() {
-            if word & CHILD != 0 {
-                mixed_roots.insert(index as u32, word);
+        #[cfg(test)]
+        let mut chunks = vec![0; n * n * n];
+        let [nx, ny, nz] = s.dims;
+        for z in 0..nz {
+            for x in 0..nx {
+                for y in 0..ny {
+                    let word = s.chunks[(z * nx + x) * ny + y];
+                    let index = (z * n + x) * n + y;
+                    if word & CHILD != 0 {
+                        mixed_roots.insert(index as u32, word);
+                    }
+                    #[cfg(test)]
+                    {
+                        chunks[index] = word;
+                    }
+                }
             }
+        }
+        let mut columns = vec![ColumnSummary::default(); n * n];
+        for z in 0..nz {
+            columns[z * n..z * n + nx].copy_from_slice(&s.columns[z * nx..(z + 1) * nx]);
         }
         Self {
             region,
-            n: s.chunks_per_edge as usize,
+            n,
             ring: [0; 3],
             mixed_roots,
             #[cfg(test)]
-            chunks: s.chunks,
+            chunks,
             gpu_distance: s.gpu_distance && !s.cpu_root_fallback,
-            columns: s.columns,
+            columns,
             leaves: Arena::new(
                 s.voxels.len() / words_per_leaf,
                 capacities[1] / (words_per_leaf * 4),
@@ -294,6 +322,9 @@ impl State {
         limit: usize,
         cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Change, String> {
+        if next.dims().iter().any(|&d| d == 0 || d > self.n) {
+            return Err("NAADF region exceeds reserved storage radius".into());
+        }
         let start = Instant::now();
         let mut profile = Collector::new();
         let parallel_phase = profile.start();
@@ -999,3 +1030,7 @@ fn profile_stream_preparation_stages() {
         state.finish(change, true);
     }
 }
+
+#[cfg(test)]
+#[path = "growth_test.rs"]
+mod growth_tests;

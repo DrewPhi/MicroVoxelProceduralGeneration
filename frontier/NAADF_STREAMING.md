@@ -1,9 +1,10 @@
 # Moving NAADF window
 
-NAADF now follows the player when enabled. The first cube is still a cold CPU
-build. After it publishes, movement shifts the cube in small, integer-meter
-steps and reuses the overlapping data. The existing renderer covers the rest
-of the world. `--naadf-follow off` preserves the fixed-region benchmark mode.
+NAADF follows the player when enabled. Default startup publishes a small cold
+8 m region, then adds 4 m shells until it reaches the selected maximum radius.
+Retained voxels stay in place. After reaching the cap, movement shifts the window
+in integer-meter steps and reuses the overlap. The raster renderer covers the
+world outside completed native coverage. `--naadf-follow off` preserves the fixed-region benchmark mode.
 The **Follow player** setting is also available in the Esc menu. For the
 latest stable mesh handoff, packed storage and radius tests, see
 [NAADF optimization](NAADF_OPTIMIZATION.md).
@@ -16,7 +17,8 @@ From the repository root:
 
 Use 32 m for a first playtest. The 256 m half-extent is a capacity test,
 and the engine may refuse it if the build or upload cannot fit with headroom.
-The manual estimate ceiling below does not reserve memory:
+The manual ceiling below does not dedicate 10 GiB; actual bounded capacity
+reservation still depends on the bootstrap density and available RAM:
 
 ```sh
 ./frontier/run.sh --preset alpine --naadf-radius 256 --naadf-budget-mib 10240 --msaa 1 --width 1920 --height 1080
@@ -60,23 +62,36 @@ resolution; it does not introduce additional voxel LODs inside the cube.
 
 ## Scope and costs
 
-- Startup publishes a small 8 m cube radius, then 16, 32, 64, 128 and 256 m
-  as needed, stopping at the selected radius (also supports intermediate sizes).
-  The last completed region stays visible while the next builds/uploads; the
-  exterior raster path covers everything else. Capture readiness still waits
-  for the full requested radius, so reference captures cannot silently use 8 m.
-- Expansion uses coherent replacement snapshots, not partially valid voxel
-  buffers. Each larger stage rebuilds the interior; doubling adds less than
-  one third of the final horizontal coverage for power-of-two targets, with
-  source caches reused where retained. This improves time to first exact detail,
-  not total build throughput. Old and new GPU allocations overlap temporarily;
-  live RAM checks still apply. At the final radius, incremental strip streaming
-  resumes. During expansion each new following snapshot is centered on the
-  current player when its build starts; fast travel can outrun the inner region.
-- `FRONTIER_NAADF_PROGRESSIVE_STARTUP=0` restores one full initial build for
-  matched benchmarks. `startup_publications_radius_seconds` in capture/report
-  JSON records each radius and elapsed seconds; `startup_expanding` distinguishes
-  partial resident coverage from a completed target. Esc reports expansion.
+- Startup publishes an 8 m cube radius first, then adds 4 m shell batches,
+  clamped exactly to the selected maximum (for example 8 → 12 → 16 → 20 m).
+  The existing interior is retained; no larger replacement snapshot is
+  generated. Shells use the same disjoint-region generation, slot reservation,
+  upload and root-publication transactions as ordinary player following.
+- Storage address space and visible bounds are independent. The dense root
+  texture reserves the selected maximum once (512 MiB at a 256 m radius);
+  unknown roots remain outside the visible/owned bounds. CPU root arrays are
+  not allocated for the whole volume. The bootstrap surface density estimates
+  initial material/leaf backing capacity, capped by the requested budget and
+  half the remaining live RAM headroom. Reserving capacity does not evaluate
+  any additional voxels. Buffers can still grow on demand, copying retained
+  contents without changing addresses; optional slack is trimmed if needed.
+  This avoids repeated GPU allocation/copy churn on typical Alpine starts.
+  Capacity, live RAM headroom and the requested radius bound all growth.
+- A completed shell becomes visible only after all its data is uploaded.
+  Until then the existing exact interior and exterior raster coverage remain
+  active. When moving during expansion the next shell is centered on the current
+  player; outgoing coverage must be restored before publishing a non-containing
+  region. Final-radius growth stops and ordinary toroidal following continues.
+- `FRONTIER_NAADF_PROGRESSIVE_STARTUP=0` restores a single initial full build.
+  Opt-in whole-volume GPU distance, sparse-root and height/beam experiments also
+  retain their original full initial build, because their acceleration domains
+  currently assume full residency. The default CPU-proof hierarchy supports
+  incremental startup. Reports disclose `incremental_startup`.
+- Capture readiness waits for the full selected radius. JSON records
+  `resident_radius_m`, `storage_radius_m`, `startup_publications_radius_seconds`,
+  `startup_generated_roots`, `arena_resizes`, and `arena_copy_bytes`. These expose
+  actual coverage, generation and memory-copy work rather than confusing reserved
+  capacity with completed terrain.
 - A large jump can require a fresh destination cube. Previously evicted strips
   are regenerated on reentry; overlapping strips are reused in place.
 - Following reserves extra block/leaf arena capacity and keeps CPU root and
@@ -134,7 +149,10 @@ Workspace tests passed (553); the GPU canonical oracle passed separately.
 With NAADF disabled, the primary reference PNG, linear color and depth
 matched the baseline byte for byte.
 
-## Progressive startup check — November 12, 2026
+## Historical replacement-snapshot startup check — November 12, 2026
+
+The measurements below describe the previous replacement-snapshot implementation,
+retained for provenance. It has been superseded by incremental shell growth above.
 
 On the Ryzen 5 7640U / Radeon 760M / 16 GB laptop, Alpine seed 7 at 1080p,
 MSAA1, native 6.25 cm, with 256 m requested: the first 8 m region published at
@@ -160,8 +178,64 @@ To inspect startup yourself:
 ```
 
 Esc shows the current expansion stage; F12 captures include both the requested
-and actually resident radius. The full requested radius may take longer overall
-because these intermediate snapshots repeat some inner work. Their purpose is
-to make the nearby scene available immediately rather than withhold it until the
-largest snapshot finishes. Shell-only growth/reusable arena expansion remains a
-possible throughput improvement.
+and actually resident radius. The earlier replacement implementation repeated
+inner work; the current shell implementation removes that regeneration.
+
+## Incremental-shell validation
+
+`cargo test --locked -p frontier-renderer --lib` includes reserved-window growth,
+rollback and wrapped-following checks against fresh canonical snapshots in both
+16-bit and 32-bit leaf modes, plus every target radius from 1 through 256 m.
+The explicit hardware check also tests primary and shadow rays before and after
+shell publication and a forced backing-buffer copy:
+
+```sh
+cargo test --locked -p frontier-renderer --lib naadf_reserved_growth_gpu_matches_canonical_rays -- --ignored --nocapture
+python3 tools/naadf_startup_check.py --radius 64 --output output/my-startup-check
+```
+
+The interactive check starts moving while startup is incomplete, stops/turns,
+waits for the selected radius, then walks at full coverage. It reads sparse
+`NAADF residency:` terminal milestones rather than depending on repeated F12
+hotkeys. Reports verify the radius never overshot, no native outside frames or
+refusals occurred, and normal following published after startup. Use radius 256
+for the larger laptop stress test; its storage reservation is substantial.
+
+This is a startup-throughput change, not a settled-frame-rate guarantee. Empty
+space proofs are conservative within each generated strip; they may require more
+queries than a full-region proof build. Large-radius traversal cost and proof
+coalescing remain independent optimization work. Capture-driven startup timings
+include screenshot overhead and are not clean steady-state GPU benchmarks.
+
+### Completed 256 m laptop check
+
+The final log-driven run reached **8 m at 0.53 s, 32 m at 2.39 s, 64 m at
+9.79 s, 128 m at 50.18 s, and 256 m at 300.80 s**. Those are elapsed times
+from the initial NAADF request, not time spent waiting before interaction.
+Walking/turning during startup and walking afterward completed without native
+outside frames or refusals. The maximum remained 256 m; 62 shell publications
+were followed by one ordinary following-strip publication.
+
+The bootstrap plus shells generated exactly **134,217,728 root words**, equal
+to the final 512³ address volume: no interior regeneration occurred on this
+route. Initial density-based backing reservation fit the scene without any arena
+resizes or arena copies. Allocated NAADF GPU payload was **1.58 GiB**; whole-process
+peak RSS was **2.17 GiB**. These are different accounting domains and must not be
+naively added as an exact physical-memory measurement on an integrated GPU.
+
+This large stress configuration is still expensive to draw: final ten-second
+frame intervals were p50 **45.75 ms**, p95 **49.02 ms**, p99 **50.17 ms** at 1080p
+(about 22 FPS median in this view). It does not pass the 30–60 FPS target, nor is
+this a matched comparison with the earlier path recording. The feature removes
+the blocking full-region startup and redundant interior generation; it does not
+claim to solve large-radius traversal performance. Keep 64 m as the default.
+
+The initially tried grow-only backing allocator paused at 200 m under memory
+headroom pressure after 13 arena resizes. A later capture-driven run was stopped
+by missed screenshot input at 164 m, with no terrain refusal. The final check
+uses log milestones, bounded density-based reservation, and explicit completion
+assertions instead. The successful result supersedes those incomplete probes.
+
+[Configuration, all radius timings, memory, frame intervals and assertions](reference/gallery/naadf-startup/incremental-measurements.json).
+
+![Completed 256 m native region after walking](reference/gallery/naadf-startup/incremental256.png)

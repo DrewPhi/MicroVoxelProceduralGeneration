@@ -1,5 +1,6 @@
 //! Optional exact NAADF window. Leading strips are generated and uploaded
 //! asynchronously; the existing renderer covers the exterior and handoff.
+mod arena;
 mod column_cache;
 mod data;
 mod diagnostics;
@@ -70,7 +71,7 @@ fn memory_headroom(memory: crate::settings::MemorySnapshot) -> Option<usize> {
 
 enum Job {
     Build(u64, Request, World, [f64; 3]),
-    Install(u64, Snapshot, [usize; 3], leaf::Encoding),
+    Install(u64, Snapshot, [usize; 3], leaf::Encoding, usize),
     Shift(u64, World, stream::Region, usize),
     Finish(stream::Change, bool),
     Reset,
@@ -128,9 +129,10 @@ impl Worker {
                                 break;
                             }
                         }
-                        Job::Install(g, s, c, encoding) => {
+                        Job::Install(g, s, c, encoding, storage_edge) => {
                             if e.load(Ordering::Relaxed) == g {
-                                state = Some(stream::State::new_with_encoding(s, c, encoding));
+                                state =
+                                    Some(stream::State::with_storage(s, c, encoding, storage_edge));
                             }
                         }
                         Job::Shift(g, w, r, budget) => {
@@ -227,6 +229,8 @@ struct Volume {
     bounds: [[f64; 3]; 2],
     ring: [u32; 3],
     capacities: [usize; 3],
+    arena_resizes: u64,
+    arena_copy_bytes: u64,
     n: u32,
     bytes: usize,
     wide_bytes: usize,
@@ -296,10 +300,24 @@ impl Pending {
         Self::with_traversal(gpu, prepared, traversal::options())
     }
 
+    fn reserved(gpu: &Gpu, prepared: leaf::Prepared, edge: u32) -> Result<Self, String> {
+        Self::with_storage(gpu, prepared, traversal::options(), edge)
+    }
+
     fn with_traversal(
         gpu: &Gpu,
         prepared: leaf::Prepared,
         options: traversal::Options,
+    ) -> Result<Self, String> {
+        let edge = prepared.snapshot.chunks_per_edge;
+        Self::with_storage(gpu, prepared, options, edge)
+    }
+
+    fn with_storage(
+        gpu: &Gpu,
+        prepared: leaf::Prepared,
+        options: traversal::Options,
+        edge: u32,
     ) -> Result<Self, String> {
         let leaf::Prepared {
             snapshot,
@@ -308,9 +326,11 @@ impl Pending {
             sparse_root_dims,
         } = prepared;
         let limits = gpu.device.limits();
-        let n = snapshot.chunks_per_edge;
-        if n > limits.max_texture_dimension_3d {
-            return Err("NAADF region exceeds device 3D texture size".into());
+        let n = edge;
+        let growing = n != snapshot.chunks_per_edge;
+        if n == 0 || n > 512 || n < snapshot.chunks_per_edge || n > limits.max_texture_dimension_3d
+        {
+            return Err("NAADF region exceeds supported/device storage extent".into());
         }
         for (name, bytes) in [
             ("blocks", snapshot.blocks.len().max(1) * 4),
@@ -327,7 +347,7 @@ impl Pending {
                 ));
             }
         }
-        let follow = gpu.visual_settings.as_ref().is_some_and(|s| s.naadf_follow);
+        let follow = growing || gpu.visual_settings.as_ref().is_some_and(|s| s.naadf_follow);
         let max = limits
             .max_buffer_size
             .min(limits.max_storage_buffer_binding_size as u64) as usize;
@@ -351,6 +371,11 @@ impl Pending {
         let [root_width, root_height, root_layers] = root_texture_dims;
         let root_bytes = root_width as usize * root_height as usize * root_layers as usize * 4;
         let headroom = memory_headroom(crate::settings::MemorySnapshot::detect());
+        let requested_budget = gpu
+            .visual_settings
+            .as_ref()
+            .filter(|s| !s.naadf_auto_memory)
+            .map_or(usize::MAX, |s| s.naadf_budget_mib.saturating_mul(1048576));
         let mut capacities = ordinary_capacities;
         if follow && n >= 32 {
             // A high start can build an almost empty volume. Reserve room
@@ -364,11 +389,44 @@ impl Pending {
                 capacities = ordinary_capacities;
             }
         }
+        if growing {
+            capacities = startup::arena_reservation(
+                [
+                    snapshot.blocks.len() * 4,
+                    snapshot.voxels.len() * 4,
+                    snapshot.palette.len() * 16,
+                ],
+                capacities,
+                [
+                    max,
+                    max.min((1usize << 30).saturating_mul(encoding.bits() as usize / 8)),
+                    max,
+                ],
+                snapshot.chunks_per_edge as usize,
+                n as usize,
+                headroom
+                    .unwrap_or(0)
+                    .saturating_sub(root_bytes)
+                    .saturating_sub(upload::scatter_allowance().unwrap_or(0))
+                    .saturating_div(2)
+                    .min(
+                        requested_budget
+                            .saturating_sub(root_bytes)
+                            .saturating_sub(upload::scatter_allowance().unwrap_or(0)),
+                    ),
+            );
+        }
         // Snapshot CPU data is still live at this point. Check the actual
         // arena capacities, including follow-mode slack, before allocating.
         let upload_bytes = root_bytes
             + capacities.iter().sum::<usize>()
             + upload::scatter_allowance().unwrap_or(0);
+
+        if growing && upload_bytes > requested_budget {
+            return Err(
+                "NAADF reserved roots and initial arenas exceed the selected memory budget".into(),
+            );
+        }
         if let Some(headroom) = headroom {
             if upload_bytes > headroom {
                 return Err(format!(
@@ -402,7 +460,9 @@ impl Pending {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: bytes.max(4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             })
         };
@@ -418,7 +478,8 @@ impl Pending {
             });
         let layout = layout(&gpu.device);
         let view = chunks.create_view(&Default::default());
-        let build_distance = snapshot.gpu_distance
+        let build_distance = !growing
+            && snapshot.gpu_distance
             && headroom.is_none_or(|bytes| upload_bytes + root_distance::bytes(n) <= bytes);
         let (root_distance, distance_view) = if build_distance {
             let [lo, hi] = snapshot.bounds().map(|p| p.map(|v| v as i64));
@@ -490,6 +551,8 @@ impl Pending {
             bounds: snapshot.bounds(),
             ring: [0; 3],
             capacities,
+            arena_resizes: 0,
+            arena_copy_bytes: 0,
             n,
             bytes: snapshot.bytes(),
             wide_bytes,
@@ -522,7 +585,11 @@ impl Pending {
         let start = Instant::now();
         let allowance = 8 * 1048576;
         if self.phase == 0 {
-            let [width, height, depth] = self.volume.root_texture_dims;
+            let [width, height, depth] = if self.volume.sparse_roots {
+                self.volume.root_texture_dims
+            } else {
+                [self.snapshot.chunks_per_edge; 3]
+            };
             let plane = width as usize * height as usize * 4;
             let layers = (allowance / plane).max(1).min(depth as usize - self.offset);
             let bytes = bytemuck::cast_slice::<_, u8>(&self.snapshot.chunks);
@@ -650,9 +717,11 @@ pub struct Experiment {
     restoring_raster: bool,
     // A completed inner snapshot stays visible while the next radius builds.
     expanding: bool,
+    incremental_startup: bool,
     growth_pending: bool,
     startup_started: Option<Instant>,
     startup_publications: Vec<(u32, f64)>,
+    startup_generated_roots: u64,
     wide_leaves: bool,
     effective_budget_mib: usize,
     worker: Worker,
@@ -688,9 +757,11 @@ impl Default for Experiment {
         Self {
             restoring_raster: false,
             expanding: false,
+            incremental_startup: false,
             growth_pending: false,
             startup_started: None,
             startup_publications: Vec::new(),
+            startup_generated_roots: 0,
             wide_leaves: false,
             effective_budget_mib: 0,
             worker: Worker::new(),
@@ -851,7 +922,17 @@ impl Experiment {
             self.worker.stage.store(0, Ordering::Relaxed);
             self.startup_started = Some(Instant::now());
             self.startup_publications.clear();
+            self.startup_generated_roots = 0;
             self.expanding = true;
+            let options = traversal::options();
+            // Opt-in whole-volume acceleration experiments retain their original
+            // build path until their cache domains support partial residency.
+            self.incremental_startup = startup::enabled()
+                && self.active.is_none()
+                && !r.gpu_distance
+                && !r.sparse_roots
+                && !options.height_enabled()
+                && !options.beam;
             self.growth_pending = false;
             self.status = "Building nearby exact voxels".into();
             self.error = None;
@@ -861,8 +942,7 @@ impl Experiment {
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
-            job.radius =
-                startup::first_radius(r.radius, startup::enabled() && self.active.is_none());
+            job.radius = startup::first_radius(r.radius, self.incremental_startup);
             self.worker
                 .send(Job::Build(self.epoch, job, world.clone(), build_center));
         }
@@ -874,6 +954,8 @@ impl Experiment {
                     self.published_epoch = self.epoch;
                     self.worker.send(Job::Reset);
                     self.pending = None;
+                    self.shift = None;
+                    self.shifting = false;
                     self.expanding = false;
                     self.growth_pending = false;
                     self.status = "NAADF expansion paused: low RAM; rebuild to retry".into();
@@ -922,7 +1004,11 @@ impl Experiment {
                 continue;
             }
             match result {
-                Ok(Reply::Built(snapshot)) => match Pending::new(gpu, snapshot) {
+                Ok(Reply::Built(snapshot)) => match if self.incremental_startup {
+                    Pending::reserved(gpu, snapshot, r.radius * 2)
+                } else {
+                    Pending::new(gpu, snapshot)
+                } {
                     Ok(p) => {
                         // Growth usually contains the old owner. If the player
                         // travelled outside it, restore outgoing raster first.
@@ -943,6 +1029,20 @@ impl Experiment {
                 },
                 Ok(Reply::Shifted(c)) => {
                     self.shift_timing.ready = Some(Instant::now());
+                    if let Some(v) = &mut self.active {
+                        if let Err(error) =
+                            v.ensure_arenas(gpu, &c, self.effective_budget_mib * 1048576)
+                        {
+                            self.worker.send(Job::Finish(c, false));
+                            self.error = Some(error.clone());
+                            self.status = error;
+                            self.refused += 1;
+                            self.shifting = false;
+                            self.expanding = false;
+                            self.growth_pending = false;
+                            continue;
+                        }
+                    }
                     self.shift = Some(upload::PendingShift::new(gpu, c));
                     self.status =
                         "Uploading leading strips; restoring outgoing mesh coverage".into();
@@ -970,30 +1070,42 @@ impl Experiment {
             if p.advance(&gpu.queue) && (!self.restoring_raster || raster_restored) {
                 let p = self.pending.take().unwrap();
                 self.upload_ms = p.upload_ms;
-                let resident = p.volume.n / 2;
+                let resident = p.volume.resident_radius();
+                self.startup_generated_roots += p.snapshot.chunks.len() as u64;
                 self.expanding = false;
                 self.growth_pending = resident < r.radius;
                 if let Some(started) = self.startup_started {
-                    self.startup_publications
-                        .push((resident, started.elapsed().as_secs_f64()));
+                    let elapsed = started.elapsed().as_secs_f64();
+                    self.startup_publications.push((resident, elapsed));
+                    startup::log_residency(resident, r.radius, elapsed);
                 }
-                if r.follow && !self.growth_pending {
+                if r.follow || self.growth_pending {
                     self.worker.send(Job::Install(
                         self.epoch,
                         p.snapshot,
-                        p.volume.capacities,
+                        if self.incremental_startup {
+                            p.volume.arena_limits(gpu)
+                        } else {
+                            p.volume.capacities
+                        },
                         p.volume.leaf_encoding,
+                        p.volume.n as usize,
                     ));
                 }
                 self.active = Some(p.volume);
                 self.restoring_raster = false;
                 self.published_epoch = self.epoch;
-                self.status = if r.follow {
-                    "Ready · following player"
+                self.status = if self.growth_pending {
+                    format!(
+                        "{} m visible · expanding toward {} m",
+                        self.active.as_ref().unwrap().resident_radius(),
+                        r.radius
+                    )
+                } else if r.follow {
+                    "Ready · following player".into()
                 } else {
-                    "Ready · fixed region"
-                }
-                .into();
+                    "Ready · fixed region".into()
+                };
             }
         }
         // A destination jump supersedes the in-flight shift before any
@@ -1016,25 +1128,37 @@ impl Experiment {
             self.status = "Preparing NAADF at new location".into();
             return;
         }
-        if self.growth_pending && !self.expanding && self.error.is_none() {
+        if self.growth_pending && !self.expanding && !self.shifting && self.error.is_none() {
             if let Some(v) = &self.active {
-                let mut job = r;
-                job.radius = startup::next_radius(v.n / 2, r.radius);
-                let headroom = memory_headroom(crate::settings::MemorySnapshot::detect())
-                    .unwrap_or_else(|| s.naadf_budget_mib.saturating_mul(1048576));
-                job.budget = build_budget_limit(r.budget, headroom);
-                self.effective_budget_mib = job.budget / 1048576;
+                let region = stream::Region {
+                    lo: v.bounds[0].map(|x| x as i64),
+                    hi: v.bounds[1].map(|x| x as i64),
+                };
                 let center = if r.follow {
                     camera.position.to_array()
                 } else {
                     std::array::from_fn(|a| (v.bounds[0][a] + v.bounds[1][a]) * 0.5)
                 };
+                let next = startup::next_region(region, r.radius, center);
                 self.expanding = true;
                 self.growth_pending = false;
+                self.shifting = true;
+                self.shift_timing = ShiftTiming {
+                    start: Some(Instant::now()),
+                    ..Default::default()
+                };
                 self.worker.stage.store(0, Ordering::Relaxed);
-                self.status = format!("Expanding exact region: {} → {} m", v.n / 2, job.radius);
-                self.worker
-                    .send(Job::Build(self.epoch, job, world.clone(), center));
+                self.status = format!(
+                    "Expanding exact region: {} → {} m",
+                    v.resident_radius(),
+                    next.dims()[0] / 2
+                );
+                self.worker.send(Job::Shift(
+                    self.epoch,
+                    world.clone(),
+                    next,
+                    self.effective_budget_mib * 1048576,
+                ));
             }
         }
         if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
@@ -1067,9 +1191,38 @@ impl Experiment {
                     self.prepare_samples
                         .push_back((c.build_ms, profile.clone()));
                 }
+                if self.expanding {
+                    self.startup_generated_roots +=
+                        c.roots.iter().map(|r| r.nodes.len() as u64).sum::<u64>();
+                }
                 self.worker.send(Job::Finish(c, true));
                 self.shifting = false;
-                self.status = "Ready · following player".into();
+                if self.expanding {
+                    let resident = v.resident_radius();
+                    self.expanding = false;
+                    self.growth_pending = resident < r.radius;
+                    if let Some(started) = self.startup_started {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        self.startup_publications.push((resident, elapsed));
+                        startup::log_residency(resident, r.radius, elapsed);
+                    }
+                }
+                if !r.follow && !self.growth_pending {
+                    self.worker.send(Job::Reset);
+                }
+                self.stage = 100;
+                self.worker.stage.store(100, Ordering::Relaxed);
+                self.status = if self.growth_pending {
+                    format!(
+                        "{} m visible · expanding toward {} m",
+                        v.resident_radius(),
+                        r.radius
+                    )
+                } else if r.follow {
+                    "Ready · following player".into()
+                } else {
+                    "Ready · fixed region".into()
+                };
             }
         }
         if !self.shifting && !self.restoring_raster && self.published_epoch == self.epoch {
@@ -1137,9 +1290,11 @@ impl Experiment {
         self.ready()
             && !self.expanding
             && !self.growth_pending
-            && self
-                .request
-                .is_some_and(|r| self.active.as_ref().is_some_and(|v| v.n / 2 == r.radius))
+            && self.request.is_some_and(|r| {
+                self.active
+                    .as_ref()
+                    .is_some_and(|v| v.resident_radius() == r.radius)
+            })
             && (!root_distance::settle_capture()
                 || self
                     .active
@@ -1244,7 +1399,12 @@ impl Experiment {
                 matrix: matrix.to_cols_array_2d(),
                 inverse: matrix.inverse().to_cols_array_2d(),
                 eye: (camera.position - origin).as_vec3().extend(0.).to_array(),
-                extent: [a.n * 16, a.n * 16, a.n * 16, a.n],
+                extent: [
+                    ((a.bounds[1][0] - a.bounds[0][0]) * 16.) as u32,
+                    ((a.bounds[1][1] - a.bounds[0][1]) * 16.) as u32,
+                    ((a.bounds[1][2] - a.bounds[0][2]) * 16.) as u32,
+                    a.n,
+                ],
                 viewport: [width as f32, height as f32, a.samples as f32, 0.],
                 sun: [sun.x, sun.y, sun.z, if s.beauty { 1. } else { 0. }],
                 sky: [
@@ -1319,7 +1479,7 @@ impl Experiment {
             root_distance::Cache::counters,
         );
         let mut json = format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
-            self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,|a|a.n/2),region,
+            self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,Volume::resident_radius),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
             a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
         json.pop();
@@ -1332,6 +1492,14 @@ impl Experiment {
                 .iter()
                 .map(|&(r, t)| [r as f64, t])
                 .collect::<Vec<_>>()
+        )
+        .unwrap();
+        write!(json, ",\"incremental_startup\":{},\"storage_radius_m\":{},\"arena_resizes\":{},\"arena_copy_bytes\":{}",
+            self.incremental_startup, a.map_or(0, |v| v.n / 2), a.map_or(0, |v| v.arena_resizes), a.map_or(0, |v| v.arena_copy_bytes)).unwrap();
+        write!(
+            json,
+            ",\"startup_generated_roots\":{}",
+            self.startup_generated_roots
         )
         .unwrap();
         let options = traversal::options();

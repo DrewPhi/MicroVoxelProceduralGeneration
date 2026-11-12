@@ -334,6 +334,13 @@ adds opt-in asynchronous compute-stage timings to reports/capture metadata;
 Use ordinary uninstrumented runs for FPS comparisons. The default CPU-proof
 traversal remains the recommended path; experimental switches are documented.
 
+Default startup now publishes an 8 m native region and grows in 4 m shells to the
+selected maximum. `naadf/startup.rs` plans bounded growth and initial capacity;
+`naadf/arena.rs` preserves addresses when backing buffers expand. Terminal
+`NAADF residency:` lines and capture JSON distinguish actual coverage from
+reserved capacity. Use `tools/naadf_startup_check.py --radius 64 --output output/startup-check`
+for startup/walking/following validation; see [incremental streaming](frontier/NAADF_STREAMING.md).
+
 Default launch (2026-11-11): adaptive scenes enable the NAADF/raster hybrid at
 64 m radius with following enabled, CPU distance proofs, and single-sample
 rendering unless MSAA is explicitly specified. Scatter uploads default on;

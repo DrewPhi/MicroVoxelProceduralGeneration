@@ -16,8 +16,8 @@ supersampled images, coverage/depth data and matched GPU comparisons. See the
 
 The default playtest uses a hybrid renderer: exact NAADF voxels within a
 64 m cube radius, with adaptive raster terrain in the distance. Startup displays
-an 8 m exact region first, then doubles the radius as each complete region becomes
-ready, up to the selected size. You can move while it expands. It uses Regional
+an 8 m exact region first, then grows in 4 m shell batches as they become
+ready, up to the selected maximum. The interior is retained during expansion. You can move while it expands. It uses Regional
 terrain, detailed appearance maps, voxel appearance filtering, single-sample
 rendering and scatter uploads. Adjust the NAADF radius in **Esc**;
 `--naadf off` selects the raster path, and explicit `--msaa 4` is still accepted. Press **Esc** for live light and

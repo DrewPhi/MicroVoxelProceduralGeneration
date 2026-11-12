@@ -139,11 +139,38 @@ fn naadf_traversal_variants_match_canonical_rays() {
     }
 }
 
+#[test]
+#[ignore = "explicit GPU parity: partial residency, shell growth, arena copies, and wrapped following"]
+fn naadf_reserved_growth_gpu_matches_canonical_rays() {
+    gpu_matches_canonical_rays_with_storage(
+        false,
+        false,
+        false,
+        traversal::Options::default(),
+        true,
+    );
+}
+
 fn gpu_matches_canonical_rays(
     force_wide_pigment: bool,
     gpu_distance: bool,
     sparse_roots: bool,
     options: traversal::Options,
+) {
+    gpu_matches_canonical_rays_with_storage(
+        force_wide_pigment,
+        gpu_distance,
+        sparse_roots,
+        options,
+        false,
+    );
+}
+fn gpu_matches_canonical_rays_with_storage(
+    force_wide_pigment: bool,
+    gpu_distance: bool,
+    sparse_roots: bool,
+    options: traversal::Options,
+    reserved: bool,
 ) {
     use glam::{Vec3, Vec4};
     pollster::block_on(async {
@@ -231,16 +258,26 @@ fn gpu_matches_canonical_rays(
             assert!(prepared.sparse_root_dims.is_some());
         }
         assert_eq!(prepared.encoding.is_compact(), !force_wide_pigment);
-        let mut pending = Pending::with_traversal(&gpu, prepared, options).unwrap();
+        let mut pending = if reserved {
+            Pending::with_storage(&gpu, prepared, options, 24)
+        } else {
+            Pending::with_traversal(&gpu, prepared, options)
+        }
+        .unwrap();
         while !pending.advance(&gpu.queue) {}
         gpu.queue.submit(std::iter::empty());
         gpu.device.poll(wgpu::Maintain::Wait);
         let mut volume = pending.volume;
-        let mut state = gpu_distance.then(|| {
-            stream::State::new_with_encoding(
+        let mut state = (gpu_distance || reserved).then(|| {
+            stream::State::with_storage(
                 pending.snapshot,
-                volume.capacities,
+                if reserved {
+                    volume.arena_limits(&gpu)
+                } else {
+                    volume.capacities
+                },
                 volume.leaf_encoding,
+                volume.n as usize,
             )
         });
         let shadow_source = crate::adaptive_gpu::AdaptiveGpu::new(&gpu.device, gpu.scene_format, 1);
@@ -295,7 +332,12 @@ fn gpu_matches_canonical_rays(
                         matrix: matrix.to_cols_array_2d(),
                         inverse: inverse.to_cols_array_2d(),
                         eye: local.extend(0.).to_array(),
-                        extent: [volume.n * 16, volume.n * 16, volume.n * 16, volume.n],
+                        extent: [
+                            ((bounds[1][0] - bounds[0][0]) * 16.) as u32,
+                            ((bounds[1][1] - bounds[0][1]) * 16.) as u32,
+                            ((bounds[1][2] - bounds[0][2]) * 16.) as u32,
+                            volume.n,
+                        ],
                         viewport: [64., 64., 1., if shadows { 2. } else { 1. }],
                         sun: [-0.5, 0.8, -0.3, 0.],
                         sky: [0.; 4],
@@ -467,9 +509,17 @@ fn gpu_matches_canonical_rays(
                                 );
                             }
 
-                            let point = local + direction * hit.distance as f32;
-                            let clip = matrix * point.extend(1.);
-                            assert!((depths[i] - clip.z / clip.w).abs() < 2e-6, "depth {x},{y}");
+                            // Compare canonical hit distance using the stable camera-depth
+                            // equation. Multiplying an f32 translated VP by a larger
+                            // local point loses precision as the visible origin grows.
+                            let cosine = direction
+                                .dot(Vec3::from_array(basis[0][..3].try_into().unwrap()))
+                                as f64;
+                            let expected_depth =
+                                basis[3][2] as f64 + basis[3][3] as f64 / (hit.distance * cosine);
+                            assert!((depths[i] as f64 - expected_depth).abs() < 2e-6,
+                                "depth {x},{y}: GPU {}, CPU {}, distance {}, cell {:?}, yaw {yaw}, pitch {pitch}, shadows {shadows}, bounds {bounds:?}, ring {:?}",
+                                depths[i], expected_depth, hit.distance, hit.cell, volume.ring);
                             tested += 1;
                         }
                     }
@@ -506,7 +556,42 @@ fn gpu_matches_canonical_rays(
             }
         };
         check_rays(&volume);
-        if let Some(state) = &mut state {
+        if reserved {
+            let state = state.as_mut().unwrap();
+            for step in 0..3 {
+                let next = if step < 2 {
+                    startup::next_region(state.region, 12, eye.to_array())
+                } else {
+                    stream::Region {
+                        lo: state.region.lo.map(|v| v - 3),
+                        hi: state.region.hi.map(|v| v - 3),
+                    }
+                };
+                let mut change = state
+                    .prepare(&world, next, 128 * 1048576, &|| false)
+                    .unwrap();
+                if step == 0 {
+                    // Force a backing-buffer replacement while all existing
+                    // primary/shadow hits must retain their exact pigments.
+                    change.writes.push(stream::Write {
+                        kind: 2,
+                        word: volume.capacities[2] / 4,
+                        data: vec![0; 4],
+                    });
+                }
+                volume.ensure_arenas(&gpu, &change, 128 * 1048576).unwrap();
+                let mut pending = upload::PendingShift::new(&gpu, change);
+                while !pending.advance(&gpu, &volume).0 {}
+                // Unpublished uploads cannot alter retained camera visibility.
+                check_rays(&volume);
+                let (change, _) = pending.publish(&gpu, &mut volume);
+                state.finish(change, true);
+                check_rays(&volume);
+            }
+            assert!(volume.arena_resizes > 0 && volume.arena_copy_bytes > 0);
+            assert_eq!(volume.resident_radius(), 12);
+        }
+        if let Some(state) = state.as_mut().filter(|_| gpu_distance) {
             let warm = |volume: &mut Volume| {
                 let cache = volume
                     .root_distance
