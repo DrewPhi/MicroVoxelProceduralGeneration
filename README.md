@@ -15,7 +15,9 @@ supersampled images, coverage/depth data and matched GPU comparisons. See the
 [reference checkpoint](frontier/REFERENCE_CHECKPOINT.md) for measured results and scope.
 
 The default playtest uses a hybrid renderer: exact NAADF voxels within a
-64 m cube radius, with adaptive raster terrain in the distance. It uses Regional
+64 m cube radius, with adaptive raster terrain in the distance. Startup displays
+an 8 m exact region first, then doubles the radius as each complete region becomes
+ready, up to the selected size. You can move while it expands. It uses Regional
 terrain, detailed appearance maps, voxel appearance filtering, single-sample
 rendering and scatter uploads. Adjust the NAADF radius in **Esc**;
 `--naadf off` selects the raster path, and explicit `--msaa 4` is still accepted. Press **Esc** for live light and

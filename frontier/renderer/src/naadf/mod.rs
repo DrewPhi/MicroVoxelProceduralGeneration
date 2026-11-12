@@ -13,6 +13,7 @@ mod prepare_profile;
 mod root_distance;
 mod scatter;
 mod sparse_roots;
+mod startup;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -647,6 +648,11 @@ fn stream_lead_seconds() -> f64 {
 }
 pub struct Experiment {
     restoring_raster: bool,
+    // A completed inner snapshot stays visible while the next radius builds.
+    expanding: bool,
+    growth_pending: bool,
+    startup_started: Option<Instant>,
+    startup_publications: Vec<(u32, f64)>,
     wide_leaves: bool,
     effective_budget_mib: usize,
     worker: Worker,
@@ -681,6 +687,10 @@ impl Default for Experiment {
     fn default() -> Self {
         Self {
             restoring_raster: false,
+            expanding: false,
+            growth_pending: false,
+            startup_started: None,
+            startup_publications: Vec::new(),
             wide_leaves: false,
             effective_budget_mib: 0,
             worker: Worker::new(),
@@ -767,6 +777,8 @@ impl Experiment {
             self.shift = None;
             self.shifting = false;
             self.request = None;
+            self.expanding = false;
+            self.growth_pending = false;
             self.pending = None;
             self.restoring_raster = self.active.is_some();
             if raster_restored {
@@ -837,7 +849,11 @@ impl Experiment {
                 self.active = None;
             }
             self.worker.stage.store(0, Ordering::Relaxed);
-            self.status = "Building exact snapshot".into();
+            self.startup_started = Some(Instant::now());
+            self.startup_publications.clear();
+            self.expanding = true;
+            self.growth_pending = false;
+            self.status = "Building nearby exact voxels".into();
             self.error = None;
             let headroom = memory_headroom(crate::settings::MemorySnapshot::detect())
                 .unwrap_or_else(|| s.naadf_budget_mib.saturating_mul(1048576));
@@ -845,11 +861,25 @@ impl Experiment {
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
+            job.radius =
+                startup::first_radius(r.radius, startup::enabled() && self.active.is_none());
             self.worker
                 .send(Job::Build(self.epoch, job, world.clone(), build_center));
         }
         if pressure {
             if self.active.is_some() && self.published_epoch == self.epoch {
+                if self.expanding || self.growth_pending {
+                    self.worker.cancel();
+                    self.epoch = self.worker.epoch.load(Ordering::Relaxed);
+                    self.published_epoch = self.epoch;
+                    self.worker.send(Job::Reset);
+                    self.pending = None;
+                    self.expanding = false;
+                    self.growth_pending = false;
+                    self.status = "NAADF expansion paused: low RAM; rebuild to retry".into();
+                    self.error = Some(self.status.clone());
+                    return;
+                }
                 if self.shifting {
                     self.worker.cancel();
                     self.epoch = self.worker.epoch.load(Ordering::Relaxed);
@@ -867,6 +897,8 @@ impl Experiment {
                 self.status = "NAADF streaming paused: low available RAM".into();
             } else {
                 self.worker.cancel();
+                self.expanding = false;
+                self.growth_pending = false;
                 self.pending = None;
                 self.status =
                     "NAADF build cancelled: low available RAM; rebuild here to retry".into();
@@ -892,13 +924,21 @@ impl Experiment {
             match result {
                 Ok(Reply::Built(snapshot)) => match Pending::new(gpu, snapshot) {
                     Ok(p) => {
+                        // Growth usually contains the old owner. If the player
+                        // travelled outside it, restore outgoing raster first.
+                        self.restoring_raster = self
+                            .active
+                            .as_ref()
+                            .is_some_and(|old| !startup::contains(p.volume.bounds, old.bounds));
                         self.pending = Some(p);
-                        self.status = "Uploading complete snapshot".into();
+                        self.status = "Uploading next exact region".into();
                     }
                     Err(e) => {
                         self.error = Some(e.clone());
                         self.status = e;
                         self.refused += 1;
+                        self.expanding = false;
+                        self.growth_pending = false;
                     }
                 },
                 Ok(Reply::Shifted(c)) => {
@@ -921,6 +961,8 @@ impl Experiment {
                     self.status = e;
                     self.refused += 1;
                     self.shifting = false;
+                    self.expanding = false;
+                    self.growth_pending = false;
                 }
             }
         }
@@ -928,7 +970,14 @@ impl Experiment {
             if p.advance(&gpu.queue) && (!self.restoring_raster || raster_restored) {
                 let p = self.pending.take().unwrap();
                 self.upload_ms = p.upload_ms;
-                if r.follow {
+                let resident = p.volume.n / 2;
+                self.expanding = false;
+                self.growth_pending = resident < r.radius;
+                if let Some(started) = self.startup_started {
+                    self.startup_publications
+                        .push((resident, started.elapsed().as_secs_f64()));
+                }
+                if r.follow && !self.growth_pending {
                     self.worker.send(Job::Install(
                         self.epoch,
                         p.snapshot,
@@ -966,6 +1015,27 @@ impl Experiment {
             self.shifting = false;
             self.status = "Preparing NAADF at new location".into();
             return;
+        }
+        if self.growth_pending && !self.expanding && self.error.is_none() {
+            if let Some(v) = &self.active {
+                let mut job = r;
+                job.radius = startup::next_radius(v.n / 2, r.radius);
+                let headroom = memory_headroom(crate::settings::MemorySnapshot::detect())
+                    .unwrap_or_else(|| s.naadf_budget_mib.saturating_mul(1048576));
+                job.budget = build_budget_limit(r.budget, headroom);
+                self.effective_budget_mib = job.budget / 1048576;
+                let center = if r.follow {
+                    camera.position.to_array()
+                } else {
+                    std::array::from_fn(|a| (v.bounds[0][a] + v.bounds[1][a]) * 0.5)
+                };
+                self.expanding = true;
+                self.growth_pending = false;
+                self.worker.stage.store(0, Ordering::Relaxed);
+                self.status = format!("Expanding exact region: {} → {} m", v.n / 2, job.radius);
+                self.worker
+                    .send(Job::Build(self.epoch, job, world.clone(), center));
+            }
         }
         if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
             let (uploaded, frame_upload) = p.advance(gpu, v);
@@ -1023,6 +1093,8 @@ impl Experiment {
                 self.stream_outside_frames += u64::from(self.camera_margin_m < VOXEL_SIZE);
             }
             if r.follow
+                && !self.expanding
+                && !self.growth_pending
                 && !self.shifting
                 && !self.restoring_raster
                 && self.published_epoch == self.epoch
@@ -1063,6 +1135,11 @@ impl Experiment {
     /// Opt-in headless capture gate; normal interactive readiness is unchanged.
     pub(crate) fn ready_for_capture(&self) -> bool {
         self.ready()
+            && !self.expanding
+            && !self.growth_pending
+            && self
+                .request
+                .is_some_and(|r| self.active.as_ref().is_some_and(|v| v.n / 2 == r.radius))
             && (!root_distance::settle_capture()
                 || self
                     .active
@@ -1247,6 +1324,16 @@ impl Experiment {
             a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
         json.pop();
         use std::fmt::Write;
+        write!(
+            json,
+            ",\"startup_expanding\":{},\"startup_publications_radius_seconds\":{:?}",
+            self.expanding || self.growth_pending,
+            self.startup_publications
+                .iter()
+                .map(|&(r, t)| [r as f64, t])
+                .collect::<Vec<_>>()
+        )
+        .unwrap();
         let options = traversal::options();
         write!(json, ",\"specialize_format\":{}", options.specialize_format).unwrap();
         write!(

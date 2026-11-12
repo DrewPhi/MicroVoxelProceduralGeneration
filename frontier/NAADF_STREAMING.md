@@ -60,9 +60,25 @@ resolution; it does not introduce additional voxel LODs inside the cube.
 
 ## Scope and costs
 
-- The initial cube still has the full cold-build cost. A large jump can require
-  a fresh destination cube. Previously evicted strips are regenerated on
-  reentry; overlapping strips are reused in place.
+- Startup publishes a small 8 m cube radius, then 16, 32, 64, 128 and 256 m
+  as needed, stopping at the selected radius (also supports intermediate sizes).
+  The last completed region stays visible while the next builds/uploads; the
+  exterior raster path covers everything else. Capture readiness still waits
+  for the full requested radius, so reference captures cannot silently use 8 m.
+- Expansion uses coherent replacement snapshots, not partially valid voxel
+  buffers. Each larger stage rebuilds the interior; doubling adds less than
+  one third of the final horizontal coverage for power-of-two targets, with
+  source caches reused where retained. This improves time to first exact detail,
+  not total build throughput. Old and new GPU allocations overlap temporarily;
+  live RAM checks still apply. At the final radius, incremental strip streaming
+  resumes. During expansion each new following snapshot is centered on the
+  current player when its build starts; fast travel can outrun the inner region.
+- `FRONTIER_NAADF_PROGRESSIVE_STARTUP=0` restores one full initial build for
+  matched benchmarks. `startup_publications_radius_seconds` in capture/report
+  JSON records each radius and elapsed seconds; `startup_expanding` distinguishes
+  partial resident coverage from a completed target. Esc reports expansion.
+- A large jump can require a fresh destination cube. Previously evicted strips
+  are regenerated on reentry; overlapping strips are reused in place.
 - Following reserves extra block/leaf arena capacity and keeps CPU root and
   reference-count metadata. `gpu_payload_bytes` reports allocated root/arena
   capacity; `initial_snapshot_payload_bytes` reports the original logical
@@ -117,3 +133,35 @@ include the route, hardware, memory and renderer counters. See the
 Workspace tests passed (553); the GPU canonical oracle passed separately.
 With NAADF disabled, the primary reference PNG, linear color and depth
 matched the baseline byte for byte.
+
+## Progressive startup check — November 12, 2026
+
+On the Ryzen 5 7640U / Radeon 760M / 16 GB laptop, Alpine seed 7 at 1080p,
+MSAA1, native 6.25 cm, with 256 m requested: the first 8 m region published at
+0.36 s, 16 m at 1.31 s, 32 m at 6.72 s and 64 m at 30.07 s after the initial
+request. These are startup smoke-test observations, including screenshot work,
+not a cold-cache throughput guarantee. Walking, stopping and turning continued
+while the next region built; no native-region refusals or outside frames were
+reported during this bounded route. Full 256 m completion was not rerun.
+
+A separate 32 m target completed and resumed incremental following (five strip
+publications while walking). The fixed primary spiky comparison was also rerun;
+this changes startup scheduling/ownership publication, not source terrain,
+shaders or settled geometry. Two pure tests check every requested radius through
+256 m and outgoing-owner containment. Existing renderer tests remain active.
+
+[Recorded configurations, readiness times, memory and frame intervals](reference/gallery/naadf-startup/measurements.json).
+Raw screenshots and reports remain in `output/progressive-startup-walk32/`,
+`output/progressive-startup-256/` and `output/progressive-startup-primary/`.
+To inspect startup yourself:
+
+```sh
+./run.sh --preset alpine --naadf-radius 256 --naadf-budget-mib 10240 --width 1920 --height 1080
+```
+
+Esc shows the current expansion stage; F12 captures include both the requested
+and actually resident radius. The full requested radius may take longer overall
+because these intermediate snapshots repeat some inner work. Their purpose is
+to make the nearby scene available immediately rather than withhold it until the
+largest snapshot finishes. Shell-only growth/reusable arena expansion remains a
+possible throughput improvement.
