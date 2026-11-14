@@ -52,6 +52,30 @@ fn naadf_gpu_matches_canonical_rays() {
 }
 
 #[test]
+#[ignore = "explicit GPU parity: exact integer decode, mixed-root cache and combined variants"]
+fn naadf_exact_fastpaths_match_canonical_rays() {
+    for options in [
+        traversal::Options {
+            integer_fastpath: true,
+            ..Default::default()
+        },
+        traversal::Options {
+            cache: 3,
+            ..Default::default()
+        },
+        traversal::Options {
+            cache: 3,
+            integer_fastpath: true,
+            ..Default::default()
+        },
+    ] {
+        gpu_matches_canonical_rays(false, false, false, options);
+        gpu_matches_canonical_rays(true, false, false, options);
+        gpu_matches_canonical_rays_with_storage(false, false, false, options, true);
+    }
+}
+
+#[test]
 #[ignore = "explicit hardware GPU parity: NAADF 32-bit leaf fallback"]
 fn naadf_wide_gpu_matches_canonical_rays() {
     gpu_matches_canonical_rays(true, false, false, traversal::Options::default());

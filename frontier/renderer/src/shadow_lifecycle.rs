@@ -94,6 +94,22 @@ impl ShadowLifecycle {
     pub fn clear(&mut self) {
         self.residents.clear();
     }
+    pub(super) fn invalidate_cells(&mut self, cells: &[frontier_world::Cell]) {
+        self.residents.retain(|root, _| {
+            let p = frontier_world::vegetation::PlantRecord {
+                species: frontier_world::vegetation::Species::Rowan,
+                root: frontier_world::Cell {
+                    x: root[0],
+                    y: root[1],
+                    z: root[2],
+                },
+                seed: 0,
+                variant: 0,
+                rotation: 0,
+            };
+            !cells.iter().any(|cell| super::edit_touches_plant(&p, cell))
+        });
+    }
     pub fn apply(
         &mut self,
         selected: Vec<VegetationBatch>,
@@ -264,6 +280,121 @@ mod tests {
                 fade: 1.,
             }],
         }
+    }
+    #[test]
+    fn local_edit_invalidates_only_overlapping_shadow_residents() {
+        let mut life = ShadowLifecycle::default();
+        let near = batch(4, 10);
+        let mut far = batch(4, 10);
+        far.instances[0].root_cell = [-1000, 2, -1000];
+        life.apply(vec![near, far], 100, Instant::now(), &mut vec![]);
+        life.invalidate_cells(&[frontier_world::Cell { x: -1, y: 3, z: -1 }]);
+        assert!(!life.residents.contains_key(&[1, 2, 3]));
+        assert!(life.residents.contains_key(&[-1000, 2, -1000]));
+    }
+    #[test]
+    fn local_edit_during_shadow_transition_drops_both_stale_sides_without_resetting_far_progress() {
+        let mut life = ShadowLifecycle::default();
+        let now = Instant::now();
+        let near_root = [-1, 2, -1];
+        let far_root = [-1000, 2, -1000];
+        let at = |root, lod, triangles, edit_id| {
+            let mut b = batch(lod, triangles);
+            b.instances[0].root_cell = root;
+            b.key.edit_id = edit_id;
+            b
+        };
+        life.apply(
+            vec![at(near_root, 4, 10, 0), at(far_root, 4, 10, 0)],
+            100,
+            now,
+            &mut vec![],
+        );
+        let start = now + Duration::from_millis(100);
+        life.apply(
+            vec![at(near_root, 2, 20, 0), at(far_root, 2, 20, 0)],
+            100,
+            start,
+            &mut vec![],
+        );
+        assert!(life.residents[&near_root].transition.is_some());
+        let old_far = life.residents[&far_root]
+            .transition
+            .as_ref()
+            .unwrap()
+            .0
+            .mesh
+            .clone();
+        let current_far = life.residents[&far_root].batch.mesh.clone();
+        let visibility = life.residents[&far_root].visibility.to_bits();
+        life.invalidate_cells(&[frontier_world::Cell {
+            x: -96,
+            y: 3,
+            z: -1,
+        }]);
+        assert!(!life.residents.contains_key(&near_root));
+        let far = &life.residents[&far_root];
+        assert!(Arc::ptr_eq(&far.batch.mesh, &current_far));
+        let (old, transition_started) = far.transition.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&old.mesh, &old_far));
+        assert_eq!(*transition_started, start);
+        assert_eq!(far.visibility.to_bits(), visibility);
+
+        // ReplacementPending must not resurrect the invalidated old tree while
+        // the edited replacement is still building.
+        let requested = at(near_root, 2, 5, 42).key;
+        let mut inspection = vec![ShadowInspection {
+            root_cell: near_root,
+            selected: None,
+            requested,
+            reason: ShadowReason::ReplacementPending,
+            triangles: 0,
+        }];
+        let (out, transitions, _) = life.apply(
+            vec![at(far_root, 2, 20, 0)],
+            100,
+            now + Duration::from_millis(200),
+            &mut inspection,
+        );
+        assert!(out.iter().all(|b| b.instances[0].root_cell == far_root));
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].root_cell, far_root);
+        assert!((transitions[0].progress - 1. / 3.).abs() < 1e-6);
+        assert!(inspection[0].selected.is_none());
+
+        let (out, transitions, _) = life.apply(
+            vec![at(near_root, 2, 5, 42), at(far_root, 2, 20, 0)],
+            100,
+            now + Duration::from_millis(250),
+            &mut vec![],
+        );
+        assert!(out
+            .iter()
+            .filter(|b| b.instances[0].root_cell == near_root)
+            .all(|b| b.key.edit_id == 42));
+        assert!(life.residents[&near_root].transition.is_none());
+        assert_eq!(transitions.len(), 1);
+        assert!((transitions[0].progress - 0.5).abs() < 1e-6);
+
+        // Undo drops the edited caster too; re-entering A cannot retain B as a
+        // fading transition side, even though its template may remain cached.
+        life.invalidate_cells(&[frontier_world::Cell {
+            x: -96,
+            y: 3,
+            z: -1,
+        }]);
+        let (out, transitions, _) = life.apply(
+            vec![at(near_root, 4, 10, 0), at(far_root, 2, 20, 0)],
+            100,
+            now + Duration::from_millis(300),
+            &mut vec![],
+        );
+        assert!(out
+            .iter()
+            .filter(|b| b.instances[0].root_cell == near_root)
+            .all(|b| b.key.edit_id == 0));
+        assert!(transitions.iter().all(|t| t.root_cell == far_root));
+        assert!(life.residents[&near_root].transition.is_none());
     }
     #[test]
     fn replacement_keeps_both_then_converges_and_releases_old() {

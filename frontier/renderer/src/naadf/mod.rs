@@ -736,6 +736,9 @@ pub struct Experiment {
     strip_ms: f64,
     strip_columns: usize,
     strip_shared_leaves: usize,
+    proof_refresh_ms: f64,
+    proofs_refreshed: u64,
+    root_occupancy_bytes: usize,
     shift_timing: ShiftTiming,
     shift_samples: std::collections::VecDeque<[f64; 4]>,
     prepare_samples: std::collections::VecDeque<(f64, prepare_profile::Metrics)>,
@@ -776,6 +779,9 @@ impl Default for Experiment {
             strip_ms: 0.,
             strip_columns: 0,
             strip_shared_leaves: 0,
+            proof_refresh_ms: 0.,
+            proofs_refreshed: 0,
+            root_occupancy_bytes: 0,
             shift_timing: ShiftTiming::default(),
             shift_samples: Default::default(),
             prepare_samples: Default::default(),
@@ -1184,6 +1190,9 @@ impl Experiment {
                 self.strip_ms = c.build_ms;
                 self.strip_columns = c.generated_columns;
                 self.strip_shared_leaves = c.shared_leaves;
+                self.proof_refresh_ms += c.root_proof_refresh_ms;
+                self.proofs_refreshed += c.root_proofs_refreshed as u64;
+                self.root_occupancy_bytes = c.root_occupancy_bytes;
                 if let Some(profile) = &c.cpu_profile {
                     if self.prepare_samples.len() == 64 {
                         self.prepare_samples.pop_front();
@@ -1285,7 +1294,8 @@ impl Experiment {
     pub fn ready(&self) -> bool {
         self.active.is_some() && self.published_epoch == self.epoch && self.error.is_none()
     }
-    /// Opt-in headless capture gate; normal interactive readiness is unchanged.
+    /// Full requested-region gate for captures and locked benchmarks.
+    /// Normal interactive readiness still permits progressive startup.
     pub(crate) fn ready_for_capture(&self) -> bool {
         self.ready()
             && !self.expanding
@@ -1502,6 +1512,8 @@ impl Experiment {
             self.startup_generated_roots
         )
         .unwrap();
+        write!(json, ",\"cpu_root_refresh\":{:?},\"cpu_root_refresh_ms\":{},\"cpu_root_proofs_refreshed\":{},\"cpu_root_occupancy_bytes\":{}",
+            root_distance::occupancy::requested().unwrap_or("off"), self.proof_refresh_ms, self.proofs_refreshed, self.root_occupancy_bytes).unwrap();
         let options = traversal::options();
         write!(json, ",\"specialize_format\":{}", options.specialize_format).unwrap();
         write!(

@@ -250,6 +250,13 @@ impl Gpu {
         json.pop();
         json.push_str(&format!(",\"ground_decisions\":{{\"selected\":{},\"missing_mesh\":{},\"budget_rejected\":{},\"retained\":{},\"coarse_fallback\":{}}},\"ground_inspection_limit\":256,\"ground_inspection\":[{}]}}",
             s.ground_decisions[0],s.ground_decisions[1],s.ground_decisions[2],s.ground_decisions[3],s.ground_decisions[4],ground_inspection));
+        if let Some(stream) = &self.vegetation_stream {
+            json.pop();
+            json.push_str(&format!(
+                ",\"local_edit_cache\":{}}}",
+                stream.local_edit_stats_json()
+            ));
+        }
         json
     }
 }

@@ -434,7 +434,11 @@ impl DiskCache {
         result.is_ok()
     }
     fn store_inner(&mut self, tile: &GeometryTile) -> io::Result<()> {
-        if tile.gpu_profiles.is_some() || !tile.appearance.available || !validate(tile) {
+        if tile.cover_input.is_some()
+            || tile.gpu_profiles.is_some()
+            || !tile.appearance.available
+            || !validate(tile)
+        {
             return Err(io::Error::other(
                 "derived cache requires a valid completed CPU geometry/appearance payload",
             ));
@@ -895,6 +899,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         + face_profile_indices.capacity() * 4;
     let t = GeometryTile {
         naadf_owned: false,
+        cover_input: None,
         key,
         mesh: Mesh {
             vertices,

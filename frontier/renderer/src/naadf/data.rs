@@ -13,6 +13,8 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
     time::Instant,
 };
+#[path = "overlay.rs"]
+mod overlay;
 const FULL: u32 = 1 << 30;
 const CHILD: u32 = 1 << 31;
 #[repr(C)]
@@ -60,9 +62,9 @@ impl Snapshot {
         [lo, std::array::from_fn(|a| lo[a] + self.dims[a] as f64)]
     }
     pub fn material(&self, p: [usize; 3]) -> u32 {
-        let n = self.chunks_per_edge as usize;
+        let [nx, ny, _] = self.dims;
         let c = p.map(|v| v / 16);
-        let mut node = self.chunks[(c[2] * n + c[0]) * n + c[1]];
+        let mut node = self.chunks[(c[2] * nx + c[0]) * ny + c[1]];
         if node & CHILD != 0 {
             let b = p.map(|v| (v % 16) / 4);
             node = self.blocks[(node & 0x3fff_ffff) as usize + b[0] + 4 * (b[1] + 4 * b[2])];
@@ -149,6 +151,20 @@ fn expand(
     axis: usize,
     bits: u32,
 ) -> u32 {
+    let coordinate = (i / strides[axis]) % dims[axis];
+    expand_at(nodes, dims, strides, i, axis, bits, coordinate)
+}
+// Axis spans supply the coordinate once for all contiguous words in a plane.
+// The Jacobi input remains immutable throughout each axis pass.
+fn expand_at(
+    nodes: &[u32],
+    dims: [usize; 3],
+    strides: [usize; 3],
+    i: usize,
+    axis: usize,
+    bits: u32,
+    coordinate: usize,
+) -> u32 {
     let old = nodes[i];
     if old & 0xc000_0000 != 0 {
         return old;
@@ -162,7 +178,6 @@ fn expand(
         if extent == mask {
             continue;
         }
-        let coordinate = (i / strides[axis]) % dims[axis];
         let gap = extent as usize + 1;
         let adjacent = if positive {
             coordinate.checked_add(gap).filter(|v| *v < dims[axis])
@@ -213,12 +228,19 @@ pub fn bounds(
     for _ in 0..((1 << bits) - 1) {
         let mut changed = false;
         for axis in 0..3 {
-            for i in 0..nodes.len() {
-                if i % 32768 == 0 && cancel() {
-                    return Err("NAADF build superseded".into());
+            let stride = strides[axis];
+            let period = stride * dims[axis];
+            for base in (0..nodes.len()).step_by(period) {
+                for coordinate in 0..dims[axis] {
+                    let start = base + coordinate * stride;
+                    for i in start..start + stride {
+                        if i % 32768 == 0 && cancel() {
+                            return Err("NAADF build superseded".into());
+                        }
+                        scratch[i] = expand_at(nodes, dims, strides, i, axis, bits, coordinate);
+                        changed |= scratch[i] != nodes[i];
+                    }
                 }
-                scratch[i] = expand(nodes, dims, strides, i, axis, bits);
-                changed |= scratch[i] != nodes[i];
             }
             std::mem::swap(nodes, &mut scratch);
         }
@@ -329,7 +351,12 @@ impl LeafIndex {
             + self.collision_entries.saturating_mul(16)
     }
 }
-fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Result<usize, String> {
+fn budget(
+    s: &Snapshot,
+    overlay_bytes: usize,
+    hash_bytes: usize,
+    limit: usize,
+) -> Result<usize, String> {
     // New CPU + GPU payload, top-level Jacobi scratch and hash table workspace.
     // Includes capacity slack; resident old snapshot is reported separately.
     let estimate = s
@@ -338,7 +365,7 @@ fn budget(s: &Snapshot, overlay: usize, hash_bytes: usize, limit: usize) -> Resu
         .saturating_mul(if s.gpu_distance { 8 } else { 12 })
         .saturating_add((s.blocks.capacity() + s.voxels.capacity()).saturating_mul(8))
         .saturating_add(s.palette.capacity().saturating_mul(32))
-        .saturating_add(overlay.saturating_mul(16))
+        .saturating_add(overlay_bytes)
         .saturating_add(hash_bytes);
     if estimate > limit {
         return Err(format!(
@@ -448,6 +475,7 @@ pub fn build_region(
         prepare_profile::enabled(),
         prepare_profile::stack_blocks(),
         prepare_profile::column_extrema(),
+        overlay::enabled(),
     )
 }
 
@@ -463,6 +491,7 @@ fn build_region_options(
     profiling: bool,
     stack_blocks: bool,
     column_extrema: bool,
+    compact_overlay: bool,
 ) -> Result<Snapshot, String> {
     let start = Instant::now();
     let mut profile = Collector::with_enabled(profiling);
@@ -497,7 +526,7 @@ fn build_region_options(
         plant_cells: 0,
     };
     let mut pigments = HashMap::new();
-    let mut overlay = Vec::<u128>::new();
+    let mut overlay = overlay::Overlay::new(compact_overlay);
     stage.store(1, Ordering::Relaxed);
     profile.end(Stage::Initialization, phase);
     let phase = profile.start();
@@ -553,52 +582,68 @@ fn build_region_options(
         for v in &model.voxels {
             if let Some(a) = address(record.world_cell(v.cell), min, dims) {
                 let ty = pigment(&mut out.palette, &mut pigments, v.color, v.material)?;
-                overlay.push(((a as u128) << 32) | ty as u128);
+                overlay.push(a, ty);
             }
         }
         profile.workspace(budget(
             &out,
-            overlay.capacity(),
+            overlay.bytes(),
             pigments.capacity().saturating_mul(32),
             limit,
         )?);
         profile.end(Stage::VegetationAssembly, phase);
     }
     let phase = profile.start();
-    overlay.sort_unstable();
-    let mut compact = 0;
-    let mut i = 0;
-    while i < overlay.len() {
-        if i % 4096 == 0 && cancel() {
-            return Err("NAADF build superseded".into());
-        }
-        let a = overlay[i] >> 32;
-        let mut j = i + 1;
-        while j < overlay.len() && overlay[j] >> 32 == a {
-            j += 1;
-        }
-        let ty = if j - i == 1 {
-            overlay[i] as u32
-        } else {
+    overlay.resolve(
+        |a| {
             let v = world
-                .vegetation_voxel(cell_at(a as u64, min, dims))
+                .vegetation_voxel(cell_at(a, min, dims))
                 .ok_or("canonical plant overlap lookup failed")?;
-            pigment(&mut out.palette, &mut pigments, v.color, v.material)?
-        };
-        overlay[compact] = (a << 32) | ty as u128;
-        compact += 1;
-        i = j;
-    }
-    overlay.truncate(compact);
-    out.plant_cells = compact;
+            pigment(&mut out.palette, &mut pigments, v.color, v.material)
+        },
+        &cancel,
+    )?;
+    out.plant_cells = overlay.len();
+    // Canonical overlap resolution may introduce a previously unseen wide
+    // pigment. Account for exact promotion's temporary old+new payload peak.
+    profile.workspace(budget(
+        &out,
+        overlay.bytes(),
+        pigments.capacity().saturating_mul(32),
+        limit,
+    )?);
     profile.end(Stage::VegetationOverlap, phase);
     let phase = profile.start();
     // Explicit edits override both terrain and plants. Material-only edited
     // cells use the ordinary semantic palette, matching canonical material.
-    let edits: HashMap<u64, u32> = world
-        .edit_cells()
-        .filter_map(|c| address(c, min, dims).map(|a| (a, id(world.material(c)))))
-        .collect();
+    let mut edits = HashMap::<usize, Vec<(usize, u32)>>::new();
+    let mut edit_payload_bytes = 0usize;
+    for (index, c) in world.edit_cells().enumerate() {
+        if index % 1024 == 0 && cancel() {
+            return Err("NAADF edit index superseded".into());
+        }
+        if let Some(a) = address(c, min, dims) {
+            // Native addresses need up to39bits although the root index fits32.
+            // Divide before narrowing on32-bit targets.
+            let values = edits.entry((a / 4096) as usize).or_default();
+            let old_capacity = values.capacity();
+            values.push(((a % 4096) as usize, id(world.material(c))));
+            edit_payload_bytes +=
+                (values.capacity() - old_capacity) * std::mem::size_of::<(usize, u32)>();
+            if index % 1024 == 0 {
+                profile.workspace(budget(
+                    &out,
+                    overlay.bytes(),
+                    pigments
+                        .capacity()
+                        .saturating_mul(32)
+                        .saturating_add(edits.capacity().saturating_mul(48))
+                        .saturating_add(edit_payload_bytes),
+                    limit,
+                )?);
+            }
+        }
+    }
     let edited_columns: HashSet<_> = world
         .edit_cells()
         .filter(|c| {
@@ -607,8 +652,20 @@ fn build_region_options(
                 && c.z >= min.z
                 && c.z < min.z + nz as i64 * 16
         })
-        .map(|c| (c.x.div_euclid(16), c.z.div_euclid(16)))
+        .map(|c| ((c.x - min.x).div_euclid(16), (c.z - min.z).div_euclid(16)))
         .collect();
+    let edit_workspace_bytes = edit_payload_bytes
+        .saturating_add(edits.capacity().saturating_mul(48))
+        .saturating_add(edited_columns.capacity().saturating_mul(24));
+    profile.workspace(budget(
+        &out,
+        overlay.bytes(),
+        pigments
+            .capacity()
+            .saturating_mul(32)
+            .saturating_add(edit_workspace_bytes),
+        limit,
+    )?);
     profile.end(Stage::EditIndex, phase);
     let mut leaves = LeafIndex::default();
     let mut cursor = 0;
@@ -618,11 +675,18 @@ fn build_region_options(
             if cancel() {
                 return Err("NAADF build superseded".into());
             }
-            let summary = cached.and_then(|f| f(min.x / 16 + cx as i64, min.z / 16 + cz as i64));
-            let plant_column = overlay
-                .get(cursor)
-                .is_some_and(|p| (p >> 44) / ny as u128 == (cz * nx + cx) as u128);
-            if let Some(v) = summary.filter(|v| v.fast && edits.is_empty() && !plant_column) {
+            // Streaming summaries describe world-aligned metre columns. A
+            // nonaligned extraction crosses their boundaries and cannot reuse
+            // one column's extrema as a proof for its shifted native tile.
+            let summary = if min.x.rem_euclid(16) == 0 && min.z.rem_euclid(16) == 0 {
+                cached.and_then(|f| f(min.x / 16 + cx as i64, min.z / 16 + cz as i64))
+            } else {
+                None
+            };
+            let plant_column = cursor < overlay.len()
+                && (overlay.address(cursor) >> 12) / ny as u64 == (cz * nx + cx) as u64;
+            let column_edited = edited_columns.contains(&(cx as i64, cz as i64));
+            if let Some(v) = summary.filter(|v| v.fast && !column_edited && !plant_column) {
                 let air = min.y >= v.high;
                 let solid = min.y + ny as i64 * 16 < v.low - 12 && v.deep != 0;
                 if air || solid {
@@ -635,78 +699,55 @@ fn build_region_options(
                 }
             }
             let fast = world.fbm_terrain().is_some()
+                // The fixture's ownership boundary is metre aligned. A shifted
+                // native tile can straddle it despite an unowned origin, so
+                // retain exact column queries for all nonaligned extractions.
+                && (world.topology_base_cells().is_none()
+                    || (min.x.rem_euclid(16)==0 && min.z.rem_euclid(16)==0))
                 && !world.volume_owned(Cell {
                     x: min.x + (cx * 16) as i64,
                     y: 0,
                     z: min.z + (cz * 16) as i64,
                 })
-                && !edited_columns.contains(&(
-                    min.x.div_euclid(16) + cx as i64,
-                    min.z.div_euclid(16) + cz as i64,
-                ));
+                && !column_edited;
             let cache_x = min.x + (cx * 16) as i64;
             let cache_z = min.z + (cz * 16) as i64;
             let reusable = fast && super::column_cache::enabled();
             let cached_samples = if reusable {
-                super::column_cache::get(world, cache_x, cache_z)
+                super::column_cache::get_unedited(world, cache_x, cache_z)
             } else {
                 None
             };
             let phase = profile.start();
-            let columns: Vec<_> = if cached_samples.is_none() {
-                (0..16)
-                    .flat_map(|z| (0..16).map(move |x| (x, z)))
-                    .map(|(x, z)| {
-                        world.column(min.x + (cx * 16 + x) as i64, min.z + (cz * 16 + z) as i64)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let heights: Vec<_> = cached_samples.as_ref().map_or_else(
-                || {
-                    columns
-                        .iter()
-                        .map(|c| (c.height_m() / VOXEL_SIZE) as i64)
-                        .collect()
-                },
-                |v| v.heights.clone(),
-            );
-            let bands: Vec<_> = cached_samples.as_ref().map_or_else(
-                || {
-                    columns
-                        .iter()
-                        .zip(&heights)
-                        .map(|(c, h)| {
-                            [
-                                id(c.material(h - 1)),
-                                id(c.material(h - 2)),
-                                id(c.material(h - 13)),
-                            ]
-                        })
-                        .collect()
-                },
-                |v| v.bands.clone(),
-            );
+            // Fixed-size tile scratch avoids three allocations per column tile.
+            // Cache hits borrow immutable arrays rather than cloning their payload.
+            let columns = cached_samples.is_none().then(|| {
+                std::array::from_fn::<_, 256, _>(|i| {
+                    world.column(cache_x + (i % 16) as i64, cache_z + (i / 16) as i64)
+                })
+            });
+            let local_samples = columns.as_ref().map(|columns| {
+                let heights = std::array::from_fn(|i| (columns[i].height_m() / VOXEL_SIZE) as i64);
+                let bands = std::array::from_fn(|i| {
+                    let h = heights[i];
+                    [
+                        id(columns[i].material(h - 1)),
+                        id(columns[i].material(h - 2)),
+                        id(columns[i].material(h - 13)),
+                    ]
+                });
+                super::column_cache::Samples { heights, bands }
+            });
+            let samples = cached_samples
+                .as_deref()
+                .or(local_samples.as_ref())
+                .unwrap();
+            let heights = &samples.heights;
+            let bands = &samples.bands;
             if reusable && cached_samples.is_none() {
-                super::column_cache::insert(
-                    world,
-                    cache_x,
-                    cache_z,
-                    super::column_cache::Samples {
-                        heights: heights.clone(),
-                        bands: bands.clone(),
-                    },
-                );
+                super::column_cache::insert_unedited(world, cache_x, cache_z, samples.clone());
             }
             profile.end(Stage::ColumnSampling, phase);
-            if let Some(m) = &mut profile.metrics {
-                m.column_vec_allocations += 2 + u64::from(!columns.is_empty());
-                m.column_vec_bytes += (columns.capacity()
-                    * std::mem::size_of::<frontier_world::WorldColumn<'_>>()
-                    + heights.capacity() * 8
-                    + bands.capacity() * 12) as u64;
-            }
             if cached_samples.is_none() {
                 out.sampled_columns += 256;
             }
@@ -733,10 +774,11 @@ fn build_region_options(
                 let ci = (cz * nx + cx) * ny + cy;
                 let y0 = min.y + (cy * 16) as i64;
                 let plant_start = cursor;
-                while cursor < overlay.len() && (overlay[cursor] >> 44) == ci as u128 {
+                while cursor < overlay.len() && (overlay.address(cursor) >> 12) == ci as u64 {
                     cursor += 1;
                 }
-                let clean = cursor == plant_start && edits.is_empty();
+                let chunk_edits = edits.get(&ci);
+                let clean = cursor == plant_start && chunk_edits.is_none();
                 if fast
                     && clean
                     && (if column_extrema {
@@ -778,23 +820,21 @@ fn build_region_options(
                                     bands[col][2]
                                 }
                             } else {
-                                id(columns[col].material(py))
+                                id(columns.as_ref().unwrap()[col].material(py))
                             };
                             cells[x + 16 * (y + 16 * z)] = if ty == 0 { 0 } else { FULL | ty };
                         }
                     }
                 }
-                for p in &overlay[plant_start..cursor] {
-                    let vi = ((p >> 32) & 4095) as usize;
+                overlay.for_each(plant_start, cursor, |address, pigment| {
+                    let vi = (address & 4095) as usize;
                     if cells[vi] == 0 {
-                        cells[vi] = FULL | (*p as u32);
+                        cells[vi] = FULL | pigment;
                     }
-                }
-                if !edits.is_empty() {
-                    for (vi, c) in cells.iter_mut().enumerate() {
-                        if let Some(&ty) = edits.get(&(ci as u64 * 4096 + vi as u64)) {
-                            *c = if ty == 0 { 0 } else { FULL | ty };
-                        }
+                });
+                if let Some(chunk_edits) = chunk_edits {
+                    for &(vi, ty) in chunk_edits {
+                        cells[vi] = if ty == 0 { 0 } else { FULL | ty };
                     }
                 }
                 profile.end(Stage::NativeCellAssembly, phase);
@@ -876,8 +916,11 @@ fn build_region_options(
             );
             profile.workspace(budget(
                 &out,
-                overlay.capacity(),
-                leaves.workspace_bytes() + pigments.capacity().saturating_mul(32),
+                overlay.bytes(),
+                leaves
+                    .workspace_bytes()
+                    .saturating_add(edit_workspace_bytes)
+                    + pigments.capacity().saturating_mul(32),
                 limit,
             )?);
             stage.store(
@@ -1145,6 +1188,7 @@ fn preparation_profiling_and_stack_scratch_preserve_exact_snapshot() {
             profiling,
             stack,
             false,
+            false,
         )
         .unwrap()
     };
@@ -1176,10 +1220,7 @@ fn preparation_profiling_and_stack_scratch_preserve_exact_snapshot() {
         .iter()
         .all(|ms| ms.is_finite() && *ms >= 0.));
     assert!(baseline_metrics.region_unclassified_wall_ms >= 0.);
-    assert_eq!(
-        baseline_metrics.column_vec_allocations,
-        baseline.sampled_columns as u64 / 256 * 3
-    );
+    assert_eq!(baseline_metrics.column_vec_allocations, 0);
 }
 
 #[cfg(test)]
@@ -1220,6 +1261,7 @@ fn profile_region_preparation_stages() {
                 &|| false,
                 true,
                 stack,
+                false,
                 false,
             )
             .unwrap();
@@ -1315,6 +1357,7 @@ fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_source
                             true,
                             false,
                             extrema,
+                            false,
                         )
                         .unwrap()
                     };
@@ -1371,3 +1414,7 @@ fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_source
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cpu_tests.rs"]
+mod cpu_tests;

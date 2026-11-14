@@ -17,27 +17,49 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
+MANAGED_OTHER = {'FRONTIER_TERRAIN_INCREMENTAL_ORDER', 'FRONTIER_GROUND_COVER_CACHE_MIB',
+                 'FRONTIER_DEFERRED_GROUND_COVER'}
+
+
+def managed(key):
+    return key.startswith('FRONTIER_NAADF_') or key in MANAGED_OTHER
+
+
 def environment(overrides):
     if not isinstance(overrides, dict) or any(
-            not k.startswith('FRONTIER_NAADF_') or not isinstance(v, str)
-            for k, v in overrides.items()):
-        raise ValueError('variants must map FRONTIER_NAADF_* variables to strings')
-    return {**{k: v for k, v in os.environ.items()
-               if not k.startswith('FRONTIER_NAADF_')}, **overrides}
+            not managed(k) or not isinstance(v, str) for k, v in overrides.items()):
+        raise ValueError('variants must map supported experiment variables to strings')
+    return {**{k: v for k, v in os.environ.items() if not managed(k)}, **overrides}
+
+
+class UnmatchedAdaptivePartition(ValueError):
+    """Scene selection differs; retain pixel metrics without accepting the gate."""
+    def __init__(self, differences, comparison):
+        self.differences = differences
+        self.comparison = comparison
+        super().__init__('unmatched adaptive partition: ' + ', '.join(differences))
 
 
 def compare(a, b):
     import numpy as np
     ma = json.loads(a.with_suffix('.capture.json').read_text())
     mb = json.loads(b.with_suffix('.capture.json').read_text())
-    for key in ('width', 'height', 'eye', 'target', 'fov_y_degrees', 'near', 'far',
-                'terrain_recipe', 'native_voxel_m'):
+    for key in ('width', 'height', 'eye', 'target', 'fov_y_degrees', 'near', 'far'):
         if ma[key] != mb[key]:
+            raise ValueError(f'unmatched capture {key}')
+    # New interactive captures put native resolution under the NAADF record;
+    # older offline captures exposed it at top level. Compare the actual value.
+    resolution = lambda m: m.get('native_voxel_m', m.get('naadf', {}).get('native_voxel_m'))
+    if resolution(ma) is None or resolution(ma) != resolution(mb):
+        raise ValueError('unmatched or missing native voxel resolution')
+    for key in ('terrain_recipe', 'scene', 'seed'):
+        if ma.get(key) != mb.get(key):
             raise ValueError(f'unmatched capture {key}')
     if ma['naadf']['world_bounds_m'] != mb['naadf']['world_bounds_m']:
         raise ValueError('unmatched exact volume')
     for key in ('seed', 'source_version', 'edit_revision', 'samples', 'voxel_filter',
-                'appearance_version', 'render_appearance_version', 'atmosphere', 'beauty'):
+                'appearance_version', 'render_appearance_version', 'atmosphere', 'beauty',
+                'horizontal_scale_m', 'amplitude_m', 'octaves', 'roughness'):
         if ma.get(key) != mb.get(key):
             raise ValueError(f'unmatched capture {key}')
     # Completed jobs alone do not prove equal resident tree selections: retained
@@ -60,6 +82,19 @@ def compare(a, b):
                         'different_values': int(np.count_nonzero(left != right)),
                         'max_absolute_error': float(error.max()),
                         'rmse': float(np.sqrt(np.mean(error * error)))}
+    # Readiness alone permits several camera-valid raster partitions. Different
+    # worker completion schedules can settle on different displayed triangles.
+    # Classify this separately from arithmetic changes while retaining all exact
+    # pixel differences; even bit-identical images cannot certify matched scenes.
+    differences = {}
+    for key in ('visible_clusters', 'triangles', 'gpu_occluded_clusters',
+                'gpu_occluded_triangles', 'gpu_occluder_boxes', 'visible_native_quads'):
+        left = ma.get('adaptive', {}).get(key)
+        right = mb.get('adaptive', {}).get(key)
+        if left != right:
+            differences[key] = {'control': left, 'candidate': right}
+    if differences:
+        raise UnmatchedAdaptivePartition(differences, result)
     return result
 
 
@@ -143,7 +178,9 @@ def main():
                 w, h = args.capture_size.split(',')
                 cmd = [str(args.binary.resolve()), '--preset', 'alpine', '--seed', '7',
                        '--msaa', '1', '--naadf-radius', str(args.radius), '--naadf-follow', 'off',
-                       '--pixel-error', '5', '--capture-far', '6000', '--capture-linear',
+                       '--pixel-error', '5', '--native-radius', '4', '--vegetation-near', '32',
+                       '--resource-profile', 'development',
+                       '--capture-far', '6000', '--capture-linear',
                        '--atmosphere', 'off', '--no-adaptive-disk-cache',
                        '--capture', str(out / 'frame.png'), '--width', w, '--height', h,
                        '--eye', args.eye or '-41.06016,28.95,-250',
@@ -178,6 +215,11 @@ def main():
                                        if not value['equal'] and not (args.allow_color_error and kind == 'linear_rgb')]
                             if unequal:
                                 raise ValueError(f"exact capture mismatch: {', '.join(unequal)}")
+                    except UnmatchedAdaptivePartition as error:
+                        record['comparison_to_first'] = error.comparison
+                        record['comparison_classification'] = 'unmatched_adaptive_partition'
+                        record['adaptive_partition_differences'] = error.differences
+                        record['error'] = str(error)
                     except (OSError, ValueError, KeyError) as error:
                         record['error'] = str(error)
                 elif 'error' not in record and args.run:

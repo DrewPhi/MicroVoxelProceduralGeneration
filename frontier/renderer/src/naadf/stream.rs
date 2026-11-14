@@ -166,6 +166,10 @@ pub struct Change {
     pub cpu_profile: Option<Metrics>,
     pub generated_columns: usize,
     pub shared_leaves: usize,
+    pub root_proof_refresh_ms: f64,
+    pub root_proofs_refreshed: usize,
+    pub root_occupancy_bytes: usize,
+    occupancy: Option<super::root_distance::occupancy::Occupancy>,
     palette_base: usize,
     leaf_slots: Vec<usize>,
     block_slots: Vec<usize>,
@@ -173,6 +177,7 @@ pub struct Change {
 }
 pub struct State {
     pub region: Region,
+    occupancy: Option<super::root_distance::occupancy::Occupancy>,
     n: usize,
     ring: [usize; 3],
     // Retirement only needs the mixed roots that own arena allocations.
@@ -259,8 +264,14 @@ impl State {
         for z in 0..nz {
             columns[z * n..z * n + nx].copy_from_slice(&s.columns[z * nx..(z + 1) * nx]);
         }
+        let occupancy = super::root_distance::occupancy::requested().map(|_| {
+            let mut occupancy = super::root_distance::occupancy::Occupancy::new(n);
+            occupancy.write(region, &s.chunks);
+            occupancy
+        });
         Self {
             region,
+            occupancy,
             n,
             ring: [0; 3],
             mixed_roots,
@@ -389,6 +400,29 @@ impl State {
         if cancel() {
             return Err("NAADF shift superseded".into());
         }
+        // Occupancy is transaction-local: a cancelled upload must never make
+        // unpublished incoming roots available as proof support to later work.
+        let proof_start = Instant::now();
+        let mut occupancy = self.occupancy.clone();
+        let mut root_proofs_refreshed = 0;
+        if let Some(occupancy) = &mut occupancy {
+            for (&region, snapshot) in regions.iter().zip(&snapshots) {
+                occupancy.write_cancelled(region, &snapshot.chunks, &|| cancel())?;
+            }
+            for (&region, snapshot) in regions.iter().zip(&mut snapshots) {
+                root_proofs_refreshed +=
+                    if super::root_distance::occupancy::requested() == Some("box") {
+                        occupancy.refresh(region, next, &mut snapshot.chunks, &|| cancel())?
+                    } else {
+                        occupancy.refresh_cubes(region, next, &mut snapshot.chunks, &|| cancel())?
+                    };
+            }
+        }
+        let root_proof_refresh_ms = if occupancy.is_some() {
+            proof_start.elapsed().as_secs_f64() * 1000.
+        } else {
+            0.
+        };
         let mut leaf_alloc = vec![];
         let mut block_alloc = vec![];
         let old_palette = self.palette.len();
@@ -566,6 +600,10 @@ impl State {
                 cpu_profile: profile.metrics.take(),
                 generated_columns: generated,
                 shared_leaves,
+                root_proof_refresh_ms,
+                root_proofs_refreshed,
+                root_occupancy_bytes: occupancy.as_ref().map_or(0, |o| o.bytes()),
+                occupancy,
                 palette_base: old_palette,
                 leaf_slots: leaf_alloc.clone(),
                 block_slots: block_alloc.clone(),
@@ -599,6 +637,7 @@ impl State {
             return;
         }
         let n = self.n;
+        self.occupancy = change.occupancy;
         let old = self.region;
         let ring = self.ring;
         let new = change.region;

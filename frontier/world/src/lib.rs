@@ -183,6 +183,33 @@ impl World {
     pub fn edit_cells(&self) -> impl Iterator<Item = Cell> + '_ {
         self.edits.keys().copied()
     }
+    /// True only for snapshots of one immutable source lineage. Reconstructed
+    /// worlds conservatively require source-wide invalidation, even if their
+    /// edit revision numbers happen to match. Vegetation toggles/replacements
+    /// are source changes; material edits preserve these identities.
+    pub fn shares_source_lineage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.counter, &other.counter)
+            && match (&self.vegetation, &other.vegetation) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+    /// Exact override-map difference, including material changes and overrides
+    /// removed by returning to an earlier immutable snapshot. Camera-independent.
+    pub fn changed_edit_cells(&self, other: &Self) -> Vec<Cell> {
+        if Arc::ptr_eq(&self.edits, &other.edits) {
+            return Vec::new();
+        }
+        self.edits
+            .keys()
+            .chain(other.edits.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|cell| self.edits.get(cell) != other.edits.get(cell))
+            .collect()
+    }
     /// Immutable unedited surface source for CPU display-page generation.
     /// Edits remain authoritative through `material`; these pages exclude edits.
     pub fn fbm_terrain(&self) -> Option<&FbmTerrain> {
@@ -444,6 +471,26 @@ pub fn raycast(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_edit_diff_and_source_lineage_handle_divergence_and_reverts() {
+        let source = World::new(7).with_vegetation();
+        let mut edited = source.clone();
+        let c = Cell {
+            x: -1,
+            y: 10000,
+            z: -513,
+        };
+        edited.set(c, Material::Stone);
+        assert!(source.shares_source_lineage(&edited));
+        assert_eq!(source.changed_edit_cells(&edited), vec![c]);
+        assert_eq!(edited.changed_edit_cells(&source), vec![c]);
+        assert!(edited.changed_edit_cells(&edited.clone()).is_empty());
+        let mut divergent = source.clone();
+        divergent.set(c, Material::Air);
+        assert_eq!(edited.changed_edit_cells(&divergent), vec![c]);
+        assert!(!source.shares_source_lineage(&World::new(7).with_vegetation()));
+        assert!(!source.shares_source_lineage(&source.clone().with_vegetation_enabled(false)));
+    }
     #[test]
     fn topology_footprint_is_canonical_and_independent_of_camera() {
         let params = FbmParams {

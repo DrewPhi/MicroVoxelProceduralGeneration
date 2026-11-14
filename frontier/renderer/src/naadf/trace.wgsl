@@ -11,6 +11,21 @@ struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE+6u) var heights:texture_2d<u32>;
 @group(NAADF_GROUP) @binding(NAADF_BASE+7u) var<storage,read_write> trace_metrics:array<atomic<u32>>;
 override traversal_metrics:bool=false;
+// Exact integer-only experiment: fixed-lane proof decoding and bit-scan faces.
+// No event-time, hit-position or shading floating-point arithmetic changes.
+override traversal_integer_fastpath:bool=false;
+fn trace_normal(faces:u32)->vec3<f32> {
+    var face=0u;
+    if traversal_integer_fastpath {face=firstTrailingBit(faces);}
+    else {for(var k=0u;k<6u;k++){if (faces&(1u<<k))!=0u{face=k;break;}}}
+    var normal=vec3(0.);
+    normal[face/2u]=select(-1.,1.,(face&1u)!=0u);
+    return normal;
+}
+fn trace_proof_faces(node:u32,bits:u32,positive:bool)->vec3<i32> {
+    let shifts=vec3(0u,2u,4u)*bits+vec3(select(0u,bits,positive));
+    return vec3<i32>((vec3(node)>>shifts)&vec3((1u<<bits)-1u));
+}
 // Approximate lighting-only experiment. Primary hits always remain exact.
 override traversal_shadow_coarse_after_m:f32=0.;
 fn trace_metric(lane:u32,index:u32,value:u32) {
@@ -36,6 +51,9 @@ fn naadf_sparse()->bool {
     return (naadf.ring.w&1u)!=0u;
 }
 override traversal_cache_nodes_compact:bool=false;
+// Two scalar words of state: retain only the last mixed root, avoiding the
+// page/block caches whose extra live state can offset saved memory queries.
+override traversal_cache_roots_only:bool=false;
 override traversal_height_bounds:bool=false;
 override traversal_height_tile:u32=8u;
 override traversal_height_mips:bool=false;
@@ -314,10 +332,7 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
         let solid=(node&0x40000000u)!=0u;
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,0u);}
         if solid && !was_solid && faces!=0u {
-            var face=0u;
-            for(var k=0u;k<6u;k++) {if (faces&(1u<<k))!=0u {face=k;break;}}
-            var normal=vec3(0.);normal[face/2u]=select(-1.,1.,(face&1u)!=0u);
-            return VoxelHit(true,t,normal,node&0x3fffffffu,visits,0u);
+            return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,0u);
         }
         was_solid=solid;
         var next=vec3(1e30);
@@ -402,14 +417,14 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
         // Snapshot construction limits the root edge to 512, hence each
         // coordinate fits nine bits. Compact mode tracks only mixed roots.
         var root_key=0u;
-        if traversal_cache_nodes_compact {root_key=cp.x|(cp.y<<9u)|(cp.z<<18u);}
+        if traversal_cache_nodes_compact || traversal_cache_roots_only {root_key=cp.x|(cp.y<<9u)|(cp.z<<18u);}
         if measure {visits.x+=1u;}
         trace_metric(lane,1u,1u);
         if traversal_cache_nodes && all(cp==last_root) {
             trace_metric(lane,25u,1u);
             node=root_word;
             scale=root_scale;
-        } else if traversal_cache_nodes_compact && root_key==last_mixed_root_key {
+        } else if (traversal_cache_nodes_compact || traversal_cache_roots_only) && root_key==last_mixed_root_key {
             trace_metric(lane,25u,1u);
             node=root_word;
         } else {
@@ -456,7 +471,7 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
                 root_word=node;
                 root_scale=scale;
             }
-            if traversal_cache_nodes_compact && (node&0xc0000000u)==0x80000000u {
+            if (traversal_cache_nodes_compact || traversal_cache_roots_only) && (node&0xc0000000u)==0x80000000u {
                 last_mixed_root_key=root_key;
                 root_word=node;
             }
@@ -504,19 +519,21 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
         let solid=(node&0x40000000u)!=0u;
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,flags);}
         if solid && !was_solid && faces!=0u {
-            var face=0u;
-            for(var k=0u;k<6u;k++){if (faces&(1u<<k))!=0u{face=k;break;}}
-            var normal=vec3(0.); normal[face/2u]=select(-1.,1.,(face&1u)!=0u);
-            return VoxelHit(true,t,normal,node&0x3fffffffu,visits,flags);
+            return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,flags);
         }
         was_solid=solid;
         let base=vec3<i32>((c/scale)*scale);
         var lo=base;var hi=base+vec3<i32>(i32(scale));
         if !solid {
-            let mask=(1u<<bits)-1u;
-            for(var a=0u;a<3u;a++){
-                lo[a]-=i32((node>>(a*2u*bits))&mask)*i32(scale);
-                hi[a]+=i32((node>>((a*2u+1u)*bits))&mask)*i32(scale);
+            if traversal_integer_fastpath {
+                lo-=trace_proof_faces(node,bits,false)*i32(scale);
+                hi+=trace_proof_faces(node,bits,true)*i32(scale);
+            } else {
+                let mask=(1u<<bits)-1u;
+                for(var a=0u;a<3u;a++){
+                    lo[a]-=i32((node>>(a*2u*bits))&mask)*i32(scale);
+                    hi[a]+=i32((node>>((a*2u+1u)*bits))&mask)*i32(scale);
+                }
             }
             lo=max(lo,parent_lo);hi=min(hi,parent_hi);
         }

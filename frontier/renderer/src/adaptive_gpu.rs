@@ -160,6 +160,7 @@ struct ProfileAllocation {
     table: Allocation,
 }
 struct Cluster {
+    appearance_pending: bool,
     cover: bool,
     native_quads: bool,
     proxy_triangles: bool,
@@ -214,6 +215,10 @@ pub struct DrawStats {
     pub gpu_profiles: GpuProfileStats,
     pub prepare_shadow_ms: f64,
     pub prepare_order_ms: f64,
+    pub prepare_resident_ms: f64,
+    pub prepare_upload_ms: f64,
+    pub prepare_bundle_ms: f64,
+    pub prepare_order_reused: bool,
     pub prepare_occlusion_ms: f64,
     pub prepare_visibility_uniform_ms: f64,
     pub prepare_reuse_enabled: bool,
@@ -437,6 +442,18 @@ fn sort_draw_order(order: &mut [(f64, TileKey)]) {
     order.sort_by(|(da, ka), (db, kb)| da.total_cmp(db).then_with(|| ka.cmp(kb)));
 }
 
+// A previous sorted key sequence is only a starting order. All depth values
+// are recomputed for the current camera before the same exact total sort.
+struct DrawOrderDomain {
+    residency_revision: u64,
+    owners: HashSet<TileKey>,
+}
+impl DrawOrderDomain {
+    fn matches(&self, residency_revision: u64, owners: &HashSet<TileKey>) -> bool {
+        self.residency_revision == residency_revision && self.owners == *owners
+    }
+}
+
 struct PreparedView {
     camera: Camera,
     width: u32,
@@ -472,6 +489,8 @@ pub struct AdaptiveGpu {
     prepared_view: Option<PreparedView>,
     resident_stats: Option<DrawStats>,
     draw_order: Vec<(f64, TileKey)>,
+    draw_order_domain: Option<DrawOrderDomain>,
+    incremental_order_enabled: bool,
     prepare_reuse_enabled: bool,
     pub(super) residency_revision: u64,
     prepared_view_hits: u64,
@@ -806,6 +825,10 @@ impl AdaptiveGpu {
             prepared_view: None,
             resident_stats: None,
             draw_order: vec![],
+            draw_order_domain: None,
+            incremental_order_enabled: std::env::var("FRONTIER_TERRAIN_INCREMENTAL_ORDER")
+                .as_deref()
+                == Ok("1"),
             prepare_reuse_enabled: std::env::var("FRONTIER_TERRAIN_PREPARE_REUSE").as_deref()
                 != Ok("0"),
             residency_revision: 0,
@@ -1176,6 +1199,7 @@ impl AdaptiveGpu {
         self.clusters.insert(
             tile.key,
             Cluster {
+                appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
                 proxy_triangles: false,
@@ -1208,6 +1232,69 @@ impl AdaptiveGpu {
                 slot: self.slots.pop().unwrap(),
             },
         );
+        Ok(())
+    }
+    pub(crate) fn appearance_pending(&self, key: &TileKey) -> bool {
+        self.clusters
+            .get(key)
+            .is_some_and(|cluster| cluster.appearance_pending)
+    }
+    pub(crate) fn appearance_debt(&self, owners: &HashSet<TileKey>) -> usize {
+        owners
+            .iter()
+            .filter(|key| self.appearance_pending(key))
+            .count()
+    }
+    /// Replace complete backing resources while keeping the old cluster alive.
+    /// Failed allocation restores the old drawable cluster and its uniform slot.
+    pub(crate) fn promote_appearance(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tile: &GeometryTile,
+    ) -> Result<(), String> {
+        let Some(old) = self.clusters.get(&tile.key) else {
+            return Ok(());
+        };
+        if !old.appearance_pending {
+            return Ok(());
+        }
+        if tile.cover_input.is_some()
+            || tile.is_empty()
+            || tile.exact
+            || tile.bounds != old.proxy_bounds
+            || tile
+                .best_certified_vertical_error_m
+                .filter(|e| e.is_finite() && *e >= 0.)
+                != old.best_error_m
+            || certificate_kind(tile) != old.certificate_kind
+        {
+            return Err("appearance promotion changed geometry certificate".into());
+        }
+        let old = self.clusters.remove(&tile.key).unwrap();
+        self.slots.push(old.slot);
+        if let Err(error) = self.upload(device, queue, tile) {
+            let restored_slot = self.slots.pop();
+            debug_assert_eq!(restored_slot, Some(old.slot));
+            self.clusters.insert(tile.key, old);
+            return Err(error);
+        }
+        if !self.clusters.contains_key(&tile.key) {
+            let restored_slot = self.slots.pop();
+            debug_assert_eq!(restored_slot, Some(old.slot));
+            self.clusters.insert(tile.key, old);
+            return Err("appearance promotion omitted drawable geometry".into());
+        }
+        if let Some(profile) = old.profile {
+            if let Some(indices) = profile.indices {
+                self.profiles[indices.page].release(indices.range);
+            }
+            self.profile_tables[profile.table.page].release(profile.table.range);
+        }
+        self.vertices[old.vertices.page].release(old.vertices.range);
+        if let Some(indices) = old.indices {
+            self.indices[indices.page].release(indices.range);
+        }
         Ok(())
     }
     /// Release unneeded ranges while retaining allocated pages for future travel.
@@ -1260,8 +1347,13 @@ impl AdaptiveGpu {
                 .is_some_and(|old| old.matches(camera, width, height, pixel_error, owners))
         {
             self.prepared_view_hits += 1;
+            let bundle_started = std::time::Instant::now();
             self.prepare_bundle(device);
             let mut stats = self.prepared_view.as_ref().unwrap().stats;
+            stats.prepare_bundle_ms = bundle_started.elapsed().as_secs_f64() * 1000.;
+            stats.prepare_resident_ms = 0.;
+            stats.prepare_upload_ms = 0.;
+            stats.prepare_order_reused = false;
             stats.prepare_shadow_ms = 0.;
             stats.prepare_order_ms = 0.;
             stats.prepare_occlusion_ms = 0.;
@@ -1286,6 +1378,7 @@ impl AdaptiveGpu {
         let direction = camera.direction();
         let view_transform = LocalViewTransform::new(direction);
         let queries = crate::adaptive_stream::CameraQueries::new(camera, width, height);
+        let resident_started = std::time::Instant::now();
         if self.resident_stats.is_none() || !self.prepare_reuse_enabled {
             let mut stats = DrawStats {
                 resident_clusters: self.clusters.len(),
@@ -1329,6 +1422,7 @@ impl AdaptiveGpu {
             self.resident_stats = Some(stats);
         }
         let mut stats = self.resident_stats.unwrap();
+        stats.prepare_resident_ms = resident_started.elapsed().as_secs_f64() * 1000.;
         stats.current_max_error_px = Some(0.);
         stats.current_quality_ready =
             width > 0 && height > 0 && pixel_error.is_finite() && pixel_error >= 0.;
@@ -1347,15 +1441,33 @@ impl AdaptiveGpu {
         } else {
             Vec::new()
         };
-        draw_order.clear();
-        draw_order.extend(self.clusters.iter().filter_map(|(&key, c)| {
-            (!self.prepare_reuse_enabled || owners.contains(&key)).then(|| {
-                (
-                    nearest_depth(c.origin, c.bounds, camera.position, forward),
-                    key,
-                )
-            })
-        }));
+        let reuse_order = self.incremental_order_enabled
+            && self.prepare_reuse_enabled
+            && self
+                .draw_order_domain
+                .as_ref()
+                .is_some_and(|domain| domain.matches(self.residency_revision, owners));
+        if reuse_order {
+            for (depth, key) in &mut draw_order {
+                let c = &self.clusters[key];
+                *depth = nearest_depth(c.origin, c.bounds, camera.position, forward);
+            }
+        } else {
+            draw_order.clear();
+            draw_order.extend(self.clusters.iter().filter_map(|(&key, c)| {
+                (!self.prepare_reuse_enabled || owners.contains(&key)).then(|| {
+                    (
+                        nearest_depth(c.origin, c.bounds, camera.position, forward),
+                        key,
+                    )
+                })
+            }));
+            self.draw_order_domain = self.incremental_order_enabled.then(|| DrawOrderDomain {
+                residency_revision: self.residency_revision,
+                owners: owners.clone(),
+            });
+        }
+        stats.prepare_order_reused = reuse_order;
         sort_draw_order(&mut draw_order);
         stats.prepare_shadow_ms = shadow_ms;
         stats.prepare_order_ms = order_started.elapsed().as_secs_f64() * 1000.;
@@ -1548,11 +1660,15 @@ impl AdaptiveGpu {
         }
         self.draw_order = draw_order;
         stats.occluder_boxes = occlusion.as_ref().map_or(0, |set| set.len());
+        stats.prepare_visibility_uniform_ms = visible_started.elapsed().as_secs_f64() * 1000.;
+        let upload_started = std::time::Instant::now();
         if !self.camera_upload.is_empty() {
             queue.write_buffer(&self.uniform, 0, &self.camera_upload);
         }
-        stats.prepare_visibility_uniform_ms = visible_started.elapsed().as_secs_f64() * 1000.;
+        stats.prepare_upload_ms = upload_started.elapsed().as_secs_f64() * 1000.;
+        let bundle_started = std::time::Instant::now();
         self.prepare_bundle(device);
+        stats.prepare_bundle_ms = bundle_started.elapsed().as_secs_f64() * 1000.;
         self.update_command_stats(&mut stats);
         if self.prepared_view_enabled {
             self.prepared_view = Some(PreparedView {
@@ -1703,6 +1819,7 @@ impl AdaptiveGpu {
         self.clusters.insert(
             tile.key,
             Cluster {
+                appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: true,
                 proxy_triangles: false,
@@ -1938,6 +2055,7 @@ impl AdaptiveGpu {
         self.clusters.insert(
             tile.key,
             Cluster {
+                appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
                 proxy_triangles: true,
@@ -2533,6 +2651,69 @@ mod tests {
             sort_draw_order(&mut optimized);
             assert_eq!(optimized, original);
             assert!(optimized.iter().all(|(_, key)| owners.contains(key)));
+        }
+    }
+
+    #[test]
+    fn incremental_order_requires_exact_owner_and_residency_identity() {
+        use super::{HashSet, TileKey};
+        let key = TileKey {
+            min: [0, 0],
+            width_cells: 128,
+            step_cells: 8,
+            edge_steps: [8; 4],
+            source_revision: 3,
+        };
+        let owners = HashSet::from([key]);
+        let domain = super::DrawOrderDomain {
+            residency_revision: 5,
+            owners: owners.clone(),
+        };
+        assert!(domain.matches(5, &owners));
+        assert!(!domain.matches(6, &owners));
+        let mut replacement = key;
+        replacement.source_revision += 1;
+        assert!(!domain.matches(5, &HashSet::from([replacement])));
+        assert!(!domain.matches(5, &HashSet::new()));
+    }
+
+    #[test]
+    fn incremental_order_matches_fresh_sort_through_motion_turn_and_teleport() {
+        use super::{nearest_depth, sort_draw_order, TileKey};
+        let residents: Vec<_> = (0..97)
+            .map(|i| {
+                let key = TileKey {
+                    min: [i, -i],
+                    width_cells: 128,
+                    step_cells: 8,
+                    edge_steps: [8; 4],
+                    source_revision: 3,
+                };
+                (
+                    key,
+                    glam::DVec3::new((i % 13) as f64 * 32., 0., (i / 13) as f64 * 32.),
+                )
+            })
+            .collect();
+        let bounds = [glam::Vec3::splat(-1.), glam::Vec3::splat(1.)];
+        let mut previous: Vec<_> = residents.iter().map(|(k, _)| (0., *k)).rev().collect();
+        for (eye, forward) in [
+            (glam::DVec3::ZERO, glam::DVec3::Z),
+            (glam::DVec3::new(0.1, 0., 0.2), glam::DVec3::Z),
+            (glam::DVec3::new(0.1, 0., 0.2), -glam::DVec3::Z),
+            (glam::DVec3::new(50000., -300., -42000.), glam::DVec3::X),
+        ] {
+            let mut fresh: Vec<_> = residents
+                .iter()
+                .map(|(key, origin)| (nearest_depth(*origin, bounds, eye, forward), *key))
+                .collect();
+            for (depth, key) in &mut previous {
+                let origin = residents.iter().find(|(k, _)| k == key).unwrap().1;
+                *depth = nearest_depth(origin, bounds, eye, forward);
+            }
+            sort_draw_order(&mut previous);
+            sort_draw_order(&mut fresh);
+            assert_eq!(previous, fresh);
         }
     }
 

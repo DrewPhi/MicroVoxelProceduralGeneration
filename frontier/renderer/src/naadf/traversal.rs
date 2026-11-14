@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Options {
     pub(super) cache: u32,
+    pub(super) integer_fastpath: bool,
     pub(super) specialize_format: bool,
     pub(super) shadow_coarse_after_m: f64,
     pub(super) height_tile: Option<u32>,
@@ -23,6 +24,7 @@ pub(super) struct Options {
 pub(super) fn options() -> Options {
     static OPTIONS: OnceLock<Options> = OnceLock::new();
     *OPTIONS.get_or_init(|| Options {
+        integer_fastpath: enabled("FRONTIER_NAADF_INTEGER_FASTPATH"),
         specialize_format: enabled("FRONTIER_NAADF_SPECIALIZE_FORMAT"),
         shadow_coarse_after_m: std::env::var("FRONTIER_NAADF_SHADOW_COARSE_AFTER_M")
             .ok()
@@ -32,6 +34,7 @@ pub(super) fn options() -> Options {
         cache: match std::env::var("FRONTIER_NAADF_CACHE_NODES").as_deref() {
             Ok("1") => 1,
             Ok("2") => 2,
+            Ok("3") => 3,
             _ => 0,
         },
         height_tile: std::env::var("FRONTIER_NAADF_HEIGHT_TILE_ROOTS")
@@ -68,6 +71,10 @@ impl Options {
     pub(super) fn mesh_constants(self) -> HashMap<String, f64> {
         HashMap::from([
             (
+                "traversal_integer_fastpath".into(),
+                u8::from(self.integer_fastpath).into(),
+            ),
+            (
                 "traversal_shadow_coarse_after_m".into(),
                 self.shadow_coarse_after_m,
             ),
@@ -86,6 +93,10 @@ impl Options {
             (
                 "traversal_cache_nodes".into(),
                 u8::from(self.cache == 1).into(),
+            ),
+            (
+                "traversal_cache_roots_only".into(),
+                u8::from(self.cache == 3).into(),
             ),
             (
                 "traversal_cache_nodes_compact".into(),

@@ -7,16 +7,17 @@ use frontier_world::{
     Material, World, VOXEL_SIZE,
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
+        OnceLock,
     },
     time::Instant,
 };
 const EDGE: i64 = 16;
 const HEIGHT: usize = 16;
-const CAPACITY: usize = 262144;
+#[path = "ground_cover_cache.rs"]
+mod shared_cache;
 pub(crate) const VERSION: u64 = 4;
 fn records() -> usize {
     if directional_enabled() {
@@ -25,8 +26,6 @@ fn records() -> usize {
         2
     }
 }
-static HITS: AtomicU64 = AtomicU64::new(0);
-static MISSES: AtomicU64 = AtomicU64::new(0);
 static NANOS: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn enabled() -> bool {
     std::env::var("FRONTIER_GROUND_COVER").as_deref() != Ok("off")
@@ -88,14 +87,16 @@ struct Key {
     level: u8,
     edits: u64,
 }
-#[derive(Default)]
-struct Cache {
-    map: HashMap<Key, Summary>,
-    fifo: VecDeque<Key>,
-}
-fn cache() -> &'static Mutex<Cache> {
-    static VALUE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    VALUE.get_or_init(|| Mutex::new(Cache::default()))
+fn cache() -> &'static shared_cache::Cache {
+    static VALUE: OnceLock<shared_cache::Cache> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        let mib = std::env::var("FRONTIER_GROUND_COVER_CACHE_MIB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| (1..=2048).contains(v))
+            .unwrap_or(128);
+        shared_cache::Cache::new(mib * 1048576)
+    })
 }
 fn source(w: &World) -> [u64; 8] {
     let p = w.fbm_terrain().map(|t| t.params()).unwrap_or_default();
@@ -113,10 +114,15 @@ fn source(w: &World) -> [u64; 8] {
     ]
 }
 pub(crate) fn stats_json() -> String {
-    let c = cache().lock().unwrap();
-    let payload =
-        c.map.len() * 160 + c.map.values().filter(|v| v.directional.is_some()).count() * 640;
-    format!("{{\"directional\":{},\"enabled\":{},\"version\":{},\"entries\":{},\"hits\":{},\"misses\":{},\"leaf_build_ms\":{},\"payload_bytes\":{},\"capacity_entries\":{},\"shell\":{}}}",directional_enabled(),enabled(),VERSION,c.map.len(),HITS.load(Ordering::Relaxed),MISSES.load(Ordering::Relaxed),NANOS.load(Ordering::Relaxed)as f64/1e6,payload,CAPACITY,shell_enabled())
+    format!(
+        "{{\"directional\":{},\"enabled\":{},\"version\":{},\"leaf_build_ms\":{},\"shell\":{},{}}}",
+        directional_enabled(),
+        enabled(),
+        VERSION,
+        NANOS.load(Ordering::Relaxed) as f64 / 1e6,
+        shell_enabled(),
+        cache().stats_json_fields()
+    )
 }
 fn node(w: &World, mut key: Key, cancel: &mut impl FnMut() -> bool) -> Result<Summary, String> {
     if cancel() {
@@ -137,11 +143,19 @@ fn node(w: &World, mut key: Key, cancel: &mut impl FnMut() -> bool) -> Result<Su
                     ^ (w.material(c) as u64 + 1)
             });
     }
-    if let Some(v) = cache().lock().unwrap().map.get(&key).cloned() {
-        HITS.fetch_add(1, Ordering::Relaxed);
-        return Ok(v);
-    }
-    MISSES.fetch_add(1, Ordering::Relaxed);
+    let producer = loop {
+        match cache().request(key) {
+            shared_cache::Request::Hit(value) => return Ok(value),
+            shared_cache::Request::Wait(flight) => {
+                if let Some(value) = flight.wait(cancel)? {
+                    return Ok(value);
+                }
+                // A cancelled/failed producer does not cancel another request.
+            }
+            shared_cache::Request::Build(producer) => break Some(producer),
+            shared_cache::Request::Bypass => break None,
+        }
+    };
     let start = Instant::now();
     let mut value = Summary::default();
     if key.level == 0 {
@@ -185,15 +199,8 @@ fn node(w: &World, mut key: Key, cancel: &mut impl FnMut() -> bool) -> Result<Su
     if key.level == 0 {
         NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-    let mut c = cache().lock().unwrap();
-    if !c.map.contains_key(&key) {
-        while c.map.len() >= CAPACITY {
-            if let Some(k) = c.fifo.pop_front() {
-                c.map.remove(&k);
-            }
-        }
-        c.map.insert(key, value.clone());
-        c.fifo.push_back(key);
+    if let Some(producer) = producer {
+        producer.complete(&value);
     }
     Ok(value)
 }
@@ -431,6 +438,14 @@ fn leaf(
     out.data[0][0] = [top_rgb[0], top_rgb[1], top_rgb[2], columns / 256.];
     Ok(out)
 }
+pub(crate) fn eligible(w: &World, tile: &GeometryTile) -> bool {
+    enabled()
+        && w.vegetation_enabled()
+        && !tile.exact
+        && tile.key.step_cells >= 2
+        && tile.gpu_profiles.is_none()
+}
+
 /// Extend the existing terrain profile table, without changing its colors,
 /// normals, topology, native certificates or source/physics identity.
 pub(crate) fn decorate(
@@ -438,12 +453,7 @@ pub(crate) fn decorate(
     tile: &mut GeometryTile,
     cancel: &mut impl FnMut() -> bool,
 ) -> Result<(), String> {
-    if !enabled()
-        || !w.vegetation_enabled()
-        || tile.exact
-        || tile.key.step_cells < 2
-        || tile.gpu_profiles.is_some()
-    {
+    if !eligible(w, tile) {
         return Ok(());
     }
     // Coverage populations vary over metres; render subdivision must not
@@ -666,5 +676,126 @@ mod tests {
         let different = World::fbm(8, w.fbm_terrain().unwrap().params()).unwrap();
         assert_ne!(source(&w), source(&different));
         assert_ne!(source(&w), source(&World::new(7)));
+    }
+}
+
+#[cfg(test)]
+mod cache_parity_tests {
+    use super::*;
+    // Pre-cache builder contract: the same children in the same arithmetic order.
+    // No cache lookup/publication is shared with the implementation under test.
+    fn uncached(w: &World, key: Key) -> Summary {
+        if key.level == 0 {
+            return leaf(
+                w,
+                [key.x * EDGE, key.z * EDGE],
+                &mut || false,
+                directional_enabled(),
+            )
+            .unwrap();
+        }
+        if key.level > 2 {
+            let side = 1i64 << key.level;
+            return uncached(
+                w,
+                Key {
+                    x: key.x * side + side / 2,
+                    z: key.z * side + side / 2,
+                    level: 0,
+                    ..key
+                },
+            );
+        }
+        let mut value = Summary::default();
+        for z in 0..2 {
+            for x in 0..2 {
+                value.add(
+                    &uncached(
+                        w,
+                        Key {
+                            x: key.x * 2 + x,
+                            z: key.z * 2 + z,
+                            level: key.level - 1,
+                            ..key
+                        },
+                    ),
+                    0.25,
+                );
+            }
+        }
+        value
+    }
+    #[test]
+    fn recursive_builder_error_releases_parent_reservation() {
+        let world = World::fbm(880012, frontier_world::FbmParams::default()).unwrap();
+        let key = Key {
+            source: source(&world),
+            x: 1901234,
+            z: -901234,
+            level: 1,
+            edits: 0,
+        };
+        let mut calls = 0;
+        let result = node(&world, key, &mut || {
+            calls += 1;
+            calls > 1
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
+        // The error propagated through `?`, dropping the producer guard.
+        assert!(matches!(
+            cache().request(key),
+            shared_cache::Request::Build(_)
+        ));
+    }
+    #[test]
+    fn cached_recursive_summaries_match_uncached_float_bits_with_edits() {
+        let mut world = World::fbm(
+            719,
+            frontier_world::FbmParams {
+                recipe: frontier_world::FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .with_vegetation();
+        for edited in [false, true] {
+            if edited {
+                let y = (world.height_m(-58., -48.) * 16.) as i64;
+                world.set(
+                    frontier_world::Cell {
+                        x: -58 * 16,
+                        y,
+                        z: -48 * 16,
+                    },
+                    Material::Wood,
+                );
+            }
+            for level in [0, 1, 2, 4] {
+                let side = 1i64 << level;
+                let key = Key {
+                    source: source(&world),
+                    x: (-58i64).div_euclid(side),
+                    z: (-48i64).div_euclid(side),
+                    level,
+                    edits: 0,
+                };
+                let expected = uncached(&world, key);
+                let actual = node(&world, key, &mut || false).unwrap();
+                assert_eq!(
+                    bytemuck::bytes_of(&actual.data),
+                    bytemuck::bytes_of(&expected.data)
+                );
+                match (&actual.directional, &expected.directional) {
+                    (Some(a), Some(b)) => assert_eq!(
+                        bytemuck::bytes_of(a.as_ref()),
+                        bytemuck::bytes_of(b.as_ref())
+                    ),
+                    (None, None) => {}
+                    _ => panic!("directional payload presence differs"),
+                }
+                assert_eq!(node(&world, key, &mut || false).unwrap(), actual);
+            }
+        }
     }
 }

@@ -1,12 +1,60 @@
 //! Presentation keeps previous complete ownership until a current replacement
 //! is entirely resident. CPU readiness alone never switches the displayed cover.
+use crate::adaptive_geometry::{deferred_cover, GeometryTile};
 use crate::{
     adaptive_geometry::TileKey,
     adaptive_gpu::{AdaptiveGpu, DrawStats},
     adaptive_stream::{SelectionFrame, StreamSettings, Worker},
     Camera, Gpu,
 };
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::Instant,
+};
+
+#[derive(Default)]
+struct CapacityRefusals(HashMap<TileKey, (u64, u64)>);
+impl CapacityRefusals {
+    fn blocked(&self, key: &TileKey, resources: (u64, u64)) -> bool {
+        self.0.get(key) == Some(&resources)
+    }
+    fn park<T>(&mut self, key: TileKey, resources: (u64, u64), ready: &mut Option<T>) {
+        self.0.insert(key, resources);
+        // Release the completed-product slot so other keys can be polled and
+        // promoted. This key is eligible after residency or budget changes.
+        ready.take();
+    }
+}
+
+struct CoverState {
+    worker: deferred_cover::Worker,
+    tiles: HashMap<TileKey, Arc<GeometryTile>>,
+    tickets: HashMap<TileKey, deferred_cover::Ticket>,
+    refused: HashSet<TileKey>,
+    capacity_refused: CapacityRefusals,
+    ready: Option<GeometryTile>,
+    owner: u64,
+    stale_results: u64,
+    promotions: u64,
+    cpu_ms: f64,
+    upload_ms: f64,
+    upload_bytes: u64,
+    allocation_refusals: u64,
+    appearance_debt: usize,
+    first_geometry_ms: Option<f64>,
+    first_appearance_ms: Option<f64>,
+}
+const PREPARE_SAMPLE_CAP: usize = 4096;
+const PREPARE_NAMES: [&str; 7] = [
+    "shadows",
+    "resident_accounting",
+    "order_excluding_accounting",
+    "occluder_build",
+    "visibility_error_uniforms",
+    "upload_enqueue",
+    "bundle_prepare",
+];
 
 pub struct AdaptiveView {
     desired_naadf_owner: u64,
@@ -30,6 +78,7 @@ pub struct AdaptiveView {
     retain_dirty: bool,
     pub stats: DrawStats,
     pub quality_ready: bool,
+    geometry_quality_ready: bool,
     pub refinement_ready: bool,
     cpu_quality_ready: bool,
     cpu_refinement_ready: bool,
@@ -43,6 +92,10 @@ pub struct AdaptiveView {
     publication_cpu_ms: f64,
     gpu_prepare_cpu_ms: f64,
     gpu_prepare_stage_ms: [f64; 4],
+    prepare_detail_ms: [f64; 7],
+    prepare_samples: [VecDeque<f64>; 7],
+    prepare_order_reuses: u64,
+    cover: Option<CoverState>,
     pub max_upload_frame_bytes: u64,
     pub published_epoch: u64,
     pub pixel_error: f64,
@@ -105,6 +158,14 @@ impl AdaptiveView {
         self.first_coverage_ms = None;
         self.first_quality_ms = None;
         self.first_refinement_ms = None;
+        if let Some(cover) = &mut self.cover {
+            for ticket in cover.tickets.values() {
+                ticket.cancel();
+            }
+            cover.ready = None;
+            cover.first_geometry_ms = None;
+            cover.first_appearance_ms = None;
+        }
         self.worker.set_naadf_owner(owner);
         self.pending = None;
         self.deferred = None;
@@ -139,6 +200,138 @@ impl AdaptiveView {
             self.cpu_quality_ready = false;
             self.cpu_refinement_ready = false;
             self.candidate_preparation = None;
+        }
+        Ok(())
+    }
+    fn update_appearance(
+        &mut self,
+        adaptive: &mut AdaptiveGpu,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        geometry_upload_idle: bool,
+    ) -> Result<(), String> {
+        let Some(cover) = &mut self.cover else {
+            return Ok(());
+        };
+        let coherent =
+            cover.owner == self.published_naadf_owner && cover.owner == self.desired_naadf_owner;
+        let idle = coherent
+            && !self.background_paused
+            && self.pending_count == 0
+            && self.gpu_pending_clusters == 0;
+        cover
+            .tiles
+            .retain(|key, _| self.owners.contains(key) && adaptive.appearance_pending(key));
+        cover.refused.retain(|key| cover.tiles.contains_key(key));
+        cover
+            .capacity_refused
+            .0
+            .retain(|key, _| cover.tiles.contains_key(key));
+        for (key, ticket) in &cover.tickets {
+            if !idle || !cover.tiles.contains_key(key) {
+                ticket.cancel();
+            }
+        }
+        if cover.ready.is_none() {
+            if let Some(completion) = cover.worker.poll() {
+                cover.tickets.remove(&completion.key);
+                cover.cpu_ms += completion.cpu_ms;
+                if !coherent
+                    || completion.key.source_revision != self.surface_source_revision
+                    || !self.owners.contains(&completion.key)
+                    || !adaptive.appearance_pending(&completion.key)
+                {
+                    cover.stale_results += 1;
+                } else {
+                    match completion.result {
+                        Ok(deferred_cover::Product::Tile(tile)) => cover.ready = Some(tile),
+                        Ok(deferred_cover::Product::Patch(_)) => {
+                            return Err("appearance worker returned unbound profiles".into())
+                        }
+                        Err(error) if error.contains("cancelled") => {}
+                        Err(error) if error.contains("exceeds payload cap") => {
+                            cover.refused.insert(completion.key);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+        if let Some(tile) = cover.ready.as_ref() {
+            if !coherent
+                || tile.key.source_revision != self.surface_source_revision
+                || !self.owners.contains(&tile.key)
+                || !adaptive.appearance_pending(&tile.key)
+            {
+                cover.stale_results += 1;
+                cover.ready = None;
+            } else if idle && geometry_upload_idle {
+                let started = Instant::now();
+                match adaptive.promote_appearance(device, queue, tile) {
+                    Ok(()) => {
+                        cover.upload_bytes += tile.bytes as u64;
+                        cover.promotions += 1;
+                        cover.tiles.remove(&tile.key);
+                        cover.ready = None;
+                    }
+                    Err(error) if crate::adaptive_gpu::resource_capacity_error(&error) => {
+                        cover.allocation_refusals += 1;
+                        cover.capacity_refused.park(
+                            tile.key,
+                            (adaptive.residency_revision, adaptive.resource_budget_mib()),
+                            &mut cover.ready,
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+                cover.upload_ms += started.elapsed().as_secs_f64() * 1000.;
+            }
+        }
+        // Reserve the sole cosmetic slot only after mandatory terrain demand
+        // has drained. A new geometry request cancels it at native checkpoints.
+        if idle && cover.ready.is_none() {
+            if let Some((&key, tile)) = cover
+                .tiles
+                .iter()
+                .filter(|(key, _)| {
+                    !cover.tickets.contains_key(key)
+                        && !cover.refused.contains(key)
+                        && !cover.capacity_refused.blocked(
+                            key,
+                            (adaptive.residency_revision, adaptive.resource_budget_mib()),
+                        )
+                })
+                .min_by(|(_, a), (_, b)| {
+                    let distance = |tile: &GeometryTile| {
+                        let center = glam::DVec3::new(
+                            (tile.bounds[0][0] + tile.bounds[1][0]) * 0.5,
+                            (tile.bounds[0][1] + tile.bounds[1][1]) * 0.5,
+                            (tile.bounds[0][2] + tile.bounds[1][2]) * 0.5,
+                        );
+                        center.distance_squared(camera.position)
+                    };
+                    distance(a)
+                        .total_cmp(&distance(b))
+                        .then_with(|| a.key.cmp(&b.key))
+                })
+            {
+                match cover.worker.submit_tile(tile.clone()) {
+                    Ok(ticket) => {
+                        cover.tickets.insert(key, ticket);
+                    }
+                    Err(()) if tile.bytes > cover.worker.max_payload_bytes() => {
+                        cover.refused.insert(key);
+                    }
+                    Err(()) => {}
+                }
+            }
+        }
+        cover.appearance_debt = adaptive.appearance_debt(&self.owners);
+        if cover.appearance_debt == 0 && self.coverage_ready && cover.first_appearance_ms.is_none()
+        {
+            cover.first_appearance_ms =
+                Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
         }
         Ok(())
     }
@@ -180,6 +373,28 @@ impl AdaptiveView {
         };
         let topology_supported = world.topology_base_cells().is_some();
         let revision = world.revision();
+        let cover = if deferred_cover::enabled() {
+            Some(CoverState {
+                worker: deferred_cover::Worker::new(world.clone(), 16 * 1024 * 1024)?,
+                tiles: HashMap::new(),
+                tickets: HashMap::new(),
+                refused: HashSet::new(),
+                capacity_refused: CapacityRefusals::default(),
+                ready: None,
+                owner: 0,
+                stale_results: 0,
+                promotions: 0,
+                cpu_ms: 0.,
+                upload_ms: 0.,
+                upload_bytes: 0,
+                allocation_refusals: 0,
+                appearance_debt: 0,
+                first_geometry_ms: None,
+                first_appearance_ms: None,
+            })
+        } else {
+            None
+        };
         Ok(Self {
             desired_naadf_owner: 0,
             published_naadf_owner: 0,
@@ -210,6 +425,7 @@ impl AdaptiveView {
             retain_dirty: true,
             stats: DrawStats::default(),
             quality_ready: false,
+            geometry_quality_ready: false,
             refinement_ready: false,
             cpu_quality_ready: false,
             cpu_refinement_ready: false,
@@ -223,6 +439,10 @@ impl AdaptiveView {
             publication_cpu_ms: 0.,
             gpu_prepare_cpu_ms: 0.,
             gpu_prepare_stage_ms: [0.; 4],
+            prepare_detail_ms: [0.; 7],
+            prepare_samples: std::array::from_fn(|_| VecDeque::new()),
+            prepare_order_reuses: 0,
+            cover,
             max_upload_frame_bytes: 0,
             published_epoch: 0,
             pixel_error,
@@ -469,6 +689,19 @@ impl AdaptiveView {
                             })
                             .map(|k| k.width_cells)
                     });
+                    if let Some(cover) = &mut self.cover {
+                        cover.owner = frame.ownership_id;
+                        cover.tiles = frame
+                            .tiles
+                            .iter()
+                            .filter(|tile| tile.cover_input.is_some())
+                            .map(|tile| (tile.key, tile.clone()))
+                            .collect();
+                        if cover.first_geometry_ms.is_none() {
+                            cover.first_geometry_ms =
+                                Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
+                        }
+                    }
                     self.owners = keys;
                     self.retain_dirty = true;
                     if let Some(transaction) = frame.publication_transaction {
@@ -533,6 +766,7 @@ impl AdaptiveView {
             self.coverage_ready =
                 self.coverage_ready && self.published_pose == Some((camera, width, height));
         }
+        self.update_appearance(adaptive, &gpu.device, &gpu.queue, &camera, uploaded == 0)?;
         let gpu_prepare_started = Instant::now();
         self.stats = adaptive.prepare(
             &gpu.device,
@@ -548,9 +782,27 @@ impl AdaptiveView {
             self.stats.prepare_shadow_ms,
             self.stats.prepare_order_ms,
             self.stats.prepare_occlusion_ms,
-            self.stats.prepare_visibility_uniform_ms,
+            self.stats.prepare_visibility_uniform_ms + self.stats.prepare_upload_ms,
         ]) {
             *total += value;
+        }
+        self.prepare_order_reuses += u64::from(self.stats.prepare_order_reused);
+        let stages = [
+            self.stats.prepare_shadow_ms,
+            self.stats.prepare_resident_ms,
+            (self.stats.prepare_order_ms - self.stats.prepare_resident_ms).max(0.),
+            self.stats.prepare_occlusion_ms,
+            self.stats.prepare_visibility_uniform_ms,
+            self.stats.prepare_upload_ms,
+            self.stats.prepare_bundle_ms,
+        ];
+        for (index, value) in stages.into_iter().enumerate() {
+            self.prepare_detail_ms[index] += value;
+            let samples = &mut self.prepare_samples[index];
+            if samples.len() == PREPARE_SAMPLE_CAP {
+                samples.pop_front();
+            }
+            samples.push_back(value);
         }
         let native_pending = self.owner_surface_bounds.iter().any(|(key, bounds)| {
             key.step_cells > 1
@@ -560,8 +812,10 @@ impl AdaptiveView {
                     self.stream_settings.native_radius_m,
                 )
         });
-        self.quality_ready =
+        self.geometry_quality_ready =
             self.coverage_ready && self.stats.current_quality_ready && !native_pending;
+        self.quality_ready =
+            self.geometry_quality_ready && adaptive.appearance_debt(&self.owners) == 0;
         if self.quality_ready && self.first_quality_ms.is_none() {
             self.first_quality_ms = Some(self.preparation_started.elapsed().as_secs_f64() * 1000.);
         }
@@ -841,6 +1095,85 @@ impl AdaptiveView {
         json.push_str(&format!(",\"terrain_prepare_stages_cpu_ms\":{{\"reuse_enabled\":{},\"shadows\":{},\"resident_accounting_and_order\":{},\"occluder_build\":{},\"visibility_error_uniforms_upload\":{}}}}}",
             self.stats.prepare_reuse_enabled, self.gpu_prepare_stage_ms[0], self.gpu_prepare_stage_ms[1], self.gpu_prepare_stage_ms[2], self.gpu_prepare_stage_ms[3]));
         json.pop();
+        json.push_str(",\"terrain_prepare_detail_cpu_ms\":{\"scope\":\"all_prepare_calls_including_startup_and_warmup\",\"sample_cap_per_stage\":4096,\"incremental_order_reuses\":");
+        json.push_str(&self.prepare_order_reuses.to_string());
+        for index in 0..PREPARE_NAMES.len() {
+            let mut samples: Vec<_> = self.prepare_samples[index].iter().copied().collect();
+            samples.sort_by(f64::total_cmp);
+            let percentile = |p: usize| {
+                samples
+                    .get((samples.len() * p).div_ceil(100).saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0.)
+            };
+            json.push_str(&format!(
+                ",\"{}\":{{\"total\":{},\"samples\":{},\"p50\":{},\"p95\":{},\"p99\":{}}}",
+                PREPARE_NAMES[index],
+                self.prepare_detail_ms[index],
+                samples.len(),
+                percentile(50),
+                percentile(95),
+                percentile(99)
+            ));
+        }
+        json.push_str("}}");
+        json.pop();
+        let (
+            enabled,
+            debt,
+            queued,
+            active,
+            outstanding,
+            done,
+            cancelled,
+            discarded,
+            refusals,
+            promotions,
+            stale,
+            appearance_cpu,
+            appearance_upload,
+            appearance_bytes,
+            allocation_refusals,
+            first_geometry,
+            first_appearance,
+            retained_inputs,
+            ready_bytes,
+        ) = self.cover.as_ref().map_or(
+            (
+                false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0., 0., 0, 0, None, None, 0, 0,
+            ),
+            |cover| {
+                let stats = cover.worker.stats();
+                (
+                    true,
+                    cover.appearance_debt,
+                    stats.queued,
+                    stats.active,
+                    stats.outstanding,
+                    stats.completed,
+                    stats.cancelled,
+                    stats.discarded_completions,
+                    stats.payload_refusals,
+                    cover.promotions,
+                    cover.stale_results,
+                    cover.cpu_ms,
+                    cover.upload_ms,
+                    cover.upload_bytes,
+                    cover.allocation_refusals,
+                    cover.first_geometry_ms,
+                    cover.first_appearance_ms,
+                    cover.tiles.values().map(|tile| tile.bytes).sum::<usize>(),
+                    cover.ready.as_ref().map_or(0, |tile| tile.bytes),
+                )
+            },
+        );
+        let optional_ms =
+            |value: Option<f64>| value.map_or_else(|| "null".into(), |v| v.to_string());
+        json.push_str(&format!(",\"deferred_ground_cover\":{{\"enabled\":{},\"geometry_quality_ready\":{},\"appearance_ready\":{},\"appearance_pending_clusters\":{},\"queued\":{},\"active\":{},\"outstanding\":{},\"completed\":{},\"cancelled\":{},\"discarded_completions\":{},\"payload_refusals\":{},\"promotions\":{},\"stale_results\":{},\"compute_cpu_ms\":{},\"upload_enqueue_cpu_ms\":{},\"upload_bytes\":{},\"allocation_refusals\":{},\"first_geometry_coverage_ms\":{},\"first_appearance_ready_ms\":{},\"retained_base_tile_bytes\":{},\"ready_tile_bytes\":{},\"max_product_bytes\":16777216,\"max_outstanding_jobs\":2,\"scratch_and_shared_cover_cache_excluded\":true,\"payload_refused_clusters\":{},\"capacity_refused_clusters\":{}}}}}", enabled, self.geometry_quality_ready, debt == 0, debt, queued, active, outstanding, done, cancelled, discarded, refusals, promotions, stale, appearance_cpu, appearance_upload, appearance_bytes, allocation_refusals,
+            optional_ms(first_geometry), optional_ms(first_appearance), retained_inputs, ready_bytes,
+            self.cover.as_ref().map_or(0, |cover| cover.refused.len()),
+            self.cover.as_ref().map_or(0, |cover| cover.capacity_refused.0.len())));
+        json.pop();
         json.push_str(&format!(
             ",\"prepared_view_cache\":{{\"hits\":{},\"misses\":{}}}}}",
             self.stats.prepared_view_hits, self.stats.prepared_view_misses
@@ -966,4 +1299,41 @@ impl RouteQualityStats {
     pub fn json(&self) -> String {
         format!("{{\"measured_frames\":{},\"coverage_ready_frames\":{},\"quality_ready_frames\":{},\"unbounded_error_frames\":{},\"max_finite_visible_error_px\":{},\"peak_unresolved_clusters\":{}}}",self.measured_frames,self.coverage_ready_frames,self.quality_ready_frames,self.unbounded_error_frames,self.max_finite_visible_error_px.map_or("null".into(),|v|v.to_string()),self.peak_unresolved_clusters)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn appearance_capacity_refusal_releases_completion_and_retries_after_resource_changes() {
+    let key = TileKey {
+        min: [0, 0],
+        width_cells: 128,
+        step_cells: 8,
+        edge_steps: [8; 4],
+        source_revision: 0,
+    };
+    let other = TileKey {
+        min: [128, 0],
+        ..key
+    };
+    let resources = (7, 512);
+    let mut refusals = CapacityRefusals::default();
+    let mut ready = Some(key);
+    refusals.park(key, resources, &mut ready);
+    assert!(
+        ready.is_none(),
+        "refused product must release the polling slot"
+    );
+    assert!(refusals.blocked(&key, resources));
+    assert!(
+        !refusals.blocked(&other, resources),
+        "another key must make progress"
+    );
+    assert!(
+        !refusals.blocked(&key, (8, 512)),
+        "retirement or uploads permit retry"
+    );
+    assert!(
+        !refusals.blocked(&key, (7, 768)),
+        "budget changes permit retry"
+    );
 }

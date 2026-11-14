@@ -1,4 +1,6 @@
 //! Disposable acceleration for exact roots, computed in fixed-size GPU tiles.
+#[path = "root_occupancy.rs"]
+pub(super) mod occupancy;
 use super::{
     stream::{Point, Region},
     Camera,

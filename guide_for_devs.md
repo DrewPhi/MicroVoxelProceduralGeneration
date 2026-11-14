@@ -2,8 +2,8 @@
 
 ## Current checkpoint
 
-The default `./run.sh` preview now uses the adaptive renderer with Regional
-terrain. Press **Esc** for live sun, atmosphere and exposure controls; image
+The default preview uses exact NAADF voxels inside a growing 64 m cube
+radius and adaptive raster terrain beyond it, with Regional terrain. Press **Esc** for live sun, atmosphere and exposure controls; image
 quality and loading settings use **Apply quality & loading**. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for the current controls,
 material-painting scope and outstanding integrated validation.
@@ -58,6 +58,11 @@ experimental scenes retain free flight. Persistent edits remain unimplemented.
 See the [Alpine vegetation beauty checkpoint](frontier/reference/BEAUTY_CHECKPOINT.md)
 for near-tree shadows, voxel ambient occlusion, procedural meadow variation and
 the current sky/fog profile.
+
+See the [November 14 optimization checkpoint](frontier/OPTIMIZATION_NOV14.md)
+for local edit invalidation, shared cover-cache coalescing, CPU preparation
+diagnostics and optional exact rendering experiments. Those experiments do not
+change the default voxel size or claim a larger supported radius.
 
 ## Adaptive loading controls
 

@@ -9,6 +9,7 @@ Start with the [architecture](frontier/ARCHITECTURE.md),
 The [developer guide](guide_for_devs.md) explains the current layout and next steps.
 The [#74 optimization plan](frontier/ISSUE74_PLAN.md) and
 [first measured checkpoint](frontier/reference/issue74/README.md) track the current research and remaining performance work.
+The [latest optimization checkpoint](frontier/OPTIMIZATION_NOV14.md) records cache/edit improvements, controlled experiments and their measured limits.
 
 An [independent offline voxel reference](frontier/reference/README.md) now provides
 supersampled images, coverage/depth data and matched GPU comparisons. See the

@@ -23,6 +23,9 @@ use std::{
     },
 };
 
+#[path = "deferred_cover.rs"]
+pub(crate) mod deferred_cover;
+
 /// Integer source addresses, independent of camera/view epoch. A cache belongs to
 /// one immutable source snapshot; revision is checked before construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -122,6 +125,8 @@ impl Drop for PayloadLifetime {
 }
 pub struct GeometryTile {
     pub naadf_owned: bool,
+    /// Explicit appearance debt; canonical geometry/certificates are already valid.
+    pub(crate) cover_input: Option<deferred_cover::Input>,
     pub(crate) payload_lifetime: Option<PayloadLifetime>,
     pub key: TileKey,
     pub mesh: Mesh,
@@ -218,12 +223,54 @@ fn build_cached(
     mut cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
 ) -> Result<GeometryTile, String> {
+    if deferred_cover::enabled() {
+        let mut input = None;
+        let mut tile = build_cached_staged(world, key, &mut cancelled, samples, Some(&mut input))?;
+        tile.cover_input = input;
+        Ok(tile)
+    } else {
+        build_cached_staged(world, key, &mut cancelled, samples, None)
+    }
+}
+
+/// Prototype entry point: mandatory geometry and certificates complete without
+/// performing cover surveys. The caller must retain explicit appearance debt.
+/// The normal build/cache path continues to request synchronous decoration.
+pub(crate) fn build_geometry_first(
+    world: &World,
+    key: TileKey,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(GeometryTile, Option<deferred_cover::Input>), String> {
+    let mut deferred = None;
+    let tile = build_cached_staged(
+        world,
+        key,
+        &mut cancelled,
+        &mut SourceSamples::new(0),
+        Some(&mut deferred),
+    )?;
+    Ok((tile, deferred))
+}
+
+fn build_cached_staged(
+    world: &World,
+    key: TileKey,
+    mut cancelled: impl FnMut() -> bool,
+    samples: &mut SourceSamples,
+    deferred: Option<&mut Option<deferred_cover::Input>>,
+) -> Result<GeometryTile, String> {
     samples.source_stage = SourceStage::Proxy;
     samples.begin_job();
     samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
         let mut tile = build_surface(world, key, &mut cancelled, samples)?;
-        crate::ground_cover::decorate(world, &mut tile, &mut cancelled)?;
+        if let Some(deferred) = deferred {
+            if crate::ground_cover::eligible(world, &tile) {
+                *deferred = Some(deferred_cover::Input::from_tile(&tile));
+            }
+        } else {
+            crate::ground_cover::decorate(world, &mut tile, &mut cancelled)?;
+        }
         let finalize_started = std::time::Instant::now();
         if tile.exact {
             pack_exact_native(&mut tile, &mut cancelled)?;
@@ -1205,6 +1252,7 @@ fn finish(
         mesh.vertices.capacity() * std::mem::size_of::<Vertex>() + mesh.indices.capacity() * 4;
     GeometryTile {
         naadf_owned: false,
+        cover_input: None,
         payload_lifetime: None,
         key,
         mesh,
@@ -3445,6 +3493,10 @@ impl GeometryCache {
         let mut built = built?;
         let packing_started = std::time::Instant::now();
         pack_proxy_triangles(&mut built)?;
+        built.bytes += built
+            .cover_input
+            .as_ref()
+            .map_or(0, deferred_cover::Input::bytes);
         if elapsed > 0. {
             let packing_ms = packing_started.elapsed().as_secs_f64() * 1000.0;
             self.samples.stages.finalize_ms += packing_ms;
@@ -3513,7 +3565,7 @@ impl GeometryCache {
         self.link_newest(key);
         self.stats.cache_admission_ms +=
             (admission_started.elapsed().as_secs_f64() * 1000. - eviction_ms).max(0.);
-        if elapsed > 0. && tile.gpu_profiles.is_none() {
+        if elapsed > 0. && tile.gpu_profiles.is_none() && tile.cover_input.is_none() {
             if let Some(disk) = &mut self.disk {
                 disk.queue_store(tile.clone());
             }

@@ -7,7 +7,7 @@ use frontier_world::{
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -21,6 +21,9 @@ mod shadow_lifecycle;
 use distant_vegetation::{distant_tree_mesh, distant_tree_radius, tree_baseline};
 use shadow_lifecycle::ShadowLifecycle;
 pub use shadow_lifecycle::{ShadowCoverage, ShadowInspection, ShadowReason, ShadowTransition};
+#[cfg(test)]
+#[path = "vegetation_edit_tests.rs"]
+mod edit_tests;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -310,18 +313,98 @@ fn budget_allows(
         _ => true,
     }
 }
-fn plant_edit_id(p: &PlantRecord, edits: &[Cell], revision: u64) -> u64 {
-    let altered = edits.iter().any(|e| {
-        (e.x - p.root.x).abs() <= 160
-            && (e.z - p.root.z).abs() <= 160
-            && e.y >= p.root.y - 1
-            && e.y <= p.root.y + 320
-    });
-    if altered {
-        mix(p.root.x as u64 ^ mix(p.root.z as u64) ^ revision).max(1)
-    } else {
-        0
+fn edit_touches_plant(p: &PlantRecord, e: &Cell) -> bool {
+    if p.species != Species::Rowan && p.variant == u8::MAX {
+        // Ground jobs own exactly these native cells. Neighboring roots are
+        // queried during assembly, but their out-of-tile cells are discarded.
+        return e.x >= p.root.x && e.x < p.root.x + 128 && e.z >= p.root.z && e.z < p.root.z + 128;
     }
+    let radius = if p.species == Species::Rowan {
+        vegetation::MAX_PLANT_RADIUS_CELLS
+    } else {
+        8
+    };
+    let height = if p.species == Species::Rowan {
+        vegetation::MAX_PLANT_HEIGHT_CELLS
+    } else {
+        12
+    };
+    e.x.abs_diff(p.root.x) <= radius as u64
+        && e.z.abs_diff(p.root.z) <= radius as u64
+        && e.y >= p.root.y - 1
+        && e.y <= p.root.y + height
+}
+// Eight-metre buckets bound edit lookups to at most nine neighboring buckets
+// for a tree, one for a grouped ground mesh. No full edit scan per visible plant.
+#[derive(Default)]
+struct PlantEdits {
+    buckets: BTreeMap<(i64, i64), Vec<Cell>>,
+}
+impl PlantEdits {
+    fn new(edits: impl Iterator<Item = Cell>) -> Self {
+        let mut value = Self::default();
+        for cell in edits {
+            value
+                .buckets
+                .entry((cell.x.div_euclid(128), cell.z.div_euclid(128)))
+                .or_default()
+                .push(cell);
+        }
+        value
+    }
+    fn id(&self, p: &PlantRecord) -> u64 {
+        if self.buckets.is_empty() {
+            return 0;
+        }
+        let (lo, hi) = if p.species != Species::Rowan && p.variant == u8::MAX {
+            ([p.root.x, p.root.z], [p.root.x + 127, p.root.z + 127])
+        } else {
+            let r = if p.species == Species::Rowan {
+                vegetation::MAX_PLANT_RADIUS_CELLS
+            } else {
+                8
+            };
+            ([p.root.x - r, p.root.z - r], [p.root.x + r, p.root.z + r])
+        };
+        // Bucket traversal has a fixed deterministic order. Sort within each
+        // bucket at construction through World's canonical Cell ordering.
+        edit_id_from(
+            p,
+            (lo[0].div_euclid(128)..=hi[0].div_euclid(128)).flat_map(|x| {
+                (lo[1].div_euclid(128)..=hi[1].div_euclid(128))
+                    .filter_map(move |z| self.buckets.get(&(x, z)))
+                    .flatten()
+            }),
+        )
+    }
+}
+fn edit_id_from<'a>(p: &PlantRecord, edits: impl Iterator<Item = &'a Cell>) -> u64 {
+    // Mesh assembly masks overrides independent of material. An order-independent
+    // local fingerprint keeps flat/original and indexed lookup identities equal.
+    let mut sum = 0u64;
+    let mut xor = 0u64;
+    let mut count = 0u64;
+    for e in edits.filter(|e| edit_touches_plant(p, e)) {
+        let cell =
+            mix(e.x as u64 ^ mix(e.y as u64).rotate_left(21) ^ mix(e.z as u64).rotate_left(42));
+        sum = sum.wrapping_add(cell);
+        xor ^= cell.rotate_left((cell & 63) as u32);
+        count += 1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    mix(sum
+        ^ mix(xor)
+        ^ mix(count)
+        ^ mix(p.root.x as u64)
+        ^ mix(p.root.y as u64).rotate_left(21)
+        ^ mix(p.root.z as u64).rotate_left(42))
+    .max(1)
+}
+#[cfg(test)]
+fn plant_edit_id(p: &PlantRecord, edits: &[Cell], _revision: u64) -> u64 {
+    edit_id_from(p, edits.iter())
 }
 fn tree_refinement_headroom(total: usize, used: usize, remaining_baseline: usize) -> usize {
     (total.saturating_mul(65) / 100)
@@ -459,6 +542,25 @@ enum Job {
 enum Done {
     Tile(Tile, u64, Vec<PlantRecord>),
     Mesh(MeshKey, u64, Arc<VegetationMesh>),
+}
+type MeshCancellation = Arc<Mutex<BTreeMap<(u64, MeshKey), Arc<AtomicBool>>>>;
+struct MeshCancellationGuard {
+    registry: MeshCancellation,
+    key: Option<(u64, MeshKey)>,
+    token: Option<Arc<AtomicBool>>,
+}
+impl Drop for MeshCancellationGuard {
+    fn drop(&mut self) {
+        if let (Some(key), Some(token)) = (self.key, self.token.as_ref()) {
+            let mut registry = self.registry.lock().unwrap();
+            if registry
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, token))
+            {
+                registry.remove(&key);
+            }
+        }
+    }
 }
 fn species(s: u8) -> Species {
     match s {
@@ -614,7 +716,7 @@ pub struct VegetationStream {
     pub naadf_omitted: usize,
     pub naadf_omitted_keys: BTreeSet<MeshKey>,
     world: World,
-    edits: Vec<Cell>,
+    edits: PlantEdits,
     pub config: VegetationConfig,
     tx: Option<SyncSender<Job>>,
     rx: Receiver<(u64, Done)>,
@@ -627,6 +729,11 @@ pub struct VegetationStream {
     mesh_costs: BTreeMap<MeshKey, (usize, u64)>,
     pending_tiles: BTreeSet<Tile>,
     pending_meshes: BTreeSet<MeshKey>,
+    mesh_sources: BTreeMap<MeshKey, PlantRecord>,
+    mesh_cancellation: MeshCancellation,
+    local_edit_updates: u64,
+    local_edit_cancelled_jobs: u64,
+    local_edit_reused_tiles: u64,
     tile_started: BTreeMap<Tile, Instant>,
     mesh_started: BTreeMap<MeshKey, Instant>,
     prediction: StreamingPrediction,
@@ -666,12 +773,14 @@ impl VegetationStream {
         let (results, rx) = mpsc::sync_channel(worker_count * 2);
         let job_counters = Arc::new(JobCounters::default());
         let epoch = Arc::new(AtomicU64::new(1));
+        let mesh_cancellation: MeshCancellation = Arc::new(Mutex::new(BTreeMap::new()));
         let workers = (0..worker_count)
             .map(|index| {
                 let cancel = epoch.clone();
                 let jobs = jobs.clone();
                 let results = results.clone();
                 let counters = job_counters.clone();
+                let mesh_cancellation = mesh_cancellation.clone();
                 thread::Builder::new()
                     .name(format!("vegetation-stream-{index}"))
                     .spawn(move || {
@@ -691,7 +800,27 @@ impl VegetationStream {
                                 | Job::Mesh(_, _, _, e)
                                 | Job::Ground(_, _, _, e) => *e,
                             };
-                            if generation != cancel.load(Ordering::Relaxed) {
+                            let cancellation_key = match &job {
+                                Job::Tile(..) => None,
+                                Job::Mesh(key, ..) | Job::Ground(key, ..) => {
+                                    Some((generation, *key))
+                                }
+                            };
+                            let local_cancel = cancellation_key.and_then(|key| {
+                                mesh_cancellation.lock().unwrap().get(&key).cloned()
+                            });
+                            let _cancellation_guard = MeshCancellationGuard {
+                                registry: mesh_cancellation.clone(),
+                                key: cancellation_key,
+                                token: local_cancel.clone(),
+                            };
+                            let cancelled = || {
+                                generation != cancel.load(Ordering::Relaxed)
+                                    || local_cancel
+                                        .as_ref()
+                                        .is_some_and(|v| v.load(Ordering::Relaxed))
+                            };
+                            if cancelled() {
                                 continue;
                             }
                             let done = match job {
@@ -706,9 +835,7 @@ impl VegetationStream {
                                 }
                                 Job::Mesh(key, p, w, _) if key.lod == 16 && key.edit_id == 0 => {
                                     let start = Instant::now();
-                                    let mesh = distant_tree_mesh(p.seed, p.variant, || {
-                                        generation != cancel.load(Ordering::Relaxed)
-                                    });
+                                    let mesh = distant_tree_mesh(p.seed, p.variant, || cancelled());
                                     counters.mesh_nanos[kind].fetch_add(
                                         start.elapsed().as_nanos() as u64,
                                         Ordering::Relaxed,
@@ -717,9 +844,9 @@ impl VegetationStream {
                                 }
                                 Job::Mesh(key, p, w, _) => {
                                     let assembly_start = Instant::now();
-                                    let Some(model) = vegetation::model_for_cancellable(&p, || {
-                                        generation != cancel.load(Ordering::Relaxed)
-                                    }) else {
+                                    let Some(model) =
+                                        vegetation::model_for_cancellable(&p, || cancelled())
+                                    else {
                                         continue;
                                     };
                                     let edited: BTreeSet<Cell> = if key.edit_id == 0 {
@@ -738,9 +865,7 @@ impl VegetationStream {
                                     );
                                     let mesh_start = Instant::now();
                                     let mut mesh =
-                                        mesh_plant_cells(p.species, cells, key.lod, || {
-                                            generation != cancel.load(Ordering::Relaxed)
-                                        });
+                                        mesh_plant_cells(p.species, cells, key.lod, || cancelled());
                                     // Bound resident payload by content size, not Vec's
                                     // geometric growth slack left during face extraction.
                                     mesh.vertices.shrink_to_fit();
@@ -764,7 +889,7 @@ impl VegetationStream {
                                     let edited: BTreeSet<Cell> = w.edit_cells().collect();
                                     let Some(cells) =
                                         ground_cells_cached(&records, p.root, &edited, || {
-                                            generation != cancel.load(Ordering::Relaxed)
+                                            cancelled()
                                         })
                                     else {
                                         continue;
@@ -777,7 +902,7 @@ impl VegetationStream {
                                     let mut mesh = mesh_ground_cells(
                                         cells.iter().map(|(c, (m, rgb))| (*c, *m, *rgb)),
                                         key.lod,
-                                        || generation != cancel.load(Ordering::Relaxed),
+                                        || cancelled(),
                                     );
                                     // Bound resident payload by content size, not Vec's
                                     // geometric growth slack left during face extraction.
@@ -790,7 +915,7 @@ impl VegetationStream {
                                     Done::Mesh(key, w.revision(), Arc::new(mesh))
                                 }
                             };
-                            if generation != cancel.load(Ordering::Relaxed) {
+                            if cancelled() {
                                 continue;
                             }
                             // Never block cancellation behind a stalled renderer/full result queue.
@@ -803,7 +928,7 @@ impl VegetationStream {
                                     Ok(()) => break,
                                     Err(mpsc::TrySendError::Full(v)) => {
                                         output = v;
-                                        if generation != cancel.load(Ordering::Relaxed) {
+                                        if cancelled() {
                                             break;
                                         }
                                         thread::park_timeout(std::time::Duration::from_millis(1));
@@ -831,7 +956,7 @@ impl VegetationStream {
             naadf_retirement: None,
             naadf_omitted: 0,
             naadf_omitted_keys: BTreeSet::new(),
-            edits: world.edit_cells().collect(),
+            edits: PlantEdits::new(world.edit_cells()),
             world,
             config,
             tx: Some(tx),
@@ -845,6 +970,11 @@ impl VegetationStream {
             mesh_costs: BTreeMap::new(),
             pending_tiles: BTreeSet::new(),
             pending_meshes: BTreeSet::new(),
+            mesh_sources: BTreeMap::new(),
+            mesh_cancellation,
+            local_edit_updates: 0,
+            local_edit_cancelled_jobs: 0,
+            local_edit_reused_tiles: 0,
             tile_started: BTreeMap::new(),
             mesh_started: BTreeMap::new(),
             prediction: StreamingPrediction::default(),
@@ -892,6 +1022,7 @@ impl VegetationStream {
         self.pending_tiles.clear();
         self.tile_started.clear();
         self.pending_meshes.clear();
+        self.mesh_sources.clear();
         self.mesh_started.clear();
     }
     pub(crate) fn set_naadf_retirement(&mut self, r: Option<crate::naadf::ownership::Retirement>) {
@@ -963,14 +1094,56 @@ impl VegetationStream {
             self.stable_frame = None;
         }
     }
-    /// Replace the immutable snapshot after edits; no stale plant mesh survives.
+    pub fn local_edit_stats_json(&self) -> String {
+        format!("{{\"local_updates\":{},\"retained_placement_tiles\":{},\"cancelled_mesh_jobs\":{},\"live_cancel_tokens\":{},\"placement_depends_on_edits\":false}}",
+            self.local_edit_updates, self.local_edit_reused_tiles, self.local_edit_cancelled_jobs,
+            self.mesh_cancellation.lock().unwrap().len())
+    }
+    /// Replace an immutable snapshot. Local overrides preserve source-derived
+    /// placement and valid content jobs; changed mesh identities cannot draw.
     pub fn set_world(&mut self, world: World) {
         self.stable_frame = None;
+        if self.world.shares_source_lineage(&world) {
+            let changed = self.world.changed_edit_cells(&world);
+            let next_edits = PlantEdits::new(world.edit_cells());
+            self.local_edit_updates += 1;
+            self.local_edit_reused_tiles += self.tiles.len() as u64;
+            // Placement and ecological shade are defined by the immutable
+            // source, independently of overrides. Their tiles/groups remain
+            // valid, including unfinished placement jobs and camera history.
+            self.shadow_lifecycle.invalidate_cells(&changed);
+            let invalid: Vec<_> = self
+                .mesh_sources
+                .iter()
+                .filter_map(|(&key, p)| {
+                    let affected = changed.iter().any(|e| edit_touches_plant(p, e));
+                    // Unedited tree templates are reusable at other placements.
+                    (affected
+                        && (key.species != 2 || key.edit_id != 0)
+                        && next_edits.id(p) != key.edit_id)
+                        .then_some(key)
+                })
+                .collect();
+            let cancellation = self.mesh_cancellation.lock().unwrap();
+            for key in invalid {
+                for ((_, candidate), token) in cancellation.iter() {
+                    if *candidate == key {
+                        token.store(true, Ordering::Relaxed);
+                    }
+                }
+                self.local_edit_cancelled_jobs += u64::from(self.pending_meshes.remove(&key));
+                self.mesh_sources.remove(&key);
+                self.mesh_started.remove(&key);
+            }
+            self.edits = next_edits;
+            self.world = world;
+            return;
+        }
         self.previous_lods.clear();
         self.shadow_lods.clear();
         self.shadow_lifecycle.clear();
         self.grouped_ground = None;
-        self.edits = world.edit_cells().collect();
+        self.edits = PlantEdits::new(world.edit_cells());
         self.world = world;
         self.content_epoch = self.epoch.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         self.tiles.clear();
@@ -982,6 +1155,8 @@ impl VegetationStream {
             .retain(|k, _| k.species == 2 && k.edit_id == 0);
         self.pending_tiles.clear();
         self.pending_meshes.clear();
+        self.mesh_sources.clear();
+        self.mesh_cancellation.lock().unwrap().clear();
         self.center = None;
         self.tile_started.clear();
         self.mesh_started.clear();
@@ -1052,6 +1227,7 @@ impl VegetationStream {
             self.epoch.fetch_add(1, Ordering::Relaxed);
             self.pending_tiles.clear();
             self.pending_meshes.clear();
+            self.mesh_sources.clear();
             self.tile_started.clear();
             self.mesh_started.clear();
         }
@@ -1067,7 +1243,7 @@ impl VegetationStream {
             drained = true;
             self.stable_frame = None;
             match done {
-                Done::Tile(t, r, p) => {
+                Done::Tile(t, _r, p) => {
                     if t.species != 2 {
                         self.grouped_ground = None;
                     }
@@ -1077,18 +1253,24 @@ impl VegetationStream {
                             self.prediction.observe_latency(start, now);
                         }
                     }
-                    if r == self.world.revision() {
-                        self.tiles.insert(t, (p, self.tick.wrapping_add(1)));
-                    }
+                    // Placement depends on source identity, never material edits.
+                    self.tiles.insert(t, (p, self.tick.wrapping_add(1)));
                 }
                 Done::Mesh(k, r, m) => {
+                    let valid = r == self.world.revision()
+                        || (k.species == 2 && k.edit_id == 0)
+                        || self
+                            .mesh_sources
+                            .get(&k)
+                            .is_some_and(|p| self.edits.id(p) == k.edit_id);
                     if current_generation {
                         self.pending_meshes.remove(&k);
+                        self.mesh_sources.remove(&k);
                         if let Some(start) = self.mesh_started.remove(&k) {
                             self.prediction.observe_latency(start, now);
                         }
                     }
-                    if r == self.world.revision() {
+                    if valid {
                         self.mesh_costs
                             .insert(k, (m.indices.len() / 3, self.tick.wrapping_add(1)));
                         self.meshes.insert(k, (m, self.tick.wrapping_add(1)));
@@ -1475,15 +1657,7 @@ impl VegetationStream {
         let mut ground_current_costs = Vec::new();
         if !self.config.reference {
             for (_, p) in plants.iter().filter(|(_, p)| p.species != Species::Rowan) {
-                let key = ground_key(
-                    p,
-                    8,
-                    if edits.is_empty() {
-                        0
-                    } else {
-                        self.world.revision().max(1)
-                    },
-                );
+                let key = ground_key(p, 8, edits.id(p));
                 let identity = tree_identity(key);
                 let previous = self.previous_lods.get(&identity).copied();
                 let mut baseline = None;
@@ -1546,7 +1720,7 @@ impl VegetationStream {
                 seed: p.seed,
                 tile: [0; 2],
                 lod: tree_baseline(*distance),
-                edit_id: plant_edit_id(p, edits, self.world.revision()),
+                edit_id: edits.id(p),
             };
             let current = resident_coverage_key(
                 &self.meshes,
@@ -1615,7 +1789,7 @@ impl VegetationStream {
                     seed: p.seed,
                     tile: [0; 2],
                     lod: 0,
-                    edit_id: plant_edit_id(p, edits, self.world.revision()),
+                    edit_id: edits.id(p),
                 })
         });
         shadow_plants.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.root.cmp(&b.1.root)));
@@ -1669,13 +1843,7 @@ impl VegetationStream {
                     lod.min(4)
                 };
             }
-            let edit_id = if s == 2 {
-                plant_edit_id(&p, edits, self.world.revision())
-            } else if edits.is_empty() {
-                0
-            } else {
-                self.world.revision().max(1)
-            };
+            let edit_id = edits.id(&p);
             let mut key = MeshKey {
                 species: s,
                 variant: p.variant,
@@ -2028,7 +2196,7 @@ impl VegetationStream {
                 seed: p.seed,
                 tile: [0; 2],
                 lod: 0,
-                edit_id: plant_edit_id(p, edits, self.world.revision()),
+                edit_id: edits.id(p),
             };
             let current = self
                 .shadow_lods
@@ -2067,7 +2235,7 @@ impl VegetationStream {
                 seed: p.seed,
                 tile: [0; 2],
                 lod: 0,
-                edit_id: plant_edit_id(&p, edits, self.world.revision()),
+                edit_id: edits.id(&p),
             };
             let previous = self.shadow_lods.get(&identity).copied();
             let target = shadow_stride(distance, previous, self.config.reference);
@@ -2274,9 +2442,15 @@ impl VegetationStream {
             } else {
                 Job::Mesh(key, p, self.world.clone(), epoch)
             };
+            self.mesh_cancellation
+                .lock()
+                .unwrap()
+                .insert((epoch, key), Arc::new(AtomicBool::new(false)));
             if self.tx.as_ref().unwrap().try_send(job).is_err() {
+                self.mesh_cancellation.lock().unwrap().remove(&(epoch, key));
                 break;
             }
+            self.mesh_sources.insert(key, p);
             self.pending_meshes.insert(key);
             self.mesh_started.insert(key, now);
             submitted += 1;

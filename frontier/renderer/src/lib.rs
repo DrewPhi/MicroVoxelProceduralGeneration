@@ -2140,7 +2140,7 @@ impl Viewer {
                 .as_ref()
                 .and_then(|g| g.naadf.as_ref())
                 .is_some_and(|n| {
-                    n.ready()
+                    n.ready_for_capture()
                         && self.adaptive_view.as_ref().is_none_or(|v| {
                             n.desired_owner()
                                 .is_some_and(|o| v.published_naadf_owner == o.id)

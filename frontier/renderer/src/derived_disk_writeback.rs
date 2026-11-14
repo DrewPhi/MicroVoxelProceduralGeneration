@@ -155,7 +155,8 @@ impl AsyncDiskCache {
     }
     pub(crate) fn queue_store(&mut self, tile: Arc<GeometryTile>) -> bool {
         let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.failed
+        if tile.cover_input.is_some()
+            || s.failed
             || s.closing
             || s.write_keys.contains(&tile.key)
             || s.write_keys.len() >= WRITE_COUNT
