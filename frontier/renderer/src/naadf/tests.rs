@@ -196,6 +196,39 @@ fn gpu_matches_canonical_rays_with_storage(
     options: traversal::Options,
     reserved: bool,
 ) {
+    gpu_matches_canonical_rays_for_source(
+        force_wide_pigment,
+        gpu_distance,
+        sparse_roots,
+        options,
+        reserved,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "explicit hardware GPU parity: SeededWorld opaque water, untouched bed, air and material IDs, compact and wide leaves"]
+fn naadf_seeded_world_water_bed_air_matches_canonical_rays() {
+    for wide in [false, true] {
+        gpu_matches_canonical_rays_for_source(
+            wide,
+            false,
+            false,
+            traversal::Options::default(),
+            false,
+            true,
+        );
+    }
+}
+
+fn gpu_matches_canonical_rays_for_source(
+    force_wide_pigment: bool,
+    gpu_distance: bool,
+    sparse_roots: bool,
+    options: traversal::Options,
+    reserved: bool,
+    seeded: bool,
+) {
     use glam::{Vec3, Vec4};
     pollster::block_on(async {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -222,19 +255,82 @@ fn gpu_matches_canonical_rays_with_storage(
         if gpu_distance {
             gpu.visual_settings = Some(crate::settings::VisualSettings::default());
         }
-        let world = World::fbm(
+        let mut world = World::fbm(
             7,
             frontier_world::FbmParams {
-                recipe: frontier_world::FbmRecipe::Legacy,
-                amplitude: 2.,
-                horizontal_scale: 30.,
-                octaves: 2,
+                recipe: if seeded {
+                    frontier_world::FbmRecipe::SeededWorld
+                } else {
+                    frontier_world::FbmRecipe::Legacy
+                },
+                amplitude: if seeded { 1000. } else { 2. },
+                horizontal_scale: if seeded { 1800. } else { 30. },
+                octaves: if seeded { 8 } else { 2 },
                 ..Default::default()
             },
         )
         .unwrap();
-        let height = world.height_m(0., 0.);
-        let eye = DVec3::new(0., height + 1.7, 0.);
+        let mut inspection = None;
+        let eye = if seeded {
+            use frontier_world::{Cell, Material};
+            // Find real source water, rather than constructing a water fixture
+            // from edits. The short river depth fits the bounded GPU snapshot.
+            let terrain = world.fbm_terrain().unwrap();
+            let (x, z, column) = (-3..=3)
+                .flat_map(|z| (-3..=3).map(move |x| (x * 38400, z * 38400)))
+                .find_map(|(x, z)| {
+                    let c = terrain.column_cells(x, z);
+                    (32..=80)
+                        .contains(&(c.visible_top - c.ground_top))
+                        .then_some((x, z, c))
+                })
+                .expect("seed7 has an active shallow river node");
+            // Opaque water hides its bed. A narrow air inspection shaft exposes
+            // the UNEDITED canonical bed while preserving surrounding source
+            // water. Both surfaces must produce matching GPU depth/material.
+            for dz in -6..6 {
+                for dx in -6..6 {
+                    let c = world.column(x + dx, z + dz);
+                    let ground = (c.ground_height_m() / VOXEL_SIZE) as i64;
+                    let top = (c.height_m() / VOXEL_SIZE) as i64;
+                    for y in ground..top {
+                        world.set(
+                            Cell {
+                                x: x + dx,
+                                y,
+                                z: z + dz,
+                            },
+                            Material::Air,
+                        );
+                    }
+                }
+            }
+            // Small visible marker caps verify the appended land material IDs
+            // alongside naturally sourced water and bed pigments.
+            for (dx, material) in [(-12, Material::Sand), (12, Material::Snow)] {
+                for zz in -2..2 {
+                    for xx in -2..2 {
+                        world.set(
+                            Cell {
+                                x: x + dx + xx,
+                                y: column.visible_top,
+                                z: z + zz,
+                            },
+                            material,
+                        );
+                    }
+                }
+            }
+            inspection = Some([x, z]);
+            DVec3::new(
+                x as f64 * VOXEL_SIZE,
+                column.visible_top as f64 * VOXEL_SIZE + 1.7,
+                z as f64 * VOXEL_SIZE,
+            )
+        } else {
+            let height = world.height_m(0., 0.);
+            DVec3::new(0., height + 1.7, 0.)
+        };
         let mut camera = Camera {
             position: eye,
             far: 100.,
@@ -246,7 +342,9 @@ fn gpu_matches_canonical_rays_with_storage(
         let mut snapshot = data::build_with_root_mode(
             &world,
             eye.to_array(),
-            if sparse_roots {
+            if seeded {
+                8
+            } else if sparse_roots {
                 8
             } else if options.height_mips {
                 // Ten roots across produce a partial tile and a padded mip base.
@@ -339,10 +437,19 @@ fn gpu_matches_canonical_rays_with_storage(
         let mut check_rays = |volume: &Volume| {
             let bounds = volume.bounds;
             let mut tested = 0;
-            for (yaw, pitch, shadows) in [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3., 0.3)]
-                .into_iter()
-                .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
-            {
+            let mut seen_water = 0;
+            let mut seen_bed = 0;
+            let mut seen_air = 0;
+            let mut seen_materials = [0_usize; 10];
+            let views = if seeded {
+                vec![(0., -1.55, false), (3., 0.3, false)]
+            } else {
+                [(0., -0.65), (1.3, -0.4), (-2.5, -0.8), (3., 0.3)]
+                    .into_iter()
+                    .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
+                    .collect()
+            };
+            for (yaw, pitch, shadows) in views {
                 camera.yaw = yaw;
                 camera.pitch = pitch;
                 let matrix = camera.matrix(DVec3::from_array(bounds[0]), 1.);
@@ -498,7 +605,26 @@ fn gpu_matches_canonical_rays_with_storage(
                             hit.is_some(),
                             "coverage pixel {x},{y}, yaw{yaw},pitch{pitch}"
                         );
+                        if seeded && hit.is_none() {
+                            seen_air += 1;
+                        }
                         if let Some(hit) = hit {
+                            if seeded && !shadows {
+                                seen_materials[data::id(hit.material) as usize] += 1;
+                                seen_water +=
+                                    usize::from(hit.material == frontier_world::Material::Water);
+                                if let Some([sx, sz]) = inspection {
+                                    if (sx - 6..sx + 6).contains(&hit.cell.x)
+                                        && (sz - 6..sz + 6).contains(&hit.cell.z)
+                                    {
+                                        let ground =
+                                            (world.column(hit.cell.x, hit.cell.z).ground_height_m()
+                                                / VOXEL_SIZE)
+                                                as i64;
+                                        seen_bed += usize::from(hit.cell.y == ground - 1);
+                                    }
+                                }
+                            }
                             if shadows {
                                 let sun = Vec3::new(-0.5, 0.8, -0.3).normalize().as_dvec3();
                                 let origin = eye
@@ -551,6 +677,26 @@ fn gpu_matches_canonical_rays_with_storage(
             }
             eprintln!("NAADF GPU oracle: {tested} covered primary/shadow samples across four headings; 32768 coverage decisions checked");
             assert!(tested > 1000);
+            if seeded {
+                assert!(
+                    seen_water > 0,
+                    "GPU oracle must exercise actual source water"
+                );
+                assert!(
+                    seen_bed > 0,
+                    "inspection shaft must expose untouched source bed"
+                );
+                assert!(seen_air > 0, "upward rays must exercise air misses");
+                assert!(
+                    seen_materials[data::id(frontier_world::Material::Sand) as usize] > 0,
+                    "Sand marker must be visible"
+                );
+                assert!(
+                    seen_materials[data::id(frontier_world::Material::Snow) as usize] > 0,
+                    "Snow marker must be visible"
+                );
+                eprintln!("SeededWorld oracle witnesses: water={seen_water}, source_bed={seen_bed}, air={seen_air}");
+            }
             if options.diagnostics {
                 let words = volume
                     .diagnostics

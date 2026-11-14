@@ -32,6 +32,9 @@ fn color(id:u32)->vec3<f32> {
         case 4u:{return vec3<f32>(0.41,0.25,0.13);}
         case 5u:{return vec3<f32>(0.40,0.53,0.25);}
         case 6u:{return vec3<f32>(0.93,0.92,0.84);}
+        case 7u:{return vec3<f32>(0.035,0.19,0.29);}
+        case 8u:{return vec3<f32>(0.62,0.52,0.32);}
+        case 9u:{return vec3<f32>(0.88,0.92,0.96);}
         default:{return vec3<f32>(0.);}
     }
 }

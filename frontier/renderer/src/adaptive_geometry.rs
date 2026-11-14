@@ -662,6 +662,11 @@ fn pack_native_quads_cancelled(
         Material::Soil,
         Material::Stone,
         Material::Wood,
+        Material::Leaf,
+        Material::Flower,
+        Material::Water,
+        Material::Sand,
+        Material::Snow,
     ];
     // Bound tessellation before allocating: steep native cliffs can expose
     // many more unit faces than their greedy rectangle count suggests.
@@ -1021,12 +1026,15 @@ fn build_surface(
         tile.appearance = appearance;
         return Ok(tile);
     }
-    let defer_profiles = samples.gpu_profiles.enabled
+    let defer_profiles = world
+        .fbm_terrain()
+        .is_none_or(|t| t.params().recipe != frontier_world::FbmRecipe::SeededWorld)
+        && samples.gpu_profiles.enabled
         && !near_profile_shared()
         && samples.gpu_job_allowed
         && appearance_mode(world).probe_cells == 1
         && !appearance_mode(world).spatial_profiles
-        && crate::appearance_method::selected() == crate::appearance_method::Method::Baseline;
+        && crate::appearance_method::for_world(world) == crate::appearance_method::Method::Baseline;
     if defer_profiles {
         samples.gpu_profiles.eligible_tiles += 1;
     }
@@ -1502,7 +1510,18 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
             if TRACK_EXTREMA {
                 note([x, z], h);
             }
-            let top = if reuse_top {
+            let water_column = (terrain.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+                .then(|| {
+                    let c = terrain.column_cells(x, z);
+                    NativeColumn {
+                        height: c.visible_top,
+                        ground_height: c.ground_top,
+                        bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
+                    }
+                });
+            let top = if let Some(c) = water_column {
+                c.material(h - 1)
+            } else if reuse_top {
                 heights
                     .top_material(x, z)
                     .ok_or("missing native profile material")?
@@ -1527,9 +1546,11 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
                 if TRACK_EXTREMA {
                     note([x + dx, z + dz], lo);
                 }
-                for hi in [h - 12, h - 1, h] {
+                for hi in water_column.map_or([h - 12, h - 1, h, h], NativeColumn::run_ends) {
                     if hi > lo {
-                        let material = if lo == h - 1 {
+                        let material = if let Some(c) = water_column {
+                            c.material(lo)
+                        } else if lo == h - 1 {
                             top
                         } else if lo >= h - 12 {
                             Material::Soil
@@ -1622,6 +1643,36 @@ fn profile_probe_bands(height: i64, neighbor: i64, probe: i64) -> [f32; 3] {
 
 /// Exact immutable source payload shared with native extraction.
 type NativeColumn = column_mesh::SampledColumn;
+fn encode_native_column(v: NativeColumn, b: &mut [u8]) {
+    b[..8].copy_from_slice(&v.height.to_le_bytes());
+    b[8..16].copy_from_slice(&v.ground_height.to_le_bytes());
+    for i in 0..3 {
+        b[16 + i] = v.bands[i] as u8;
+    }
+}
+fn decode_native_column(b: &[u8]) -> Option<NativeColumn> {
+    if b.len() != 19 {
+        return None;
+    }
+    let material = |v| match v {
+        0 => Some(Material::Air),
+        1 => Some(Material::Grass),
+        2 => Some(Material::Soil),
+        3 => Some(Material::Stone),
+        4 => Some(Material::Wood),
+        5 => Some(Material::Leaf),
+        6 => Some(Material::Flower),
+        7 => Some(Material::Water),
+        8 => Some(Material::Sand),
+        9 => Some(Material::Snow),
+        _ => None,
+    };
+    Some(NativeColumn {
+        height: i64::from_le_bytes(b[..8].try_into().ok()?),
+        ground_height: i64::from_le_bytes(b[8..16].try_into().ok()?),
+        bands: [material(b[16])?, material(b[17])?, material(b[18])?],
+    })
+}
 const SOURCE_SHARDS: usize = 32;
 
 /// Spatial page sharding shares exact samples between concurrent builders. The
@@ -1702,31 +1753,9 @@ impl SharedSourcePages {
                             PageCache::with_cold(
                                 bytes,
                                 crate::source_page_cache::ValueCodec {
-                                    bytes: 11,
-                                    encode: |v: NativeColumn, b| {
-                                        b[..8].copy_from_slice(&v.height.to_le_bytes());
-                                        for i in 0..3 {
-                                            b[8 + i] = v.bands[i] as u8;
-                                        }
-                                    },
-                                    decode: |b| {
-                                        let material = |v| match v {
-                                            0 => Some(Material::Air),
-                                            1 => Some(Material::Grass),
-                                            2 => Some(Material::Soil),
-                                            3 => Some(Material::Stone),
-                                            4 => Some(Material::Wood),
-                                            _ => None,
-                                        };
-                                        Some(NativeColumn {
-                                            height: i64::from_le_bytes(b[..8].try_into().ok()?),
-                                            bands: [
-                                                material(b[8])?,
-                                                material(b[9])?,
-                                                material(b[10])?,
-                                            ],
-                                        })
-                                    },
+                                    bytes: 19,
+                                    encode: encode_native_column,
+                                    decode: decode_native_column,
                                 },
                             )
                         } else {
@@ -2241,7 +2270,18 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        let method = crate::appearance_method::selected();
+        // Three-band appearance experiments cannot represent a separate water run.
+        // SeededWorld uses the canonical run-aware baseline until those opt-in
+        // experiments support water ownership explicitly.
+        let seeded = self
+            .world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+        let method = if seeded {
+            crate::appearance_method::Method::Baseline
+        } else {
+            crate::appearance_method::selected()
+        };
         let shared_near = near_profile_shared();
         #[cfg(test)]
         let shared_near = self.experiment.map_or(shared_near, |mode| {
@@ -2270,8 +2310,9 @@ impl Generator<'_> {
             && method == crate::appearance_method::Method::Map
         {
             self.mapped_profile(x, z, s)?
-        } else if (appearance_mode(self.world).spatial_profiles
-            || method == crate::appearance_method::Method::Hierarchy)
+        } else if !seeded
+            && (appearance_mode(self.world).spatial_profiles
+                || method == crate::appearance_method::Method::Hierarchy)
             && self.key.width_cells > MAX_NATIVE_WIDTH
             && s >= 16
         {
@@ -2358,7 +2399,7 @@ impl Generator<'_> {
                     size: footprint,
                     stride: (footprint / 4).max(1),
                 };
-                let mut value = if crate::appearance_method::selected()
+                let mut value = if crate::appearance_method::for_world(self.world)
                     == crate::appearance_method::Method::Hierarchy
                     && footprint <= crate::appearance_hierarchy::MAX_EDGE_CELLS.min(128)
                 {
@@ -2771,7 +2812,11 @@ impl Generator<'_> {
             }
         };
         let weight = (stride * stride) as f32;
-        let probe = if self.key.width_cells > MAX_NATIVE_WIDTH && stride > 1 {
+        let seeded = self
+            .world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+        let probe = if !seeded && self.key.width_cells > MAX_NATIVE_WIDTH && stride > 1 {
             appearance_mode(self.world).probe_cells.min(stride)
         } else {
             1
@@ -2842,7 +2887,7 @@ impl Generator<'_> {
                         }
                         continue;
                     }
-                    for hi in [h - 12, h - 1, h] {
+                    for hi in self.heights[&[xx, zz]].run_ends() {
                         if hi > lo {
                             let material = match center {
                                 Some(column) => column.material(lo),
@@ -2876,7 +2921,7 @@ impl Generator<'_> {
             return Ok(());
         }
         let mut lo = low;
-        for hi in [h - 12, h - 1, h] {
+        for hi in self.heights[&[x, z]].run_ends() {
             if hi <= lo {
                 continue;
             }
@@ -5174,6 +5219,7 @@ mod tests {
                 let p = [x, z];
                 let v = NativeColumn {
                     height: x * 31 - z * 17,
+                    ground_height: x * 31 - z * 17,
                     bands: [Material::Grass, Material::Soil, Material::Stone],
                 };
                 dense.insert(p, v);
@@ -6164,6 +6210,7 @@ mod tests {
                         [x, z],
                         NativeColumn {
                             height: if x == 2 && z == 1 { 0 } else { 10 },
+                            ground_height: if x == 2 && z == 1 { 0 } else { 10 },
                             bands: [Material::Grass, Material::Soil, Material::Stone],
                         },
                     );
@@ -6945,4 +6992,20 @@ mod tests {
             bytemuck::cast_slice::<_, u8>(&baseline.face_profiles)
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn source_column_codec_retains_water_depth_and_new_ground_materials() {
+    let column = NativeColumn {
+        height: 47,
+        ground_height: -81,
+        bands: [Material::Snow, Material::Sand, Material::Stone],
+    };
+    let mut bytes = [0; 19];
+    encode_native_column(column, &mut bytes);
+    assert_eq!(decode_native_column(&bytes), Some(column));
+    assert_eq!(decode_native_column(&bytes[..11]), None);
+    bytes[16] = 255;
+    assert_eq!(decode_native_column(&bytes), None);
 }

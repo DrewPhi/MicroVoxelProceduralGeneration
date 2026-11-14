@@ -58,11 +58,11 @@ pub struct VolumeSummary {
     pub region: CellBounds,
     pub occupancy: Occupancy,
     pub occupied_bounds: Option<CellBounds>,
-    /// Air/Grass/Soil/Stone/Wood/Leaf/Flower native cell counts. No majority interpretation.
-    pub material_cells: [u64; 7],
+    /// Air/Grass/Soil/Stone/Wood/Leaf/Flower/Water/Sand/Snow native cell counts. No majority interpretation.
+    pub material_cells: [u64; 10],
     /// Canonical exposed native unit-face counts, +X/-X/+Y/-Y/+Z/-Z,
-    /// then Air/Grass/Soil/Stone/Wood/Leaf/Flower. Halo culls internal child borders.
-    pub exposed_faces: [[u64; 7]; 6],
+    /// then Air/Grass/Soil/Stone/Wood/Leaf/Flower/Water/Sand/Snow. Halo culls internal child borders.
+    pub exposed_faces: [[u64; 10]; 6],
     pub topology: TopologyEvidence,
 }
 impl VolumeSummary {
@@ -122,15 +122,15 @@ impl VolumeSummary {
             region,
             occupancy: Occupancy::Mixed,
             occupied_bounds: None,
-            material_cells: [0; 7],
-            exposed_faces: [[0; 7]; 6],
+            material_cells: [0; 10],
+            exposed_faces: [[0; 10]; 6],
             topology: TopologyEvidence::HeightfieldSafe,
         };
         for c in children {
             if let Some(bounds) = c.occupied_bounds {
                 out.occupied_bounds = Some(out.occupied_bounds.map_or(bounds, |b| b.union(bounds)))
             }
-            for m in 0..7 {
+            for m in 0..10 {
                 out.material_cells[m] = out.material_cells[m]
                     .checked_add(c.material_cells[m])
                     .ok_or("volume material count overflow")?;
@@ -175,6 +175,9 @@ fn material(index: usize) -> Material {
         Material::Wood,
         Material::Leaf,
         Material::Flower,
+        Material::Water,
+        Material::Sand,
+        Material::Snow,
     ][index]
 }
 fn material_index(m: Material) -> usize {
@@ -186,9 +189,12 @@ fn material_index(m: Material) -> usize {
         Material::Wood => 4,
         Material::Leaf => 5,
         Material::Flower => 6,
+        Material::Water => 7,
+        Material::Sand => 8,
+        Material::Snow => 9,
     }
 }
-fn occupancy(counts: [u64; 7]) -> Occupancy {
+fn occupancy(counts: [u64; 10]) -> Occupancy {
     if counts[1..].iter().all(|&n| n == 0) {
         Occupancy::Empty
     } else if counts[0] == 0 {
@@ -271,8 +277,8 @@ pub fn sample(
         region,
         occupancy: Occupancy::Empty,
         occupied_bounds: None,
-        material_cells: [0; 7],
-        exposed_faces: [[0; 7]; 6],
+        material_cells: [0; 10],
+        exposed_faces: [[0; 10]; 6],
         topology: if heightfield_safe {
             TopologyEvidence::HeightfieldSafe
         } else {
@@ -385,7 +391,7 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert_eq!(s.material_cells, [6, 0, 0, 0, 0, 1, 1]);
+        assert_eq!(s.material_cells, [6, 0, 0, 0, 0, 1, 1, 0, 0, 0]);
         assert_eq!(s.exposed_faces.iter().map(|f| f[5]).sum::<u64>(), 5);
         assert_eq!(s.exposed_faces.iter().map(|f| f[6]).sum::<u64>(), 5);
         let w = World::fbm(1, crate::FbmParams::default())
@@ -449,7 +455,7 @@ mod tests {
         .unwrap();
         assert_eq!(solid.occupancy, Occupancy::Full);
         assert_eq!(solid.uniform_material(), Some(Material::Stone));
-        assert_eq!(solid.exposed_faces, [[0; 7]; 6]);
+        assert_eq!(solid.exposed_faces, [[0; 10]; 6]);
         assert_eq!(solid.topology, TopologyEvidence::Unknown);
         let single = sample(
             1,

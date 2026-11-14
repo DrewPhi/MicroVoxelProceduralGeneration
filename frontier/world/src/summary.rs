@@ -22,8 +22,8 @@ pub enum TopologyClass {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AppearanceSummary {
-    /// Exposed canonical face area (m²), indexed Air/Grass/Soil/Stone/Wood/Leaf/Flower.
-    pub material_area_m2: [f64; 7],
+    /// Exposed canonical face area, indexed by the stable material IDs.
+    pub material_area_m2: [f64; 10],
     /// Exposed canonical face area indexed +X/-X/+Y/-Y/+Z/-Z.
     pub normal_area_m2: [f64; 6],
 }
@@ -55,7 +55,7 @@ impl TerrainSummary {
                 (TopologyClass::Unknown, _) | (_, TopologyClass::Unknown) => TopologyClass::Unknown,
                 _ => TopologyClass::Heightfield,
             };
-            for i in 0..7 {
+            for i in 0..10 {
                 result.appearance.material_area_m2[i] += c.appearance.material_area_m2[i];
             }
             for i in 0..6 {
@@ -72,6 +72,10 @@ impl TerrainSummary {
 pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     let p = terrain.params();
     match p.recipe {
+        FbmRecipe::SeededWorld => [
+            (-402.0 * p.amplitude / 1000.0).next_down() - VOXEL_SIZE,
+            (1663.0 * p.amplitude / 1000.0).next_up(),
+        ],
         FbmRecipe::Legacy => [-0.7325 * p.amplitude - VOXEL_SIZE, 1.13 * p.amplitude],
         // |meadow|<=54, all four peak weights sum to2520, crest<=3200,
         // foothills<=480, envelope in[0,1], fine relief<=7.95 plus fixed
@@ -110,6 +114,8 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
     };
     let n = 16.0;
     match p.recipe {
+        // Local river banks are bounded through the source-specific affine path.
+        FbmRecipe::SeededWorld => f64::INFINITY,
         FbmRecipe::Alpine => {
             // Work in authored scene meters then scale to physical meters.
             // smooth(1-d²) has |gradient|<=3|gradient d| on its active support.
@@ -209,7 +215,7 @@ pub fn conservative_grid_error_at(
     let p = terrain.params();
     // The older floating-point operation-count certificate predates Alpine's
     // spatial masks. Its affine bounds independently certify Alpine regions.
-    if p.recipe == FbmRecipe::Alpine {
+    if matches!(p.recipe, FbmRecipe::Alpine | FbmRecipe::SeededWorld) {
         return GeometryError::Uncertified;
     }
     if p.validate().is_err() {
@@ -295,20 +301,25 @@ pub fn summarize_native_columns(
                 // Each exposed side voxel can have a different depth material.
                 let bottom = (neighbor / VOXEL_SIZE) as i64;
                 let top = (h / VOXEL_SIZE) as i64;
-                // Pure FBM has exactly three depth runs; count their areas without
-                // work proportional to cliff height (or the world's vertical range).
+                // Ground and water have a fixed number of depth runs. Count
+                // their areas without walking every cell in a tall cliff.
                 if bottom < top {
                     let face = VOXEL_SIZE * VOXEL_SIZE;
-                    add_face(&mut s.appearance, m, axis, face);
-                    let soil = (top - 1 - bottom.max(top - 12)).max(0);
-                    let stone = (top - 12 - bottom).max(0);
-                    add_face(&mut s.appearance, Material::Soil, axis, soil as f64 * face);
-                    add_face(
-                        &mut s.appearance,
-                        Material::Stone,
-                        axis,
-                        stone as f64 * face,
-                    );
+                    let ground = (c.ground_height_m() / VOXEL_SIZE) as i64;
+                    let mut cuts = [bottom, ground - 12, ground - 1, ground, top];
+                    cuts.sort_unstable();
+                    for pair in cuts.windows(2) {
+                        let lo = pair[0].max(bottom);
+                        let hi = pair[1].min(top);
+                        if lo < hi {
+                            add_face(
+                                &mut s.appearance,
+                                c.material(lo),
+                                axis,
+                                (hi - lo) as f64 * face,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -330,6 +341,9 @@ fn add_face(a: &mut AppearanceSummary, m: Material, axis: usize, area: f64) {
         Material::Wood => 4,
         Material::Leaf => 5,
         Material::Flower => 6,
+        Material::Water => 7,
+        Material::Sand => 8,
+        Material::Snow => 9,
     };
     a.material_area_m2[i] += area;
     a.normal_area_m2[axis] += area;

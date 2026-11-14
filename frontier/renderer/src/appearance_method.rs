@@ -48,6 +48,19 @@ pub(crate) fn selected() -> Method {
     *VALUE.get_or_init(|| from_environment(Method::Baseline))
 }
 
+/// Water adds a fourth vertical run. The legacy detailed-map experiments do
+/// not encode that run yet; use the canonical run-aware path and report it.
+pub(crate) fn for_world(world: &frontier_world::World) -> Method {
+    if world
+        .fbm_terrain()
+        .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+    {
+        Method::Baseline
+    } else {
+        selected()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,12 @@ pub struct CanonicalPage {
 impl CanonicalPage {
     /// Bounded unedited FBM heightfields only; general edited volumes are rejected.
     pub fn sample(world: &World, min: [i64; 2]) -> Result<Self, String> {
+        if world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+        {
+            return Err("summary probe experiment does not support static-water columns".into());
+        }
         if world.fbm_terrain().is_none()
             || world.topology_base_cells().is_some()
             || world.edit_cells().next().is_some()

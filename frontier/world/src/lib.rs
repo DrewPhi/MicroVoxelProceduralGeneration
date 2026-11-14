@@ -11,6 +11,8 @@ use std::{
 
 pub mod affine_bounds;
 mod alpine;
+#[cfg(test)]
+mod seeded_bounds_tests;
 pub mod summary;
 pub mod terrain;
 pub mod vegetation;
@@ -85,10 +87,13 @@ pub enum Material {
     Wood,
     Leaf,
     Flower,
+    Water,
+    Sand,
+    Snow,
 }
 impl Material {
     pub fn is_blocking(self) -> bool {
-        !matches!(self, Self::Air | Self::Leaf | Self::Flower)
+        !matches!(self, Self::Air | Self::Leaf | Self::Flower | Self::Water)
     }
     pub fn color(self) -> [f32; 3] {
         match self {
@@ -99,6 +104,9 @@ impl Material {
             Self::Wood => [0.41, 0.25, 0.13],
             Self::Leaf => [0.40, 0.53, 0.25],
             Self::Flower => [0.93, 0.92, 0.84],
+            Self::Water => [0.035, 0.19, 0.29],
+            Self::Sand => [0.62, 0.52, 0.32],
+            Self::Snow => [0.88, 0.92, 0.96],
         }
     }
 }
@@ -127,10 +135,14 @@ pub struct WorldColumn<'a> {
     x: i64,
     z: i64,
     height: i64,
+    terrain_column: Option<terrain::TerrainColumn>,
 }
 impl WorldColumn<'_> {
     pub fn height_m(&self) -> f64 {
         self.height as f64 * VOXEL_SIZE
+    }
+    pub fn ground_height_m(&self) -> f64 {
+        self.terrain_column.map_or(self.height, |c| c.ground_top) as f64 * VOXEL_SIZE
     }
     pub fn material(&self, y: i64) -> Material {
         let c = Cell {
@@ -138,11 +150,10 @@ impl WorldColumn<'_> {
             y,
             z: self.z,
         };
-        self.world
-            .edits
-            .get(&c)
-            .copied()
-            .unwrap_or_else(|| self.world.source_with_height(c, self.height))
+        self.world.edits.get(&c).copied().unwrap_or_else(|| {
+            self.world
+                .source_with_column(c, self.height, self.terrain_column)
+        })
     }
 }
 impl World {
@@ -217,11 +228,13 @@ impl World {
     }
     /// Terrain and edits only. Vegetation has separate volume ownership.
     pub fn column(&self, x: i64, z: i64) -> WorldColumn<'_> {
+        let terrain_column = self.terrain.as_ref().map(|t| t.column_cells(x, z));
         WorldColumn {
             world: self,
             x,
             z,
-            height: self.height_cells(x, z),
+            height: terrain_column.map_or_else(|| self.height_cells(x, z), |c| c.visible_top),
+            terrain_column,
         }
     }
     pub fn revision(&self) -> u64 {
@@ -242,11 +255,17 @@ impl World {
         Arc::make_mut(&mut self.edits).insert(c, m);
         self.revision = next;
     }
-    /// Base terrain top in meters, excluding caves, bridge and edits. Quantized
+    /// Visible terrain/water top in meters, excluding caves, bridge and edits. Quantized
     /// to canonical columns, so consumers cannot mistake a smooth H for voxels.
     pub fn height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
         self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
+    }
+    /// Physical ground top, excluding static water and edits.
+    pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
+        self.terrain
+            .as_ref()
+            .map_or_else(|| self.height_m(x, z), |t| t.ground_height_m(x, z))
     }
     pub fn material(&self, c: Cell) -> Material {
         self.edits.get(&c).copied().unwrap_or_else(|| {
@@ -276,9 +295,20 @@ impl World {
         h
     }
     fn source(&self, c: Cell) -> Material {
-        self.source_with_height(c, self.height_cells(c.x, c.z))
+        let column = self
+            .terrain
+            .as_ref()
+            .filter(|t| t.params().recipe == FbmRecipe::SeededWorld)
+            .map(|t| t.column_cells(c.x, c.z));
+        let h = column.map_or_else(|| self.height_cells(c.x, c.z), |v| v.visible_top);
+        self.source_with_column(c, h, column)
     }
-    fn source_with_height(&self, c: Cell, h: i64) -> Material {
+    fn source_with_column(
+        &self,
+        c: Cell,
+        h: i64,
+        column: Option<terrain::TerrainColumn>,
+    ) -> Material {
         let mut h = h;
         if let Some(base) = self.topology_base.filter(|_| self.volume_owned(c)) {
             // An open excavation reveals a tunnel mouth; a second trench runs
@@ -310,6 +340,9 @@ impl World {
             }
         }
         if let Some(terrain) = &self.terrain {
+            if terrain.params().recipe == FbmRecipe::SeededWorld {
+                return column.expect("FBM source column").material(c.y);
+            }
             return if c.y >= h {
                 Material::Air
             } else if c.y == h - 1 {

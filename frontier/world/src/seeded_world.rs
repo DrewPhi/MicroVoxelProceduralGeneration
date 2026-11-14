@@ -1,0 +1,1065 @@
+//! Greenfield endless terrain: climate FBM, continental uplift and finite local D8 drainage.
+//! The drainage lattice is global; cached regions are only an acceleration structure.
+//! Every above-sea node supplies a spring and drains to its lowest neighbor or a
+//! local endorheic lake. This finite local model does not claim globally conserved
+//! runoff or geological erosion. It requires no recursive watershed traversal.
+//! Each worker caches at most eight immutable regions with 256 candidate bins;
+//! source identity contains every physical parameter and cache order changes no output.
+use super::{noise, FbmParams, TerrainColumn};
+use crate::{Material, VOXEL_SIZE};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
+pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 7;
+pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SeededBiome {
+    Ocean,
+    Coast,
+    Desert,
+    Plains,
+    Tundra,
+    Mountains,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeededFields {
+    pub continentalness: f64,
+    pub temperature: f64,
+    pub moisture: f64,
+    pub mountain: f64,
+    pub biome: SeededBiome,
+    pub ground_height_m: f64,
+    pub water_height_m: Option<f64>,
+}
+fn smooth(t: f64) -> f64 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+fn fbm(seed: u64, x: f64, z: f64, wavelength: f64, count: u32, gain: f64, salt: u64) -> f64 {
+    let (mut a, mut f, mut sum, mut norm) = (1., 1. / wavelength, 0., 0.);
+    for i in 0..count {
+        sum += a * noise(
+            x * f + 13.7,
+            z * f - 8.3,
+            seed ^ salt.wrapping_add(i as u64 * 0x9e3779b9),
+        );
+        norm += a;
+        a *= gain;
+        f *= 2.;
+    }
+    sum / norm
+}
+#[derive(Clone, Copy)]
+struct Land {
+    h: f64,
+    continental: f64,
+    mountain: f64,
+}
+fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
+    // World scale changes wavelengths alone; amplitude changes meters of relief.
+    let x = x * 1800. / p.horizontal_scale;
+    let z = z * 1800. / p.horizontal_scale;
+    let continental = fbm(seed, x, z, 48000., 3, 0.45, 0x5101);
+    let province = fbm(seed, x, z, 22000., 3, 0.45, 0x5102);
+    let mountain = smooth((province + 0.08) / 0.48);
+    let ridge = 1. - fbm(seed, x, z, 3600., 4, 0.48, 0x5105).abs();
+    let foothill = fbm(seed, x, z, 1800., 3, 0.45, 0x5106);
+    let fine = fbm(seed, x, z, 90., p.octaves, 0.65 * p.roughness, 0x5107);
+    let h = p.amplitude / 1000.
+        * (400. * continental
+            + 65.
+            + 1150. * mountain * mountain * ridge * ridge
+            + 45. * foothill
+            + 3. * fine);
+    Land {
+        h,
+        continental,
+        mountain,
+    }
+}
+// Climate is a smooth, globally anchored 512m field. Fine native columns reuse
+// the same four climate corners rather than repeating upwind noise evaluations.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ClimateKey {
+    seed: u64,
+    x: i64,
+    z: i64,
+}
+#[derive(Default)]
+struct ClimateCache {
+    nodes: HashMap<ClimateKey, [f64; 2]>,
+    last: Option<(ClimateKey, [[f64; 2]; 4])>,
+}
+thread_local! {static CLIMATE:RefCell<ClimateCache>=RefCell::new(ClimateCache::default());}
+fn climate_node(seed: u64, ix: i64, iz: i64) -> [f64; 2] {
+    let x = ix as f64 * 512.;
+    let z = iz as f64 * 512.;
+    let temperature = (0.52 + 0.62 * fbm(seed, x, z, 38000., 3, 0.5, 0x5103)).clamp(0., 1.);
+    let uplift = |x, z| {
+        let m = smooth((fbm(seed, x, z, 22000., 3, 0.45, 0x5102) + 0.08) / 0.48);
+        m * m
+    };
+    let local = uplift(x, z);
+    let wind = match seed & 3 {
+        0 => [1., 0.],
+        1 => [0., 1.],
+        2 => [-1., 0.],
+        _ => [0., -1.],
+    };
+    let mut barrier: f64 = 0.;
+    for distance in [2000., 4000., 8000., 16000.] {
+        barrier = barrier.max(uplift(x - wind[0] * distance, z - wind[1] * distance) - local);
+    }
+    let moisture =
+        (0.50 + 0.75 * fbm(seed, x, z, 27000., 3, 0.5, 0x5104) - 0.24 * barrier).clamp(0., 1.);
+    [temperature, moisture]
+}
+fn climate(seed: u64, p: FbmParams, x: f64, z: f64) -> [f64; 2] {
+    let x = x * 1800. / p.horizontal_scale / 512.;
+    let z = z * 1800. / p.horizontal_scale / 512.;
+    let ix = x.floor() as i64;
+    let iz = z.floor() as i64;
+    let key = ClimateKey { seed, x: ix, z: iz };
+    let corners = CLIMATE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((old, values)) = cache.last {
+            if old == key {
+                return values;
+            }
+        }
+        if cache.nodes.len() > 4092 {
+            cache.nodes.clear();
+        }
+        let coords = [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)];
+        let values = coords.map(|(x, z)| {
+            *cache
+                .nodes
+                .entry(ClimateKey { seed, x, z })
+                .or_insert_with(|| climate_node(seed, x, z))
+        });
+        cache.last = Some((key, values));
+        values
+    });
+    let tx = smooth(x - x.floor());
+    let tz = smooth(z - z.floor());
+    [0, 1].map(|i| {
+        let a = corners[0][i] + tx * (corners[1][i] - corners[0][i]);
+        let b = corners[2][i] + tx * (corners[3][i] - corners[2][i]);
+        a + tz * (b - a)
+    })
+}
+// Graph nodes sample the same canonical landform at globally fixed coordinates;
+// renderer spacing and cached query order never change their stages.
+fn node(seed: u64, p: FbmParams, ix: i64, iz: i64) -> Node {
+    let spacing = 2400. * p.horizontal_scale / 1800.;
+    let l = land(seed, p, ix as f64 * spacing, iz as f64 * spacing);
+    Node {
+        x: ix as f64 * spacing,
+        z: iz as f64 * spacing,
+        stage: (l.h - 12. * p.amplitude / 1000.).max(0.),
+        potential: l.h - 12. * p.amplitude / 1000.,
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Node {
+    pub(crate) x: f64,
+    pub(crate) z: f64,
+    pub(crate) stage: f64,
+    potential: f64,
+}
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reach {
+    pub(crate) a: Node,
+    pub(crate) b: Node,
+    pub(crate) width: f64,
+    pub(crate) lake: bool,
+    pub(crate) owner: [i64; 2],
+    pub(crate) segment: u8,
+}
+impl Reach {
+    /// Compact river-valley conditioning stays inside one drainage-node halo.
+    pub(crate) fn outer_radius(self) -> f64 {
+        if self.lake {
+            3. * self.width
+        } else {
+            (18. * self.width).max(self.width * (240. / 14.))
+        }
+    }
+}
+#[derive(Debug)]
+struct Region {
+    reaches: Vec<Reach>,
+    bins: Vec<Vec<usize>>,
+    origin: [f64; 2],
+    bin_size: f64,
+}
+impl Region {
+    fn candidates(&self, x: f64, z: f64) -> impl Iterator<Item = Reach> + '_ {
+        let ix = ((x - self.origin[0]) / self.bin_size)
+            .floor()
+            .clamp(0., 15.) as usize;
+        let iz = ((z - self.origin[1]) / self.bin_size)
+            .floor()
+            .clamp(0., 15.) as usize;
+        self.bins[iz * 16 + ix].iter().map(|&i| self.reaches[i])
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Key {
+    seed: u64,
+    scale: u64,
+    amplitude: u64,
+    octaves: u32,
+    roughness: u64,
+    x: i64,
+    z: i64,
+}
+thread_local! { static REGIONS:RefCell<VecDeque<(Key,Arc<Region>)>>=const{RefCell::new(VecDeque::new())}; }
+fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
+    let spacing = 2400. * p.horizontal_scale / 1800.;
+    let rx = (x / (spacing * 4.)).floor() as i64;
+    let rz = (z / (spacing * 4.)).floor() as i64;
+    let key = Key {
+        seed,
+        scale: p.horizontal_scale.to_bits(),
+        amplitude: p.amplitude.to_bits(),
+        octaves: p.octaves,
+        roughness: p.roughness.to_bits(),
+        x: rx,
+        z: rz,
+    };
+    if let Some(hit) = REGIONS.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| Arc::clone(v))
+    }) {
+        return hit;
+    }
+    // Build outside the cache borrow. A one-node halo includes every incident
+    // edge affecting this region, including diagonals and negative boundaries.
+    let mut nodes = Vec::with_capacity(64);
+    for iz in rz * 4 - 2..=rz * 4 + 5 {
+        for ix in rx * 4 - 2..=rx * 4 + 5 {
+            nodes.push(node(seed, p, ix, iz));
+        }
+    }
+    let mut reaches = Vec::new();
+    for j in 1..7 {
+        for i in 1..7 {
+            let a = nodes[j * 8 + i];
+            if a.potential <= 0. {
+                continue;
+            }
+            let mut b = a;
+            for dz in -1isize..=1 {
+                for dx in -1isize..=1 {
+                    let q = nodes[((j as isize + dz) * 8 + i as isize + dx) as usize];
+                    if q.potential < b.potential {
+                        b = q;
+                    }
+                }
+            }
+            let lake = b.x == a.x && b.z == a.z;
+            // Every downhill edge is present, so confluences never terminate because
+            // an accumulation threshold changed at a cache boundary.
+            let width = if lake { 100. } else { 14. } * p.horizontal_scale / 1800.;
+            let owner = [rx * 4 - 2 + i as i64, rz * 4 - 2 + j as i64];
+            if lake {
+                reaches.push(Reach {
+                    a,
+                    b,
+                    width,
+                    lake,
+                    owner,
+                    segment: 0,
+                });
+            } else {
+                // The source path is finite and independent of cache regions.
+                // Every segment shares its exact endpoint/stage with the next.
+                let dx = b.x - a.x;
+                let dz = b.z - a.z;
+                let length = dx.hypot(dz);
+                let point = |index: u8| {
+                    if index == 0 {
+                        return a;
+                    }
+                    if index == 16 {
+                        return b;
+                    }
+                    let t = index as f64 / 16.;
+                    let px = a.x + t * dx;
+                    let pz = a.z + t * dz;
+                    let nx = px * 1800. / p.horizontal_scale;
+                    let nz = pz * 1800. / p.horizontal_scale;
+                    let bend = (std::f64::consts::PI * t).sin().powi(2);
+                    let signal = fbm(seed, nx, nz, 1500., 3, 0.5, 0x5191);
+                    let offset = 0.08 * spacing * bend * signal;
+                    Node {
+                        x: px - dz / length * offset,
+                        z: pz + dx / length * offset,
+                        stage: a.stage + t * (b.stage - a.stage),
+                        potential: a.potential + t * (b.potential - a.potential),
+                    }
+                };
+                let points: [Node; 17] = std::array::from_fn(|i| point(i as u8));
+                for segment in 0..16 {
+                    reaches.push(Reach {
+                        a: points[segment as usize],
+                        b: points[segment as usize + 1],
+                        width,
+                        lake,
+                        owner,
+                        segment,
+                    });
+                }
+            }
+        }
+    }
+    let origin = [rx as f64 * spacing * 4., rz as f64 * spacing * 4.];
+    let bin_size = spacing / 4.;
+    let mut bins = vec![Vec::new(); 256];
+    for (i, r) in reaches.iter().enumerate() {
+        let radius = r.outer_radius();
+        let ax = ((r.a.x.min(r.b.x) - radius - origin[0]) / bin_size).floor() as i64;
+        let bx = ((r.a.x.max(r.b.x) + radius - origin[0]) / bin_size).floor() as i64;
+        let az = ((r.a.z.min(r.b.z) - radius - origin[1]) / bin_size).floor() as i64;
+        let bz = ((r.a.z.max(r.b.z) + radius - origin[1]) / bin_size).floor() as i64;
+        for iz in az.max(0)..=bz.min(15) {
+            for ix in ax.max(0)..=bx.min(15) {
+                bins[(iz * 16 + ix) as usize].push(i);
+            }
+        }
+    }
+    let value = Arc::new(Region {
+        reaches,
+        bins,
+        origin,
+        bin_size,
+    });
+    REGIONS.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if c.len() >= 8 {
+            c.pop_front();
+        }
+        c.push_back((key, Arc::clone(&value)));
+    });
+    value
+}
+fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
+    let dx = r.b.x - r.a.x;
+    let dz = r.b.z - r.a.z;
+    let denom = dx * dx + dz * dz;
+    let t = if denom > 0. {
+        ((x - r.a.x) * dx + (z - r.a.z) * dz) / denom
+    } else {
+        0.
+    }
+    .clamp(0., 1.);
+    (
+        (x - r.a.x - t * dx).hypot(z - r.a.z - t * dz),
+        r.a.stage + t * (r.b.stage - r.a.stage),
+    )
+}
+pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
+    let l = land(seed, p, x, z);
+    let mut ground = l.h;
+    let mut water = if ground < 0. { Some(0.) } else { None };
+    if p.amplitude > 0. {
+        let region = region(seed, p, x, z);
+        let mut weighted_ground = ground;
+        let mut total_weight = 1.;
+        let mut river_stage = f64::NEG_INFINITY;
+        let mut lake_stage: Option<f64> = None;
+        for r in region.candidates(x, z) {
+            let (d, stage) = project(r, x, z);
+            let outer = r.outer_radius();
+            if d >= outer || stage < 0. {
+                continue;
+            }
+            let amplitude = p.amplitude / 1000.;
+            let depth = if r.lake { 7. } else { 4. } * amplitude;
+            let bank_height = 0.7 * amplitude;
+            let profile = if d <= r.width {
+                stage - depth + (depth + bank_height) * smooth(d / r.width)
+            } else {
+                stage
+                    + bank_height
+                    + (l.h - stage - bank_height) * smooth((d - r.width) / (outer - r.width))
+            };
+            // Sea-level reach caps may cut the seabed, never raise a ring.
+            let profile = if stage == 0. && l.h < 0. {
+                profile.min(l.h)
+            } else {
+                profile
+            };
+            let taper = 1. - smooth(d / outer);
+            let weight = outer * outer / (d * d).max(r.width * r.width * 1e-8) * taper * taper;
+            weighted_ground += weight * profile;
+            total_weight += weight;
+            if d < r.width {
+                if r.lake && profile < stage {
+                    lake_stage = Some(lake_stage.map_or(stage, |old| old.min(stage)));
+                }
+                river_stage = river_stage.max(stage);
+            }
+        }
+        ground = weighted_ground / total_weight;
+        if let Some(stage) = lake_stage {
+            // Tributaries can lift the blended shore above the lake level.
+            // Flat lake priority applies only to its actual wet interior.
+            if stage > ground {
+                river_stage = stage;
+            }
+        }
+        if river_stage > ground {
+            water = Some(water.map_or(river_stage, |w: f64| w.max(river_stage)));
+        }
+    }
+    let [temperature, moisture] = climate(seed, p, x, z);
+    let effective_temperature = temperature - 0.00019 * ground.max(0.);
+    let biome = if ground < -4. {
+        SeededBiome::Ocean
+    } else if ground < 10. {
+        SeededBiome::Coast
+    } else if effective_temperature < 0.29 {
+        SeededBiome::Tundra
+    } else if l.mountain > 0.62 && ground > 350. * p.amplitude / 1000. {
+        SeededBiome::Mountains
+    } else if moisture < 0.39 && effective_temperature > 0.48 {
+        SeededBiome::Desert
+    } else {
+        SeededBiome::Plains
+    };
+    SeededFields {
+        continentalness: l.continental,
+        temperature: effective_temperature,
+        moisture,
+        mountain: l.mountain,
+        biome,
+        ground_height_m: ground,
+        water_height_m: water.filter(|w| *w > ground),
+    }
+}
+pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
+    let f = fields(seed, p, x, z);
+    let ground_top = (f.ground_height_m / VOXEL_SIZE).floor() as i64;
+    let visible_top = f
+        .water_height_m
+        .map_or(ground_top, |w| (w / VOXEL_SIZE).floor() as i64)
+        .max(ground_top);
+    let mut surface = match f.biome {
+        SeededBiome::Ocean | SeededBiome::Coast => Material::Sand,
+        SeededBiome::Tundra => {
+            if f.temperature < 0.18 {
+                Material::Snow
+            } else if f.moisture < 0.42 {
+                Material::Soil
+            } else {
+                Material::Grass
+            }
+        }
+        SeededBiome::Mountains => {
+            if f.temperature < 0.36 {
+                Material::Snow
+            } else {
+                Material::Stone
+            }
+        }
+        SeededBiome::Desert | SeededBiome::Plains => {
+            // Shift only the moisture transition belt with connected meter-scale
+            // turf/sand tongues. No hash dithering or per-face color variation.
+            let shift = if (f.moisture - 0.39).abs() < 0.075 {
+                let nx = x * 1800. / p.horizontal_scale;
+                let nz = z * 1800. / p.horizontal_scale;
+                0.075
+                    * (0.75 * noise(nx / 180. + 3.1, nz / 180. - 7.3, seed ^ 0x51a1)
+                        + 0.25 * noise(nx / 45. - 8.9, nz / 45. + 4.7, seed ^ 0x51a2))
+            } else {
+                0.
+            };
+            if f.temperature > 0.48 && f.moisture < 0.39 + shift {
+                Material::Sand
+            } else {
+                Material::Grass
+            }
+        }
+    };
+    if visible_top > ground_top {
+        surface = if matches!(
+            f.biome,
+            SeededBiome::Ocean | SeededBiome::Coast | SeededBiome::Desert
+        ) {
+            Material::Sand
+        } else {
+            Material::Soil
+        };
+    }
+    TerrainColumn {
+        ground_top,
+        visible_top,
+        ground_surface: surface,
+        ground_subsurface: if surface == Material::Sand {
+            Material::Sand
+        } else {
+            Material::Soil
+        },
+    }
+}
+
+/// Analytical pre-quantization envelope; ordinary f64 endpoints are not an
+/// outward-rounded certificate. No sampled extrema are used.
+/// Gradient noise has Euclidean Lipschitz constant <=16: corner gradients have
+/// norm one, quintic fade derivative <=1.875, corner differences <=2sqrt(2),
+/// and output scaling is 1.6; clamping cannot increase that bound.
+pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
+    let a = p.amplitude / 1000.;
+    let global = [-402. * a, 1663. * a];
+    let x = (min[0] + max[0]) * 0.5;
+    let z = (min[1] + max[1]) * 0.5;
+    let radius = ((max[0] - min[0]) * 0.5).hypot((max[1] - min[1]) * 0.5);
+    let scale = 1800. / p.horizontal_scale;
+    let band = |w: f64, count: u32, gain: f64, salt: u64| {
+        let (mut weight, mut norm, mut sum, mut uncertainty, mut f) = (1., 0., 0., 0., 1. / w);
+        for i in 0..count {
+            let n = noise(
+                x * scale * f + 13.7,
+                z * scale * f - 8.3,
+                seed ^ salt.wrapping_add(i as u64 * 0x9e3779b9),
+            );
+            let e = 16. * radius * scale * f;
+            sum += weight * n;
+            uncertainty += weight * e;
+            norm += weight;
+            weight *= gain;
+            f *= 2.;
+        }
+        [
+            ((sum - uncertainty) / norm).max(-1.),
+            ((sum + uncertainty) / norm).min(1.),
+        ]
+    };
+    let c = band(48000., 3, 0.45, 0x5101);
+    let province = band(22000., 3, 0.45, 0x5102);
+    let m = province.map(|v| smooth((v + 0.08) / 0.48));
+    let r = band(3600., 4, 0.48, 0x5105);
+    let abslo = if r[0] <= 0. && r[1] >= 0. {
+        0.
+    } else {
+        r[0].abs().min(r[1].abs())
+    };
+    let ridge = [1. - r[0].abs().max(r[1].abs()), 1. - abslo];
+    let hills = band(1800., 3, 0.45, 0x5106);
+    let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
+    let base = [0, 1].map(|i| {
+        a * (400. * c[i]
+            + 65.
+            + 1150. * m[i] * m[i] * ridge[i] * ridge[i]
+            + 45. * hills[i]
+            + 3. * fine[i])
+    });
+    let mut result = [base[0], base[1].max(0.)];
+    let spacing = 2400. * p.horizontal_scale / 1800.;
+    if max[0] - min[0] > spacing * 4. || max[1] - min[1] > spacing * 4. {
+        return global;
+    }
+    for cx in [min[0], max[0]] {
+        for cz in [min[1], max[1]] {
+            let region = region(seed, p, cx, cz);
+            for &r in &region.reaches {
+                let (distance, stage) = project(r, x, z);
+                let dlo = (distance - radius).max(0.);
+                if dlo >= r.outer_radius() || r.a.stage.max(r.b.stage) < 0. {
+                    continue;
+                }
+                let length = (r.a.x - r.b.x).hypot(r.a.z - r.b.z);
+                let e = if length > 0. {
+                    (r.a.stage - r.b.stage).abs() * radius / length
+                } else {
+                    0.
+                };
+                let slo = (stage - e).max(r.a.stage.min(r.b.stage)).max(0.);
+                let shi = (stage + e).min(r.a.stage.max(r.b.stage)).max(0.);
+                // Every conditioned height is a convex combination of the
+                // original source and compact valley profiles. This diagnostic
+                // hull intentionally drops weights; certified callers use AA.
+                let depth = if r.lake { 7. * a } else { 4. * a };
+                let profile_lo = if dlo < r.width {
+                    slo - depth
+                } else {
+                    slo + 0.7 * a
+                };
+                result[0] = result[0].min(profile_lo.min(base[0]));
+                result[1] = result[1].max(base[1].max(shi + 0.7 * a));
+            }
+        }
+    }
+    [result[0].max(global[0]), result[1].min(global[1])]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terrain::{FbmRecipe, FbmTerrain};
+    fn params() -> FbmParams {
+        FbmParams {
+            recipe: FbmRecipe::SeededWorld,
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn deterministic_columns_survive_negative_boundaries_and_cache_eviction() {
+        let p = params();
+        let a = FbmTerrain::new(7, p).unwrap();
+        let b = FbmTerrain::new(7, p).unwrap();
+        let locations = [
+            (-153601, -1),
+            (-153600, 0),
+            (-1, -1),
+            (0, 0),
+            (1, 1),
+            (153599, -153600),
+            (153600, -153601),
+        ];
+        let expected: Vec<_> = locations
+            .iter()
+            .map(|&(x, z)| a.column_cells(x, z))
+            .collect();
+        for i in 0..16 {
+            let _ = a.height_m(i as f64 * 19201. - 100000., i as f64 * -19003.);
+        }
+        for (&(x, z), &column) in locations.iter().zip(&expected).rev() {
+            assert_eq!(column, b.column_cells(x, z));
+            assert!(column.visible_top >= column.ground_top);
+            assert_eq!(column.material(column.visible_top), Material::Air);
+            assert_eq!(
+                column.material(column.ground_top - 1),
+                column.ground_surface
+            );
+            assert_eq!(column.material(column.ground_top - 13), Material::Stone);
+        }
+        let other = FbmTerrain::new(8, p).unwrap();
+        assert!(locations
+            .iter()
+            .any(|&(x, z)| a.column_cells(x, z) != other.column_cells(x, z)));
+    }
+    #[test]
+    fn node_stages_are_shared_monotone_and_sink_lakes_are_level() {
+        let p = params();
+        let mut wet = 0;
+        let mut lakes = 0;
+        for x in -5..=5 {
+            for z in -5..=5 {
+                let region = region(7, p, x as f64 * 2400., z as f64 * 2400.);
+                for &r in &region.reaches {
+                    assert!(r.a.stage >= r.b.stage);
+                    if r.a.stage < 0. {
+                        continue;
+                    }
+                    for t in [0., 0.25, 0.5, 0.75, 1.] {
+                        let x = r.a.x + (r.b.x - r.a.x) * t;
+                        let z = r.a.z + (r.b.z - r.a.z) * t;
+                        let f = fields(7, p, x, z);
+                        let stage = r.a.stage + (r.b.stage - r.a.stage) * t;
+                        assert!(
+                            f.ground_height_m < stage,
+                            "channel lost at {x},{z}; stage={stage}, fields={f:?}, reach={r:?}"
+                        );
+                        let water = f.water_height_m.unwrap_or_else(||panic!("continuous wet channel lost at {x},{z}: stage={stage}, fields={f:?}, reach={r:?}"));
+                        if water < stage - 1e-9 {
+                            assert!(
+                                super::region(7, p, x, z)
+                                    .candidates(x, z)
+                                    .any(|lake| lake.lake && lake.a.stage == water),
+                                "river stage fell without a shared sink lake at {x},{z}: {f:?}"
+                            );
+                        }
+                        wet += 1;
+                    }
+                    if r.lake {
+                        lakes += 1;
+                        // Sink center and a short radius use the exact same stage.
+                        let f = fields(7, p, r.a.x + 1., r.a.z);
+                        assert_eq!(f.water_height_m, Some(r.a.stage));
+                    }
+                }
+            }
+        }
+        assert!(wet > 0 && lakes > 0);
+    }
+    #[test]
+    fn positive_river_reaches_sea_level_without_a_dry_coastal_gap() {
+        let p = params();
+        // Held-out regression: the destination's raw potential is -71.77m.
+        // Previously skipping negative interpolated stages cut this river off
+        // before the endpoint, even though it drains into the ocean.
+        let region = region(7, p, -18000., -20400.);
+        let mut path: Vec<_> = region
+            .reaches
+            .iter()
+            .filter(|r| r.owner == [-8, -9])
+            .copied()
+            .collect();
+        path.sort_by_key(|r| r.segment);
+        assert_eq!(path.len(), 16);
+        assert!(path[0].a.stage > 0. && path[15].b.potential < 0.);
+        assert_eq!(path[15].b.stage, 0.);
+        let mut previous = f64::INFINITY;
+        for r in path {
+            for t in [0., 0.25, 0.5, 0.75, 0.95, 0.99, 1.] {
+                let x = r.a.x + t * (r.b.x - r.a.x);
+                let z = r.a.z + t * (r.b.z - r.a.z);
+                let stage = r.a.stage + t * (r.b.stage - r.a.stage);
+                assert!(stage <= previous + 1e-9);
+                previous = stage;
+                let f = fields(7, p, x, z);
+                assert!(
+                    f.ground_height_m < stage,
+                    "dry coast at segment={} t={t}: {f:?}",
+                    r.segment
+                );
+                assert!(f.water_height_m.unwrap() >= stage - 1e-9);
+                let c = column(7, p, x, z);
+                assert!(
+                    c.visible_top > c.ground_top,
+                    "native dry coast at t={t}: {c:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn meandering_edges_preserve_global_endpoints_stages_and_descriptor_identity() {
+        let p = params();
+        let owner = [-8, -9];
+        let extract = |r: &Region| {
+            let mut path: Vec<_> = r
+                .reaches
+                .iter()
+                .filter(|v| v.owner == owner)
+                .copied()
+                .collect();
+            path.sort_by_key(|v| v.segment);
+            path
+        };
+        let original = region(7, p, -18000., -20400.);
+        let path = extract(&original);
+        assert_eq!(path.len(), 16);
+        assert_eq!([path[0].a.x, path[0].a.z], [-19200., -21600.]);
+        assert_eq!([path[15].b.x, path[15].b.z], [-16800., -19200.]);
+        let a = path[0].a;
+        let b = path[15].b;
+        let dx = b.x - a.x;
+        let dz = b.z - a.z;
+        let length = dx.hypot(dz);
+        let mut widest: f64 = 0.;
+        for (i, r) in path.iter().enumerate() {
+            assert_eq!(r.segment as usize, i);
+            assert!(r.a.stage >= r.b.stage);
+            if i > 0 {
+                let previous = path[i - 1].b;
+                assert_eq!(
+                    [previous.x, previous.z, previous.stage],
+                    [r.a.x, r.a.z, r.a.stage]
+                );
+            }
+            let distance = ((r.a.x - a.x) * dz - (r.a.z - a.z) * dx).abs() / length;
+            assert!(distance <= 0.08 * 2400. + 1e-8);
+            widest = widest.max(distance);
+        }
+        assert!(widest > 2., "river remained straight: {widest}");
+        let min = [
+            path.iter()
+                .map(|r| r.a.x.min(r.b.x))
+                .fold(f64::INFINITY, f64::min)
+                - 50.,
+            path.iter()
+                .map(|r| r.a.z.min(r.b.z))
+                .fold(f64::INFINITY, f64::min)
+                - 50.,
+        ];
+        let max = [
+            path.iter()
+                .map(|r| r.a.x.max(r.b.x))
+                .fold(f64::NEG_INFINITY, f64::max)
+                + 50.,
+            path.iter()
+                .map(|r| r.a.z.max(r.b.z))
+                .fold(f64::NEG_INFINITY, f64::max)
+                + 50.,
+        ];
+        let descriptors: Vec<_> = reaches_intersecting(7, p, min, max)
+            .into_iter()
+            .filter(|r| r.owner == owner)
+            .collect();
+        assert_eq!(
+            descriptors.len(),
+            16,
+            "segment descriptors were collapsed by owner"
+        );
+        for i in 0..16 {
+            assert_eq!(descriptors.iter().filter(|r| r.segment == i).count(), 1);
+        }
+        for i in 0..12 {
+            let _ = region(7, p, i as f64 * 19200., -30000.);
+        }
+        let repeated = extract(&region(7, p, -18000., -20400.));
+        for (a, b) in path.iter().zip(repeated) {
+            assert_eq!(
+                [
+                    a.a.x.to_bits(),
+                    a.a.z.to_bits(),
+                    a.a.stage.to_bits(),
+                    a.b.x.to_bits(),
+                    a.b.z.to_bits(),
+                    a.b.stage.to_bits()
+                ],
+                [
+                    b.a.x.to_bits(),
+                    b.a.z.to_bits(),
+                    b.a.stage.to_bits(),
+                    b.b.x.to_bits(),
+                    b.b.z.to_bits(),
+                    b.b.stage.to_bits()
+                ]
+            );
+        }
+    }
+    #[test]
+    fn sea_level_reach_caps_do_not_raise_seabed_rings_or_islands() {
+        let p = params();
+        let mut checked = 0;
+        // Known negative-potential destination of an above-sea river.
+        for ix in -10..=10 {
+            for iz in -10..=10 {
+                let x = -16800. + ix as f64 * 32.;
+                let z = -19200. + iz as f64 * 32.;
+                let base = land(7, p, x, z).h;
+                if base >= -1. {
+                    continue;
+                }
+                let local = region(7, p, x, z);
+                let active: Vec<_> = local
+                    .candidates(x, z)
+                    .filter(|&r| project(r, x, z).0 < r.outer_radius())
+                    .collect();
+                if active.is_empty() || active.iter().any(|&r| project(r, x, z).1 != 0.) {
+                    continue;
+                }
+                let f = fields(7, p, x, z);
+                assert!(
+                    f.ground_height_m <= base + 1e-10,
+                    "sea bank raised from {base} to {f:?}"
+                );
+                assert_eq!(f.water_height_m, Some(0.));
+                assert_eq!(column(7, p, x, z).visible_top, 0);
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10,
+            "fixture missed sea-level influence caps: {checked}"
+        );
+    }
+    #[test]
+    fn seed19_river_valley_has_broad_shoulders_instead_of_a_narrow_wall() {
+        let p = params();
+        let anchor = [-896., 256.];
+        let reaches =
+            reaches_intersecting(19, p, anchor.map(|v| v - 600.), anchor.map(|v| v + 600.));
+        let r = reaches
+            .iter()
+            .filter(|r| !r.lake)
+            .min_by(|a, b| {
+                project(**a, anchor[0], anchor[1])
+                    .0
+                    .total_cmp(&project(**b, anchor[0], anchor[1]).0)
+            })
+            .copied()
+            .unwrap();
+        let dx = r.b.x - r.a.x;
+        let dz = r.b.z - r.a.z;
+        let length = dx.hypot(dz);
+        let t = (((anchor[0] - r.a.x) * dx + (anchor[1] - r.a.z) * dz) / (length * length))
+            .clamp(0., 1.);
+        let center = [r.a.x + t * dx, r.a.z + t * dz];
+        let mut broad = 0.;
+        let mut steepest: f64 = 0.;
+        for sign in [-1., 1.] {
+            for distance in [0., 14., 28., 42., 56., 112., 200., 252.] {
+                let x = center[0] - dz / length * distance * sign;
+                let z = center[1] + dx / length * distance * sign;
+                let ground = fields(19, p, x, z).ground_height_m;
+                let base = land(19, p, x, z).h;
+                if distance == 56. {
+                    broad = f64::max(broad, (ground - base).abs());
+                }
+                if (14. ..=112.).contains(&distance) {
+                    let next = fields(19, p, x - dz / length * sign, z + dx / length * sign)
+                        .ground_height_m;
+                    steepest = steepest.max((next - ground).abs());
+                }
+            }
+        }
+        assert!(broad > 0.5, "valley lost its broad shoulder: {broad}");
+        assert!(steepest < 2., "narrow bank wall remains: {steepest}m/m");
+    }
+    #[test]
+    fn wet_beds_are_sediment_and_ecotone_paint_is_native_coherent() {
+        let p = params();
+        let mut wet = 0;
+        let mut changes = 0;
+        for ix in -12..=12 {
+            for iz in -12..=12 {
+                let x = ix as f64 * 2400.;
+                let z = iz as f64 * 2400.;
+                let a = column(19, p, x, z);
+                if a.visible_top > a.ground_top {
+                    wet += 1;
+                    assert!(matches!(a.ground_surface, Material::Sand | Material::Soil));
+                }
+                let x = x + 317.25;
+                let z = z - 189.75;
+                let a = column(19, p, x, z);
+                let b = column(19, p, x + VOXEL_SIZE, z);
+                changes += usize::from(a.ground_surface != b.ground_surface);
+            }
+        }
+        assert!(wet > 100, "wet coverage {wet}");
+        assert!(changes < 12, "native paint became speckled: {changes}");
+    }
+    #[test]
+    fn climate_survey_contains_biomes_and_water_is_local_on_land() {
+        let p = params();
+        let mut biomes = [0; 6];
+        let (mut land_count, mut wet_land) = (0, 0);
+        for x in -24..=24 {
+            for z in -24..=24 {
+                let f = fields(7, p, x as f64 * 4871. + 117., z as f64 * 4933. - 239.);
+                biomes[f.biome as usize] += 1;
+                if f.ground_height_m > 10. {
+                    land_count += 1;
+                    wet_land += usize::from(f.water_height_m.is_some());
+                }
+            }
+        }
+        assert!(biomes.iter().all(|&n| n > 0), "biomes {biomes:?}");
+        assert!(
+            wet_land * 5 < land_count,
+            "wet land {wet_land}/{land_count}"
+        );
+    }
+    #[test]
+    fn analytical_ranges_contain_survey_heights_including_channels() {
+        let p = params();
+        for seed in [7, 113] {
+            for i in -12..=12 {
+                let x = i as f64 * 2400.;
+                let z = (i % 5) as f64 * 2400.;
+                for radius in [0.03125, 3., 41., 300.] {
+                    let bounds =
+                        height_bounds(seed, p, [x - radius, z - radius], [x + radius, z + radius]);
+                    for dx in [-radius, 0., radius] {
+                        for dz in [-radius, 0., radius] {
+                            let f = fields(seed, p, x + dx, z + dz);
+                            assert!(
+                                f.ground_height_m >= bounds[0] - 1e-8
+                                    && f.ground_height_m <= bounds[1] + 1e-8,
+                                "{bounds:?} vs {f:?}"
+                            );
+                            if let Some(w) = f.water_height_m {
+                                assert!(w <= bounds[1] + 1e-8);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn horizontal_scale_preserves_physical_amplitude() {
+        let p = params();
+        let scaled = FbmParams {
+            horizontal_scale: 3600.,
+            ..p
+        };
+        for (x, z) in [(-9321., 2712.), (17., -5.), (2400., 4800.)] {
+            let a = fields(7, p, x, z);
+            let b = fields(7, scaled, x * 2., z * 2.);
+            assert_eq!(a, b);
+        }
+    }
+}
+
+/// Conservative descriptor enumeration for boxes no larger than one graph region.
+/// Larger requests must use the source global envelope instead.
+pub(crate) fn reaches_intersecting(
+    seed: u64,
+    p: FbmParams,
+    min: [f64; 2],
+    max: [f64; 2],
+) -> Vec<Reach> {
+    let spacing = 2400. * p.horizontal_scale / 1800.;
+    if max[0] - min[0] > spacing * 4. || max[1] - min[1] > spacing * 4. {
+        return Vec::new();
+    }
+    let mut out: Vec<Reach> = Vec::new();
+    for x in [min[0], max[0]] {
+        for z in [min[1], max[1]] {
+            for &r in &region(seed, p, x, z).reaches {
+                let radius = r.outer_radius();
+                if r.a.x.min(r.b.x) - radius > max[0]
+                    || r.a.x.max(r.b.x) + radius < min[0]
+                    || r.a.z.min(r.b.z) - radius > max[1]
+                    || r.a.z.max(r.b.z) + radius < min[1]
+                {
+                    continue;
+                }
+                if !out
+                    .iter()
+                    .any(|old| old.owner == r.owner && old.segment == r.segment)
+                {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod climate_tests {
+    use super::*;
+    #[test]
+    fn macro_barriers_dry_the_lee_and_climate_has_no_cell_seams() {
+        let mut dry = 0;
+        for i in -16..=16 {
+            let ix = i * 13;
+            let iz = i * 7 + 3;
+            let [_, moisture] = climate_node(7, ix, iz);
+            let baseline = (0.50
+                + 0.75
+                    * fbm(
+                        7,
+                        ix as f64 * 512.,
+                        iz as f64 * 512.,
+                        27000.,
+                        3,
+                        0.5,
+                        0x5104,
+                    ))
+            .clamp(0., 1.);
+            assert!(moisture <= baseline + 1e-14);
+            dry += usize::from(moisture < baseline - 0.01);
+        }
+        assert!(dry > 0);
+        let p = FbmParams::default();
+        for x in [-1024., -512., 0., 512., 1024.] {
+            let a = climate(7, p, x - 1e-5, 37.);
+            let b = climate(7, p, x + 1e-5, 37.);
+            assert!((a[0] - b[0]).abs() < 1e-8 && (a[1] - b[1]).abs() < 1e-8);
+        }
+    }
+}

@@ -9,12 +9,13 @@ use std::{
 #[derive(Clone)]
 pub(super) struct Samples {
     pub heights: [i64; 256],
+    pub ground_heights: [i64; 256],
     pub bands: [[u32; 3]; 256],
 }
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 // x/z are exact native-cell origins, including non-meter-aligned test regions.
 struct Key {
-    source: [u64; 7],
+    source: [u64; 9],
     x: i64,
     z: i64,
 }
@@ -31,6 +32,8 @@ impl Key {
                 u64::from(p.octaves),
                 p.roughness.to_bits(),
                 t.seed(),
+                u64::from(t.source_version()),
+                u64::from(t.appearance_version()),
             ],
             x,
             z,
@@ -46,7 +49,7 @@ fn capacity() -> usize {
             .filter(|n| (16..=2048).contains(n))
             .unwrap_or(320)
             * 1048576
-            / 5120
+            / 7168
     })
 }
 #[derive(Default)]
@@ -102,7 +105,7 @@ pub(super) fn json() -> String {
         return "{\"enabled\":false}".into();
     }
     let c = cache().lock().unwrap();
-    format!("{{\"enabled\":true,\"hits\":{},\"misses\":{},\"tiles\":{},\"capacity_tiles\":{},\"resident_payload_bytes\":{},\"payload_limit_bytes\":{},\"estimated_metadata_bytes\":{}}}",c.hits,c.misses,c.values.len(),capacity(),c.values.len()*5120,capacity()*5120,c.values.capacity()*(std::mem::size_of::<Key>()+std::mem::size_of::<Arc<Samples>>()+8)+c.fifo.capacity()*std::mem::size_of::<Key>())
+    format!("{{\"enabled\":true,\"hits\":{},\"misses\":{},\"tiles\":{},\"capacity_tiles\":{},\"resident_payload_bytes\":{},\"payload_limit_bytes\":{},\"estimated_metadata_bytes\":{}}}",c.hits,c.misses,c.values.len(),capacity(),c.values.len()*7168,capacity()*7168,c.values.capacity()*(std::mem::size_of::<Key>()+std::mem::size_of::<Arc<Samples>>()+8)+c.fifo.capacity()*std::mem::size_of::<Key>())
 }
 #[cfg(test)]
 mod tests {
@@ -143,6 +146,7 @@ fn distant_edit_preserves_unedited_cache_identity_and_payload() {
         z,
         Samples {
             heights: [123; 256],
+            ground_heights: [123; 256],
             bands: [[1, 2, 3]; 256],
         },
     );

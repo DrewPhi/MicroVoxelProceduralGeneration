@@ -1,6 +1,42 @@
 //! CPU-canonical, seeded mountain heightfield, independent of renderer spacing.
 //! Greenfield gradient noise/FBM composition; no external implementation copied.
 use crate::{Cell, Material, VOXEL_SIZE};
+#[path = "seeded_world.rs"]
+pub(crate) mod seeded_world;
+pub use seeded_world::{
+    SeededBiome, SeededFields, SEEDED_WORLD_APPEARANCE_VERSION, SEEDED_WORLD_SOURCE_VERSION,
+};
+
+/// Canonical solid and static-water ownership of one native column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainColumn {
+    pub ground_top: i64,
+    pub visible_top: i64,
+    pub ground_surface: Material,
+    pub ground_subsurface: Material,
+}
+impl TerrainColumn {
+    pub fn material(self, y: i64) -> Material {
+        if y >= self.visible_top {
+            Material::Air
+        } else if y >= self.ground_top {
+            Material::Water
+        } else if y == self.ground_top - 1 {
+            self.ground_surface
+        } else if y >= self.ground_top - 12 {
+            self.ground_subsurface
+        } else {
+            Material::Stone
+        }
+    }
+    pub fn top_material(self) -> Material {
+        if self.visible_top > self.ground_top {
+            Material::Water
+        } else {
+            self.ground_surface
+        }
+    }
+}
 
 /// Noise/composition and material definition version, independent of the fixture.
 pub const FBM_SOURCE_VERSION: u32 = 1;
@@ -23,6 +59,8 @@ pub enum FbmRecipe {
     RegionalUnwarped,
     /// Rolling meadow at origin with a connected range several kilometers north.
     Alpine,
+    /// Continuous climate, continental relief and globally addressed local drainage.
+    SeededWorld,
 }
 
 /// Physical source settings, not display/LOD settings. Changing them changes the world.
@@ -83,7 +121,8 @@ impl FbmParams {
     }
 }
 
-/// Immutable heightfield only: no caves, water, structures, or edit overrides.
+/// Immutable terrain columns, including seeded-world static water.
+/// No caves, structures, vegetation, or edit overrides.
 /// CPU f64 defines the source; GPU consumers upload samples rather than re-run noise.
 #[derive(Clone, Debug)]
 pub struct FbmTerrain {
@@ -106,6 +145,7 @@ impl FbmTerrain {
     /// source/cache identity. Elevation and material recipes evolve separately.
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
+            FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
@@ -113,6 +153,7 @@ impl FbmTerrain {
     }
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
+            FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,
@@ -127,13 +168,25 @@ impl FbmTerrain {
         let c = Cell::from_meters([x, 0.0, z]);
         self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
     }
-    pub(crate) fn height_cells(&self, x: i64, z: i64) -> i64 {
+    pub fn height_cells(&self, x: i64, z: i64) -> i64 {
+        if self.params.recipe == FbmRecipe::SeededWorld {
+            return self.column_cells(x, z).visible_top;
+        }
         let x = (x as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
         let z = (z as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
         (self.elevation(x, z) / VOXEL_SIZE).floor() as i64
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
+            FbmRecipe::SeededWorld => {
+                seeded_world::fields(
+                    self.seed,
+                    self.params,
+                    x * self.params.horizontal_scale,
+                    z * self.params.horizontal_scale,
+                )
+                .ground_height_m
+            }
             FbmRecipe::Legacy => self.legacy_elevation(x, z),
             FbmRecipe::Alpine => crate::alpine::elevation(x, z, self.params, true, |x, z, salt| {
                 noise(x, z, self.seed ^ salt)
@@ -342,6 +395,10 @@ impl FbmTerrain {
     /// and continuous moisture, never a display normal or an independent patch map.
     /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
+        if self.params.recipe == FbmRecipe::SeededWorld {
+            let c = Cell::from_meters([x, 0.0, z]);
+            return self.column_cells(c.x, c.z).top_material();
+        }
         if self.params.recipe == FbmRecipe::Alpine {
             let [x, _, z] = Cell::from_meters([x, 0.0, z]).center_m();
             let sx = x * 1800.0 / self.params.horizontal_scale;
@@ -400,6 +457,45 @@ impl FbmTerrain {
             Material::Stone
         } else {
             Material::Grass
+        }
+    }
+    pub(crate) fn seeded_reaches(&self, min: [f64; 2], max: [f64; 2]) -> Vec<seeded_world::Reach> {
+        seeded_world::reaches_intersecting(self.seed, self.params, min, max)
+    }
+    /// Analytical seeded-world range estimate over an axis-aligned meter box.
+    /// Includes ground, water, banks and channels, but uses ordinary f64 interval
+    /// endpoints. Certified callers must use outward-rounded interval arithmetic.
+    /// Quantized tops also need a native voxel of downward rounding allowance.
+    pub fn seeded_height_bounds(&self, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
+        seeded_world::height_bounds(self.seed, self.params, min, max)
+    }
+    /// Sample physical climate and landforms for diagnostics (seeded-world recipe).
+    pub fn sample_fields(&self, x: f64, z: f64) -> SeededFields {
+        seeded_world::fields(self.seed, self.params, x, z)
+    }
+    pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
+        let c = Cell::from_meters([x, 0.0, z]);
+        self.column_cells(c.x, c.z).ground_top as f64 * VOXEL_SIZE
+    }
+    pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
+        let xm = (x as f64 + 0.5) * VOXEL_SIZE;
+        let zm = (z as f64 + 0.5) * VOXEL_SIZE;
+        if self.params.recipe == FbmRecipe::SeededWorld {
+            return seeded_world::column(self.seed, self.params, xm, zm);
+        }
+        let top = self.height_cells(x, z);
+        let ground_surface = self.surface_material(xm, zm, top as f64 * VOXEL_SIZE);
+        TerrainColumn {
+            ground_top: top,
+            visible_top: top,
+            ground_surface,
+            ground_subsurface: if self.params.recipe == FbmRecipe::Alpine
+                && ground_surface == Material::Stone
+            {
+                Material::Stone
+            } else {
+                Material::Soil
+            },
         }
     }
     pub fn surface_color(&self, x: f64, z: f64, height: f64) -> [f32; 3] {

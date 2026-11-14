@@ -90,7 +90,7 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         6
     } else if appearance_method::voxel_grain().is_some() {
         4
-    } else if appearance_method::selected() == appearance_method::Method::Baseline {
+    } else if appearance_method::for_world(world) == appearance_method::Method::Baseline {
         ADAPTIVE_RENDER_APPEARANCE_VERSION
     } else {
         3
@@ -101,7 +101,7 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         mode.probe_cells,
         if mode.half_footprint { "half" } else { "full" },
         adaptive_stream::near_detail_setting(world),
-        appearance_method::selected().name(),
+        appearance_method::for_world(world).name(),
         appearance_map::map_intervals(),
         appearance_visibility::grid_side(),
         appearance_visibility::spatial_enabled(),
@@ -2854,6 +2854,12 @@ pub fn run() -> Result<()> {
                 camera.position = eye;
                 camera.yaw = direction.x.atan2(direction.z) as f32;
                 camera.pitch = direction.y.asin() as f32;
+            }
+        }
+        if camera_preset == "seeded-world" {
+            if let Some(source) = world.fbm_terrain() {
+                (camera.yaw, camera.pitch) =
+                    terrain::seeded_world_heading(source, start_x, start_z);
             }
         }
         if camera_preset == "alpine" {

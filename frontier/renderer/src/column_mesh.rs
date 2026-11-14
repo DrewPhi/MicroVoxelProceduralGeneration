@@ -10,17 +10,19 @@ const MAX_RELIEF_CELLS: i64 = 65_536;
 const MAX_LOCAL_CELLS: i64 = 16_777_216;
 
 /// Exact data for the current unedited FBM column contract: its integer top,
-/// surface material, eleven-cell soil band, and deeper material. A cache may
+/// visible and ground tops, surface material, eleven-cell subsurface band, and deeper material. A cache may
 /// reuse this only for the same immutable seed/parameters/source version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampledColumn {
     pub height: i64,
+    pub ground_height: i64,
     pub bands: [Material; 3],
 }
 impl Default for SampledColumn {
     fn default() -> Self {
         Self {
             height: 0,
+            ground_height: 0,
             bands: [Material::Air; 3],
         }
     }
@@ -29,25 +31,38 @@ impl SampledColumn {
     pub fn canonical(world: &World, x: i64, z: i64) -> Self {
         let column = world.column(x, z);
         let height = (column.height_m() / VOXEL_SIZE) as i64;
+        let ground_height = (column.ground_height_m() / VOXEL_SIZE) as i64;
         Self {
             height,
+            ground_height,
             bands: [
-                column.material(height.saturating_sub(1)),
-                column.material(height.saturating_sub(2)),
-                column.material(height.saturating_sub(13)),
+                column.material(ground_height.saturating_sub(1)),
+                column.material(ground_height.saturating_sub(2)),
+                column.material(ground_height.saturating_sub(13)),
             ],
         }
     }
     pub fn material(self, y: i64) -> Material {
         if y >= self.height {
             Material::Air
-        } else if y == self.height - 1 {
+        } else if y >= self.ground_height {
+            Material::Water
+        } else if y == self.ground_height - 1 {
             self.bands[0]
-        } else if y >= self.height - 12 {
+        } else if y >= self.ground_height - 12 {
             self.bands[1]
         } else {
             self.bands[2]
         }
+    }
+    /// Upper boundaries of the deep, subsurface, surface and water runs.
+    pub fn run_ends(self) -> [i64; 4] {
+        [
+            self.ground_height - 12,
+            self.ground_height - 1,
+            self.ground_height,
+            self.height,
+        ]
     }
 }
 
@@ -171,7 +186,7 @@ pub fn build_sampled(
                 );
             }
             values.push(h);
-            top_materials.push(c.bands[0]);
+            top_materials.push(c.material(h - 1));
             columns.push(c);
         }
     }
@@ -234,7 +249,7 @@ pub fn build_sampled(
         }
     }
     drop(tops);
-    // Each edge exposes at most three material spans, independent of its relief.
+    // Each edge exposes at most four material spans, including static water.
     // Equal spans in consecutive columns merge along the side's horizontal axis.
     for axis in [0, 2] {
         for positive in [false, true] {
@@ -244,9 +259,9 @@ pub fn build_sampled(
                 (size[1], size[0])
             };
             for layer in 0..layers {
-                let mut active: [Option<Span>; 3] = [None; 3];
+                let mut active: [Option<Span>; 4] = [None; 4];
                 for t in 0..=tangent {
-                    let mut next: [Option<Span>; 3] = [None; 3];
+                    let mut next: [Option<Span>; 4] = [None; 4];
                     let mut span_count = 0;
                     if t < tangent {
                         let (x, z) = if axis == 0 {
@@ -264,7 +279,7 @@ pub fn build_sampled(
                         let lo = heights.values[neighbor];
                         if lo < h {
                             let mut start = lo;
-                            for end in [h - 12, h - 1, h] {
+                            for end in columns[i].run_ends() {
                                 if end > start {
                                     next[span_count] = Some(Span {
                                         lo: start,
@@ -417,7 +432,11 @@ mod tests {
     fn exact_sampled_cache_and_uncached_meshes_are_bitwise_identical() {
         use frontier_world::FbmRecipe;
         use std::collections::HashMap;
-        for recipe in [FbmRecipe::Legacy, FbmRecipe::Regional] {
+        for recipe in [
+            FbmRecipe::Legacy,
+            FbmRecipe::Regional,
+            FbmRecipe::SeededWorld,
+        ] {
             let world = World::fbm(
                 7,
                 FbmParams {
@@ -472,7 +491,10 @@ mod tests {
                 for z in min.z..min.z + 9 {
                     for x in min.x..min.x + 11 {
                         let column = SampledColumn::canonical(&world, x, z);
-                        assert_eq!(expected.heights.top_material(x, z), Some(column.bands[0]));
+                        assert_eq!(
+                            expected.heights.top_material(x, z),
+                            Some(column.material(column.height - 1))
+                        );
                         for y in [
                             column.height,
                             column.height - 1,
@@ -766,4 +788,32 @@ mod tests {
         eprintln!("64m exact native columns seed=7: {:.3}s; {} sampled columns; {} exposed faces; {} quads; {} vertex/index bytes; {} height/material cache bytes",start.elapsed().as_secs_f64(),out.heights.sampled_columns(),out.mesh.exposed_native_faces,out.mesh.indices.len()/6,out.mesh.vertices.len()*std::mem::size_of::<Vertex>()+out.mesh.indices.len()*4,out.heights.allocated_bytes());
         assert_eq!(out.heights.sampled_columns(), 1026 * 1026);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn static_water_retains_independent_bed_and_material_run_boundaries() {
+    let c = SampledColumn {
+        height: 32,
+        ground_height: -20,
+        bands: [Material::Sand, Material::Soil, Material::Stone],
+    };
+    assert_eq!(c.run_ends(), [-32, -21, -20, 32]);
+    for y in -40..40 {
+        let expected = if y >= 32 {
+            Material::Air
+        } else if y >= -20 {
+            Material::Water
+        } else if y == -21 {
+            Material::Sand
+        } else if y >= -32 {
+            Material::Soil
+        } else {
+            Material::Stone
+        };
+        assert_eq!(c.material(y), expected, "y={y}");
+    }
+    assert!(!Material::Water.is_blocking());
+    assert!(Material::Sand.is_blocking());
+    assert!(Material::Snow.is_blocking());
 }

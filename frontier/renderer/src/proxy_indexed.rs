@@ -33,6 +33,11 @@ impl Packed {
             Material::Soil,
             Material::Stone,
             Material::Wood,
+            Material::Leaf,
+            Material::Flower,
+            Material::Water,
+            Material::Sand,
+            Material::Snow,
         ];
         // Validate the complete tile before allocating or discarding exact data.
         // Custom normals and non-palette colors retain mode1 losslessly.
@@ -250,7 +255,12 @@ mod tests {
                         Material::Soil,
                         Material::Stone,
                         Material::Wood,
-                    ][i % 4]
+                        Material::Leaf,
+                        Material::Flower,
+                        Material::Water,
+                        Material::Sand,
+                        Material::Snow,
+                    ][i % 9]
                         .color(),
                     profile_index: i as u32,
                 })
@@ -264,6 +274,11 @@ mod tests {
             Material::Soil,
             Material::Stone,
             Material::Wood,
+            Material::Leaf,
+            Material::Flower,
+            Material::Water,
+            Material::Sand,
+            Material::Snow,
         ];
         for (original, triangle) in input.iter().zip(packed.derived.as_ref().unwrap()) {
             assert_eq!(

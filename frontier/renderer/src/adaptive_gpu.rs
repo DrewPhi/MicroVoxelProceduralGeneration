@@ -2413,6 +2413,11 @@ mod tests {
             Material::Soil,
             Material::Stone,
             Material::Wood,
+            Material::Leaf,
+            Material::Flower,
+            Material::Water,
+            Material::Sand,
+            Material::Snow,
         ]
         .into_iter()
         .enumerate()

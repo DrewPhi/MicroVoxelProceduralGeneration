@@ -91,6 +91,9 @@ pub fn id(m: Material) -> u32 {
         Material::Wood => 4,
         Material::Leaf => 5,
         Material::Flower => 6,
+        Material::Water => 7,
+        Material::Sand => 8,
+        Material::Snow => 9,
     }
 }
 fn palette() -> Vec<Pigment> {
@@ -102,6 +105,9 @@ fn palette() -> Vec<Pigment> {
         [0.41, 0.25, 0.13],
         [0.40, 0.53, 0.25],
         [0.93, 0.92, 0.84],
+        Material::Water.color(),
+        Material::Sand.color(),
+        Material::Snow.color(),
     ]
     .into_iter()
     .enumerate()
@@ -728,15 +734,21 @@ fn build_region_options(
             });
             let local_samples = columns.as_ref().map(|columns| {
                 let heights = std::array::from_fn(|i| (columns[i].height_m() / VOXEL_SIZE) as i64);
+                let ground_heights =
+                    std::array::from_fn(|i| (columns[i].ground_height_m() / VOXEL_SIZE) as i64);
                 let bands = std::array::from_fn(|i| {
-                    let h = heights[i];
+                    let h = ground_heights[i];
                     [
                         id(columns[i].material(h - 1)),
                         id(columns[i].material(h - 2)),
                         id(columns[i].material(h - 13)),
                     ]
                 });
-                super::column_cache::Samples { heights, bands }
+                super::column_cache::Samples {
+                    heights,
+                    ground_heights,
+                    bands,
+                }
             });
             let samples = cached_samples
                 .as_deref()
@@ -744,6 +756,7 @@ fn build_region_options(
                 .unwrap();
             let heights = &samples.heights;
             let bands = &samples.bands;
+            let ground_heights = &samples.ground_heights;
             if reusable && cached_samples.is_none() {
                 super::column_cache::insert_unedited(world, cache_x, cache_z, samples.clone());
             }
@@ -755,11 +768,14 @@ fn build_region_options(
                 && heights
                     .iter()
                     .all(|h| *h > min.y + 1 && *h < min.y + ny as i64 * 16 - 1);
-            let low_height = *heights.iter().min().unwrap();
+            let low_ground = *ground_heights.iter().min().unwrap();
+            let high_ground = *ground_heights.iter().max().unwrap();
+            let low_visible = *heights.iter().min().unwrap();
+            let has_water = ground_heights.iter().zip(heights).any(|(g, h)| h > g);
             let high_height = *heights.iter().max().unwrap();
             let uniform_deep = bands.iter().all(|b| b[2] == bands[0][2]);
             out.columns[cz * nx + cx] = ColumnSummary {
-                low: low_height,
+                low: low_ground,
                 high: high_height,
                 deep: if uniform_deep { bands[0][2] } else { 0 },
                 fast,
@@ -792,13 +808,20 @@ fn build_region_options(
                 if fast
                     && clean
                     && (if column_extrema {
-                        y0 + 15 < low_height - 12 && uniform_deep
+                        y0 + 15 < low_ground - 12 && uniform_deep
                     } else {
-                        heights.iter().all(|h| y0 + 15 < *h - 12)
+                        ground_heights.iter().all(|h| y0 + 15 < *h - 12)
                             && bands.iter().all(|b| b[2] == bands[0][2])
                     })
                 {
                     out.chunks[ci] = FULL | bands[0][2] as u32;
+                    continue;
+                }
+                // Both bounds are over every native x/z column in this tile.
+                // The complete clean chunk lies above every bed and below every
+                // visible top, so it is canonical water without cell assembly.
+                if fast && clean && has_water && y0 >= high_ground && y0 + 16 <= low_visible {
+                    out.chunks[ci] = FULL | id(Material::Water);
                     continue;
                 }
                 let phase = profile.start();
@@ -812,9 +835,11 @@ fn build_region_options(
                             let ty = if fast {
                                 if py >= h {
                                     0
-                                } else if py == h - 1 {
+                                } else if py >= ground_heights[col] {
+                                    id(Material::Water)
+                                } else if py == ground_heights[col] - 1 {
                                     bands[col][0]
-                                } else if py >= h - 12 {
+                                } else if py >= ground_heights[col] - 12 {
                                     bands[col][1]
                                 } else {
                                     bands[col][2]
@@ -1418,3 +1443,193 @@ fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_source
 #[cfg(test)]
 #[path = "cpu_tests.rs"]
 mod cpu_tests;
+
+#[cfg(test)]
+#[test]
+fn seeded_static_water_snapshot_matches_canonical_bed_water_and_air() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::SeededWorld,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let terrain = world.fbm_terrain().unwrap();
+    let (x, z, column) = (-1..=1)
+        .flat_map(|z| (-1..=1).map(move |x| (x * 38400, z * 38400)))
+        .find_map(|(x, z)| {
+            let c = terrain.column_cells(x, z);
+            (c.visible_top > c.ground_top && c.visible_top - c.ground_top < 200)
+                .then_some((x, z, c))
+        })
+        .expect("seed 7 has water at a nearby global drainage node");
+    let min = Cell {
+        x,
+        y: (column.ground_top - 32).div_euclid(16) * 16,
+        z,
+    };
+    let snapshot = build_region(
+        &world,
+        min,
+        [1, 16, 1],
+        32 * 1048576,
+        &AtomicU32::new(0),
+        None,
+        false,
+        &|| false,
+    )
+    .unwrap();
+    let mut seen = [false; 3];
+    for z in 0..16 {
+        for x in 0..16 {
+            let c = world.column(min.x + x as i64, min.z + z as i64);
+            for y in 0..256 {
+                let material = c.material(min.y + y as i64);
+                seen[if material == Material::Air {
+                    0
+                } else if material == Material::Water {
+                    1
+                } else {
+                    2
+                }] = true;
+                let word = snapshot.material([x, y, z]);
+                let actual = if word == 0 {
+                    0
+                } else {
+                    snapshot.palette[(word & 0x3fff_ffff) as usize].material
+                };
+                assert_eq!(actual, id(material), "local={x},{y},{z}");
+            }
+        }
+    }
+    assert_eq!(
+        seen, [true; 3],
+        "fixture must cross ground, static water and air"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn deep_ocean_uniform_chunks_preserve_bed_air_and_edits() {
+    let mut world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::SeededWorld,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let terrain = world.fbm_terrain().unwrap();
+    let (x, z, c) = (-4..=4)
+        .flat_map(|z| (-4..=4).map(move |x| (x * 320000, z * 320000)))
+        .find_map(|(x, z)| {
+            let c = terrain.column_cells(x, z);
+            (c.visible_top == 0 && (-2048..-128).contains(&c.ground_top)).then_some((x, z, c))
+        })
+        .expect("seed7 contains a bounded deep ocean fixture");
+    let min = Cell {
+        x,
+        y: (c.ground_top - 32).div_euclid(16) * 16,
+        z,
+    };
+    let ny = ((16 - min.y) / 16) as usize;
+    let build = |world: &World| {
+        build_region(
+            world,
+            min,
+            [1, ny, 1],
+            32 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+        )
+        .unwrap()
+    };
+    let baseline = build(&world);
+    let water_only = build_region_options(
+        &world,
+        Cell { x, y: -64, z },
+        [1, 2, 1],
+        32 * 1048576,
+        &AtomicU32::new(0),
+        None,
+        false,
+        &|| false,
+        true,
+        false,
+        true,
+        false,
+    )
+    .unwrap();
+    assert_eq!(water_only.chunks, vec![FULL | id(Material::Water); 2]);
+    assert!(water_only.blocks.is_empty() && water_only.voxels.is_empty());
+    assert_eq!(
+        water_only.cpu_profile.as_ref().unwrap().ms[Stage::NativeCellAssembly as usize],
+        0.
+    );
+    assert!(baseline
+        .chunks
+        .iter()
+        .any(|w| *w == FULL | id(Material::Water)));
+    let edited = Cell {
+        x: x + 3,
+        y: -32,
+        z: z + 5,
+    };
+    assert_eq!(world.material(edited), Material::Water);
+    world.set(edited, Material::Stone);
+    world.set(
+        Cell {
+            x: x + 8,
+            y: -31,
+            z: z + 7,
+        },
+        Material::Air,
+    );
+    let changed = build(&world);
+    assert_ne!(
+        changed.material([3, (-32 - min.y) as usize, 5]),
+        FULL | id(Material::Water)
+    );
+    let mut seen = [false; 3];
+    for z in 0..16 {
+        for x in 0..16 {
+            let column = world.column(min.x + x as i64, min.z + z as i64);
+            for y in 0..ny * 16 {
+                let expected = column.material(min.y + y as i64);
+                seen[if expected == Material::Air {
+                    0
+                } else if expected == Material::Water {
+                    1
+                } else {
+                    2
+                }] = true;
+                let word = changed.material([x, y, z]);
+                let actual = if word == 0 {
+                    0
+                } else {
+                    changed.palette[(word & (FULL - 1)) as usize].material
+                };
+                assert_eq!(actual, id(expected), "local={x},{y},{z}");
+                let cell = Cell {
+                    x: min.x + x as i64,
+                    y: min.y + y as i64,
+                    z: min.z + z as i64,
+                };
+                if cell != edited
+                    && cell
+                        != (Cell {
+                            x: min.x + 8,
+                            y: -31,
+                            z: min.z + 7,
+                        })
+                {
+                    assert_eq!(word, baseline.material([x, y, z]));
+                }
+            }
+        }
+    }
+    assert_eq!(seen, [true; 3]);
+}

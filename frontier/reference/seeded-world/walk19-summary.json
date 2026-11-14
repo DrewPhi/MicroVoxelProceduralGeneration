@@ -1,0 +1,1108 @@
+{
+  "schema": 1,
+  "scene": "adaptive",
+  "seed": 19,
+  "route": "WalkTurnReturn",
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "vsync": false,
+  "warmup": {
+    "policy": "discard_first_frames",
+    "frames": 30
+  },
+  "frames": {
+    "sample_count": 838,
+    "accepted_frames": 838,
+    "missed_budget_frames": 470,
+    "rejected_inputs": 0,
+    "p50_ms": 16.898365,
+    "p95_ms": 21.587281,
+    "p99_ms": 24.528694
+  },
+  "process_memory": {
+    "rss_bytes": 827162624,
+    "peak_rss_bytes": 857309184,
+    "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+  },
+  "benchmark_interrupted": false,
+  "benchmark_failed": false,
+  "benchmark_requested_seconds": 15,
+  "terrain_recipe": "SeededWorld",
+  "appearance_version": 2,
+  "render_appearance_version": 6,
+  "adaptive_appearance": {
+    "spatial_profiles": false,
+    "profile_probe_cells": 1,
+    "profile_footprint": "full",
+    "near_detail": false,
+    "method": "baseline",
+    "map_intervals": 2,
+    "visibility_grid": 6,
+    "visibility_spatial": true,
+    "voxel_grain_amplitude": 0.055,
+    "debug_view": 0,
+    "near_profile_shared": false,
+    "near_blend": 0,
+    "map_prefilter_radius_cells": 2,
+    "map_anisotropy_taps": 2,
+    "map_prefilter_mode": "native-box",
+    "map_filter_soft_surfaces": true
+  },
+  "source": {
+    "version": 7,
+    "native_voxel_m": 0.0625,
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5
+  },
+  "representation": {
+    "name": "adaptive_pooled_canonical_clusters",
+    "surface_only": true,
+    "fixed_center": false,
+    "half_extent_m": 6000,
+    "finest_spacing_m": 0.0625,
+    "levels": 1,
+    "triangles": 149304,
+    "gpu_page_bytes": 0
+  },
+  "route_height_policy": "FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained",
+  "route_clock": "realtime",
+  "route_elapsed_seconds": 15.023793492,
+  "route_speed_mps": 2.5,
+  "projection": {
+    "fov_y_degrees": 60,
+    "near_m": 0.025,
+    "far_m": 6000
+  },
+  "beauty": true,
+  "msaa_samples": 1,
+  "voxel_filter": true,
+  "adaptive_route_quality": {
+    "measured_frames": 838,
+    "coverage_ready_frames": 838,
+    "quality_ready_frames": 0,
+    "unbounded_error_frames": 32,
+    "max_finite_visible_error_px": 18065760.459828284,
+    "peak_unresolved_clusters": 206
+  },
+  "naadf": {
+    "status": "Ready \u00b7 following player",
+    "stage": 100,
+    "requested_radius_m": 64,
+    "resident_radius_m": 64,
+    "world_bounds_m": [
+      [
+        -960.0,
+        319.0,
+        192.0
+      ],
+      [
+        -832.0,
+        447.0,
+        320.0
+      ]
+    ],
+    "native_voxel_m": 0.0625,
+    "requested_build_budget_mib": 0,
+    "gpu_payload_bytes": 57090212,
+    "build_ms": 85.678235,
+    "upload_cpu_ms": 0.8890020000000001,
+    "mixed_chunks": 531,
+    "unique_blocks": 646,
+    "sampled_columns": 65536,
+    "plant_cells": 0,
+    "palette_entries": 10,
+    "color_channel_bits": 10,
+    "refused": 0,
+    "fixed_snapshot": false,
+    "stream_shifts": 16,
+    "stream_build_ms": 77.1386,
+    "stream_sampled_columns": 262144,
+    "stream_shared_leaves_last_shift": 518,
+    "camera_margin_m": 63.49999998999999,
+    "min_camera_margin_m": 7.550000000000011,
+    "stream_active_frames": 2118,
+    "stream_outside_frames": 0,
+    "initial_snapshot_payload_bytes": 235168,
+    "initial_snapshot_wide_leaf_payload_bytes": 317856,
+    "initial_leaf_bytes": 82688,
+    "gpu_leaf_bits": 16,
+    "lighting": "primary_visibility_lambert_without_GI",
+    "includes_distant_and_boundary_raster_overhead": true,
+    "interior_meshes_omitted": true,
+    "supports_direct_voxel_shadows": true,
+    "effective_build_budget_mib": 11106,
+    "auto_memory": true,
+    "gpu_root_distance_requested": false,
+    "gpu_root_distance_tiles_ready": 0,
+    "gpu_root_distance_tiles_total": 0,
+    "sparse_roots_requested": false,
+    "sparse_roots_active": false,
+    "gpu_root_texture_bytes": 8388608,
+    "startup_expanding": false,
+    "startup_publications_radius_seconds": [
+      [
+        8.0,
+        0.270527657
+      ],
+      [
+        12.0,
+        0.423563337
+      ],
+      [
+        16.0,
+        0.628455154
+      ],
+      [
+        20.0,
+        0.883901084
+      ],
+      [
+        24.0,
+        1.191104486
+      ],
+      [
+        28.0,
+        1.497065065
+      ],
+      [
+        32.0,
+        1.855342733
+      ],
+      [
+        36.0,
+        2.212822621
+      ],
+      [
+        40.0,
+        2.5716428540000003
+      ],
+      [
+        44.0,
+        2.979050018
+      ],
+      [
+        48.0,
+        3.389008989
+      ],
+      [
+        52.0,
+        3.75134546
+      ],
+      [
+        56.0,
+        4.109659773
+      ],
+      [
+        60.0,
+        4.470182212
+      ],
+      [
+        64.0,
+        4.881787192
+      ]
+    ],
+    "incremental_startup": true,
+    "storage_radius_m": 64,
+    "arena_resizes": 0,
+    "arena_copy_bytes": 0,
+    "startup_generated_roots": 2097152,
+    "cpu_root_refresh": "off",
+    "cpu_root_refresh_ms": 0,
+    "cpu_root_proofs_refreshed": 0,
+    "cpu_root_occupancy_bytes": 0,
+    "specialize_format": false,
+    "native_column_cache": {
+      "enabled": false
+    },
+    "fast_leaf_hash": false,
+    "shadow_coarse_after_m": 0,
+    "cpu_profile_enabled": false,
+    "stack_block_bounds": false,
+    "column_extrema": false,
+    "traversal_instrumented": false,
+    "local_exit_repair": false,
+    "node_cache": false,
+    "node_cache_mode": 0,
+    "height_tile_roots": 0,
+    "height_mips": false,
+    "height_probe_level": null,
+    "height_gate": false,
+    "height_levels": 0,
+    "height_bounds_bytes": 0,
+    "beam_prefix": false,
+    "beam_prefix_bytes": 0,
+    "gpu_root_distance_schedule": "reset",
+    "gpu_root_distance_cpu_fallback": false,
+    "gpu_root_distance_tiles_retained": 0,
+    "gpu_root_distance_tiles_invalidated": 0,
+    "gpu_root_distance_tiles_submitted": 0,
+    "gpu_root_distance_ray_ranked_tiles": 0,
+    "gpu_root_distance_rank_cpu_ns": 0,
+    "gpu_root_distance_feedback_dispatches": 0,
+    "gpu_root_distance_feedback_reads": 0,
+    "gpu_root_distance_feedback_stale": 0,
+    "gpu_root_distance_feedback_prioritized_tiles": 0,
+    "gpu_root_distance_feedback_cpu_ns": 0,
+    "gpu_root_distance_direct": false,
+    "gpu_root_distance_repair": false,
+    "gpu_root_distance_direct_publications": 0,
+    "gpu_root_distance_settle_capture": false,
+    "fixed_center_override_m": null,
+    "stream_upload": {
+      "batching": false,
+      "bytes_per_frame_limit": 8388608,
+      "calls_per_frame_limit": 64,
+      "active_frames": 16,
+      "root_bytes": 9420800,
+      "arena_bytes": 10866432,
+      "root_calls": 344,
+      "arena_calls": 16,
+      "arena_source_slices": 480,
+      "byte_limited_frames": 0,
+      "call_limited_frames": 0,
+      "legacy_root_phase_frames": 0,
+      "unused_bytes": 113922816,
+      "unused_calls": 664,
+      "peak_bytes": 2613040,
+      "peak_calls": 25,
+      "publication_texture_copies": 826,
+      "scatter": true,
+      "descriptor_bytes": 7680,
+      "scatter_descriptors": 480,
+      "scatter_dispatches": 16,
+      "descriptor_limit_hits": 0,
+      "scatter_pack_cpu_ms": 2.491822,
+      "scatter_gpu_staging_bytes_peak": 8388608,
+      "scatter_cpu_pack_bytes_peak": 8388608,
+      "transfer_bytes": 20294912
+    },
+    "scatter_gpu_staging_bytes": 8388608,
+    "scatter_cpu_pack_bytes": 8388608,
+    "stream_lead_s": 0,
+    "stream_stage_ms": [
+      [
+        100.64470200000001,
+        1.047321,
+        51.324912,
+        151.96965400000002
+      ],
+      [
+        100.699656,
+        0.855919,
+        51.144491,
+        151.844187
+      ],
+      [
+        152.21025799999998,
+        1.0868760000000002,
+        51.473554,
+        203.68387199999998
+      ],
+      [
+        202.650147,
+        1.032884,
+        51.424661,
+        254.074858
+      ],
+      [
+        201.563832,
+        1.6028609999999999,
+        52.05345,
+        253.61732199999997
+      ],
+      [
+        251.800766,
+        1.2496829999999999,
+        51.622484,
+        303.42329
+      ],
+      [
+        252.45769800000002,
+        1.558668,
+        51.992123,
+        304.449861
+      ],
+      [
+        251.77895300000003,
+        2.013809,
+        52.617777,
+        304.39678
+      ],
+      [
+        301.95379,
+        1.616417,
+        52.248718,
+        354.202579
+      ],
+      [
+        304.42083599999995,
+        1.632407,
+        53.265381,
+        357.68624700000004
+      ],
+      [
+        254.30613200000002,
+        1.462305,
+        52.422216,
+        306.728368
+      ],
+      [
+        253.58121,
+        1.545634,
+        52.455890999999994,
+        306.037121
+      ],
+      [
+        253.61834,
+        1.4758609999999999,
+        53.197432000000006,
+        306.815792
+      ],
+      [
+        304.999617,
+        1.417892,
+        53.264449,
+        358.264096
+      ],
+      [
+        83.271819,
+        1.040207,
+        44.901309,
+        128.173158
+      ],
+      [
+        77.726972,
+        0.476181,
+        22.497373,
+        100.22437500000001
+      ]
+    ]
+  },
+  "adaptive": {
+    "pixel_error": 5,
+    "coverage_ready": true,
+    "quality_ready": false,
+    "pending_clusters": 71,
+    "unresolved": false,
+    "published_epoch": 338,
+    "requested_epoch": 338,
+    "native_clusters": 65,
+    "resident_clusters": 6962,
+    "visible_clusters": 579,
+    "triangles": 149304,
+    "gpu_resident_bytes": 151026592,
+    "gpu_allocated_bytes": 197132784,
+    "upload_bytes": 320886752,
+    "max_upload_frame_bytes": 4348480,
+    "cpu_cache_bytes": 425701568,
+    "cache_hits": 2564846,
+    "builds": 13656,
+    "appearance_self_occlusion_exact": false,
+    "topology_supported": false,
+    "naadf_owned_tiles": 65,
+    "naadf_ownership_id": 400,
+    "naadf_handoff_reused_tiles": 30980,
+    "naadf_handoff_changed_tiles": 63,
+    "background_paused": false,
+    "upload_budget_bytes_per_frame": 8388608,
+    "elapsed_preparation_ms": 11655.917226,
+    "first_coverage_ms": 30.980665000000002,
+    "empirical_geometry_error_m": 132.734375,
+    "uncertified_clusters": 3057,
+    "selected_cpu_bytes": 186115072,
+    "selected_sampled_columns": 80247426,
+    "total_build_ms": 240173.34492999935,
+    "max_build_ms": 55.645146,
+    "surface_source_revision": 0,
+    "displayed_world_revision": 0,
+    "base_source_reused_outside_edited_owner": false,
+    "generated_columns": 105391802,
+    "source_cache_hits": 5671416,
+    "source_cache_bytes": 31791264,
+    "source_budget_bytes": 33554432,
+    "cpu_cache_budget_bytes": 2403336192,
+    "pending_selection_arc_bytes": 0,
+    "cpu_selection_bytes_overlap_cache": true,
+    "gpu_pool_budget_bytes": 1602224128,
+    "max_visible_error_px": 79.82184599867242,
+    "visible_unresolved_count": 128,
+    "visible_global_bound_clusters": 0,
+    "visible_local_certified_clusters": 364,
+    "gpu_pool_allocated_bytes": 197132784,
+    "gpu_camera_uniform_bytes": 4194304,
+    "frame_attachment_logical_bytes": 16588800,
+    "visible_uncertified_count": 0,
+    "native_quad_record_bytes": 32,
+    "resident_native_quad_bytes": 0,
+    "resident_profile_bytes": 36202400,
+    "visible_native_quads": 0,
+    "deferred_selection_arc_bytes": 0,
+    "gpu_pending_clusters": 0,
+    "selection_arc_bytes_may_overlap_each_other": true,
+    "gpu_occluded_clusters": 61,
+    "gpu_occluded_triangles": 15632,
+    "gpu_occluder_boxes": 64,
+    "gpu_occlusion_uses_current_camera": true,
+    "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+    "visible_affine_bound_clusters": 215,
+    "elapsed_since_stream_start_ms": 11655.919691,
+    "first_quality_ms": null,
+    "refinement_ready": false,
+    "refinement_reserve": 0.8,
+    "first_refinement_ms": null,
+    "cpu_quality_ready": false,
+    "cpu_refinement_ready": false,
+    "cpu_max_visible_error_px": 79.82184599867242,
+    "current_gpu_offenders": [
+      {
+        "key": {
+          "min": [
+            -18944,
+            0
+          ],
+          "width_cells": 512,
+          "step_cells": 64,
+          "edge_steps": [
+            64,
+            64,
+            32,
+            64
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -1184.0,
+            273.88093880403306,
+            0.0
+          ],
+          [
+            -1152.0,
+            304.8197038569528,
+            32.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -1184.0,
+            280.0625,
+            0.0
+          ],
+          [
+            -1152.0,
+            286.8125,
+            32.0
+          ]
+        ],
+        "cached_vertical_error_m": 19.13220385695284,
+        "projected_error_px": 79.82184599867242,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -22528,
+            0
+          ],
+          "width_cells": 1024,
+          "step_cells": 128,
+          "edge_steps": [
+            128,
+            128,
+            64,
+            128
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -1408.0,
+            207.62788346490524,
+            0.0
+          ],
+          [
+            -1344.0,
+            251.26155567475317,
+            64.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -1408.0,
+            236.9375,
+            0.0
+          ],
+          [
+            -1344.0,
+            250.625,
+            64.0
+          ]
+        ],
+        "cached_vertical_error_m": 33.67750744158764,
+        "projected_error_px": 78.38958751595004,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -24576,
+            -2048
+          ],
+          "width_cells": 2048,
+          "step_cells": 256,
+          "edge_steps": [
+            256,
+            256,
+            128,
+            256
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -1536.0,
+            163.4676772902064,
+            -128.0
+          ],
+          [
+            -1408.0,
+            246.34753534605883,
+            0.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -1536.0,
+            170.125,
+            -128.0
+          ],
+          [
+            -1408.0,
+            239.25,
+            0.0
+          ]
+        ],
+        "cached_vertical_error_m": 36.4992405644627,
+        "projected_error_px": 76.25220369742712,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -24576,
+            0
+          ],
+          "width_cells": 2048,
+          "step_cells": 256,
+          "edge_steps": [
+            256,
+            256,
+            128,
+            256
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -1536.0,
+            183.53411149878318,
+            0.0
+          ],
+          [
+            -1408.0,
+            246.95785431659786,
+            128.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -1536.0,
+            207.5,
+            0.0
+          ],
+          [
+            -1408.0,
+            239.3125,
+            128.0
+          ]
+        ],
+        "cached_vertical_error_m": 37.23355509781329,
+        "projected_error_px": 76.20314729829755,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -49152,
+            16384
+          ],
+          "width_cells": 16384,
+          "step_cells": 2048,
+          "edge_steps": [
+            2048,
+            1024,
+            1024,
+            1024
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -3072.0,
+            15.105878287563284,
+            1024.0
+          ],
+          [
+            -2048.0,
+            225.92270637308465,
+            2048.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -3072.0,
+            47.9375,
+            1024.0
+          ],
+          [
+            -2048.0,
+            197.25,
+            2048.0
+          ]
+        ],
+        "cached_vertical_error_m": 81.14825588009211,
+        "projected_error_px": 74.58716724438023,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -20992,
+            0
+          ],
+          "width_cells": 512,
+          "step_cells": 64,
+          "edge_steps": [
+            64,
+            64,
+            64,
+            64
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -1312.0,
+            231.8092093253878,
+            0.0
+          ],
+          [
+            -1280.0,
+            268.5458622513397,
+            32.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -1312.0,
+            255.8125,
+            0.0
+          ],
+          [
+            -1280.0,
+            262.875,
+            32.0
+          ]
+        ],
+        "cached_vertical_error_m": 26.128290674612238,
+        "projected_error_px": 70.98526670138011,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -131072,
+            65536
+          ],
+          "width_cells": 65536,
+          "step_cells": 8192,
+          "edge_steps": [
+            8192,
+            8192,
+            4096,
+            4096
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -8192.0,
+            -89.47750143445762,
+            4096.0
+          ],
+          [
+            -4096.0,
+            305.24474350343434,
+            8192.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -8192.0,
+            0.0,
+            4096.0
+          ],
+          [
+            -4096.0,
+            125.375,
+            8192.0
+          ]
+        ],
+        "cached_vertical_error_m": 211.2447435034343,
+        "projected_error_px": 68.96560195767941,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      },
+      {
+        "key": {
+          "min": [
+            -49152,
+            -32768
+          ],
+          "width_cells": 8192,
+          "step_cells": 1024,
+          "edge_steps": [
+            1024,
+            1024,
+            1024,
+            1024
+          ],
+          "source_revision": 0
+        },
+        "canonical_bounds": [
+          [
+            -3072.0,
+            0.8119217333865903,
+            -2048.0
+          ],
+          [
+            -2560.0,
+            132.58697478735954,
+            -1536.0
+          ]
+        ],
+        "proxy_bounds": [
+          [
+            -3072.0,
+            13.875,
+            -2048.0
+          ],
+          [
+            -2560.0,
+            126.25,
+            -1536.0
+          ]
+        ],
+        "cached_vertical_error_m": 110.43334826234992,
+        "projected_error_px": 68.24697011321095,
+        "current_bounds_visible": true,
+        "current_occlusion_rejected": false
+      }
+    ],
+    "native_bins_enabled": true,
+    "native_bin_tests": 0,
+    "native_bin_skipped_quads": 0,
+    "draw_calls": 579,
+    "no_voxel_shadow_clusters": 0,
+    "vertex_pages_coalescing_enabled": true,
+    "vertex_page_binds_eligible": 579,
+    "vertex_page_binds_avoided": 244,
+    "source_cache_peak_bytes": 33554080,
+    "source_cache_pages": 25768,
+    "source_cache_columns": 619853,
+    "source_cache_promotions": 66844,
+    "source_cache_page_evictions": 9696818,
+    "affine_quad_bounds": 596352,
+    "affine_noise_cells": 13112776,
+    "affine_full_range_fallbacks": 2074688,
+    "affine_unavailable_quads": 0,
+    "affine_ms": 60024.85140600004,
+    "preparation_cpu_stage_ms": {
+      "appearance": 157451.25262199875,
+      "certificate": 4815.462572000009,
+      "native_mesh": 67.957772,
+      "finalize": 442.0296370000028
+    },
+    "preparation_stage_note": "CPU stage sums; canonical source query costs are included in caller stages, not exclusive source timings",
+    "preparation_workers": 4,
+    "disk_cache": {
+      "hits": 0,
+      "misses": 0,
+      "invalid": 0,
+      "writes": 0,
+      "errors": 0,
+      "evictions": 0,
+      "read_bytes": 0,
+      "written_bytes": 0,
+      "read_ms": 0,
+      "write_ms": 0,
+      "resident_bytes": 0
+    },
+    "disk_writeback": {
+      "queued_entries": 0,
+      "peak_queued_entries": 0,
+      "queued_payload_bytes": 0,
+      "peak_queued_payload_bytes": 0,
+      "skipped_writes": 0,
+      "encode_buffer_cap_bytes": 0,
+      "encode_buffer_reserved_bytes": 0,
+      "peak_encode_buffer_reserved_bytes": 0
+    },
+    "quality_cycle_latency": {
+      "samples": 1,
+      "p95_ms": 66975.556264
+    },
+    "prediction": {
+      "horizon_ms": 742.906995,
+      "horizon_from_publication": true,
+      "publication_samples": 64,
+      "generation_samples": 64,
+      "active": false,
+      "transaction_latency_ms": 742.906995,
+      "forecast_transactions": 28,
+      "debt_prediction_enabled": false
+    },
+    "live_tile_payload_bytes": 392280224,
+    "peak_live_tile_payload_bytes": 392280224,
+    "affine_cache_hits": 148049,
+    "affine_cache_misses": 450551,
+    "affine_cache_bytes": 4192256,
+    "resident_proxy_triangle_bytes": 114824192,
+    "indexed_proxy": {
+      "mode": 0,
+      "enabled": false,
+      "derived_clusters": 0,
+      "resident_clusters": 0,
+      "position_bytes": 0,
+      "position_reserved_bytes": 0,
+      "record_padding_bytes": 0,
+      "pack_ms": 0,
+      "pack_attempts": 0,
+      "pack_accepted": 0,
+      "peak_staging_estimate_bytes": 0,
+      "normal_roundoff_possible": false,
+      "extra_bind_group_binds": 0,
+      "source_generation_savings_claimed": false,
+      "cpu_tile_payload_unchanged": true
+    },
+    "gpu_profile_preparation": {
+      "enabled": false,
+      "eligible_tiles": 0,
+      "deferred_tiles": 0,
+      "deferred_jobs": 0,
+      "fallback_tiles": 0,
+      "snapshot_generated_columns": 0,
+      "snapshot_ms": 0
+    },
+    "gpu_profiles": {
+      "enabled": false,
+      "source_cache_hits": 0,
+      "source_uploads": 0,
+      "source_upload_bytes": 0,
+      "job_upload_bytes": 0,
+      "result_copy_bytes": 0,
+      "cpu_profile_upload_bytes_avoided": 0,
+      "dispatches": 0,
+      "profiles": 0,
+      "submits": 0,
+      "enqueue_ms": 0,
+      "initialization_ms": 0,
+      "resident_gpu_bytes": 0,
+      "source_cache_cpu_bytes": 0,
+      "gpu_ms": null,
+      "readback_bytes": 0
+    },
+    "gpu_resource_limited": false,
+    "gpu_cluster_capacity": 16384,
+    "gpu_available_cluster_slots": 9422,
+    "direct_native_urgent": false,
+    "visible_vertical_error_bound": false,
+    "appearance_cache": {
+      "hits": 125977,
+      "misses": 797239,
+      "bytes": 4189952
+    },
+    "render_bundles": {
+      "enabled": true,
+      "active": true,
+      "builds": 238,
+      "reuses": 1136,
+      "build_ms": 304.94583300000016
+    },
+    "cold_source_residency": {
+      "enabled_shards": 0,
+      "reserved_bytes": 0,
+      "resident_bytes": 0,
+      "entries": 0,
+      "retained_raw_bytes": 0
+    },
+    "cold_source_cache": {
+      "hits": 0,
+      "encoded_bytes_cumulative": 0,
+      "raw_bytes_cumulative": 0,
+      "encode_ms": 0,
+      "decode_ms": 0
+    },
+    "exclusive_cpu_profile": {
+      "enabled": false,
+      "source_lock_ms": 0,
+      "source_lookup_ms": 0,
+      "source_generate_ms": 0,
+      "appearance_ms": 157451.25262199875,
+      "certificate_ms": 4815.462572000009,
+      "native_mesh_ms": 67.957772,
+      "proxy_ms": 17371.790921000567,
+      "cache_snapshot_ms": 11.909281000000043,
+      "cache_admission_ms": 17.154734000000097,
+      "cache_eviction_ms": 0.6792679999999901,
+      "lru_metadata_bytes": 1630080
+    },
+    "presentation_cpu_ms": {
+      "upload_enqueue": 223.70551199997854,
+      "publication_check": 1029.6523109999996,
+      "gpu_visibility_uniforms_bundles": 4388.629701000007
+    },
+    "terrain_prepare_stages_cpu_ms": {
+      "reuse_enabled": true,
+      "shadows": 13.662291000000009,
+      "resident_accounting_and_order": 611.0022099999998,
+      "occluder_build": 1217.5421029999984,
+      "visibility_error_uniforms_upload": 1466.136696000001
+    },
+    "terrain_prepare_detail_cpu_ms": {
+      "scope": "all_prepare_calls_including_startup_and_warmup",
+      "sample_cap_per_stage": 4096,
+      "incremental_order_reuses": 0,
+      "shadows": {
+        "total": 13.662291000000009,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 0.029235,
+        "p99": 0.04231
+      },
+      "resident_accounting": {
+        "total": 50.09933700000002,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 0.171514,
+        "p99": 0.24855
+      },
+      "order_excluding_accounting": {
+        "total": 560.9028729999999,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 1.685036,
+        "p99": 2.298858
+      },
+      "occluder_build": {
+        "total": 1217.5421029999984,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 3.254163,
+        "p99": 4.20416
+      },
+      "visibility_error_uniforms": {
+        "total": 1429.079337999998,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 3.8292610000000002,
+        "p99": 5.535487000000001
+      },
+      "upload_enqueue": {
+        "total": 37.05735800000002,
+        "samples": 2124,
+        "p50": 0,
+        "p95": 0.08477,
+        "p99": 0.143862
+      },
+      "bundle_prepare": {
+        "total": 333.7264639999995,
+        "samples": 2124,
+        "p50": 0.013566,
+        "p95": 1.3491620000000002,
+        "p99": 2.767564
+      }
+    },
+    "deferred_ground_cover": {
+      "enabled": false,
+      "geometry_quality_ready": false,
+      "appearance_ready": true,
+      "appearance_pending_clusters": 0,
+      "queued": 0,
+      "active": 0,
+      "outstanding": 0,
+      "completed": 0,
+      "cancelled": 0,
+      "discarded_completions": 0,
+      "payload_refusals": 0,
+      "promotions": 0,
+      "stale_results": 0,
+      "compute_cpu_ms": 0,
+      "upload_enqueue_cpu_ms": 0,
+      "upload_bytes": 0,
+      "allocation_refusals": 0,
+      "first_geometry_coverage_ms": null,
+      "first_appearance_ready_ms": null,
+      "retained_base_tile_bytes": 0,
+      "ready_tile_bytes": 0,
+      "max_product_bytes": 16777216,
+      "max_outstanding_jobs": 2,
+      "scratch_and_shared_cover_cache_excluded": true,
+      "payload_refused_clusters": 0,
+      "capacity_refused_clusters": 0
+    },
+    "prepared_view_cache": {
+      "hits": 1528,
+      "misses": 596
+    },
+    "refinements_per_transaction": 8,
+    "planning": {
+      "calls": 538,
+      "full_calls": 271,
+      "retained_calls": 267,
+      "total_ms": 7073.3367039999985,
+      "max_ms": 69.1585,
+      "prepared_batches_without_plan": 3237,
+      "obsolete_transaction_preemptions": 0,
+      "obsolete_transaction_pending_jobs": 0
+    },
+    "build_memory_model": {
+      "budget_bytes": 2403336192,
+      "reserved_bytes": 0,
+      "peak_reserved_bytes": 893392768,
+      "evicted_arc_bytes": 0,
+      "refused_jobs": 0,
+      "last_batch_jobs": 0
+    }
+  },
+  "gpu_full_render": {
+    "supported": true,
+    "samples": 628,
+    "p50_ms": 15.73625908713913,
+    "p95_ms": 19.448312033706664,
+    "p99_ms": 20.868009476428984,
+    "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+  },
+  "evidence_scope": "One 15-second no-vegetation 1080p walk; coverage passed, distant requested quality did not. Not a renderer speedup comparison."
+}

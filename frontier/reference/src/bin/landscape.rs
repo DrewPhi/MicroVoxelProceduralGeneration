@@ -320,7 +320,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --output DIR --cache FILE --terrain-recipe legacy|regional|alpine --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
+            println!("landscape --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
             return Ok(());
         }
         if a == "--shadows" {
@@ -358,7 +358,8 @@ fn main() -> Result<()> {
                     "legacy" => FbmRecipe::Legacy,
                     "regional" => FbmRecipe::Regional,
                     "alpine" => FbmRecipe::Alpine,
-                    _ => return Err("recipe must be legacy|regional|alpine".into()),
+                    "seeded-world" | "world" => FbmRecipe::SeededWorld,
+                    _ => return Err("recipe must be legacy|regional|alpine|seeded-world".into()),
                 }
             }
             "--sample-seed" => sample_seed = v.parse()?,

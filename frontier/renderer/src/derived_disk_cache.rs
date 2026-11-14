@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 11;
+const REPRESENTATION_VERSION: u64 = 12;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -60,7 +60,7 @@ struct AppearanceConfig {
 impl AppearanceConfig {
     fn current(world: &World) -> Self {
         Self {
-            method: crate::appearance_method::selected(),
+            method: crate::appearance_method::for_world(world),
             mode: crate::adaptive_geometry::appearance_mode(world),
             intervals: crate::appearance_map::map_intervals(),
             prefilter: crate::appearance_map::map_prefilter(),

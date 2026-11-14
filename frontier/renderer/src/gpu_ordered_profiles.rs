@@ -62,6 +62,9 @@ impl CachedPage {
             .fbm_terrain()
             .ok_or("ordered profiles require FBM")?
             .params();
+        if params.recipe == frontier_world::FbmRecipe::SeededWorld {
+            return Err("ordered profile experiment does not support static-water columns".into());
+        }
         if world.topology_base_cells().is_some()
             || world.revision() != 0
             || world.edit_cells().next().is_some()
@@ -79,6 +82,11 @@ impl CachedPage {
             for x in -1..=WIDTH as i64 {
                 let c = lookup(min[0] + x, min[1] + z)
                     .ok_or("ordered profile missing cached canonical column")?;
+                if c.ground_height != c.height {
+                    return Err(
+                        "ordered profile experiment does not support static-water columns".into(),
+                    );
+                }
                 if c.bands.iter().any(|m| *m as u32 > 4 || *m as u32 == 0) {
                     return Err("ordered profile columns require solid canonical bands".into());
                 }
@@ -653,6 +661,11 @@ mod tests {
                 } else {
                     -300 + ((x * 17 + z * 31).rem_euclid(1025))
                 },
+                ground_height: if flat {
+                    -300
+                } else {
+                    -300 + ((x * 17 + z * 31).rem_euclid(1025))
+                },
                 bands: [
                     if (x + z).rem_euclid(2) == 0 {
                         Material::Grass
@@ -772,6 +785,7 @@ mod tests {
             reads += 1;
             Some(SampledColumn {
                 height: i64::MIN,
+                ground_height: i64::MIN,
                 bands: [Material::Grass, Material::Soil, Material::Stone],
             })
         })

@@ -124,11 +124,17 @@ pub fn bound_native_height(
         z.div_scalar(p.horizontal_scale),
         &mut context,
     );
-    let height = height.add(Aa {
-        c: -VOXEL_SIZE * 0.5,
-        a: [0.0; 2],
-        r: VOXEL_SIZE * 0.5,
-    });
+    let height = if height.r == 0. && height.a == [0.; 2] {
+        // A proven constant (notably the sea plane) quantizes to one exact
+        // height. Giving it an artificial one-voxel error refines flat oceans.
+        Aa::point((height.c / VOXEL_SIZE).floor() * VOXEL_SIZE)
+    } else {
+        height.add(Aa {
+            c: -VOXEL_SIZE * 0.5,
+            a: [0.0; 2],
+            r: VOXEL_SIZE * 0.5,
+        })
+    };
     let range = height.range();
     if ![
         height.c,
@@ -816,9 +822,264 @@ impl crate::alpine::Value for Aa {
         self.clamp(0.0, 1.0)
     }
 }
+/// Outward-rounded evaluation of SeededWorld's geometry. Climate changes only
+/// materials. Keep this composition paired with the canonical source: the
+/// held-out tests below exercise land, water, banks and cache boundaries.
+fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
+    let p = t.params();
+    let sx = x.scale(1800.).div_scalar(p.horizontal_scale);
+    let sz = z.scale(1800.).div_scalar(p.horizontal_scale);
+    let mut band = |wavelength: f64, count: u32, gain: f64, salt: u64| {
+        let (mut weight, mut frequency, mut sum, mut norm) =
+            (1., 1. / wavelength, Aa::point(0.), 0.);
+        for octave in 0..count {
+            let n = noise(
+                sx.scale(frequency).add(Aa::point(13.7)),
+                sz.scale(frequency).sub(Aa::point(8.3)),
+                t.seed() ^ salt.wrapping_add(octave as u64 * 0x9e3779b9),
+                c,
+            );
+            sum = sum.add(n.scale(weight));
+            norm += weight;
+            weight *= gain;
+            frequency *= 2.;
+        }
+        sum.div_scalar(norm)
+    };
+    let continent = band(48_000., 3, 0.45, 0x5101);
+    let province = band(22_000., 3, 0.45, 0x5102);
+    let m = province.add(Aa::point(0.08)).div_scalar(0.48).clamp(0., 1.);
+    let mountain = m.mul(m).mul(Aa::point(3.).sub(m.scale(2.)));
+    let ridge = Aa::point(1.).sub(band(3600., 4, 0.48, 0x5105).abs());
+    let hills = band(1800., 3, 0.45, 0x5106);
+    let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
+    let base = continent
+        .scale(400.)
+        .add(Aa::point(65.))
+        .add(mountain.mul(mountain).mul(ridge.mul(ridge)).scale(1150.))
+        .add(hills.scale(45.))
+        .add(fine.scale(3.))
+        .scale(p.amplitude / 1000.);
+    let rx = x.range();
+    let rz = z.range();
+    let spacing = 2400. * p.horizontal_scale / 1800.;
+    if rx.hi - rx.lo > spacing * 4. || rz.hi - rz.lo > spacing * 4. {
+        // Huge root regions use the proven finite source envelope; no graph
+        // search or mistaken empty candidate list may certify absent channels.
+        return Aa::interval(
+            (-402. * p.amplitude / 1000.).next_down(),
+            (1663. * p.amplitude / 1000.).next_up(),
+        );
+    }
+    let reaches = t.seeded_reaches([rx.lo, rz.lo], [rx.hi, rz.hi]);
+    let smooth = |v: I| {
+        let f = |q: f64| {
+            let q = I::point(q.clamp(0., 1.));
+            q.mul(q).mul(I::point(3.).sub(q.scale(2.)))
+        };
+        I {
+            lo: f(v.lo).lo,
+            hi: f(v.hi).hi,
+        }
+    };
+    let base_range = base.range();
+    // Each entry is one positive influence weight and its target valley
+    // profile. Normalize with bounded coefficients instead of dividing two
+    // huge, correlated interval sums near a river centerline.
+    let mut contributions: Vec<(I, I)> = Vec::new();
+    let mut stage_upper = 0.0_f64;
+    let mut guaranteed_stage: Option<f64> = None;
+    let mut possible_lake_lower = f64::INFINITY;
+    let mut wet_lakes = Vec::new();
+    let mut only_sea_reaches = true;
+    for r in reaches {
+        let dx = r.b.x - r.a.x;
+        let dz = r.b.z - r.a.z;
+        let denom = dx * dx + dz * dz;
+        let fraction = if denom > 0. {
+            x.sub(Aa::point(r.a.x))
+                .scale(dx)
+                .add(z.sub(Aa::point(r.a.z)).scale(dz))
+                .div_scalar(denom)
+                .clamp(0., 1.)
+        } else {
+            Aa::point(0.)
+        };
+        let u = x.sub(Aa::point(r.a.x)).sub(fraction.scale(dx));
+        let v = z.sub(Aa::point(r.a.z)).sub(fraction.scale(dz));
+        let distance = u.mul(u).add(v.mul(v)).sqrt().range();
+        let stage = Aa::point(r.a.stage)
+            .add(fraction.scale(r.b.stage - r.a.stage))
+            .range();
+        let outer = r.outer_radius();
+        if distance.lo >= outer || stage.hi < 0. {
+            continue;
+        }
+        only_sea_reaches &= r.a.stage == 0. && r.b.stage == 0.;
+        let fully_active = stage.lo >= 0. && distance.hi < outer;
+        let d = I {
+            lo: distance.lo.max(0.),
+            hi: distance.hi.min(outer).max(0.),
+        };
+        let stage = I {
+            lo: stage.lo.max(0.),
+            hi: stage.hi.max(0.),
+        };
+        let amplitude = p.amplitude / 1000.;
+        let depth = if r.lake { 7. } else { 4. } * amplitude;
+        let bank = I::point(0.7 * amplitude);
+        let inner = |d: I| {
+            stage.sub(I::point(depth)).add(
+                I::point(depth)
+                    .add(bank)
+                    .mul(smooth(d.div(I::point(r.width)))),
+            )
+        };
+        let outer_profile = |d: I| {
+            let q = smooth(d.sub(I::point(r.width)).div(I::point(outer - r.width)));
+            stage.add(bank).add(base_range.sub(stage).sub(bank).mul(q))
+        };
+        let mut profile = if d.hi <= r.width {
+            inner(d)
+        } else if d.lo >= r.width {
+            outer_profile(d)
+        } else {
+            let a = inner(I {
+                lo: d.lo,
+                hi: r.width,
+            });
+            let b = outer_profile(I {
+                lo: r.width,
+                hi: d.hi,
+            });
+            I {
+                lo: a.lo.min(b.lo),
+                hi: a.hi.max(b.hi),
+            }
+        };
+        if stage.lo == 0. && base_range.lo < 0. {
+            // The source permits cuts, but no raised banks, where a zero-stage
+            // reach is already below sea level.
+            profile.lo = profile.lo.min(base_range.lo);
+            if r.a.stage == 0. && r.b.stage == 0. && base_range.hi < 0. {
+                profile.hi = profile.hi.min(base_range.hi);
+            }
+        }
+        let taper = I::point(1.).sub(smooth(d.div(I::point(outer))));
+        let square = I {
+            lo: (d.lo * d.lo).next_down().max(0.),
+            hi: (d.hi * d.hi).next_up(),
+        };
+        let epsilon = r.width * r.width * 1e-8;
+        let denominator = I {
+            lo: square.lo.max(epsilon),
+            hi: square.hi.max(epsilon),
+        };
+        let raw = I::point(outer * outer)
+            .div(denominator)
+            .mul(taper)
+            .mul(taper);
+        let weight = I {
+            lo: if fully_active { raw.lo.max(0.) } else { 0. },
+            hi: raw.hi.max(0.),
+        };
+        contributions.push((weight, profile));
+        if d.lo < r.width {
+            stage_upper = stage_upper.max(stage.hi);
+            if r.lake {
+                possible_lake_lower = possible_lake_lower.min(stage.lo);
+            }
+            if fully_active && distance.hi < r.width {
+                guaranteed_stage = Some(guaranteed_stage.map_or(stage.lo, |old| old.max(stage.lo)));
+                if r.lake && profile.hi < stage.lo {
+                    wet_lakes.push(stage);
+                }
+            }
+        }
+    }
+    if only_sea_reaches && base_range.hi < 0. {
+        return Aa::point(0.);
+    }
+    if contributions.is_empty() {
+        // Preserve coordinate correlation away from hydrology influence.
+        if base_range.lo >= 0. {
+            return base;
+        }
+        if base_range.hi <= 0. {
+            return Aa::point(0.);
+        }
+        return base.add(base.abs()).scale(0.5);
+    }
+    let sum = contributions
+        .iter()
+        .fold(I::point(0.), |sum, (w, _)| sum.add(*w));
+    let mut ground = base_range;
+    let mut hull = base_range;
+    let mut magnitude = base_range.abs_max();
+    for (w, profile) in &contributions {
+        hull.lo = hull.lo.min(profile.lo);
+        hull.hi = hull.hi.max(profile.hi);
+        magnitude = magnitude.max(profile.abs_max());
+        let other_lo = (sum.lo - w.hi).next_down().max(0.);
+        let other_hi = (sum.hi - w.lo).next_up().max(0.);
+        let alpha = I {
+            lo: I::point(w.lo)
+                .div(I::point(1.).add(I::point(w.lo)).add(I::point(other_hi)))
+                .lo
+                .max(0.),
+            hi: I::point(w.hi)
+                .div(I::point(1.).add(I::point(w.hi)).add(I::point(other_lo)))
+                .hi
+                .min(1.),
+        };
+        ground = ground.add(alpha.mul(profile.sub(base_range)));
+    }
+    // Positive normalization is a convex combination. Reserve summation and
+    // normalization roundoff even when different cache regions enumerate the
+    // same contributing descriptors in a different order.
+    let roundoff = fp_pad(64. * (contributions.len() + 1) as f64 * magnitude);
+    ground.lo = (ground.lo.max(hull.lo) - roundoff).next_down();
+    ground.hi = (ground.hi.min(hull.hi) + roundoff).next_up();
+    if let Some(stage) = guaranteed_stage {
+        let lower = stage.min(possible_lake_lower);
+        // Prove a wholly wet region without carrying its hidden bed into the
+        // visible error. Test the signed weighted excess above the water level;
+        // this stays useful even when several huge centerline weights overlap.
+        let mut excess = base_range.sub(I::point(lower));
+        for (w, profile) in &contributions {
+            excess = excess.add(w.mul(profile.sub(I::point(lower))));
+        }
+        let error = fp_pad(64. * (contributions.len() + 1) as f64 * magnitude * (1. + sum.hi));
+        if excess.hi + error < 0. {
+            ground.hi = ground
+                .hi
+                .min((lower + (excess.hi + error) / (1. + sum.hi)).next_up());
+        }
+        for lake in wet_lakes {
+            if ground.hi < lake.lo && ground.hi < possible_lake_lower {
+                stage_upper = stage_upper.min(lake.hi);
+            }
+        }
+        Aa::interval(
+            ground.lo.max(0.).max(lower),
+            ground.hi.max(stage_upper).max(0.),
+        )
+    } else {
+        Aa::interval(ground.lo.max(0.), ground.hi.max(stage_upper).max(0.))
+    }
+}
+
 fn elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let p = t.params();
     let seed = t.seed();
+    if p.recipe == FbmRecipe::SeededWorld {
+        return seeded_elevation(
+            t,
+            x.scale(p.horizontal_scale),
+            z.scale(p.horizontal_scale),
+            c,
+        );
+    }
     if p.recipe == FbmRecipe::Alpine {
         return crate::alpine::elevation(x, z, p, true, |x, z, salt| noise(x, z, seed ^ salt, c));
     }
