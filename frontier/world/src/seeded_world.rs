@@ -14,6 +14,11 @@ use std::{
 };
 pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
+
+const CLIMATE_CACHE_CAPACITY: usize = 4096;
+const REGION_CACHE_CAPACITY: usize = 8;
+const REGION_BINS_PER_AXIS: usize = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SeededBiome {
     Ocean,
@@ -92,7 +97,9 @@ struct ClimateCache {
     nodes: HashMap<ClimateKey, [f64; 2]>,
     last: Option<(ClimateKey, [[f64; 2]; 4])>,
 }
-thread_local! {static CLIMATE:RefCell<ClimateCache>=RefCell::new(ClimateCache::default());}
+thread_local! {
+    static CLIMATE: RefCell<ClimateCache> = RefCell::new(ClimateCache::default());
+}
 fn climate_node(seed: u64, ix: i64, iz: i64) -> [f64; 2] {
     let x = ix as f64 * 512.;
     let z = iz as f64 * 512.;
@@ -129,7 +136,8 @@ fn climate(seed: u64, p: FbmParams, x: f64, z: f64) -> [f64; 2] {
                 return values;
             }
         }
-        if cache.nodes.len() > 4092 {
+        // Leave room for all four interpolation corners before inserting them.
+        if cache.nodes.len() > CLIMATE_CACHE_CAPACITY - 4 {
             cache.nodes.clear();
         }
         let coords = [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)];
@@ -201,11 +209,13 @@ impl Region {
     fn candidates(&self, x: f64, z: f64) -> impl Iterator<Item = Reach> + '_ {
         let ix = ((x - self.origin[0]) / self.bin_size)
             .floor()
-            .clamp(0., 15.) as usize;
+            .clamp(0., (REGION_BINS_PER_AXIS - 1) as f64) as usize;
         let iz = ((z - self.origin[1]) / self.bin_size)
             .floor()
-            .clamp(0., 15.) as usize;
-        self.bins[iz * 16 + ix].iter().map(|&i| self.reaches[i])
+            .clamp(0., (REGION_BINS_PER_AXIS - 1) as f64) as usize;
+        self.bins[iz * REGION_BINS_PER_AXIS + ix]
+            .iter()
+            .map(|&i| self.reaches[i])
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -218,7 +228,11 @@ struct Key {
     x: i64,
     z: i64,
 }
-thread_local! { static REGIONS:RefCell<VecDeque<(Key,Arc<Region>)>>=const{RefCell::new(VecDeque::new())}; }
+thread_local! {
+    static REGIONS: RefCell<VecDeque<(Key, Arc<Region>)>> = const {
+        RefCell::new(VecDeque::new())
+    };
+}
 fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
@@ -366,17 +380,17 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
         }
     }
     let origin = [rx as f64 * spacing * 4., rz as f64 * spacing * 4.];
-    let bin_size = spacing / 4.;
-    let mut bins = vec![Vec::new(); 256];
+    let bin_size = spacing / (REGION_BINS_PER_AXIS as f64 / 4.);
+    let mut bins = vec![Vec::new(); REGION_BINS_PER_AXIS * REGION_BINS_PER_AXIS];
     for (i, r) in reaches.iter().enumerate() {
         let radius = r.outer_radius();
         let ax = ((r.a.x.min(r.b.x) - radius - origin[0]) / bin_size).floor() as i64;
         let bx = ((r.a.x.max(r.b.x) + radius - origin[0]) / bin_size).floor() as i64;
         let az = ((r.a.z.min(r.b.z) - radius - origin[1]) / bin_size).floor() as i64;
         let bz = ((r.a.z.max(r.b.z) + radius - origin[1]) / bin_size).floor() as i64;
-        for iz in az.max(0)..=bz.min(15) {
-            for ix in ax.max(0)..=bx.min(15) {
-                bins[(iz * 16 + ix) as usize].push(i);
+        for iz in az.max(0)..=bz.min((REGION_BINS_PER_AXIS - 1) as i64) {
+            for ix in ax.max(0)..=bx.min((REGION_BINS_PER_AXIS - 1) as i64) {
+                bins[iz as usize * REGION_BINS_PER_AXIS + ix as usize].push(i);
             }
         }
     }
@@ -388,7 +402,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     });
     REGIONS.with(|cache| {
         let mut c = cache.borrow_mut();
-        if c.len() >= 8 {
+        if c.len() >= REGION_CACHE_CAPACITY {
             c.pop_front();
         }
         c.push_back((key, Arc::clone(&value)));

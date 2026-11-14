@@ -1,6 +1,6 @@
 # Seeded world playtest
 
-This is the first implementation checkpoint for [issue #87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87). Astra's full design, including later fluid simulation, is in [agent_context/seeded_world_issue.md](agent_context/seeded_world_issue.md). The issue remains open for its broader acceptance gates.
+This is the first implementation checkpoint for [issue #87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87). The original design brief and acceptance criteria are in [agent_context/seeded_world_issue.md](agent_context/seeded_world_issue.md). The issue remains open for its broader acceptance gates.
 
 From this directory:
 

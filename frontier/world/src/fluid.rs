@@ -350,9 +350,6 @@ impl FluidWorld {
                 .collect()
         };
         for c in pending {
-            if !self.loaded.contains(&c) {
-                continue;
-            }
             let mut remaining = self.displaced[&c];
             for n in std::iter::once(c).chain(NEIGHBORS.into_iter().filter_map(|d| offset(c, d))) {
                 if remaining == 0 {
@@ -374,7 +371,7 @@ impl FluidWorld {
                 self.displaced.insert(c, remaining);
             }
         }
-        for c in changed.iter().copied().collect::<Vec<_>>() {
+        for &c in &changed {
             self.wake(c);
         }
         // All proposals read tick-N mass. Faces have unique lower-coordinate

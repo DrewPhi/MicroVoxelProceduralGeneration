@@ -1,5 +1,8 @@
 # Guide for developers
 
+See the [documentation map](frontier/DOCUMENTATION.md) for feature guides, plans
+and historical measurements. Checkpoint-specific defaults are not launch defaults.
+
 ## Current checkpoint
 
 The opt-in [seeded world checkpoint](frontier/SEEDED_WORLD.md) adds globally addressed FBM geography, cached climate, bounded local drainage and canonical water/bed material runs. Launch `./run.sh --preset seeded-world --seed 19` from `frontier/`. The [experimental local fluid driver](frontier/LIVE_WATER.md) uses integer native-cell mass and transactional NAADF updates; its broader streaming/quality gates are tracked in [#87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87).
@@ -25,8 +28,8 @@ The default scene tests a CPU-canonical seeded FBM source using adaptive
 terrain clusters. The explicit `fbm` scene retains experimental moving nested
 GPU grids. Background workers prepare coherent coverage; native
 voxel identity remains 0.0625 m. All implementation is greenfield (tier G).
-The [prototype checkpoints 3–5](frontier/PROTOTYPE_CHECKPOINT.md) record the current
-measurements and remaining gates.
+The [prototype checkpoints 3–5](frontier/PROTOTYPE_CHECKPOINT.md) preserve early
+comparison measurements and their remaining gates.
 
 | Scene or option | Current scope |
 |---|---|
@@ -56,7 +59,9 @@ mesh. `brick-skip` is a conservative cache experiment, not the published NAADF
 implementation. Use `--msaa 1` for mesh/ray image comparisons. The quadtree probe
 uses hard LOD selection and remains a static experiment, not a production CDLOD
 implementation or a declared winner. The Alpine adaptive preset adds grounded walking and wood collision. Other
-experimental scenes retain free flight. Persistent edits remain unimplemented.
+experimental scenes retain free flight. General persistent world edits remain
+unimplemented; the opt-in [live-water checkpoint](frontier/LIVE_WATER.md) saves
+its terrain edits together with fluid state.
 See the [Alpine vegetation beauty checkpoint](frontier/reference/BEAUTY_CHECKPOINT.md)
 for near-tree shadows, voxel ambient occlusion, procedural meadow variation and
 the current sky/fog profile.
@@ -166,8 +171,8 @@ Click the window to capture the mouse. WASD moves horizontally, mouse looks,
 Space/Ctrl moves vertically, Shift accelerates, Esc opens settings and releases the mouse, F12 saves
 a PNG. Aim at screen center: left click removes a cell, right click places stone
 within 8 m in the fixture or inside the `hybrid-topology` ownership zone. One
-background rebuild runs at a time; wait for it before editing again. Edits are
-session-only. This is a free-fly camera, not a colliding player controller.
+background rebuild runs at a time; wait for it before editing again. Those fixture/topology edits are session-only. These scenes use free flight;
+Alpine and Seeded World presets support grounded walking.
 
 Press **T** in `hybrid` or `hybrid-topology` to prepare a destination away from the
 starting position, then return on the next press. The current camera remains
@@ -254,7 +259,8 @@ work, so capture does not depend on wall-clock travel speed:
 
 JSON reports include source parameters, native size, representation, camera,
 route, adapter, warmup and frame percentiles. GPU render-pass timestamps are
-collected automatically when supported; total process RSS/VRAM remain unmeasured.
+collected automatically when supported. Memory reporting varies by experiment;
+process RSS, logical GPU payload and driver residency are distinct quantities.
 Backend, brick residency, teleport readiness and prediction metadata accompany
 the corresponding experiments. `--capture` and `--report` are intentionally separate
 modes. Warmup frames are excluded from frame statistics. Keep raw artifacts under
@@ -298,8 +304,9 @@ remain on their remote branches; inspect with `git show` or a separate benchmark
 checkout. Do not restore old source trees here. Generated historical artifacts
 remain in the [archive release](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04).
 
-Latest transition work: [four-pass LOD experiment](frontier/LOD_POLISH_CHECKPOINT.md).
-4×MSAA and `--voxel-filter on` are now defaults (filter enabled by user preference).
+Historical transition evidence: [four-pass LOD experiment](frontier/LOD_POLISH_CHECKPOINT.md).
+Current adaptive launches use single-sample rendering and `--voxel-filter on`;
+request `--msaa 4` explicitly for the earlier comparison configuration.
 The CLI defaults to the regional recipe; `--terrain-recipe legacy` preserves the
 original world. See [regional terrain results](frontier/REGIONAL_TERRAIN_CHECKPOINT.md)
 and use `--start-xz X,Z` to inspect another physical region.
@@ -319,7 +326,7 @@ The [cozy meadow checkpoint](frontier/COZY_SCENE.md) describes the current Alpin
 
 [Vegetation streaming and GPU representation](frontier/VEGETATION_STREAMING_CHECKPOINT.md): `vegetation_mesher.rs` retains exact reference parity while avoiding nested ordered-map extraction; `vegetation_gpu_parity.rs` is an opt-in hardware test of frozen plant content. `FRONTIER_VEGETATION_GPU` selects compact/compact-indexed/expanded for controlled experiments; compact is the measured default.
 
-## Optional NAADF radius experiment
+## NAADF controls and optional experiments
 
 Esc → **NAADF experiment** exposes an enable switch, 1–256 m cube radius, build
 budget, status and GPU payload. Apply changes, or use **Rebuild NAADF here** to
@@ -369,7 +376,7 @@ documented in [frontier/DISTANT_VEGETATION.md](frontier/DISTANT_VEGETATION.md).
 The independent all-vegetation offline image target and reproduction command are
 in [frontier/VEGETATION_REFERENCE.md](frontier/VEGETATION_REFERENCE.md).
 
-A grounded mountain overlook with native vegetation and a matched128m NAADF
+A grounded mountain overlook with native vegetation and a matched 128 m NAADF
 comparison is recorded in [frontier/MOUNTAIN_OVERLOOK_REFERENCE.md](frontier/MOUNTAIN_OVERLOOK_REFERENCE.md).
 
 Distant grass/flower coverage: [frontier/GROUND_COVER.md](frontier/GROUND_COVER.md).

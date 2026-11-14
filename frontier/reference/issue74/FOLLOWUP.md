@@ -65,8 +65,12 @@ lighting/Legacy equivalence, exact summary values, conservative cancellation,
 instance-address equivalence, native bins, memory accounting and measured samples.
 Sequential GPU runs use Radeon 760M/RADV without concurrent compilation; CPU model
 recorded locally as Ryzen 5 7640U. Raw data/commands remain in `output/issue74/`;
-[followup.json](followup.json) and [followup.md](followup.md) summarize provenance.
+[followup.json](followup.json) and [followup-metrics.md](followup-metrics.md) summarize provenance.
 Changed binaries/partitions, unknown metadata and failures stay separate.
+When regenerating these tables with `tools/issue74_report.py` from `frontier/`,
+pass `--markdown reference/issue74/followup-metrics.md` alongside
+`--output reference/issue74/followup.json`. The explicit name avoids a
+case-only filename collision with this narrative report.
 
 An initial cache sweep accidentally used the old launcher after only its library
 rebuilt. It is excluded; valid runs verify active settings and the rebuilt binary.

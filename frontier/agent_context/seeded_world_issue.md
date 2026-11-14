@@ -1,5 +1,11 @@
 # [FV] Seeded streamed world: FBM landforms, climate biomes and canonical static waterways
 
+
+> Design brief retained for provenance and acceptance criteria. This describes
+> intended work, not current implementation status. See [Seeded World](../SEEDED_WORLD.md)
+> for the implemented source and [Live Water](../LIVE_WATER.md) for the opt-in
+> fluid checkpoint; broader streaming and quality gates remain open.
+
 ## Outcome and scope
 
 Add an opt-in `SeededWorld` recipe/preset that can be explored continuously: the same seed, source version and global coordinates produce the same 6.25 cm voxels regardless of travel, chunk generation order, worker count or cache eviction. Build a complete first visual checkpoint with continents/coasts, mountain ranges, hills, plains, climate-driven surface biomes, connected regional rivers, lakes and oceans. No vegetation in this preset. Preserve Alpine, Regional and Legacy behavior and existing renderer optimizations.

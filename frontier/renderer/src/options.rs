@@ -60,6 +60,16 @@ pub struct Options {
 pub fn parse() -> Result<Option<Options>> {
     parse_args(std::env::args().skip(1))
 }
+
+/// Consume a boolean switch while preserving the flag-specific diagnostic.
+fn parse_on_off(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<bool> {
+    match args.next().as_deref() {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        _ => Err(format!("{flag} requires on|off").into()),
+    }
+}
+
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     use crate::settings::ResourceProfile;
     let mut live_water = false;
@@ -130,19 +140,52 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut native_bins = true;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--water-active-radius" => {water_active_radius=args.next().ok_or("water active radius requires 1..2 metres")?.parse()?;if !(1..=2).contains(&water_active_radius){return Err("--water-active-radius requires 1..2 metres".into());}}
-            "--water-history-cells" => {water_history_cells=args.next().ok_or("water history requires cell count")?.parse()?;if !(32768..=16_777_216).contains(&water_history_cells){return Err("--water-history-cells requires 32768..16777216".into());}}
-
-            "--live-water" => { live_water = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--live-water requires on|off".into())}; }
-            "--water-save" => { water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?)); }
-            "--water-demo" => { live_water = true; water_demo = true; }
-
-            "--visibility-benchmark" => {visual.visibility_benchmark=true;}
-            "--naadf" => { explicit_naadf=true; visual.naadf_enabled = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--naadf requires on|off".into())}; }
-            "--naadf-gpu-distance" => {visual.naadf_gpu_distance=match args.next().as_deref(){Some("on")=>true,Some("off")=>false,_=>return Err("--naadf-gpu-distance requires on|off".into())};}
-            "--naadf-follow" => {visual.naadf_follow=match args.next().as_deref(){Some("on")=>true,Some("off")=>false,_=>return Err("--naadf-follow requires on|off".into())};}
-            "--naadf-radius" => { explicit_naadf=true; let radius:u32=args.next().ok_or("NAADF radius requires metres")?.parse()?; if !(1..=256).contains(&radius){return Err("--naadf-radius requires integer 1..256 metres".into());} visual.naadf_radius_m=radius;visual.naadf_enabled=true; }
-            "--naadf-budget-mib" => { let budget:usize=args.next().ok_or("NAADF budget requires MiB")?.parse()?; if !(16..=16384).contains(&budget){return Err("--naadf-budget-mib requires 16..16384".into());} visual.naadf_budget_mib=budget;visual.naadf_auto_memory=false; }
+            "--water-active-radius" => {
+                water_active_radius = args.next()
+                    .ok_or("water active radius requires 1..2 metres")?.parse()?;
+                if !(1..=2).contains(&water_active_radius) {
+                    return Err("--water-active-radius requires 1..2 metres".into());
+                }
+            }
+            "--water-history-cells" => {
+                water_history_cells = args.next()
+                    .ok_or("water history requires cell count")?.parse()?;
+                if !(32768..=16_777_216).contains(&water_history_cells) {
+                    return Err("--water-history-cells requires 32768..16777216".into());
+                }
+            }
+            "--live-water" => live_water = parse_on_off(&mut args, &arg)?,
+            "--water-save" => {
+                water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?));
+            }
+            "--water-demo" => {
+                live_water = true;
+                water_demo = true;
+            }
+            "--visibility-benchmark" => visual.visibility_benchmark = true,
+            "--naadf" => {
+                explicit_naadf = true;
+                visual.naadf_enabled = parse_on_off(&mut args, &arg)?;
+            }
+            "--naadf-gpu-distance" => visual.naadf_gpu_distance = parse_on_off(&mut args, &arg)?,
+            "--naadf-follow" => visual.naadf_follow = parse_on_off(&mut args, &arg)?,
+            "--naadf-radius" => {
+                explicit_naadf = true;
+                let radius: u32 = args.next().ok_or("NAADF radius requires metres")?.parse()?;
+                if !(1..=256).contains(&radius) {
+                    return Err("--naadf-radius requires integer 1..256 metres".into());
+                }
+                visual.naadf_radius_m = radius;
+                visual.naadf_enabled = true;
+            }
+            "--naadf-budget-mib" => {
+                let budget: usize = args.next().ok_or("NAADF budget requires MiB")?.parse()?;
+                if !(16..=16384).contains(&budget) {
+                    return Err("--naadf-budget-mib requires 16..16384".into());
+                }
+                visual.naadf_budget_mib = budget;
+                visual.naadf_auto_memory = false;
+            }
             "--resource-profile" => {
                 resource_profile = Some(match args.next().as_deref() {
                     Some("development") => ResourceProfile::Development,
@@ -250,11 +293,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 *field = value;
             }
             "--vegetation" | "--walk" | "--beauty" | "--step-smoothing" => {
-                let value = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err(format!("{arg} requires on|off").into()),
-                };
+                let value = parse_on_off(&mut args, &arg)?;
                 if arg == "--vegetation" {
                     visual.vegetation = value;
                 } else if arg == "--step-smoothing" {
@@ -266,18 +305,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 }
             }
             "--terrain-shadows" => {
-                visual.terrain_shadows = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err("--terrain-shadows requires on|off".into()),
-                };
+                visual.terrain_shadows = parse_on_off(&mut args, &arg)?;
             }
             "--atmosphere" => {
-                atmosphere = Some(match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err("--atmosphere requires on|off".into()),
-                });
+                atmosphere = Some(parse_on_off(&mut args, &arg)?);
             }
             "--render-scale" => {
                 render_scale = args
@@ -301,11 +332,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 resource_overrides.push((arg.clone(), adaptive_build_mib));
             }
             "--adaptive-direct-native" => {
-                adaptive_direct_native = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err("--adaptive-direct-native requires on|off".into()),
-                };
+                adaptive_direct_native = parse_on_off(&mut args, &arg)?;
             }
             "--adaptive-refinements" => {
                 adaptive_refinements = args
@@ -349,11 +376,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 }
             }
             "--native-bins" => {
-                native_bins = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err("--native-bins requires on|off".into()),
-                }
+                native_bins = parse_on_off(&mut args, &arg)?
             }
             "--benchmark-input-lock" => benchmark_input_lock = true,
             "--adaptive-cache-mib" => {
@@ -480,11 +503,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--edit-test" => edit_test = true,
             "--uncapped" => uncapped = true,
             "--voxel-filter" => {
-                voxel_filter = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err("--voxel-filter requires on|off".into()),
-                }
+                voxel_filter = parse_on_off(&mut args, &arg)?
             }
             "--capture-coverage-shift" => {
                 capture_coverage_shift = args
@@ -787,7 +806,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     adaptive_build_mib = visual.build_mib;
     adaptive_workers = visual.workers;
     adaptive_refinements = visual.refinements;
-    if live_water && water_history_cells < ((water_active_radius as usize * 2 + 1).pow(3) * 4096) {
+    if live_water
+        && water_history_cells < crate::live_water::active_cell_capacity(water_active_radius)
+    {
         return Err("--water-history-cells must fit the complete active region; increase history or lower active radius".into());
     }
     if live_water && (scene != "adaptive" || !visual.naadf_enabled) {

@@ -3,8 +3,8 @@
 Live water is opt-in. Existing Alpine, Regional, Legacy and Seeded World launches keep their static source behavior unless `--live-water on` or `--water-demo` is supplied.
 
 ```sh
-source ../../.toolchains/env.sh
-cargo run -p frontier-tools --bin frontier --release -- \
+cargo build --release --locked
+./run.sh \
   --preset seeded-world --seed 19 --water-demo \
   --water-save output/water-demo.save
 ```

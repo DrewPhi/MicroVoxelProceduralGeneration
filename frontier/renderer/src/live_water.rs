@@ -10,6 +10,16 @@ use std::{
     time::Instant,
 };
 
+// One metre at the authoritative 6.25 cm voxel resolution.
+const REGION_EDGE_CELLS: i64 = 16;
+const REGIONS_PER_FRAME: usize = 2;
+const STEP_SECONDS: f64 = 0.1;
+
+/// Shared by the simulation allocation and CLI history-budget validation.
+pub(crate) fn active_cell_capacity(radius: u32) -> usize {
+    (radius as usize * 2 + 1).pow(3) * (REGION_EDGE_CELLS as usize).pow(3)
+}
+
 /// One immutable far-renderer source, constructed once at viewer startup. Native
 /// rendering, picking, collision and persistence continue using the live world.
 pub fn immutable_surface_world(world: &World) -> Result<World> {
@@ -41,14 +51,14 @@ fn solid(world: &World, c: Cell) -> bool {
 fn region(p: [i64; 3]) -> FluidRegion {
     FluidRegion::new(
         Cell {
-            x: p[0] * 16,
-            y: p[1] * 16,
-            z: p[2] * 16,
+            x: p[0] * REGION_EDGE_CELLS,
+            y: p[1] * REGION_EDGE_CELLS,
+            z: p[2] * REGION_EDGE_CELLS,
         },
         Cell {
-            x: (p[0] + 1) * 16,
-            y: (p[1] + 1) * 16,
-            z: (p[2] + 1) * 16,
+            x: (p[0] + 1) * REGION_EDGE_CELLS,
+            y: (p[1] + 1) * REGION_EDGE_CELLS,
+            z: (p[2] + 1) * REGION_EDGE_CELLS,
         },
     )
 }
@@ -62,7 +72,7 @@ impl LiveWater {
         let now = Instant::now();
         let mut live = Self {
             fluid: FluidWorld::new(FluidConfig {
-                max_loaded_cells: (active_radius as usize * 2 + 1).pow(3) * 4096,
+                max_loaded_cells: active_cell_capacity(active_radius),
                 max_stored_cells: history_cells,
                 sleep_ticks: 4,
             }),
@@ -101,9 +111,9 @@ impl LiveWater {
             .filter(|c| (c.x - feet.x).abs() < 96 && (c.z - feet.z).abs() < 96)
             .unwrap_or(feet);
         let p = [
-            center.x.div_euclid(16),
-            center.y.div_euclid(16),
-            center.z.div_euclid(16),
+            center.x.div_euclid(REGION_EDGE_CELLS),
+            center.y.div_euclid(REGION_EDGE_CELLS),
+            center.z.div_euclid(REGION_EDGE_CELLS),
         ];
         let mut desired = BTreeSet::new();
         for z in -self.active_radius..=self.active_radius {
@@ -123,9 +133,11 @@ impl LiveWater {
         // Nearest regions first gives immediate local response during activation.
         let mut missing: Vec<_> = desired.difference(&old).copied().collect();
         missing.sort_by_key(|r| {
-            (r.min.x / 16 - p[0]).abs() + (r.min.y / 16 - p[1]).abs() + (r.min.z / 16 - p[2]).abs()
+            (r.min.x / REGION_EDGE_CELLS - p[0]).abs()
+                + (r.min.y / REGION_EDGE_CELLS - p[1]).abs()
+                + (r.min.z / REGION_EDGE_CELLS - p[2]).abs()
         });
-        for r in missing.into_iter().take(2) {
+        for r in missing.into_iter().take(REGIONS_PER_FRAME) {
             let mut columns = BTreeMap::new();
             for x in r.min.x..r.max.x {
                 for z in r.min.z..r.max.z {
@@ -172,7 +184,7 @@ impl LiveWater {
         {
             self.open_dam(world);
         }
-        if self.debt >= 0.1 {
+        if self.debt >= STEP_SECONDS {
             if self.fluid.tick() == 0 {
                 eprintln!("water simulation started after initial native publication");
             }
@@ -188,7 +200,7 @@ impl LiveWater {
             drop(columns);
             self.publish(world, step.changed);
             self.last_step_ms = start.elapsed().as_secs_f64() * 1000.;
-            self.debt -= 0.1;
+            self.debt -= STEP_SECONDS;
         }
         if self.reported.elapsed().as_secs() >= 5 {
             let d = self.fluid.diagnostics();
@@ -514,7 +526,7 @@ mod tests {
         )
         .unwrap();
         for _ in 0..24 {
-            live.debt = 0.1;
+            live.debt = STEP_SECONDS;
             live.update(&mut world, camera).unwrap();
         }
         assert_eq!(world.material_without_fluid(center), Material::Air);
