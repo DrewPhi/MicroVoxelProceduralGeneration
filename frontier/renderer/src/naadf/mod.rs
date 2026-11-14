@@ -73,6 +73,7 @@ enum Job {
     Build(u64, Request, World, [f64; 3]),
     Install(u64, Snapshot, [usize; 3], leaf::Encoding, usize),
     Shift(u64, World, stream::Region, usize),
+    Refresh(u64, World, Vec<frontier_world::Cell>, usize),
     Finish(stream::Change, bool),
     Reset,
 }
@@ -155,6 +156,28 @@ impl Worker {
                                 break;
                             }
                         }
+                        Job::Refresh(g, w, cells, budget) => {
+                            if e.load(Ordering::Relaxed) != g {
+                                continue;
+                            }
+                            let result = state
+                                .as_mut()
+                                .ok_or_else(|| "NAADF streaming state unavailable".to_string())
+                                .and_then(|s| {
+                                    s.prepare_refresh(&w, &cells, budget, &|| {
+                                        e.load(Ordering::Relaxed) != g
+                                    })
+                                });
+                            if e.load(Ordering::Relaxed) != g {
+                                if let (Some(s), Ok(c)) = (&mut state, result) {
+                                    s.finish(c, false);
+                                }
+                                continue;
+                            }
+                            if output.send((g, result.map(Reply::Shifted))).is_err() {
+                                break;
+                            }
+                        }
                         Job::Finish(c, commit) => {
                             if let Some(s) = &mut state {
                                 s.finish(c, commit);
@@ -207,6 +230,8 @@ struct Uniform {
     projection: [f32; 4],
     ring: [u32; 4],
     cache: [u32; 4],
+    edit_min: [i32; 4],
+    edit_max: [i32; 4],
 }
 struct Volume {
     resources: Bindings,
@@ -220,6 +245,8 @@ struct Volume {
     _chunks: wgpu::Texture,
     root_distance: Option<root_distance::Cache>,
     cpu_root_fallback: bool,
+    edited_root_proofs: bool,
+    dirty_roots: Option<[[i64; 3]; 2]>,
     root_texture_dims: [u32; 3],
     sparse_roots: bool,
     blocks: wgpu::Buffer,
@@ -243,10 +270,28 @@ struct Volume {
     cpu_profile: Option<prepare_profile::Metrics>,
 }
 impl Volume {
+    fn edit_bounds(&self) -> [[i32; 4]; 2] {
+        self.dirty_roots
+            .map_or([[i32::MIN; 4], [i32::MAX; 4]], |b| {
+                std::array::from_fn(|k| {
+                    std::array::from_fn(|a| {
+                        if a < 3 {
+                            b[k][a]
+                                .saturating_sub(self.bounds[0][a] as i64)
+                                .clamp(i32::MIN as i64, i32::MAX as i64)
+                                as i32
+                        } else {
+                            0
+                        }
+                    })
+                })
+            })
+    }
     fn traversal_flags(&self) -> u32 {
         u32::from(self.sparse_roots)
             | (u32::from(self.leaf_encoding.is_compact()) << 1)
             | (u32::from(self.cpu_root_fallback) << 2)
+            | (u32::from(self.edited_root_proofs) << 3)
     }
 
     fn encode_traversal(
@@ -542,6 +587,8 @@ impl Pending {
             _chunks: chunks,
             root_distance,
             cpu_root_fallback: snapshot.cpu_root_fallback,
+            edited_root_proofs: false,
+            dirty_roots: None,
             root_texture_dims,
             sparse_roots: sparse_root_dims.is_some(),
             blocks,
@@ -728,6 +775,8 @@ pub struct Experiment {
     request: Option<Request>,
     epoch: u64,
     active: Option<Volume>,
+    source_world: Option<World>,
+    refresh_world: Option<World>,
     pending: Option<Pending>,
     shift: Option<upload::PendingShift>,
     stream_upload: upload::UploadStats,
@@ -771,6 +820,8 @@ impl Default for Experiment {
             request: None,
             epoch: 0,
             active: None,
+            source_world: None,
+            refresh_world: None,
             pending: None,
             shift: None,
             stream_upload: upload::UploadStats::default(),
@@ -875,7 +926,7 @@ impl Experiment {
             self.error = Some(self.status.clone());
             return;
         }
-        let r = Request {
+        let mut r = Request {
             radius: s.naadf_radius_m,
             budget: if s.naadf_auto_memory {
                 usize::MAX
@@ -894,6 +945,23 @@ impl Experiment {
             wide_leaves: self.wide_leaves
                 || std::env::var_os("FRONTIER_NAADF_WIDE_LEAVES").is_some_and(|v| v == "1"),
         };
+        // Content revisions use atomic local root replacement on the ordinary
+        // following path. Whole-volume skip-proof experiments retain rebuilds.
+        let local_edits = r.follow
+            && !r.gpu_distance
+            && !r.sparse_roots
+            && self
+                .source_world
+                .as_ref()
+                .is_none_or(|old| old.shares_source_lineage(world))
+            && root_distance::occupancy::requested().is_none()
+            && !traversal::options().height_enabled()
+            && !traversal::options().beam;
+        if local_edits {
+            if let Some(old) = self.request {
+                r.revision = old.revision;
+            }
+        }
         if self.request != Some(r) {
             let eye = camera.position.to_array();
             let build_center = if r.follow {
@@ -915,6 +983,8 @@ impl Experiment {
             self.worker.cancel();
             self.epoch = self.worker.epoch.load(Ordering::Relaxed);
             self.request = Some(r);
+            self.source_world = Some(world.clone());
+            self.refresh_world = None;
             self.pending = None;
             self.shift = None;
             self.shifting = false;
@@ -962,6 +1032,7 @@ impl Experiment {
                     self.pending = None;
                     self.shift = None;
                     self.shifting = false;
+                    self.refresh_world = None;
                     self.expanding = false;
                     self.growth_pending = false;
                     self.status = "NAADF expansion paused: low RAM; rebuild to retry".into();
@@ -973,6 +1044,7 @@ impl Experiment {
                     self.epoch = self.worker.epoch.load(Ordering::Relaxed);
                     self.published_epoch = self.epoch;
                     self.shifting = false;
+                    self.refresh_world = None;
                     if let Some(p) = self.shift.take() {
                         self.worker.send(Job::Finish(p.change, false));
                     }
@@ -1044,6 +1116,7 @@ impl Experiment {
                             self.status = error;
                             self.refused += 1;
                             self.shifting = false;
+                            self.refresh_world = None;
                             self.expanding = false;
                             self.growth_pending = false;
                             continue;
@@ -1067,6 +1140,7 @@ impl Experiment {
                     self.status = e;
                     self.refused += 1;
                     self.shifting = false;
+                    self.refresh_world = None;
                     self.expanding = false;
                     self.growth_pending = false;
                 }
@@ -1131,8 +1205,37 @@ impl Experiment {
             self.request = None;
             self.shift = None;
             self.shifting = false;
+            self.refresh_world = None;
             self.status = "Preparing NAADF at new location".into();
             return;
+        }
+        if local_edits
+            && !self.shifting
+            && !self.expanding
+            && !self.restoring_raster
+            && self.active.is_some()
+            && self.published_epoch == self.epoch
+            && self.error.is_none()
+            && self
+                .source_world
+                .as_ref()
+                .is_some_and(|old| old.revision() != world.revision())
+        {
+            let old = self.source_world.as_ref().unwrap();
+            let cells = old.changed_edit_cells(world);
+            self.refresh_world = Some(world.clone());
+            self.shifting = true;
+            self.shift_timing = ShiftTiming {
+                start: Some(Instant::now()),
+                ..Default::default()
+            };
+            self.worker.send(Job::Refresh(
+                self.epoch,
+                world.clone(),
+                cells,
+                self.effective_budget_mib * 1048576,
+            ));
+            self.status = "Updating changed voxel roots".into();
         }
         if self.growth_pending && !self.expanding && !self.shifting && self.error.is_none() {
             if let Some(v) = &self.active {
@@ -1159,9 +1262,10 @@ impl Experiment {
                     v.resident_radius(),
                     next.dims()[0] / 2
                 );
+                self.refresh_world = None;
                 self.worker.send(Job::Shift(
                     self.epoch,
-                    world.clone(),
+                    self.source_world.as_ref().unwrap_or(world).clone(),
                     next,
                     self.effective_budget_mib * 1048576,
                 ));
@@ -1204,7 +1308,23 @@ impl Experiment {
                     self.startup_generated_roots +=
                         c.roots.iter().map(|r| r.nodes.len() as u64).sum::<u64>();
                 }
+                if self.refresh_world.is_some() {
+                    for root in &c.roots {
+                        let b = v
+                            .dirty_roots
+                            .get_or_insert([root.region.lo, root.region.hi.map(|x| x - 1)]);
+                        for a in 0..3 {
+                            b[0][a] = b[0][a].min(root.region.lo[a]);
+                            b[1][a] = b[1][a].max(root.region.hi[a] - 1);
+                        }
+                    }
+                }
                 self.worker.send(Job::Finish(c, true));
+                if let Some(updated) = self.refresh_world.take() {
+                    v.revision = updated.revision();
+                    v.edited_root_proofs = true;
+                    self.source_world = Some(updated);
+                }
                 self.shifting = false;
                 if self.expanding {
                     let resident = v.resident_radius();
@@ -1278,9 +1398,10 @@ impl Experiment {
                     };
                     self.shifting = true;
                     self.status = "Building leading strips".into();
+                    self.refresh_world = None;
                     self.worker.send(Job::Shift(
                         self.epoch,
-                        world.clone(),
+                        self.source_world.as_ref().unwrap_or(world).clone(),
                         next,
                         self.effective_budget_mib * 1048576,
                     ));
@@ -1298,6 +1419,7 @@ impl Experiment {
     /// Normal interactive readiness still permits progressive startup.
     pub(crate) fn ready_for_capture(&self) -> bool {
         self.ready()
+            && !self.shifting
             && !self.expanding
             && !self.growth_pending
             && self.request.is_some_and(|r| {
@@ -1432,6 +1554,8 @@ impl Experiment {
                 right: basis[1],
                 up: basis[2],
                 projection: basis[3],
+                edit_min: a.edit_bounds()[0],
+                edit_max: a.edit_bounds()[1],
                 ring: [a.ring[0], a.ring[1], a.ring[2], a.traversal_flags()],
                 cache: a
                     .root_distance
@@ -1494,6 +1618,7 @@ impl Experiment {
             a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
         json.pop();
         use std::fmt::Write;
+        write!(json, ",\"published_world_revision\":{},\"content_update_pending\":{},\"edited_root_proofs_invalidated\":{}", a.map_or(0,|v|v.revision),self.refresh_world.is_some(),a.is_some_and(|v|v.edited_root_proofs)).unwrap();
         write!(
             json,
             ",\"startup_expanding\":{},\"startup_publications_radius_seconds\":{:?}",

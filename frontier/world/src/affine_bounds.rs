@@ -822,6 +822,106 @@ impl crate::alpine::Value for Aa {
         self.clamp(0.0, 1.0)
     }
 }
+/// Exact extrema structure for an independently interval-bounded positive
+/// weighted mean. Material/profile intervals are monotone inputs, so their
+/// lower endpoints minimize and upper endpoints maximize. With targets fixed,
+/// d(mean)/d(weight_i) has sign target_i-mean. Thus at a minimum all targets
+/// below the optimum take maximum weight, all above take minimum weight; at
+/// a maximum the choices reverse. Sorting targets leaves only n+1 threshold
+/// assignments to check, including equal-target optima. Outward I arithmetic
+/// encloses each assignment; no sampled source extrema enter this proof.
+fn positive_weighted_mean_range(base: I, contributions: &[(I, I)]) -> I {
+    let extreme = |upper: bool| {
+        let mut ordered: Vec<_> = contributions
+            .iter()
+            .map(|(w, p)| (*w, if upper { p.hi } else { p.lo }))
+            .collect();
+        ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut numerator = I::point(if upper { base.hi } else { base.lo });
+        let mut denominator = I::point(1.);
+        for (w, p) in &ordered {
+            let weight = I::point(if upper { w.hi } else { w.lo });
+            numerator = numerator.add(weight.scale(*p));
+            denominator = denominator.add(weight);
+        }
+        let ratio = |numerator: I, denominator: I| {
+            // Every true denominator includes the fixed unit base weight.
+            numerator.div(I {
+                lo: denominator.lo.max(1.),
+                hi: denominator.hi.max(1.),
+            })
+        };
+        let first = ratio(numerator, denominator);
+        let mut result = if upper { first.hi } else { first.lo };
+        for (w, p) in ordered {
+            let delta = if upper {
+                I::point(w.lo).sub(I::point(w.hi))
+            } else {
+                I::point(w.hi).sub(I::point(w.lo))
+            };
+            numerator = numerator.add(delta.scale(p));
+            denominator = denominator.add(delta);
+            let candidate = ratio(numerator, denominator);
+            result = if upper {
+                result.max(candidate.hi)
+            } else {
+                result.min(candidate.lo)
+            };
+        }
+        result
+    };
+    I {
+        lo: extreme(false),
+        hi: extreme(true),
+    }
+}
+
+/// Distance to a fixed segment is 1-Lipschitz. Evaluate its center with the
+/// same outward arithmetic and extend by the box circumradius. Intersecting
+/// this with the ordinary interval avoids the lost x/z correlation in u²+v²
+/// (especially for diagonal reaches) without rejecting an unsampled feature.
+fn segment_distance_lipschitz(x: Aa, z: Aa, a: [f64; 2], b: [f64; 2]) -> I {
+    let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+    let denominator = dx * dx + dz * dz;
+    let cx = Aa::point(x.c);
+    let cz = Aa::point(z.c);
+    let f = if denominator > 0. {
+        cx.sub(Aa::point(a[0]))
+            .scale(dx)
+            .add(cz.sub(Aa::point(a[1])).scale(dz))
+            .div_scalar(denominator)
+            .clamp(0., 1.)
+    } else {
+        Aa::point(0.)
+    };
+    let u = cx.sub(Aa::point(a[0])).sub(f.scale(dx));
+    let v = cz.sub(Aa::point(a[1])).sub(f.scale(dz));
+    let center = u.mul(u).add(v.mul(v)).sqrt().range();
+    let rx = x.range().sub(I::point(x.c)).abs_max();
+    let rz = z.range().sub(I::point(z.c)).abs_max();
+    let radius = Aa::point(rx)
+        .mul(Aa::point(rx))
+        .add(Aa::point(rz).mul(Aa::point(rz)))
+        .sqrt()
+        .range()
+        .hi;
+    // Reserve the finite-precision projection arithmetic at every point,
+    // including nearly coincident endpoints; canonical source uses f64 too.
+    let magnitude = x.range().abs_max()
+        + z.range().abs_max()
+        + a[0].abs()
+        + a[1].abs()
+        + b[0].abs()
+        + b[1].abs()
+        + radius
+        + 1.;
+    let radius = up_add(radius, fp_pad(512. * magnitude));
+    I {
+        lo: (center.lo - radius).next_down().max(0.),
+        hi: (center.hi + radius).next_up(),
+    }
+}
+
 /// Outward-rounded evaluation of SeededWorld's geometry. Climate changes only
 /// materials. Keep this composition paired with the canonical source: the
 /// held-out tests below exercise land, water, banks and cache boundaries.
@@ -907,9 +1007,17 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         };
         let u = x.sub(Aa::point(r.a.x)).sub(fraction.scale(dx));
         let v = z.sub(Aa::point(r.a.z)).sub(fraction.scale(dz));
-        let distance = u.mul(u).add(v.mul(v)).sqrt().range();
+        let ordinary = u.mul(u).add(v.mul(v)).sqrt().range();
+        let tight = segment_distance_lipschitz(x, z, [r.a.x, r.a.z], [r.b.x, r.b.z]);
+        let distance = I {
+            lo: ordinary.lo.max(tight.lo),
+            hi: ordinary.hi.min(tight.hi),
+        };
         let stage = Aa::point(r.a.stage)
             .add(fraction.scale(r.b.stage - r.a.stage))
+            .range();
+        let width = Aa::point(r.width)
+            .add(fraction.scale(r.width_b - r.width))
             .range();
         let outer = r.outer_radius();
         if distance.lo >= outer || stage.hi < 0. {
@@ -929,27 +1037,25 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         let depth = if r.lake { 7. } else { 4. } * amplitude;
         let bank = I::point(0.7 * amplitude);
         let inner = |d: I| {
-            stage.sub(I::point(depth)).add(
-                I::point(depth)
-                    .add(bank)
-                    .mul(smooth(d.div(I::point(r.width)))),
-            )
+            stage
+                .sub(I::point(depth))
+                .add(I::point(depth).add(bank).mul(smooth(d.div(width))))
         };
         let outer_profile = |d: I| {
-            let q = smooth(d.sub(I::point(r.width)).div(I::point(outer - r.width)));
+            let q = smooth(d.sub(width).div(I::point(outer).sub(width)));
             stage.add(bank).add(base_range.sub(stage).sub(bank).mul(q))
         };
-        let mut profile = if d.hi <= r.width {
+        let mut profile = if d.hi <= width.lo {
             inner(d)
-        } else if d.lo >= r.width {
+        } else if d.lo >= width.hi {
             outer_profile(d)
         } else {
             let a = inner(I {
                 lo: d.lo,
-                hi: r.width,
+                hi: d.hi.min(width.hi),
             });
             let b = outer_profile(I {
-                lo: r.width,
+                lo: d.lo.max(width.lo),
                 hi: d.hi,
             });
             I {
@@ -970,10 +1076,10 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             lo: (d.lo * d.lo).next_down().max(0.),
             hi: (d.hi * d.hi).next_up(),
         };
-        let epsilon = r.width * r.width * 1e-8;
+        let epsilon = width.mul(width).scale(1e-8);
         let denominator = I {
-            lo: square.lo.max(epsilon),
-            hi: square.hi.max(epsilon),
+            lo: square.lo.max(epsilon.lo),
+            hi: square.hi.max(epsilon.hi),
         };
         let raw = I::point(outer * outer)
             .div(denominator)
@@ -984,12 +1090,12 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             hi: raw.hi.max(0.),
         };
         contributions.push((weight, profile));
-        if d.lo < r.width {
+        if d.lo < width.hi {
             stage_upper = stage_upper.max(stage.hi);
             if r.lake {
                 possible_lake_lower = possible_lake_lower.min(stage.lo);
             }
-            if fully_active && distance.hi < r.width {
+            if fully_active && distance.hi < width.lo {
                 guaranteed_stage = Some(guaranteed_stage.map_or(stage.lo, |old| old.max(stage.lo)));
                 if r.lake && profile.hi < stage.lo {
                     wet_lakes.push(stage);
@@ -1034,6 +1140,11 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         };
         ground = ground.add(alpha.mul(profile.sub(base_range)));
     }
+    // Preserve the shared normalization instead of treating each alpha as an
+    // independent contribution. Intersect independent conservative enclosures.
+    let normalized = positive_weighted_mean_range(base_range, &contributions);
+    ground.lo = ground.lo.max(normalized.lo);
+    ground.hi = ground.hi.min(normalized.hi);
     // Positive normalization is a convex combination. Reserve summation and
     // normalization roundoff even when different cache regions enumerate the
     // same contributing descriptors in a different order.
@@ -1247,6 +1358,104 @@ mod tests {
             bound.full_range_fallbacks,
         )
     }
+    #[test]
+    fn positive_weighted_mean_extrema_enclose_all_adversarial_corners() {
+        for base in [
+            I {
+                lo: -1000.,
+                hi: 1000.,
+            },
+            I::point(500.),
+        ] {
+            for count in 1..=5 {
+                let contributions: Vec<_> = (0..count)
+                    .map(|i| {
+                        let weight = if i % 2 == 0 {
+                            I { lo: 0., hi: 1e10 }
+                        } else {
+                            I { lo: 1e5, hi: 1e10 }
+                        };
+                        let profile = I {
+                            lo: (i as f64 - 2.) * 100.,
+                            hi: (i as f64 - 2.) * 100. + 30.,
+                        };
+                        (weight, profile)
+                    })
+                    .collect();
+                let range = positive_weighted_mean_range(base, &contributions);
+                for b in [base.lo, base.hi] {
+                    for weights in 0..1usize << count {
+                        for targets in 0..1usize << count {
+                            let (mut numerator, mut denominator) = (b, 1.);
+                            for (i, (w, p)) in contributions.iter().enumerate() {
+                                let w = if weights & (1 << i) == 0 { w.lo } else { w.hi };
+                                let p = if targets & (1 << i) == 0 { p.lo } else { p.hi };
+                                numerator += w * p;
+                                denominator += w;
+                            }
+                            let mean = numerator / denominator;
+                            assert!(
+                                mean >= range.lo && mean <= range.hi,
+                                "{mean} outside {range:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let range = positive_weighted_mean_range(
+            I::point(500.),
+            &[(I { lo: 1e8, hi: 1e10 }, I { lo: 20., hi: 21. })],
+        );
+        assert!(
+            range.lo > 19.99 && range.hi < 21.01,
+            "dominant wet target must suppress hidden upland: {range:?}"
+        );
+    }
+
+    #[test]
+    fn segment_distance_lipschitz_encloses_diagonal_and_endpoint_boxes() {
+        for (a, b) in [([0., 0.], [1200., 900.]), ([-20., 30.], [-20., 30.])] {
+            for center in [[400., 350.], [-10., -10.], [1210., 890.]] {
+                let x = Aa {
+                    c: center[0],
+                    a: [4., 0.],
+                    r: 0.03125,
+                };
+                let z = Aa {
+                    c: center[1],
+                    a: [0., 4.],
+                    r: 0.03125,
+                };
+                let range = segment_distance_lipschitz(x, z, a, b);
+                assert!(range.hi - range.lo < 12.);
+                for ix in -10..=10 {
+                    for iz in -10..=10 {
+                        let p = [
+                            center[0] + ix as f64 * 0.403125,
+                            center[1] + iz as f64 * 0.403125,
+                        ];
+                        let d = [b[0] - a[0], b[1] - a[1]];
+                        let den = d[0] * d[0] + d[1] * d[1];
+                        let f = if den > 0. {
+                            ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / den
+                        } else {
+                            0.
+                        }
+                        .clamp(0., 1.);
+                        let distance = ((p[0] - a[0] - f * d[0]).powi(2)
+                            + (p[1] - a[1] - f * d[1]).powi(2))
+                        .sqrt();
+                        assert!(
+                            distance >= range.lo && distance <= range.hi,
+                            "{distance} outside {range:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn streamed_noise_branches_match_retained_bounds_bit_for_bit() {
         for recipe in [

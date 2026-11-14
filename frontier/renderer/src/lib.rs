@@ -22,6 +22,7 @@ mod ground_cover;
 mod hybrid;
 mod hybrid_gpu;
 mod integrated_profiles;
+mod live_water;
 pub mod mesh;
 mod naadf;
 mod native_fbm;
@@ -1452,6 +1453,7 @@ impl Default for EditTest {
 }
 
 struct Viewer {
+    live_water: Option<live_water::LiveWater>,
     visual_settings: settings::VisualSettings,
     settings_ui: Option<settings_ui::SettingsUi>,
     atmosphere: Option<atmosphere::Atmosphere>,
@@ -1721,7 +1723,10 @@ impl Viewer {
         }
     }
     fn edit(&mut self, place: bool) {
-        if self.world.fbm_terrain().is_some() && self.world.topology_base_cells().is_none() {
+        if self.live_water.is_none()
+            && self.world.fbm_terrain().is_some()
+            && self.world.topology_base_cells().is_none()
+        {
             eprintln!(
                 "FBM comparison scenes have edits disabled; use --scene fixture for exact editing"
             );
@@ -1736,6 +1741,18 @@ impl Viewer {
         ) else {
             return;
         };
+        if let Some(live) = &mut self.live_water {
+            live.edit(
+                &mut self.world,
+                cell,
+                if place {
+                    Material::Stone
+                } else {
+                    Material::Air
+                },
+            );
+            return;
+        }
         let mut snapshot = self.world.clone();
         snapshot.set(
             cell,
@@ -2032,6 +2049,18 @@ impl Viewer {
             }
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
+        }
+        if let Some(live) = &mut self.live_water {
+            if self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.naadf.as_ref())
+                .is_some_and(|n| n.ready())
+            {
+                live.update(&mut self.world, self.camera)?;
+            } else {
+                live.wait_for_render();
+            }
         }
         let terrain_started = Instant::now();
         self.poll_terrain();
@@ -2619,6 +2648,26 @@ impl ApplicationHandler for Viewer {
                     }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
+                        if key == KeyCode::KeyG && !event.repeat {
+                            if let Some(live) = &mut self.live_water {
+                                live.open_dam(&mut self.world);
+                            }
+                        }
+                        if key == KeyCode::KeyP && !event.repeat {
+                            if let Some(c) = edit_target(
+                                &self.world,
+                                self.camera.position.to_array(),
+                                self.camera.direction().as_dvec3().to_array(),
+                                true,
+                                false,
+                            ) {
+                                if let Some(live) = &mut self.live_water {
+                                    if let Err(e) = live.add_water(&mut self.world, c) {
+                                        self.error = Some(e.to_string());
+                                    }
+                                }
+                            }
+                        }
                         if key == KeyCode::KeyF && !event.repeat {
                             self.visual_settings.walking = !self.visual_settings.walking;
                             self.walking.reset();
@@ -2717,6 +2766,11 @@ fn capture_pose(
 pub fn run() -> Result<()> {
     appearance_method::initialize_application();
     let Some(options::Options {
+        live_water: live_water_enabled,
+        water_active_radius,
+        water_history_cells,
+        water_save,
+        water_demo,
         atmosphere: atmosphere_option,
         visual,
         render_scale,
@@ -2810,7 +2864,17 @@ pub fn run() -> Result<()> {
     } else {
         World::fbm(seed, params)?
     };
-    let world = world.with_vegetation_enabled(visual_settings.vegetation);
+    let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
+    let mut live_water = if live_water_enabled {
+        Some(live_water::LiveWater::new(
+            &mut world,
+            water_save,
+            water_active_radius,
+            water_history_cells,
+        )?)
+    } else {
+        None
+    };
     if world.vegetation_enabled() {
         frontier_world::vegetation::prewarm_models();
     }
@@ -2884,8 +2948,28 @@ pub fn run() -> Result<()> {
         // Final capture clip and projection are applied before first worker demand.
         camera.far = capture_far.unwrap_or(20000.);
         camera.fov_y = fov_y;
+        if let Some(live) = &mut live_water {
+            if water_demo && live.demo_center.is_none() {
+                live.demo(&mut world, &mut camera)?;
+            } else if let Some(c) = live.demo_center {
+                camera.position = DVec3::new(
+                    c.x as f64 * frontier_world::VOXEL_SIZE,
+                    c.y as f64 * frontier_world::VOXEL_SIZE + 2.2,
+                    c.z as f64 * frontier_world::VOXEL_SIZE - 2.,
+                );
+                camera.yaw = 0.;
+                camera.pitch = -0.7;
+            }
+        }
+        // Far surface pages remain immutable. Live terrain/fluid overrides are
+        // presented by the canonical native volume and its ownership mask.
+        let surface_world = if live_water.is_some() {
+            live_water::immutable_surface_world(&world)?
+        } else {
+            world.clone()
+        };
         adaptive_view = Some(adaptive_view::AdaptiveView::new(
-            world.clone(),
+            surface_world,
             pixel_error,
             adaptive_cache_mib * 1024 * 1024,
             native_bins,
@@ -3363,6 +3447,7 @@ pub fn run() -> Result<()> {
     let now = Instant::now();
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
+        live_water,
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -3486,13 +3571,19 @@ pub fn run() -> Result<()> {
         pending_edit: None,
     };
     EventLoop::new()?.run_app(&mut viewer)?;
+    if let Some(live) = &viewer.live_water {
+        live.save(&viewer.world)?;
+    }
     let route_elapsed_seconds = if viewer.adaptive_route_started {
         viewer.route_started.elapsed().as_secs_f64()
     } else {
         0.
     };
     if let Some(path) = capture_on_exit {
-        if let (Some(gpu), Some(config)) = (&viewer.gpu, &viewer.config) {
+        if let (Some(gpu), Some(config)) = (&mut viewer.gpu, &viewer.config) {
+            if viewer.live_water.is_some() {
+                gpu.settle_naadf(&viewer.world, viewer.camera)?;
+            }
             gpu.capture(&viewer.camera, &path, config.width, config.height)?;
             if let Some(adaptive) = &viewer.adaptive_view {
                 let metadata_path = path.with_extension("capture.json");
@@ -3743,6 +3834,11 @@ pub fn run() -> Result<()> {
             let m = &gpu.brick_cache_metrics;
             json.pop();
             json.push_str(&format!(",\"brick_directional_cache\":{{\"builds\":{},\"latest_build_ms\":{},\"total_build_ms\":{},\"gpu_bytes\":{},\"uploaded_bytes\":{},\"latest_scratch_bytes\":{},\"peak_scratch_bytes\":{},\"immutable_revision_publication\":true}}}}", m.builds, m.latest_build_ms, m.total_build_ms, m.latest_gpu_bytes, m.uploaded_bytes, m.latest_scratch_bytes, m.peak_scratch_bytes));
+        }
+        if let Some(live) = &viewer.live_water {
+            let d = live.fluid.diagnostics();
+            json.pop();
+            json.push_str(&format!(",\"live_water\":{{\"tick\":{},\"tick_seconds\":0.1,\"last_step_ms\":{},\"loaded_cells\":{},\"stored_cells\":{},\"initial_mass\":{},\"additions\":{},\"removals\":{},\"resident_mass\":{},\"dormant_mass\":{},\"displaced_mass\":{},\"conserved\":{},\"activation_error\":{:?}}}}}",d.tick,live.last_step_ms,d.loaded_cells,d.stored_cells,d.initial_mass,d.additions,d.removals,d.resident_mass,d.dormant_mass,d.displaced_mass,d.conserved(),live.activation_error.as_deref().unwrap_or("")));
         }
         json.pop();
         json.push_str(&format!(",\"topology_owner\":{{\"enabled\":{},\"world_revision\":{},\"exact_at_all_distances\":{},\"full_G3_passed\":false}}}}",viewer.world.topology_base_cells().is_some(),viewer.world.revision(),viewer.world.topology_base_cells().is_some()));

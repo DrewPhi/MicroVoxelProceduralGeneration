@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
 };
-pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 7;
+pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SeededBiome {
@@ -174,6 +174,7 @@ pub(crate) struct Reach {
     pub(crate) a: Node,
     pub(crate) b: Node,
     pub(crate) width: f64,
+    pub(crate) width_b: f64,
     pub(crate) lake: bool,
     pub(crate) owner: [i64; 2],
     pub(crate) segment: u8,
@@ -181,10 +182,11 @@ pub(crate) struct Reach {
 impl Reach {
     /// Compact river-valley conditioning stays inside one drainage-node halo.
     pub(crate) fn outer_radius(self) -> f64 {
+        let width = self.width.max(self.width_b);
         if self.lake {
-            3. * self.width
+            3. * width
         } else {
-            (18. * self.width).max(self.width * (240. / 14.))
+            18. * width
         }
     }
 }
@@ -266,13 +268,25 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
             let lake = b.x == a.x && b.z == a.z;
             // Every downhill edge is present, so confluences never terminate because
             // an accumulation threshold changed at a cache boundary.
-            let width = if lake { 100. } else { 14. } * p.horizontal_scale / 1800.;
+            // Bounded local rainfall/runoff proxy, not accumulated discharge.
+            // All incident edges evaluate the same globally addressed node width.
+            let river_width = |n: Node| {
+                let [temperature, moisture] = climate(seed, p, n.x, n.z);
+                let runoff = (moisture - 0.10 * temperature).clamp(0., 1.);
+                (8. + 16. * smooth((runoff - 0.15) / 0.60)) * p.horizontal_scale / 1800.
+            };
+            let width = if lake {
+                100. * p.horizontal_scale / 1800.
+            } else {
+                river_width(a)
+            };
             let owner = [rx * 4 - 2 + i as i64, rz * 4 - 2 + j as i64];
             if lake {
                 reaches.push(Reach {
                     a,
                     b,
                     width,
+                    width_b: width,
                     lake,
                     owner,
                     segment: 0,
@@ -283,6 +297,17 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                 let dx = b.x - a.x;
                 let dz = b.z - a.z;
                 let length = dx.hypot(dz);
+                // Two explicit bounded oscillations keep bends legible at the
+                // kilometre node scale; low-amplitude FBM alone looked straight.
+                // The envelope has zero value/slope at both shared nodes.
+                // offset<=.16*spacing and support<=24*18*scale: together
+                // <.5*spacing, preserving the one-node candidate halo.
+                let phase = |salt| {
+                    let bits = super::hash(owner[0], owner[1], seed ^ salt);
+                    (bits >> 11) as f64 / ((1u64 << 53) as f64) * std::f64::consts::TAU
+                };
+                let phase1 = phase(0x5191);
+                let phase2 = phase(0x5192);
                 let point = |index: u8| {
                     if index == 0 {
                         return a;
@@ -293,11 +318,10 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                     let t = index as f64 / 16.;
                     let px = a.x + t * dx;
                     let pz = a.z + t * dz;
-                    let nx = px * 1800. / p.horizontal_scale;
-                    let nz = pz * 1800. / p.horizontal_scale;
                     let bend = (std::f64::consts::PI * t).sin().powi(2);
-                    let signal = fbm(seed, nx, nz, 1500., 3, 0.5, 0x5191);
-                    let offset = 0.08 * spacing * bend * signal;
+                    let signal = 0.75 * (std::f64::consts::TAU * t + phase1).sin()
+                        + 0.25 * (2. * std::f64::consts::TAU * t + phase2).sin();
+                    let offset = 0.16 * spacing * bend * signal;
                     Node {
                         x: px - dz / length * offset,
                         z: pz + dx / length * offset,
@@ -306,11 +330,33 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                     }
                 };
                 let points: [Node; 17] = std::array::from_fn(|i| point(i as u8));
+                let downstream_width = river_width(b);
+                let widths: [f64; 17] = std::array::from_fn(|i| {
+                    if i == 0 {
+                        return width;
+                    }
+                    if i == 16 {
+                        return downstream_width;
+                    }
+                    let t = i as f64 / 16.;
+                    let baseline = width + t * (downstream_width - width);
+                    // Width varies continuously within an edge as well as
+                    // between climates. Shared endpoints have exact node widths.
+                    let pulse = 1.
+                        + 0.14
+                            * (std::f64::consts::PI * t).sin().powi(2)
+                            * (std::f64::consts::TAU * t + phase2).sin();
+                    (baseline * pulse).clamp(
+                        8. * p.horizontal_scale / 1800.,
+                        24. * p.horizontal_scale / 1800.,
+                    )
+                });
                 for segment in 0..16 {
                     reaches.push(Reach {
                         a: points[segment as usize],
                         b: points[segment as usize + 1],
-                        width,
+                        width: widths[segment as usize],
+                        width_b: widths[segment as usize + 1],
                         lake,
                         owner,
                         segment,
@@ -349,16 +395,20 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     });
     value
 }
-fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
+fn projection_t(r: Reach, x: f64, z: f64) -> f64 {
     let dx = r.b.x - r.a.x;
     let dz = r.b.z - r.a.z;
     let denom = dx * dx + dz * dz;
-    let t = if denom > 0. {
-        ((x - r.a.x) * dx + (z - r.a.z) * dz) / denom
+    if denom > 0. {
+        (((x - r.a.x) * dx + (z - r.a.z) * dz) / denom).clamp(0., 1.)
     } else {
         0.
     }
-    .clamp(0., 1.);
+}
+fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
+    let dx = r.b.x - r.a.x;
+    let dz = r.b.z - r.a.z;
+    let t = projection_t(r, x, z);
     (
         (x - r.a.x - t * dx).hypot(z - r.a.z - t * dz),
         r.a.stage + t * (r.b.stage - r.a.stage),
@@ -377,18 +427,20 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
         for r in region.candidates(x, z) {
             let (d, stage) = project(r, x, z);
             let outer = r.outer_radius();
+            let t = projection_t(r, x, z);
+            let width = r.width + t * (r.width_b - r.width);
             if d >= outer || stage < 0. {
                 continue;
             }
             let amplitude = p.amplitude / 1000.;
             let depth = if r.lake { 7. } else { 4. } * amplitude;
             let bank_height = 0.7 * amplitude;
-            let profile = if d <= r.width {
-                stage - depth + (depth + bank_height) * smooth(d / r.width)
+            let profile = if d <= width {
+                stage - depth + (depth + bank_height) * smooth(d / width)
             } else {
                 stage
                     + bank_height
-                    + (l.h - stage - bank_height) * smooth((d - r.width) / (outer - r.width))
+                    + (l.h - stage - bank_height) * smooth((d - width) / (outer - width))
             };
             // Sea-level reach caps may cut the seabed, never raise a ring.
             let profile = if stage == 0. && l.h < 0. {
@@ -397,10 +449,10 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                 profile
             };
             let taper = 1. - smooth(d / outer);
-            let weight = outer * outer / (d * d).max(r.width * r.width * 1e-8) * taper * taper;
+            let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
             total_weight += weight;
-            if d < r.width {
+            if d < width {
                 if r.lake && profile < stage {
                     lake_stage = Some(lake_stage.map_or(stage, |old| old.min(stage)));
                 }
@@ -587,7 +639,7 @@ pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2
                 // original source and compact valley profiles. This diagnostic
                 // hull intentionally drops weights; certified callers use AA.
                 let depth = if r.lake { 7. * a } else { 4. * a };
-                let profile_lo = if dlo < r.width {
+                let profile_lo = if dlo < r.width.max(r.width_b) {
                     slo - depth
                 } else {
                     slo + 0.7 * a
@@ -731,6 +783,63 @@ mod tests {
         }
     }
     #[test]
+    fn variable_width_reaches_share_node_widths_and_stay_in_search_halo() {
+        let p = params();
+        let mut narrowest = f64::INFINITY;
+        let mut widest: f64 = 0.;
+        let mut changes = 0;
+        let mut nodes = std::collections::HashMap::new();
+        for seed in [7, 19, 83] {
+            for (x, z) in [(-9600., -9600.), (0., 0.), (9600., 9600.)] {
+                let region = region(seed, p, x, z);
+                for r in region.reaches.iter().filter(|r| !r.lake) {
+                    for width in [r.width, r.width_b] {
+                        assert!((8. ..=24.).contains(&width));
+                        narrowest = narrowest.min(width);
+                        widest = widest.max(width);
+                    }
+                    if (r.width - r.width_b).abs() > 0.1 {
+                        changes += 1;
+                    }
+                    assert!(r.outer_radius() + 0.16 * 2400. < 0.5 * 2400.);
+                    for (endpoint, width, is_node) in [
+                        (r.a, r.width, r.segment == 0),
+                        (r.b, r.width_b, r.segment == 15),
+                    ] {
+                        if !is_node {
+                            continue;
+                        }
+                        let key = (seed, endpoint.x.to_bits(), endpoint.z.to_bits());
+                        if let Some(previous) = nodes.insert(key, width) {
+                            assert_eq!(previous, width);
+                        }
+                    }
+                    // Native projected centerline remains wet despite varying
+                    // profiles and overlaps; widths never repaint solid water.
+                    for t in [0., 0.25, 0.5, 0.75, 1.] {
+                        let x = r.a.x + t * (r.b.x - r.a.x);
+                        let z = r.a.z + t * (r.b.z - r.a.z);
+                        let q = column(seed, p, x, z);
+                        assert!(
+                            q.visible_top > q.ground_top,
+                            "dry seed={seed} owner={:?} segment={} t={t}",
+                            r.owner,
+                            r.segment
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            changes > 100,
+            "variable width failed to vary along edges: {changes}"
+        );
+        assert!(
+            widest > narrowest * 1.3,
+            "width range too uniform {narrowest}..{widest}"
+        );
+    }
+    #[test]
     fn meandering_edges_preserve_global_endpoints_stages_and_descriptor_identity() {
         let p = params();
         let owner = [-8, -9];
@@ -766,10 +875,10 @@ mod tests {
                 );
             }
             let distance = ((r.a.x - a.x) * dz - (r.a.z - a.z) * dx).abs() / length;
-            assert!(distance <= 0.08 * 2400. + 1e-8);
+            assert!(distance <= 0.16 * 2400. + 1e-8);
             widest = widest.max(distance);
         }
-        assert!(widest > 2., "river remained straight: {widest}");
+        assert!(widest > 60., "river remained straight: {widest}");
         let min = [
             path.iter()
                 .map(|r| r.a.x.min(r.b.x))

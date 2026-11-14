@@ -26,7 +26,7 @@ atmosphere controls plus image-quality and loading settings. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for controls and scope.
 Use `--terrain-recipe legacy` for the original spiky terrain.
 Use `--preset seeded-world --seed random` for the new vegetation-free, streamed
-[seeded world playtest](frontier/SEEDED_WORLD.md), with climate-driven biomes and static rivers, lakes and oceans. Live water physics comes later.
+[seeded world playtest](frontier/SEEDED_WORLD.md), with climate-driven biomes and static rivers, lakes and oceans. An opt-in [live voxel-water demo](frontier/LIVE_WATER.md) adds conservative local flow, editable dams and saved fluid state.
 Use `--preset alpine` for the [Alpine Meadow scene](frontier/ALPINE_MEADOW.md),
 now with [seeded voxel grass, edelweiss and flowering rowans](frontier/VEGETATION.md),
 grounded walking, a winding path and mountain backdrop. See the [playability pass](frontier/PLAYABILITY_CHECKPOINT.md) for nearby streaming, cache defaults, camera easing and motion capture tools. The [cozy meadow checkpoint](frontier/COZY_SCENE.md) adds full-seed growth, fuller crowns, denser ground cover, HDR lighting and shadowed near haze. Press F for flight;

@@ -429,6 +429,7 @@ fn nonaligned_negative_column_edits_cannot_take_air_or_solid_summary_shortcuts()
             high,
             deep: id(Material::Stone),
             fast: true,
+            owned: true,
         };
         for air in [true, false] {
             let min = Cell {
@@ -533,6 +534,52 @@ fn nonaligned_topology_columns_match_canonical_at_ownership_and_feature_boundari
                         id(world.material(cell)),
                         "{cell:?}"
                     );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dirty_root_proof_5bit_cuboids_match_naive_point_intersection() {
+    // Independent lattice-point oracle: the encoded counts include current root
+    // plus each neighboring root, so both decoded endpoints are inclusive.
+    let cp = [0_i32, 31, 511];
+    for axis in 0..3 {
+        for negative in 0..32_i32 {
+            for positive in 0..32_i32 {
+                let mut faces = [3_i32, 17, 31, 0, 9, 24];
+                faces[2 * axis] = negative;
+                faces[2 * axis + 1] = positive;
+                let word = faces.iter().enumerate().fold(0_u32, |word, (face, count)| {
+                    word | ((*count as u32) << (face * 5))
+                });
+                let lo: [i32; 3] =
+                    std::array::from_fn(|a| cp[a] - ((word >> (10 * a)) & 31) as i32);
+                let hi: [i32; 3] =
+                    std::array::from_fn(|a| cp[a] + ((word >> (10 * a + 5)) & 31) as i32);
+                for a in 0..3 {
+                    assert_eq!(lo[a], cp[a] - faces[2 * a]);
+                    assert_eq!(hi[a], cp[a] + faces[2 * a + 1]);
+                }
+                for delta in -34..=34 {
+                    for width in [0, 1, 7, 31] {
+                        let mut dirty_min = cp;
+                        let mut dirty_max = cp;
+                        dirty_min[axis] += delta;
+                        dirty_max[axis] += delta + width;
+                        let decoded =
+                            (0..3).all(|a| hi[a] >= dirty_min[a] && lo[a] <= dirty_max[a]);
+                        let naive = (-negative..=positive).any(|offset| {
+                            let mut point = cp;
+                            point[axis] += offset;
+                            (0..3).all(|a| point[a] >= dirty_min[a] && point[a] <= dirty_max[a])
+                        });
+                        assert_eq!(
+                            decoded, naive,
+                            "axis={axis} counts={negative},{positive} delta={delta} width={width}"
+                        );
+                    }
                 }
             }
         }

@@ -11,6 +11,7 @@ use std::{
 
 pub mod affine_bounds;
 mod alpine;
+pub mod fluid;
 #[cfg(test)]
 mod seeded_bounds_tests;
 pub mod summary;
@@ -122,6 +123,7 @@ pub struct World {
     vegetation: Option<Arc<vegetation::TileCache>>,
     topology_base: Option<i64>,
     edits: Arc<BTreeMap<Cell, Material>>,
+    fluid: Arc<BTreeMap<Cell, bool>>,
     revision: u64,
     counter: Arc<AtomicU64>,
 }
@@ -144,7 +146,8 @@ impl WorldColumn<'_> {
     pub fn ground_height_m(&self) -> f64 {
         self.terrain_column.map_or(self.height, |c| c.ground_top) as f64 * VOXEL_SIZE
     }
-    pub fn material(&self, y: i64) -> Material {
+    /// Edited terrain before live fluid; excludes separately owned vegetation.
+    pub fn material_without_fluid(&self, y: i64) -> Material {
         let c = Cell {
             x: self.x,
             y,
@@ -155,6 +158,38 @@ impl WorldColumn<'_> {
                 .source_with_column(c, self.height, self.terrain_column)
         })
     }
+    pub fn material(&self, y: i64) -> Material {
+        let c = Cell {
+            x: self.x,
+            y,
+            z: self.z,
+        };
+        self.world.compose_fluid(c, self.material_without_fluid(y))
+    }
+    /// Canonical edited terrain plus vegetation before fluid composition.
+    pub fn canonical_material_without_fluid(&self, y: i64) -> Material {
+        let c = Cell {
+            x: self.x,
+            y,
+            z: self.z,
+        };
+        let base = self.material_without_fluid(y);
+        if base == Material::Air && !self.world.edits.contains_key(&c) {
+            self.world.vegetation_voxel(c).map_or(base, |v| v.material)
+        } else {
+            base
+        }
+    }
+    fn canonical_material(&self, y: i64) -> Material {
+        self.world.compose_fluid(
+            Cell {
+                x: self.x,
+                y,
+                z: self.z,
+            },
+            self.canonical_material_without_fluid(y),
+        )
+    }
 }
 impl World {
     pub fn new(seed: u64) -> Self {
@@ -164,6 +199,7 @@ impl World {
             vegetation: None,
             topology_base: None,
             edits: Arc::default(),
+            fluid: Arc::default(),
             revision: 0,
             counter: Arc::new(AtomicU64::new(0)),
         }
@@ -192,7 +228,7 @@ impl World {
     }
     /// Effective edit bounds are exposed for bounded exact extraction, never for LOD.
     pub fn edit_cells(&self) -> impl Iterator<Item = Cell> + '_ {
-        self.edits.keys().copied()
+        self.edits.keys().chain(self.fluid.keys()).copied()
     }
     /// True only for snapshots of one immutable source lineage. Reconstructed
     /// worlds conservatively require source-wide invalidation, even if their
@@ -209,18 +245,106 @@ impl World {
     /// Exact override-map difference, including material changes and overrides
     /// removed by returning to an earlier immutable snapshot. Camera-independent.
     pub fn changed_edit_cells(&self, other: &Self) -> Vec<Cell> {
-        if Arc::ptr_eq(&self.edits, &other.edits) {
+        if Arc::ptr_eq(&self.edits, &other.edits) && Arc::ptr_eq(&self.fluid, &other.fluid) {
             return Vec::new();
         }
-        self.edits
-            .keys()
-            .chain(other.edits.keys())
-            .copied()
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        self.edit_cells()
+            .chain(other.edit_cells())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .filter(|cell| self.edits.get(cell) != other.edits.get(cell))
+            .filter(|&c| {
+                if self.edits.get(&c) == other.edits.get(&c)
+                    && self.fluid.get(&c) == other.fluid.get(&c)
+                {
+                    return false;
+                }
+                left.entry((c.x, c.z))
+                    .or_insert_with(|| self.column(c.x, c.z))
+                    .canonical_material(c.y)
+                    != right
+                        .entry((c.x, c.z))
+                        .or_insert_with(|| other.column(c.x, c.z))
+                        .canonical_material(c.y)
+            })
             .collect()
     }
+
+    /// Terrain edits only, for an atomic terrain/fluid save transaction.
+    pub fn terrain_edits(&self) -> impl Iterator<Item = (Cell, Material)> + '_ {
+        self.edits.iter().map(|(&c, &m)| (c, m))
+    }
+    /// Physical terrain/vegetation before live water composition. Air edits open
+    /// a cell to fluid; solid edits always take precedence over fluid occupancy.
+    pub fn material_without_fluid(&self, c: Cell) -> Material {
+        self.edits.get(&c).copied().unwrap_or_else(|| {
+            let m = self.source(c);
+            if m == Material::Air {
+                self.vegetation_voxel(c).map_or(m, |v| v.material)
+            } else {
+                m
+            }
+        })
+    }
+    fn compose_fluid(&self, c: Cell, base: Material) -> Material {
+        if base != Material::Air && base != Material::Water {
+            return base;
+        }
+        self.fluid.get(&c).map_or(
+            base,
+            |&wet| if wet { Material::Water } else { Material::Air },
+        )
+    }
+    /// Batch only changed visible occupancies. Fractional mass remains in the
+    /// simulator, while each occupied cell renders on the native voxel lattice.
+    pub fn set_fluid_occupancy(&mut self, values: impl IntoIterator<Item = (Cell, bool)>) {
+        let mut columns = BTreeMap::new();
+        let mut updates = Vec::new();
+        let mut visible_changed = false;
+        for (c, wet) in values {
+            if self.fluid.get(&c) == Some(&wet) {
+                continue;
+            }
+            let column = columns
+                .entry((c.x, c.z))
+                .or_insert_with(|| self.column(c.x, c.z));
+            let base = column.canonical_material_without_fluid(c.y);
+            if !matches!(base, Material::Air | Material::Water) {
+                // A solid edit hides the cell, but its fluid tombstone must
+                // replace any old wet override before the solid is removed.
+                if self.fluid.contains_key(&c) {
+                    updates.push((c, wet));
+                }
+                continue;
+            }
+            let before = self.compose_fluid(c, base);
+            let after = if wet { Material::Water } else { Material::Air };
+            if before == after && !self.fluid.contains_key(&c) {
+                continue;
+            }
+            visible_changed |= before != after;
+            updates.push((c, wet));
+        }
+        drop(columns);
+        if updates.is_empty() {
+            return;
+        }
+        let map = Arc::make_mut(&mut self.fluid);
+        map.extend(updates);
+        if visible_changed {
+            self.bump_revision();
+        }
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self
+            .counter
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .expect("world revision exhausted")
+            + 1;
+    }
+
     /// Immutable unedited surface source for CPU display-page generation.
     /// Edits remain authoritative through `material`; these pages exclude edits.
     pub fn fbm_terrain(&self) -> Option<&FbmTerrain> {
@@ -247,14 +371,10 @@ impl World {
         if self.material(c) == m {
             return;
         }
-        let next = self
-            .counter
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
-            .expect("world revision exhausted")
-            + 1;
         Arc::make_mut(&mut self.edits).insert(c, m);
-        self.revision = next;
+        self.bump_revision();
     }
+
     /// Visible terrain/water top in meters, excluding caves, bridge and edits. Quantized
     /// to canonical columns, so consumers cannot mistake a smooth H for voxels.
     pub fn height_m(&self, x: f64, z: f64) -> f64 {
@@ -268,15 +388,9 @@ impl World {
             .map_or_else(|| self.height_m(x, z), |t| t.ground_height_m(x, z))
     }
     pub fn material(&self, c: Cell) -> Material {
-        self.edits.get(&c).copied().unwrap_or_else(|| {
-            let terrain = self.source(c);
-            if terrain == Material::Air {
-                self.vegetation_voxel(c).map_or(terrain, |v| v.material)
-            } else {
-                terrain
-            }
-        })
+        self.compose_fluid(c, self.material_without_fluid(c))
     }
+
     fn height_cells(&self, x: i64, z: i64) -> i64 {
         if let Some(terrain) = &self.terrain {
             return terrain.height_cells(x, z);
@@ -498,6 +612,43 @@ pub fn raycast(
             }
         }
         distance = t;
+    }
+}
+
+#[cfg(test)]
+mod live_water_overlay_tests {
+    use super::*;
+    #[test]
+    fn native_column_overlay_snapshots_diff_and_solidity_agree() {
+        let mut world = World::fbm(7, Default::default()).unwrap();
+        let c = Cell {
+            x: 0,
+            y: world.height_cells(0, 0) + 4,
+            z: 0,
+        };
+        let initial = world.clone();
+        world.set_fluid_occupancy([(c, false)]);
+        assert_eq!(world.revision(), initial.revision());
+        assert_eq!(world.edit_cells().count(), 0);
+        world.set_fluid_occupancy([(c, true)]);
+        assert_eq!(world.material(c), Material::Water);
+        assert_eq!(world.column(c.x, c.z).material(c.y), Material::Water);
+        assert_eq!(initial.material(c), Material::Air);
+        assert_eq!(world.changed_edit_cells(&initial), vec![c]);
+        let wet = world.clone();
+        let revision = world.revision();
+        world.set_fluid_occupancy([(c, true)]);
+        assert_eq!(revision, world.revision());
+        world.set_fluid_occupancy([(c, false)]);
+        assert_eq!(world.changed_edit_cells(&wet), vec![c]);
+        assert_eq!(world.material(c), Material::Air);
+        world.set(c, Material::Stone);
+        world.set_fluid_occupancy([(c, true)]);
+        assert_eq!(world.material(c), Material::Stone);
+        assert_eq!(world.column(c.x, c.z).material(c.y), Material::Stone);
+        world.set_fluid_occupancy([(c, false)]);
+        world.set(c, Material::Air);
+        assert_eq!(world.material(c), Material::Air);
     }
 }
 

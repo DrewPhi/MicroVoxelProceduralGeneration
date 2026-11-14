@@ -27,11 +27,11 @@ This is **bounded local drainage**, not continent-wide watershed accumulation or
 
 `TerrainColumn` stores separate exclusive ground and visible tops. Water occupies actual native cells between them; the seabed remains soil/sand/rock. CPU queries, near voxel extraction, the NAADF hierarchy, distant profiles and the offline oracle share this definition. Uniform water chunks use a direct uniform-node proof instead of assembling 4,096 identical cells.
 
-Water is opaque and nonblocking for this first pass. There is **no live flow, swimming, waves, refraction or transparent underwater view**. Walk on land or fly over water; entering opaque water is not a finished gameplay experience. Its state is a generated initial condition, not an already-running fluid simulator. The design defers conserved integer-cell fluid state and persistence to phase C.
+By default, water is opaque, static and nonblocking. Enable the experimental [live-water mode](LIVE_WATER.md) explicitly for local conserved flow and saved fluid state. Swimming, waves, refraction and a transparent underwater view remain unimplemented. Walk on land or fly over water; entering opaque water is not a finished gameplay experience. Generated water supplies an initial condition, not a perpetual source.
 
-The old detailed appearance-map experiments assume three ground runs. This new source currently uses the correct **run-aware baseline appearance path** for its fourth water run; existing worlds retain their selected detailed-map appearance. Metadata and disk identity report the effective method. Extending filtered detailed maps and feature-aware distant shoreline/channel preservation is still work, not a completed quality claim.
+Detailed appearance maps now retain separate ground and water run boundaries, including native side-face integrals across exposed bed, soil, rock and water. The seeded source can use the selected Map appearance path, with point/native/footprint filtering sharing the same canonical run definition. The older Hierarchy and Visibility experiments still fall back to the run-aware Baseline path for this source. Map filtering remains bounded quadrature; it does not certify water-area coverage or preserve every narrow waterway between probes. Distant selection now carries a separate river/lake display-spacing debt from conservative descriptor core supports and minimum endpoint widths. Resolvable features request geometry spacing at most half the local minimum radius; subpixel supports may remain coarse. This debt participates in both streaming selection and current-draw quality assessment, without replacing the vertical geometry certificate. Filtered water-area coverage and ocean shoreline preservation remain separate quality gates.
 
-Local terrain bounds use outward-rounded affine/interval evaluation of this source, including channel/lake influence. Definitely wet lake regions bound the visible water surface rather than the hidden bed. Unsupported legacy omitted-band experiments reject this source explicitly. Derived cache representation version 12 invalidates incompatible older payloads.
+Local terrain bounds use outward-rounded affine/interval evaluation of this source, including channel/lake influence. Definitely wet lake regions bound the visible water surface rather than the hidden bed. Unsupported legacy omitted-band experiments reject this source explicitly. Derived cache representation version 14 invalidates incompatible older payloads.
 
 ## Inspection and reproduction
 
@@ -75,3 +75,8 @@ Rebuild that bounded native reference from this directory after a workspace rele
 mkdir -p output/seeded-world/native-reference
 target/release/landscape --terrain-recipe seeded-world --seed 19 --center 0,0 --extent 256 --native-extent 256 --sample-stride 1 --eye '-20,501.2,20' --target '-55,493,0' --width 640 --height 360 --spp 4 --far 96 --threads 4 --lighting regional --sun-elevation 28 --sun-azimuth 22 --overcast .08 --output output/seeded-world/native-reference --cache output/seeded-world/native-reference/columns.bin
 ```
+
+
+## Live-water and quality follow-up
+
+The experimental [live voxel-water mode](LIVE_WATER.md) now adds conservative integer cell transfers and persistent terrain/fluid edits. Use its explicit launch flags to enable it. Source version 8 adds stronger bounded river bends and shared climate-derived width variation. It changes terrain identity; source-7 saves are rejected rather than silently interpreted against changed ground. Water-aware detailed appearance maps replace the prior seeded-only baseline fallback. Refer to the follow-up evidence for current results; the measurement above remains the original source-7 checkpoint, not a measurement of the new fluid system.

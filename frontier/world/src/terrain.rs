@@ -462,6 +462,40 @@ impl FbmTerrain {
     pub(crate) fn seeded_reaches(&self, min: [f64; 2], max: [f64; 2]) -> Vec<seeded_world::Reach> {
         seeded_world::reaches_intersecting(self.seed, self.params, min, max)
     }
+    /// Conservative river/lake core-support spacing hint, in meters. This is
+    /// a display sampling rule, not a height certificate or water-area estimate.
+    /// Segment endpoint AABBs expanded by maximum width contain every possible
+    /// wet core; tiny floating-point padding keeps boundary queries inclusive.
+    pub fn seeded_water_feature_spacing(&self, min: [f64; 2], max: [f64; 2]) -> Option<f64> {
+        if self.params.recipe != FbmRecipe::SeededWorld {
+            return None;
+        }
+        let scale = self.params.horizontal_scale / 1800.;
+        let spacing = 2400. * scale;
+        if (0..2).any(|a| max[a] - min[a] > spacing * 4.) {
+            return Some(4. * scale); // Half the source's minimum 8 m river radius.
+        }
+        self.seeded_reaches(min, max)
+            .into_iter()
+            .filter_map(|r| {
+                if r.a.stage.max(r.b.stage) < 0. {
+                    return None;
+                }
+                let pad = 1e-8 * (1. + min[0].abs() + min[1].abs() + max[0].abs() + max[1].abs());
+                let radius = r.width.max(r.width_b) + pad;
+                if r.a.x.min(r.b.x) - radius > max[0]
+                    || r.a.x.max(r.b.x) + radius < min[0]
+                    || r.a.z.min(r.b.z) - radius > max[1]
+                    || r.a.z.max(r.b.z) + radius < min[1]
+                {
+                    None
+                } else {
+                    Some(0.5 * r.width.min(r.width_b))
+                }
+            })
+            .reduce(f64::min)
+    }
+
     /// Analytical seeded-world range estimate over an axis-aligned meter box.
     /// Includes ground, water, banks and channels, but uses ordinary f64 interval
     /// endpoints. Certified callers must use outward-rounded interval arithmetic.
@@ -1382,5 +1416,43 @@ mod alpine_derivative_tests {
                 assert!((f.dz - (value(x, z + e) - value(x, z - e)) / (2. * e)).abs() < 1e-6);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod water_feature_spacing_tests {
+    use super::*;
+    #[test]
+    fn descriptor_core_spacing_is_bounded_and_does_not_need_fine_columns() {
+        let t = FbmTerrain::new(
+            19,
+            FbmParams {
+                recipe: FbmRecipe::SeededWorld,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut checked = 0;
+        for r in t.seeded_reaches([-2400.; 2], [2400.; 2]) {
+            if r.a.stage.max(r.b.stage) < 0. {
+                continue;
+            }
+            let center = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
+            let hint = t
+                .seeded_water_feature_spacing(center.map(|v| v - 1.), center.map(|v| v + 1.))
+                .unwrap();
+            assert!(hint > 0. && hint <= 0.5 * r.width.min(r.width_b));
+            checked += 1;
+        }
+        assert!(checked > 0);
+        assert_eq!(
+            t.seeded_water_feature_spacing([-100_000.; 2], [100_000.; 2]),
+            Some(4.)
+        );
+        let legacy = FbmTerrain::new(19, FbmParams::default()).unwrap();
+        assert_eq!(
+            legacy.seeded_water_feature_spacing([-100_000.; 2], [100_000.; 2]),
+            None
+        );
     }
 }

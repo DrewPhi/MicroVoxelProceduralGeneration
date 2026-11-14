@@ -1,0 +1,70 @@
+{
+  "schema": "frontier-seeded-weight-normalization-ab-v1",
+  "source_version": 8,
+  "seed": 19,
+  "native_voxel_m": 0.0625,
+  "params": {
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5
+  },
+  "tile_width_cells": 512,
+  "grid_step_cells": 64,
+  "before": "source-v8 interval per-weight alpha normalization; frozen pre-tightening release world rlib",
+  "after": "same source-v8 and geometry, intersected outward sorted-threshold positive weighted mean enclosure",
+  "proof": "analytic interval arithmetic; native queries only construct unchanged canonical proxy vertices, never certify unsampled extrema",
+  "rows": [
+    {
+      "tile_min_cells": [
+        -17920,
+        3072
+      ],
+      "native_center_top_cells": 4776,
+      "before_affine_error_m": 51.220974054,
+      "after_affine_error_m": 4.520060546,
+      "before_visible_height_range_m": [
+        292.26472359972786,
+        347.14395313012335
+      ],
+      "after_visible_height_range_m": [
+        292.310208270747,
+        307.5435732414933
+      ]
+    },
+    {
+      "tile_min_cells": [
+        -17408,
+        2560
+      ],
+      "native_center_top_cells": 4898,
+      "before_affine_error_m": 41.152281552,
+      "after_affine_error_m": 4.418246126,
+      "before_visible_height_range_m": [
+        296.5621177004929,
+        339.40228155209354
+      ],
+      "after_visible_height_range_m": [
+        296.6941345555253,
+        316.5277514978416
+      ]
+    },
+    {
+      "tile_min_cells": [
+        -14848,
+        4096
+      ],
+      "native_center_top_cells": 5568,
+      "before_affine_error_m": 15.855113938,
+      "after_affine_error_m": 4.357041635,
+      "before_visible_height_range_m": [
+        334.2447393847015,
+        368.2951213167385
+      ],
+      "after_visible_height_range_m": [
+        338.0595805996769,
+        361.79442413839985
+      ]
+    }
+  ]
+}

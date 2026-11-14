@@ -29,6 +29,8 @@ pub struct ColumnSummary {
     pub high: i64,
     pub deep: u32,
     pub fast: bool,
+    /// Surface/edit vertical envelope can be exclusively owned by native voxels.
+    pub owned: bool,
 }
 #[derive(Debug)]
 pub struct Snapshot {
@@ -624,7 +626,20 @@ fn build_region_options(
     // cells use the ordinary semantic palette, matching canonical material.
     let mut edits = HashMap::<usize, Vec<(usize, u32)>>::new();
     let mut edit_payload_bytes = 0usize;
+    let mut edit_extrema = HashMap::<(i64, i64), (i64, i64)>::new();
     for (index, c) in world.edit_cells().enumerate() {
+        if c.x >= min.x
+            && c.x < min.x + nx as i64 * 16
+            && c.z >= min.z
+            && c.z < min.z + nz as i64 * 16
+        {
+            let key = ((c.x - min.x).div_euclid(16), (c.z - min.z).div_euclid(16));
+            let e = edit_extrema
+                .entry(key)
+                .or_insert((c.y, c.y.saturating_add(1)));
+            e.0 = e.0.min(c.y);
+            e.1 = e.1.max(c.y.saturating_add(1));
+        }
         if index % 1024 == 0 && cancel() {
             return Err("NAADF edit index superseded".into());
         }
@@ -764,10 +779,14 @@ fn build_region_options(
             if cached_samples.is_none() {
                 out.sampled_columns += 256;
             }
-            safe_columns[cz * nx + cx] = fast
+            let owned = world.fbm_terrain().is_some() && world.topology_base_cells().is_none();
+            safe_columns[cz * nx + cx] = owned
                 && heights
                     .iter()
                     .all(|h| *h > min.y + 1 && *h < min.y + ny as i64 * 16 - 1);
+            let extrema = edit_extrema.get(&(cx as i64, cz as i64));
+            safe_columns[cz * nx + cx] &=
+                extrema.is_none_or(|&(lo, hi)| lo > min.y + 1 && hi < min.y + ny as i64 * 16 - 1);
             let low_ground = *ground_heights.iter().min().unwrap();
             let high_ground = *ground_heights.iter().max().unwrap();
             let low_visible = *heights.iter().min().unwrap();
@@ -775,10 +794,11 @@ fn build_region_options(
             let high_height = *heights.iter().max().unwrap();
             let uniform_deep = bands.iter().all(|b| b[2] == bands[0][2]);
             out.columns[cz * nx + cx] = ColumnSummary {
-                low: low_ground,
-                high: high_height,
+                low: extrema.map_or(low_ground, |e| low_ground.min(e.0)),
+                high: extrema.map_or(high_height, |e| high_height.max(e.1)),
                 deep: if uniform_deep { bands[0][2] } else { 0 },
                 fast,
+                owned,
             };
             let chunk_stages = [
                 Stage::NativeCellAssembly,

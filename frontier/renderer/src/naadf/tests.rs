@@ -449,7 +449,9 @@ fn gpu_matches_canonical_rays_for_source(
                     .flat_map(|(y, p)| [(y, p, false), (y, p, true)])
                     .collect()
             };
-            for (yaw, pitch, shadows) in views {
+            for (view_index, (yaw, pitch, shadows)) in views.into_iter().enumerate() {
+                // Check post-edit conservative root traversal against native DDA.
+                let edited_flag = if seeded && view_index % 2 == 0 { 8 } else { 0 };
                 camera.yaw = yaw;
                 camera.pitch = pitch;
                 let matrix = camera.matrix(DVec3::from_array(bounds[0]), 1.);
@@ -478,11 +480,13 @@ fn gpu_matches_canonical_rays_for_source(
                         right: basis[1],
                         up: basis[2],
                         projection: basis[3],
+                        edit_min: [i32::MIN; 4],
+                        edit_max: [i32::MAX; 4],
                         ring: [
                             volume.ring[0],
                             volume.ring[1],
                             volume.ring[2],
-                            volume.traversal_flags(),
+                            volume.traversal_flags() | edited_flag,
                         ],
                         cache: volume
                             .root_distance

@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 12;
+const REPRESENTATION_VERSION: u64 = 14;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -647,6 +647,7 @@ fn encode(t: &GeometryTile, b: &mut Vec<u8>) {
         }
     }
     f(b, t.empirical_error_m);
+    f(b, t.water_feature_error_m);
     for v in [
         t.certified_error_m,
         t.best_certified_vertical_error_m,
@@ -824,6 +825,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         None
     };
     let empirical_error_m = r.f()?;
+    let water_feature_error_m = r.f()?;
     let certified_error_m = r.opt()?;
     let best_certified_vertical_error_m = r.opt()?;
     let global_error_m = r.opt()?;
@@ -915,6 +917,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         guaranteed_solid_box,
         sampled_columns,
         empirical_error_m,
+        water_feature_error_m,
         certified_error_m,
         best_certified_vertical_error_m,
         global_error_m,
@@ -943,6 +946,8 @@ fn validate(t: &GeometryTile) -> bool {
             .is_some_and(|p| p[0][3] != -4.)
     };
     bbox(t.bounds)
+        && t.water_feature_error_m.is_finite()
+        && t.water_feature_error_m >= 0.
         && crate::spatial_appearance::valid_table(&t.face_profiles)
         && (t.proxy_triangles.is_empty()
             || (t.native_quads.is_empty()

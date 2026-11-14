@@ -11,6 +11,44 @@
 use crate::appearance_hierarchy::AppearanceColumn;
 use std::collections::HashMap;
 
+/// Explicit run boundaries retain the bed beneath an opaque water surface.
+/// Ground colors are surface, subsurface and deep rock, independent of water depth.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MapColumn {
+    pub height: i64,
+    pub ground_height: i64,
+    pub colors: [[f32; 3]; 3],
+    pub water_color: [f32; 3],
+}
+impl From<AppearanceColumn> for MapColumn {
+    fn from(c: AppearanceColumn) -> Self {
+        Self {
+            height: c.height,
+            ground_height: c.height,
+            colors: c.colors,
+            water_color: [0.; 3],
+        }
+    }
+}
+impl From<(i64, [[f32; 3]; 3])> for MapColumn {
+    fn from(c: (i64, [[f32; 3]; 3])) -> Self {
+        AppearanceColumn {
+            height: c.0,
+            colors: c.1,
+        }
+        .into()
+    }
+}
+impl MapColumn {
+    fn top_color(self) -> [f32; 3] {
+        if self.height > self.ground_height {
+            self.water_color
+        } else {
+            self.colors[0]
+        }
+    }
+}
+
 pub(crate) type Profile = [[f32; 4]; 5];
 const TARGET_SPACING_CELLS: i64 = 4;
 /// Number of intervals per patch axis. The memory-bounded default produces a
@@ -159,10 +197,10 @@ pub(crate) struct AppearanceMap {
 /// Point nodes cost at most five canonical queries. Filtered nodes use at most
 /// (2r+1)^2 native profiles (r <= 4), with source overlap reused locally;
 /// the caller may additionally reuse its immutable world/revision source cache.
-pub(crate) fn build_map(
+pub(crate) fn build_map<C: Into<MapColumn>>(
     origin: [i64; 2],
     edge: i64,
-    sample: impl FnMut(i64, i64) -> Result<AppearanceColumn, String>,
+    sample: impl FnMut(i64, i64) -> Result<C, String>,
 ) -> Result<AppearanceMap, String> {
     build_map_with_config(origin, edge, map_intervals(), map_prefilter(), sample)
 }
@@ -170,23 +208,23 @@ pub(crate) fn build_map(
 /// Explicit-density variant for bounded experiments and deterministic tests.
 /// Aligned patches have at most intervals+1 nodes per axis; an unaligned patch
 /// can need one extra node to preserve global alignment and full coverage.
-pub(crate) fn build_map_with_intervals(
+pub(crate) fn build_map_with_intervals<C: Into<MapColumn>>(
     origin: [i64; 2],
     edge: i64,
     intervals: usize,
-    sample: impl FnMut(i64, i64) -> Result<AppearanceColumn, String>,
+    sample: impl FnMut(i64, i64) -> Result<C, String>,
 ) -> Result<AppearanceMap, String> {
     build_map_with_config(origin, edge, intervals, MapPrefilter::Off, sample)
 }
 
 /// Deterministic explicit configuration; the density-only variant retains the
 /// original point reference regardless of process environment.
-pub(crate) fn build_map_with_config(
+pub(crate) fn build_map_with_config<C: Into<MapColumn>>(
     origin: [i64; 2],
     edge: i64,
     intervals: usize,
     prefilter: MapPrefilter,
-    sample: impl FnMut(i64, i64) -> Result<AppearanceColumn, String>,
+    sample: impl FnMut(i64, i64) -> Result<C, String>,
 ) -> Result<AppearanceMap, String> {
     build_map_with_config_and_predicate(origin, edge, intervals, prefilter, |_| true, sample)
 }
@@ -195,13 +233,13 @@ pub(crate) fn build_map_with_config(
 /// Excluded nodes retain the bit-identical point profile, including all native
 /// side strata. Filtering at allowed nodes still integrates canonical colors
 /// throughout its support; this policy does not relabel or modify the world.
-pub(crate) fn build_map_with_config_and_predicate(
+pub(crate) fn build_map_with_config_and_predicate<C: Into<MapColumn>>(
     origin: [i64; 2],
     edge: i64,
     intervals: usize,
     prefilter: MapPrefilter,
     allowed: impl Fn([f32; 3]) -> bool,
-    mut sample: impl FnMut(i64, i64) -> Result<AppearanceColumn, String>,
+    mut sample: impl FnMut(i64, i64) -> Result<C, String>,
 ) -> Result<AppearanceMap, String> {
     if !matches!(
         prefilter,
@@ -219,21 +257,25 @@ pub(crate) fn build_map_with_config_and_predicate(
     let dimension = map.dimension;
     // Cache only the native source payload, keeping this independent of the
     // hierarchy's representation or any mip/geometry-dependent cache key.
-    let mut columns = HashMap::<[i64; 2], (i64, [[f32; 3]; 3])>::new();
-    let mut column = |point: [i64; 2]| -> Result<(i64, [[f32; 3]; 3]), String> {
+    let mut columns = HashMap::<[i64; 2], MapColumn>::new();
+    let mut column = |point: [i64; 2]| -> Result<MapColumn, String> {
         if let Some(value) = columns.get(&point) {
             return Ok(*value);
         }
-        let value = sample(point[0], point[1])?;
+        let value: MapColumn = sample(point[0], point[1])?.into();
+        if value.ground_height > value.height {
+            return Err("appearance map ground top exceeds visible top".into());
+        }
         if value
             .colors
             .iter()
             .flatten()
+            .chain(value.water_color.iter())
             .any(|c| !c.is_finite() || *c < 0.)
         {
             return Err("appearance map requires finite nonnegative canonical colors".into());
         }
-        let value = (value.height, value.colors);
+
         columns.insert(point, value);
         Ok(value)
     };
@@ -298,18 +340,19 @@ pub(crate) fn layout(
 
 /// Evaluate exactly one node. Callers may memoize the result using world,
 /// position, effective footprint and surface-filter policy identity.
-pub(crate) fn node_profile(
+pub(crate) fn node_profile<C: Copy + Into<MapColumn>>(
     point: [i64; 2],
     spacing: i64,
     prefilter: MapPrefilter,
     allowed: &impl Fn([f32; 3]) -> bool,
-    column: &mut impl FnMut([i64; 2]) -> Result<(i64, [[f32; 3]; 3]), String>,
+    column: &mut impl FnMut([i64; 2]) -> Result<C, String>,
 ) -> Result<Profile, String> {
-    let node_prefilter = if prefilter != MapPrefilter::Off && !allowed(column(point)?.1[0]) {
-        MapPrefilter::Off
-    } else {
-        prefilter
-    };
+    let node_prefilter =
+        if prefilter != MapPrefilter::Off && !allowed(column(point)?.into().top_color()) {
+            MapPrefilter::Off
+        } else {
+            prefilter
+        };
     let profile = if node_prefilter == MapPrefilter::Footprint && spacing > 4 {
         let mut filtered = [[0.; 4]; 5];
         for probe in footprint_probes(point, spacing)? {
@@ -330,10 +373,10 @@ fn add_weighted(target: &mut Profile, source: Profile, weight: f32) {
     }
 }
 
-fn box_profile(
+fn box_profile<C: Copy + Into<MapColumn>>(
     point: [i64; 2],
     radius: i64,
-    column: &mut impl FnMut([i64; 2]) -> Result<(i64, [[f32; 3]; 3]), String>,
+    column: &mut impl FnMut([i64; 2]) -> Result<C, String>,
 ) -> Result<Profile, String> {
     if radius == 0 {
         return native_profile(point, column);
@@ -388,13 +431,15 @@ fn footprint_probes(point: [i64; 2], spacing: i64) -> Result<[[i64; 2]; 4], Stri
 }
 
 /// Canonical one-native-cell top and directional exposed side integrals.
-fn native_profile(
+fn native_profile<C: Copy + Into<MapColumn>>(
     point: [i64; 2],
-    column: &mut impl FnMut([i64; 2]) -> Result<(i64, [[f32; 3]; 3]), String>,
+    column: &mut impl FnMut([i64; 2]) -> Result<C, String>,
 ) -> Result<Profile, String> {
-    let (height, colors) = column(point)?;
+    let c: MapColumn = column(point)?.into();
+    let height = c.height;
+    let top = c.top_color();
     let mut profile = [[0.; 4]; 5];
-    profile[0] = [colors[0][0], colors[0][1], colors[0][2], 1.];
+    profile[0] = [top[0], top[1], top[2], 1.];
     for (axis, delta) in [[1_i64, 0_i64], [-1, 0], [0, 1], [0, -1]]
         .into_iter()
         .enumerate()
@@ -407,12 +452,22 @@ fn native_profile(
                 .checked_add(delta[1])
                 .ok_or("appearance map halo overflow")?,
         ];
-        let (neighbor_height, _) = column(neighbor)?;
+        let neighbor_height = column(neighbor)?.into().height;
         let drop = (i128::from(height) - i128::from(neighbor_height)).max(0);
-        // Canonical top / soil / deep strata are exactly one, eleven,
-        // then remaining native layers. No coarse slope invents faces.
-        let areas = [drop.min(1), (drop - 1).clamp(0, 11), (drop - 12).max(0)];
-        for (area, color) in areas.into_iter().zip(colors) {
+        // Intersect exposed [neighbor_height,height) with canonical ground
+        // strata and the independent water run. i128 avoids address overflow.
+        let ground_drop = (i128::from(c.ground_height) - i128::from(neighbor_height)).max(0);
+        let areas = [
+            ground_drop.min(1),
+            (ground_drop - 1).clamp(0, 11),
+            (ground_drop - 12).max(0),
+            drop - ground_drop,
+        ];
+        for (area, color) in
+            areas
+                .into_iter()
+                .zip([c.colors[0], c.colors[1], c.colors[2], c.water_color])
+        {
             let area = area as f32;
             for (channel, value) in color.into_iter().enumerate() {
                 profile[axis + 1][channel] += value * area;
@@ -426,6 +481,61 @@ fn native_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn water_and_bed_runs_match_exhaustive_native_faces() {
+        for water_depth in [0, 1, 2, 12, 13, 80] {
+            for neighbor_height in [-60, -13, -12, -2, -1, 0, 1, 12, 100] {
+                let ground = -7_i64;
+                let c = MapColumn {
+                    height: ground + water_depth,
+                    ground_height: ground,
+                    colors: [[0.2, 0.4, 0.1], [0.4, 0.2, 0.1], [0.3, 0.3, 0.3]],
+                    water_color: [0.1, 0.3, 0.8],
+                };
+                let mut sample = |p: [i64; 2]| {
+                    Ok(if p == [0, 0] {
+                        c
+                    } else {
+                        MapColumn {
+                            height: neighbor_height,
+                            ground_height: neighbor_height,
+                            ..c
+                        }
+                    })
+                };
+                let profile =
+                    node_profile([0, 0], 4, MapPrefilter::Off, &|_| true, &mut sample).unwrap();
+                let top = if water_depth > 0 {
+                    c.water_color
+                } else {
+                    c.colors[0]
+                };
+                assert_eq!(profile[0], [top[0], top[1], top[2], 1.]);
+                let mut expected = [0_f32; 4];
+                for y in neighbor_height..c.height {
+                    let color = if y >= ground {
+                        c.water_color
+                    } else if y == ground - 1 {
+                        c.colors[0]
+                    } else if y >= ground - 12 {
+                        c.colors[1]
+                    } else {
+                        c.colors[2]
+                    };
+                    for channel in 0..3 {
+                        expected[channel] += color[channel];
+                    }
+                    expected[3] += 1.;
+                }
+                for side in &profile[1..] {
+                    for channel in 0..4 {
+                        assert!((side[channel] - expected[channel]).abs() < 0.0002, "depth={water_depth}, neighbor={neighbor_height}, {side:?} != {expected:?}");
+                    }
+                }
+            }
+        }
+    }
 
     fn source(x: i64, z: i64) -> Result<AppearanceColumn, String> {
         Ok(AppearanceColumn {
@@ -1009,9 +1119,11 @@ mod tests {
         assert!(build_map_with_intervals([i64::MAX, 0], 32, 8, source).is_err());
         assert!(build_map_with_intervals([i64::MIN, 0], 32, 8, source).is_err());
         assert!(
-            build_map_with_intervals([0, 0], 32, 8, |_, _| Err("cancelled".into()))
-                .unwrap_err()
-                .contains("cancelled")
+            build_map_with_intervals([0, 0], 32, 8, |_, _| Err::<AppearanceColumn, String>(
+                "cancelled".into()
+            ))
+            .unwrap_err()
+            .contains("cancelled")
         );
         assert!(
             build_map_with_intervals([0, 0], 32, 8, |_, _| Ok(AppearanceColumn {

@@ -457,7 +457,11 @@ fn obsolete_refinement_demand(
             })
             && tile.best_certified_vertical_error_m.map_or(true, |error| {
                 let projected = weighted_near_detail_error(
-                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection),
+                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection)
+                        .max(projection.projected_error_px(
+                            tile.water_feature_error_m,
+                            world_bounds_to_view(tile.bounds, camera),
+                        )),
                     tile.conservative_surface_bounds,
                     camera.position,
                     near_detail,
@@ -1794,7 +1798,11 @@ impl AdaptiveStream {
         let e = tile.best_certified_vertical_error_m;
         let bound = e
             .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
-            .unwrap_or(f64::INFINITY);
+            .unwrap_or(f64::INFINITY)
+            .max(p.projected_error_px(
+                tile.water_feature_error_m,
+                world_bounds_to_view(tile.bounds, camera),
+            ));
         weighted_near_detail_error(
             bound,
             tile.conservative_surface_bounds,
@@ -2110,6 +2118,11 @@ impl CameraQueries {
             || -b.min[0] + self.tx * b.max[2] < 0.
             || b.max[1] + self.ty * b.max[2] < 0.
             || -b.min[1] + self.ty * b.max[2] < 0.)
+    }
+    pub(crate) fn feature_error(&self, error: f64, bounds: [[f64; 3]; 2]) -> f64 {
+        self.projection.map_or(f64::INFINITY, |p| {
+            p.projected_error_px(error, self.bounds(bounds))
+        })
     }
     pub(crate) fn vertical_error(&self, error: f64, bounds: [[f64; 3]; 2], origin: DVec3) -> f64 {
         let Some(p) = self.projection else {
@@ -3639,7 +3652,11 @@ impl DeliveryPolicy {
             let error_m = tile.best_certified_vertical_error_m;
             let error = error_m
                 .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
-                .unwrap_or(f64::INFINITY);
+                .unwrap_or(f64::INFINITY)
+                .max(p.projected_error_px(
+                    tile.water_feature_error_m,
+                    world_bounds_to_view(tile.bounds, camera),
+                ));
             let error = weighted_near_detail_error(
                 error,
                 tile.conservative_surface_bounds,

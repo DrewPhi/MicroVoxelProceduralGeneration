@@ -982,10 +982,11 @@ impl AdaptiveView {
         json.pop();
         let offenders = self.stats.current_offenders.iter().flatten().map(|offender| {
             let key = offender.key;
-            format!("{{\"key\":{{\"min\":{:?},\"width_cells\":{},\"step_cells\":{},\"edge_steps\":{:?},\"source_revision\":{}}},\"canonical_bounds\":{:?},\"proxy_bounds\":{:?},\"cached_vertical_error_m\":{},\"projected_error_px\":{},\"current_bounds_visible\":true,\"current_occlusion_rejected\":false}}",
+            format!("{{\"key\":{{\"min\":{:?},\"width_cells\":{},\"step_cells\":{},\"edge_steps\":{:?},\"source_revision\":{}}},\"canonical_bounds\":{:?},\"proxy_bounds\":{:?},\"cached_vertical_error_m\":{},\"water_feature_spacing_debt_m\":{},\"projected_error_px\":{},\"current_bounds_visible\":true,\"current_occlusion_rejected\":false}}",
                 key.min, key.width_cells, key.step_cells, key.edge_steps, key.source_revision,
                 offender.canonical_bounds, offender.proxy_bounds,
                 offender.cached_vertical_error_m.map_or("null".into(), |v| v.to_string()),
+                offender.water_feature_error_m,
                 offender.projected_error_px.map_or("null".into(), |v| v.to_string()))
         }).collect::<Vec<_>>().join(",");
         json.push_str(&format!(",\"current_gpu_offenders\":[{}]}}", offenders));

@@ -2,6 +2,11 @@
 use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
+    pub live_water: bool,
+    pub water_active_radius: u32,
+    pub water_history_cells: usize,
+    pub water_save: Option<PathBuf>,
+    pub water_demo: bool,
     pub atmosphere: Option<bool>,
     pub visual: crate::settings::VisualSettings,
     pub render_scale: f32,
@@ -57,6 +62,11 @@ pub fn parse() -> Result<Option<Options>> {
 }
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     use crate::settings::ResourceProfile;
+    let mut live_water = false;
+    let mut water_active_radius = 1u32;
+    let mut water_history_cells = 1_048_576usize;
+    let mut water_save = None;
+    let mut water_demo = false;
     let mut explicit_naadf = false;
     let mut explicit_msaa = false;
     let mut seeded_preset = false;
@@ -120,6 +130,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut native_bins = true;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--water-active-radius" => {water_active_radius=args.next().ok_or("water active radius requires 1..2 metres")?.parse()?;if !(1..=2).contains(&water_active_radius){return Err("--water-active-radius requires 1..2 metres".into());}}
+            "--water-history-cells" => {water_history_cells=args.next().ok_or("water history requires cell count")?.parse()?;if !(32768..=16_777_216).contains(&water_history_cells){return Err("--water-history-cells requires 32768..16777216".into());}}
+
+            "--live-water" => { live_water = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--live-water requires on|off".into())}; }
+            "--water-save" => { water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?)); }
+            "--water-demo" => { live_water = true; water_demo = true; }
+
             "--visibility-benchmark" => {visual.visibility_benchmark=true;}
             "--naadf" => { explicit_naadf=true; visual.naadf_enabled = match args.next().as_deref() {Some("on")=>true,Some("off")=>false,_=>return Err("--naadf requires on|off".into())}; }
             "--naadf-gpu-distance" => {visual.naadf_gpu_distance=match args.next().as_deref(){Some("on")=>true,Some("off")=>false,_=>return Err("--naadf-gpu-distance requires on|off".into())};}
@@ -550,6 +567,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             }
             "--help" | "-h" => {
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius 1..256 (integer metres, enables experiment) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
+                println!("Live native water (opt-in): --live-water on --water-save PATH saves terrain edits and fluid state atomically on clean exit, reloads the same source/seed on next launch. Requires adaptive scene, NAADF on/follow on/GPU distance off. --water-demo builds a two-chamber basin; dam opens after 20 fixed ticks (2 simulated seconds); G opens early, P adds one counted water cell at the aim. Left/right edit terrain. 10Hz physics; --water-active-radius 1|2 selects a 3m|5m active cube (default 1); --water-history-cells 32768..16777216 sets the persistent cell cap (default 1048576, at least the active cube). Sealed unloaded borders, dormant history retained until the cap; no swimming/pressure/erosion.");
                 println!("Visual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded Alpine adaptive geometry only). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
@@ -769,7 +787,29 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     adaptive_build_mib = visual.build_mib;
     adaptive_workers = visual.workers;
     adaptive_refinements = visual.refinements;
+    if live_water && water_history_cells < ((water_active_radius as usize * 2 + 1).pow(3) * 4096) {
+        return Err("--water-history-cells must fit the complete active region; increase history or lower active radius".into());
+    }
+    if live_water && (scene != "adaptive" || !visual.naadf_enabled) {
+        return Err("live water requires --scene adaptive and --naadf on".into());
+    }
+    if water_save.is_some() && !live_water {
+        return Err("--water-save requires --live-water on".into());
+    }
+    if live_water && (visual.naadf_gpu_distance || !visual.naadf_follow) {
+        return Err("live water requires --naadf-follow on --naadf-gpu-distance off".into());
+    }
+    if live_water && capture.is_some() {
+        return Err(
+            "live water uses window ticks; use --frames/--seconds with --capture-on-exit".into(),
+        );
+    }
     Ok(Some(Options {
+        live_water,
+        water_active_radius,
+        water_history_cells,
+        water_save,
+        water_demo,
         atmosphere,
         visual,
         render_scale,
@@ -1143,5 +1183,28 @@ mod tests {
         let i = args.iter().position(|v| v == "300").unwrap();
         args[i] = "NaN".into();
         assert!(parse_args(args.into_iter()).is_err());
+    }
+    #[test]
+    fn live_water_requires_supported_native_publication_and_is_opt_in() {
+        let parse = |args: &[&str]| {
+            parse_args(args.iter().map(|s| s.to_string()))
+                .unwrap()
+                .unwrap()
+        };
+        assert!(!parse(&[]).live_water);
+        let live = parse(&["--preset", "seeded-world", "--water-demo"]);
+        assert!(live.live_water && live.water_demo);
+        assert!(parse_args(
+            ["--live-water", "on", "--naadf", "off"]
+                .into_iter()
+                .map(str::to_string)
+        )
+        .is_err());
+        assert!(parse_args(
+            ["--water-save", "unused.save"]
+                .into_iter()
+                .map(str::to_string)
+        )
+        .is_err());
     }
 }

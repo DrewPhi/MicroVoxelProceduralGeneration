@@ -1,6 +1,6 @@
 // Shared exact hierarchy for primary rays and occlusion queries. Generated
 // with group0 for the ray pass and the shared near-shadow group for mesh receivers.
-struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>,ring:vec4<u32>,cache:vec4<u32>};
+struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>,ring:vec4<u32>,cache:vec4<u32>,edit_min:vec4<i32>,edit_max:vec4<i32>};
 struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE) var<uniform> naadf:NaadfCamera;
 @group(NAADF_GROUP) @binding(NAADF_BASE+1u) var chunks:texture_3d<u32>;
@@ -69,7 +69,14 @@ override traversal_local_exit_repair:bool=false;
 fn root_repaired(word:u32)->bool {
     return traversal_direct_roots && (word&0xc0000000u)==0xc0000000u;
 }
-fn root_decode(word:u32)->u32 {
+fn root_decode(word:u32, cp:vec3<u32>)->u32 {
+    // Content edits invalidate old inter-root air proofs. Keep exact one-root
+    // traversal; the rebuilt block/leaf proofs remain local and valid.
+    if (naadf.ring.w&8u)!=0u && (word&0xc0000000u)==0u {
+        let lo=vec3<i32>(cp)-trace_proof_faces(word,5u,false);
+        let hi=vec3<i32>(cp)+trace_proof_faces(word,5u,true);
+        if all(hi>=naadf.edit_min.xyz) && all(lo<=naadf.edit_max.xyz) {return 0u;}
+    }
     return select(word,word&0x3fffffffu,root_repaired(word));
 }
 
@@ -142,7 +149,7 @@ fn trace_diagnostic_crossing(o:vec3<f32>,d:vec3<f32>,cell:vec3<i32>,t:f32)->f32 
         let slot=select(address,address-size,address>=size);
         node=cached_root_word(cp,textureLoad(chunks,vec3<i32>(slot.yxz),0).x,0u,false);
     }
-    node=root_decode(node);
+    node=root_decode(node,cp);
     if (node&0x80000000u)!=0u {
         let bp=(c%16u)/4u;node=blocks[(node&0x3fffffffu)+bp.x+4u*(bp.y+4u*bp.z)];
         scale=4u;bits=2u;parent_lo=vec3<i32>(cp*16u);parent_hi=parent_lo+vec3(16);
@@ -316,7 +323,7 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
             let slot=(cp+naadf.ring.xyz)%vec3(naadf.extent.w);
             node=textureLoad(chunks,vec3<i32>(slot.yxz),0).x;
         }
-        node=root_decode(node);
+        node=root_decode(node,cp);
         if (node&0x80000000u)!=0u {
             if measure {visits.y+=1u;}
             trace_metric(u32(occlusion),2u,1u);trace_metric(u32(occlusion),5u,1u);
@@ -478,7 +485,7 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
         }
         let repaired_here=root_repaired(node);
         if repaired_here {flags|=TRACE_REPAIRED_PATH;}
-        node=root_decode(node);
+        node=root_decode(node,cp);
         let root_empty=(node&0xc0000000u)==0u;
         if (node&0x80000000u)!=0u {
             if measure {visits.y+=1u;}

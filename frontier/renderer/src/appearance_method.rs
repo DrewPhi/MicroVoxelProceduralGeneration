@@ -48,16 +48,18 @@ pub(crate) fn selected() -> Method {
     *VALUE.get_or_init(|| from_environment(Method::Baseline))
 }
 
-/// Water adds a fourth vertical run. The legacy detailed-map experiments do
-/// not encode that run yet; use the canonical run-aware path and report it.
+/// Detailed maps preserve the independent water and ground runs. The older
+/// hierarchy/visibility experiments still assume three bands and fall back.
 pub(crate) fn for_world(world: &frontier_world::World) -> Method {
+    let method = selected();
     if world
         .fbm_terrain()
         .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+        && matches!(method, Method::Hierarchy | Method::Visibility)
     {
         Method::Baseline
     } else {
-        selected()
+        method
     }
 }
 

@@ -373,3 +373,48 @@ fn seeded_flat_ocean_has_no_artificial_quantization_error() {
     }
     panic!("survey must contain a simple below-sea region");
 }
+
+#[test]
+fn normalized_channel_weights_keep_motion_offender_bounds_useful() {
+    let t = FbmTerrain::new(19, params()).unwrap();
+    // These source-v8 route tiles previously reported 51.22, 41.15 and 15.86 m
+    // affine error because independently normalized weights lost correlation.
+    for min in [[-17920, 3072], [-17408, 2560], [-14848, 4096]] {
+        let mut worst = 0_f64;
+        for z in (min[1]..min[1] + 512).step_by(64) {
+            for x in (min[0]..min[0] + 512).step_by(64) {
+                let region = ColumnBox {
+                    min: [x, z],
+                    size_cells: [64; 2],
+                };
+                let bound = bound_native_height(&t, region, BoundBudget::default()).unwrap();
+                let point = |x: i64, z: i64| {
+                    [
+                        x as f64 * VOXEL_SIZE,
+                        t.column_cells(x, z).visible_top as f64 * VOXEL_SIZE,
+                        z as f64 * VOXEL_SIZE,
+                    ]
+                };
+                let center = point(x + 32, z + 32);
+                let corners = [
+                    point(x, z),
+                    point(x, z + 64),
+                    point(x + 64, z + 64),
+                    point(x + 64, z),
+                ];
+                for i in 0..4 {
+                    worst = worst.max(
+                        bound
+                            .triangle_error([center, corners[i], corners[(i + 1) % 4]])
+                            .unwrap(),
+                    );
+                }
+                verify(&t, region, BoundBudget::default());
+            }
+        }
+        assert!(
+            worst < 6.,
+            "route region {min:?} lost useful weighted normalization: {worst}"
+        );
+    }
+}

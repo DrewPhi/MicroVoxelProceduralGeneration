@@ -169,6 +169,7 @@ fn clone_geometry(tile: &GeometryTile) -> Result<GeometryTile, String> {
         empirical_error_m: tile.empirical_error_m,
         certified_error_m: tile.certified_error_m,
         best_certified_vertical_error_m: tile.best_certified_vertical_error_m,
+        water_feature_error_m: tile.water_feature_error_m,
         global_error_m: tile.global_error_m,
         affine_error_m: tile.affine_error_m,
         affine_height_range_m: tile.affine_height_range_m,

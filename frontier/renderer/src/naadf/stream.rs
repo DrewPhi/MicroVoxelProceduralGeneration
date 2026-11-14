@@ -320,11 +320,47 @@ impl State {
                     .copied()
                     .or_else(|| self.summary(x, z))
                     .is_some_and(|s| {
-                        s.fast && s.low > r.lo[1] * 16 + 1 && s.high < r.hi[1] * 16 - 1
+                        s.owned && s.low > r.lo[1] * 16 + 1 && s.high < r.hi[1] * 16 - 1
                     })
             })
             .collect();
         Arc::new(Ownership::new(r.bounds(), self.n, &safe))
+    }
+    /// Rebuild only edited one-meter roots. Old allocations remain reachable until
+    /// publication; cancellation releases only the candidate allocations.
+    pub fn prepare_refresh(
+        &mut self,
+        world: &World,
+        cells: &[Cell],
+        limit: usize,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Change, String> {
+        if self.occupancy.is_some() || self.gpu_distance {
+            return Err("incremental edits require ordinary root traversal".into());
+        }
+        let points: std::collections::BTreeSet<Point> = cells
+            .iter()
+            .map(|c| [c.x.div_euclid(16), c.y.div_euclid(16), c.z.div_euclid(16)])
+            .filter(|p| {
+                [0, 2]
+                    .iter()
+                    .all(|&a| p[a] >= self.region.lo[a] && p[a] < self.region.hi[a])
+            })
+            // Out-of-height edits still change whether the native column can
+            // own raster coverage. Rebuild a boundary root to refresh extrema.
+            .map(|mut p| {
+                p[1] = p[1].clamp(self.region.lo[1], self.region.hi[1] - 1);
+                p
+            })
+            .collect();
+        let regions = points
+            .into_iter()
+            .map(|lo| Region {
+                lo,
+                hi: lo.map(|v| v + 1),
+            })
+            .collect();
+        self.prepare_regions(world, self.region, limit, cancel, Some(regions))
     }
     pub fn prepare(
         &mut self,
@@ -333,6 +369,17 @@ impl State {
         limit: usize,
         cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Change, String> {
+        self.prepare_regions(world, next, limit, cancel, None)
+    }
+    fn prepare_regions(
+        &mut self,
+        world: &World,
+        next: Region,
+        limit: usize,
+        cancel: &(dyn Fn() -> bool + Sync),
+        replacement: Option<Vec<Region>>,
+    ) -> Result<Change, String> {
+        let refreshing = replacement.is_some();
         if next.dims().iter().any(|&d| d == 0 || d > self.n) {
             return Err("NAADF region exceeds reserved storage radius".into());
         }
@@ -355,7 +402,10 @@ impl State {
                 }
             }
         }
-        let cached = |x, z| self.summary(x, z);
+        if let Some(replacement) = replacement {
+            regions = replacement;
+        }
+        let cached = |x, z| if refreshing { None } else { self.summary(x, z) };
         let gpu_distance = self.gpu_distance;
         let mut snapshots = vec![];
         for batch in regions.chunks(4) {
@@ -576,7 +626,21 @@ impl State {
             let mut old = self.region;
             old.lo[1] = overlap.lo[1];
             old.hi[1] = overlap.hi[1];
-            let retiring = self.owner(old, &HashMap::new()).crop(overlap.bounds());
+            let retiring_columns = columns
+                .iter()
+                .map(|(&(x, z), &new)| {
+                    let mut shared = new;
+                    if let Some(previous) = self.summary(x, z) {
+                        shared.low = shared.low.min(previous.low);
+                        shared.high = shared.high.max(previous.high);
+                        shared.owned &= previous.owned;
+                    } else {
+                        shared.owned = false;
+                    }
+                    ((x, z), shared)
+                })
+                .collect();
+            let retiring = self.owner(old, &retiring_columns).crop(overlap.bounds());
             let ring = std::array::from_fn(|a| {
                 (self.ring[a] as i64 + next.lo[a] - self.region.lo[a]).rem_euclid(self.n as i64)
                     as u32
@@ -641,16 +705,29 @@ impl State {
         let old = self.region;
         let ring = self.ring;
         let new = change.region;
+        let mut replaced = std::collections::HashSet::new();
+        for r in &change.roots {
+            // Leading strips already retire outgoing slots below.
+            let overlap = r.region.intersection(old);
+            for z in overlap.lo[2]..overlap.hi[2] {
+                for x in overlap.lo[0]..overlap.hi[0] {
+                    for y in overlap.lo[1]..overlap.hi[1] {
+                        replaced.insert(self.index([x, y, z]) as u32);
+                    }
+                }
+            }
+        }
         for (_, word) in self.mixed_roots.extract_if(|&index, _| {
             let index = index as usize;
             let slot = [(index / n) % n, index % n, index / (n * n)];
-            (0..3).any(|axis| {
-                if old.lo[axis] == new.lo[axis] {
-                    return false;
-                }
-                let cell = old.lo[axis] + ((slot[axis] + n - ring[axis]) % n) as i64;
-                cell < new.lo[axis] || cell >= new.hi[axis]
-            })
+            replaced.contains(&(index as u32))
+                || (0..3).any(|axis| {
+                    if old.lo[axis] == new.lo[axis] {
+                        return false;
+                    }
+                    let cell = old.lo[axis] + ((slot[axis] + n - ring[axis]) % n) as i64;
+                    cell < new.lo[axis] || cell >= new.hi[axis]
+                })
         }) {
             let slot = (word & MASK) as usize / 64;
             for word in &self.blocks[slot * 64..slot * 64 + 64] {
@@ -740,6 +817,147 @@ mod tests {
         }
         assert_eq!(target(a, [0.; 3], [0.; 3], 0.), None);
         assert!(target(a, [-3., 0., 0.], [0.; 3], 0.).unwrap().lo[0] < a.lo[0]);
+    }
+    #[test]
+    fn out_of_height_edits_refresh_column_ownership_before_advancing_source() {
+        let base = World::fbm(
+            19,
+            frontier_world::FbmParams {
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let eye = [0., base.height_m(0., 0.) + 1., 0.];
+        for above in [false, true] {
+            let mut world = base.clone();
+            let first =
+                data::build(&world, eye, 4, 128 * 1048576, &AtomicU32::new(0), || false).unwrap();
+            let mut state = State::new_with_encoding(
+                first,
+                [16 * 1048576, 32 * 1048576, 1048576],
+                Encoding::Wide32,
+            );
+            let c = Cell {
+                x: 0,
+                z: 0,
+                y: if above {
+                    state.region.hi[1] * 16 + 19
+                } else {
+                    state.region.lo[1] * 16 - 19
+                },
+            };
+            let key = crate::adaptive_geometry::TileKey {
+                min: [0, 0],
+                width_cells: 1,
+                step_cells: 1,
+                edge_steps: [1; 4],
+                source_revision: 0,
+            };
+            assert!(state.owner(state.region, &HashMap::new()).terrain(key));
+            world.set(
+                c,
+                if above {
+                    frontier_world::Material::Stone
+                } else {
+                    frontier_world::Material::Air
+                },
+            );
+            let change = state
+                .prepare_refresh(&world, &[c], 128 * 1048576, &|| false)
+                .unwrap();
+            assert_eq!(
+                change.roots.len(),
+                1,
+                "outside-Y edits still need a boundary-root summary refresh"
+            );
+            let summary = change.columns[&(0, 0)];
+            if above {
+                assert!(summary.high >= c.y + 1);
+            } else {
+                assert!(summary.low <= c.y);
+            }
+            assert!(
+                !change.owner.terrain(key),
+                "out-of-height content must restore raster ownership"
+            );
+            assert!(
+                !change.retiring.terrain(key),
+                "fallback must be restored before atomic native publication"
+            );
+            state.finish(change, true);
+            assert!(!state.owner(state.region, &HashMap::new()).terrain(key));
+        }
+    }
+    #[test]
+    fn content_refresh_replaces_roots_and_abort_preserves_old_allocations() {
+        let mut world = World::fbm(19, frontier_world::FbmParams::default()).unwrap();
+        let eye = [0., world.height_m(0., 0.) + 1., 0.];
+        let first =
+            data::build(&world, eye, 2, 128 * 1048576, &AtomicU32::new(0), || false).unwrap();
+        let mut voxels = first.voxels.clone();
+        let mut state = State::new_with_encoding(
+            first,
+            [16 * 1048576, 32 * 1048576, 1048576],
+            Encoding::Wide32,
+        );
+        let c = Cell::from_meters(eye);
+        let root = [c.x.div_euclid(16), c.y.div_euclid(16), c.z.div_euclid(16)];
+        let read = |state: &State, voxels: &[u32]| {
+            let mut v = state.chunks[state.index(root)];
+            let [x, y, z] = [
+                c.x.rem_euclid(16) as usize,
+                c.y.rem_euclid(16) as usize,
+                c.z.rem_euclid(16) as usize,
+            ];
+            if v & CHILD != 0 {
+                v = state.blocks[(v & MASK) as usize + x / 4 + 4 * (y / 4 + 4 * (z / 4))];
+                if v & CHILD != 0 {
+                    v = Encoding::Wide32.load(
+                        voxels,
+                        (v & MASK) as usize + x % 4 + 4 * (y % 4 + 4 * (z % 4)),
+                    );
+                }
+            }
+            if v & FULL != 0 {
+                Some(state.palette[(v & MASK) as usize].material)
+            } else {
+                None
+            }
+        };
+        for material in [
+            frontier_world::Material::Water,
+            frontier_world::Material::Stone,
+            frontier_world::Material::Air,
+            frontier_world::Material::Water,
+        ] {
+            let before = read(&state, &voxels);
+            world.set(c, material);
+            let change = state
+                .prepare_refresh(&world, &[c, c], 128 * 1048576, &|| false)
+                .unwrap();
+            assert_eq!(change.roots.len(), 1);
+            state.finish(change, false);
+            assert_eq!(read(&state, &voxels), before);
+            let change = state
+                .prepare_refresh(&world, &[c], 128 * 1048576, &|| false)
+                .unwrap();
+            for w in &change.writes {
+                if w.kind == 1 {
+                    voxels.resize(voxels.len().max(w.word + w.data.len()), 0);
+                    voxels[w.word..w.word + w.data.len()].copy_from_slice(&w.data);
+                }
+            }
+            state.finish(change, true);
+            assert_eq!(
+                read(&state, &voxels),
+                if material == frontier_world::Material::Air {
+                    None
+                } else {
+                    Some(material as u32)
+                }
+            );
+        }
     }
     #[test]
     fn arena_reclaims_and_coalesces() {

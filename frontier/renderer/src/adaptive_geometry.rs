@@ -148,6 +148,8 @@ pub struct GeometryTile {
     pub certified_error_m: Option<f64>,
     /// Minimum eligible source certificate, cached once rather than per camera.
     pub best_certified_vertical_error_m: Option<f64>,
+    /// Independent river/lake display-spacing debt; NEVER a geometry certificate.
+    pub water_feature_error_m: f64,
     pub global_error_m: Option<f64>,
     pub affine_error_m: Option<f64>,
     pub affine_height_range_m: Option<[f64; 2]>,
@@ -405,6 +407,21 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
     let Some(terrain) = world.fbm_terrain() else {
         return;
     };
+    // The sea plane is already exact geometry. Ocean shoreline area filtering
+    // is a separate appearance gate; river hints must not refine flat oceans.
+    let proven_sea_plane =
+        tile.affine_height_range_m == Some([0., 0.]) || tile.exact_height_range_m == Some([0., 0.]);
+    if !tile.exact && !proven_sea_plane {
+        let min = tile.key.min.map(|v| v as f64 * VOXEL_SIZE);
+        let max = min.map(|v| v + tile.key.width_cells as f64 * VOXEL_SIZE);
+        if terrain
+            .seeded_water_feature_spacing(min, max)
+            .is_some_and(|limit| tile.key.step_cells as f64 * VOXEL_SIZE > limit)
+        {
+            tile.water_feature_error_m =
+                tile.key.step_cells as f64 * VOXEL_SIZE * std::f64::consts::SQRT_2;
+        }
+    }
     let envelope = frontier_world::summary::fbm_height_envelope(terrain);
     tile.global_error_m = if tile.exact {
         None
@@ -1274,6 +1291,7 @@ fn finish(
         empirical_error_m,
         certified_error_m: None,
         best_certified_vertical_error_m: None,
+        water_feature_error_m: 0.,
         global_error_m: None,
         affine_error_m: None,
         affine_height_range_m: None,
@@ -2270,18 +2288,11 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        // Three-band appearance experiments cannot represent a separate water run.
-        // SeededWorld uses the canonical run-aware baseline until those opt-in
-        // experiments support water ownership explicitly.
         let seeded = self
             .world
             .fbm_terrain()
             .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
-        let method = if seeded {
-            crate::appearance_method::Method::Baseline
-        } else {
-            crate::appearance_method::selected()
-        };
+        let method = crate::appearance_method::for_world(self.world);
         let shared_near = near_profile_shared();
         #[cfg(test)]
         let shared_near = self.experiment.map_or(shared_near, |mode| {
@@ -2464,6 +2475,18 @@ impl Generator<'_> {
             ],
         })
     }
+    fn map_column(&mut self, gx: i64, gz: i64) -> Result<crate::appearance_map::MapColumn, String> {
+        let x = gx - self.key.min[0];
+        let z = gz - self.key.min[1];
+        let height = self.height(x, z)?;
+        let c = self.heights[&[x, z]];
+        Ok(crate::appearance_map::MapColumn {
+            height,
+            ground_height: c.ground_height,
+            colors: c.bands.map(Material::color),
+            water_color: Material::Water.color(),
+        })
+    }
     fn note_profile_mean(&mut self, values: &[[[f32; 4]; 5]], area_scale: f64) {
         for value in values {
             for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
@@ -2565,7 +2588,7 @@ impl Generator<'_> {
                 crate::appearance_map::map_intervals(),
                 filter,
                 allowed,
-                |gx, gz| self.appearance_column(gx, gz),
+                |gx, gz| self.map_column(gx, gz),
             )?
         } else {
             let mut map =
@@ -2608,7 +2631,7 @@ impl Generator<'_> {
                                         if let Some(v) = columns.get(&p) {
                                             return Ok(*v);
                                         }
-                                        let c = self.appearance_column(p[0], p[1])?;
+                                        let c = self.map_column(p[0], p[1])?;
                                         if c.height < limits[0] {
                                             limits[0] = c.height;
                                             extrema[0] = p;
@@ -2617,7 +2640,7 @@ impl Generator<'_> {
                                             limits[1] = c.height;
                                             extrema[1] = p;
                                         }
-                                        let value = (c.height, c.colors);
+                                        let value = c;
                                         columns.insert(p, value);
                                         Ok(value)
                                     },
@@ -3699,6 +3722,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn river_spacing_debt_is_separate_from_vertical_certificates() {
+        let world = World::fbm(
+            19,
+            frontier_world::FbmParams {
+                recipe: frontier_world::FbmRecipe::SeededWorld,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let key = TileKey {
+            min: [-16384, 0],
+            width_cells: 8192,
+            step_cells: 512,
+            edge_steps: [512; 4],
+            source_revision: 0,
+        };
+        let tile = build(&world, key, || false).unwrap();
+        assert!(tile.water_feature_error_m > 0.);
+        let geometric = [
+            tile.certified_error_m,
+            tile.affine_error_m,
+            tile.global_error_m,
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(f64::min);
+        assert_eq!(tile.best_certified_vertical_error_m, geometric);
+        let world = World::fbm(
+            19,
+            frontier_world::FbmParams {
+                recipe: frontier_world::FbmRecipe::Legacy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let legacy = build(&world, key, || false).unwrap();
+        assert_eq!(legacy.water_feature_error_m, 0.);
+    }
+
+    #[test]
     fn map_node_memo_preserves_bits_and_height_extrema_across_jobs() {
         fn run(
             world: &World,
@@ -3751,35 +3814,41 @@ mod tests {
             }
             (g.face_profiles, range, g.heights.len())
         }
-        let world = World::fbm(
-            7,
-            frontier_world::FbmParams {
-                recipe: frontier_world::FbmRecipe::Alpine,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        for filter in [
-            crate::appearance_map::MapPrefilter::Off,
-            crate::appearance_map::MapPrefilter::NativeBox { radius_cells: 2 },
-            crate::appearance_map::MapPrefilter::Footprint,
+        for recipe in [
+            frontier_world::FbmRecipe::Legacy,
+            frontier_world::FbmRecipe::Alpine,
+            frontier_world::FbmRecipe::SeededWorld,
         ] {
-            let mut sources = SourceSamples::new(32 * 1024 * 1024);
-            let original = run(&world, &mut sources, false, filter);
-            let cold = run(&world, &mut sources, true, filter);
-            let warm = run(&world, &mut sources, true, filter);
-            let bits = |v: &Vec<[[f32; 4]; 5]>| {
-                v.iter()
-                    .flatten()
-                    .flatten()
-                    .map(|x| x.to_bits())
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(bits(&original.0), bits(&cold.0));
-            assert_eq!(bits(&cold.0), bits(&warm.0));
-            assert_eq!(original.1, cold.1);
-            assert_eq!(original.1, warm.1);
-            assert!(warm.2 < cold.2, "warm memo must avoid native sample work");
+            let world = World::fbm(
+                7,
+                frontier_world::FbmParams {
+                    recipe,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for filter in [
+                crate::appearance_map::MapPrefilter::Off,
+                crate::appearance_map::MapPrefilter::NativeBox { radius_cells: 2 },
+                crate::appearance_map::MapPrefilter::Footprint,
+            ] {
+                let mut sources = SourceSamples::new(32 * 1024 * 1024);
+                let original = run(&world, &mut sources, false, filter);
+                let cold = run(&world, &mut sources, true, filter);
+                let warm = run(&world, &mut sources, true, filter);
+                let bits = |v: &Vec<[[f32; 4]; 5]>| {
+                    v.iter()
+                        .flatten()
+                        .flatten()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(&original.0), bits(&cold.0));
+                assert_eq!(bits(&cold.0), bits(&warm.0));
+                assert_eq!(original.1, cold.1);
+                assert_eq!(original.1, warm.1);
+                assert!(warm.2 < cold.2, "warm memo must avoid native sample work");
+            }
         }
     }
     #[test]

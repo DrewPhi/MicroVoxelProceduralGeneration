@@ -2,7 +2,7 @@
 
 ## Current checkpoint
 
-The opt-in [seeded world checkpoint](frontier/SEEDED_WORLD.md) adds globally addressed FBM geography, cached climate, bounded local drainage and canonical water/bed material runs. Launch `./run.sh --preset seeded-world --seed 19` from `frontier/`. Its remaining quality and future fluid gates are tracked in [#87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87).
+The opt-in [seeded world checkpoint](frontier/SEEDED_WORLD.md) adds globally addressed FBM geography, cached climate, bounded local drainage and canonical water/bed material runs. Launch `./run.sh --preset seeded-world --seed 19` from `frontier/`. The [experimental local fluid driver](frontier/LIVE_WATER.md) uses integer native-cell mass and transactional NAADF updates; its broader streaming/quality gates are tracked in [#87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87).
 
 The default preview uses exact NAADF voxels inside a growing 64 m cube
 radius and adaptive raster terrain beyond it, with Regional terrain. Press **Esc** for live sun, atmosphere and exposure controls; image

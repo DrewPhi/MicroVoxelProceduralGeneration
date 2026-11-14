@@ -180,6 +180,7 @@ struct Cluster {
     guaranteed_solid: Option<Aabb>,
     proxy_bounds: [[f64; 3]; 2],
     best_error_m: Option<f64>,
+    water_feature_error_m: f64,
     certificate_kind: u8,
     slot: u32,
 }
@@ -190,6 +191,7 @@ pub struct VisibleOffender {
     pub canonical_bounds: [[f64; 3]; 2],
     pub proxy_bounds: [[f64; 3]; 2],
     pub cached_vertical_error_m: Option<f64>,
+    pub water_feature_error_m: f64,
     pub projected_error_px: Option<f64>,
 }
 #[derive(Default, Clone, Copy, Debug)]
@@ -1226,6 +1228,7 @@ impl AdaptiveGpu {
                 guaranteed_solid: tile.guaranteed_solid_box,
                 proxy_bounds: tile.bounds,
                 certificate_kind: certificate_kind(tile),
+                water_feature_error_m: tile.water_feature_error_m,
                 best_error_m: tile
                     .best_certified_vertical_error_m
                     .filter(|e| e.is_finite() && *e >= 0.),
@@ -1267,6 +1270,7 @@ impl AdaptiveGpu {
                 .best_certified_vertical_error_m
                 .filter(|e| e.is_finite() && *e >= 0.)
                 != old.best_error_m
+            || tile.water_feature_error_m != old.water_feature_error_m
             || certificate_kind(tile) != old.certificate_kind
         {
             return Err("appearance promotion changed geometry certificate".into());
@@ -1514,9 +1518,12 @@ impl AdaptiveGpu {
                 3 => stats.current_global_bound_clusters += 1,
                 _ => {}
             }
-            let error = c.best_error_m.map_or(f64::INFINITY, |e| {
-                queries.vertical_error(e, c.proxy_bounds, c.origin)
-            });
+            let error = c
+                .best_error_m
+                .map_or(f64::INFINITY, |e| {
+                    queries.vertical_error(e, c.proxy_bounds, c.origin)
+                })
+                .max(queries.feature_error(c.water_feature_error_m, c.proxy_bounds));
             let error = crate::adaptive_stream::weighted_near_detail_error(
                 error,
                 [c.canonical_bounds.min, c.canonical_bounds.max],
@@ -1548,6 +1555,7 @@ impl AdaptiveGpu {
                         canonical_bounds: [c.canonical_bounds.min, c.canonical_bounds.max],
                         proxy_bounds: c.proxy_bounds,
                         cached_vertical_error_m: c.best_error_m,
+                        water_feature_error_m: c.water_feature_error_m,
                         projected_error_px: error.is_finite().then_some(error),
                     },
                 );
@@ -1845,6 +1853,7 @@ impl AdaptiveGpu {
                 guaranteed_solid: tile.guaranteed_solid_box,
                 proxy_bounds: tile.bounds,
                 certificate_kind: certificate_kind(tile),
+                water_feature_error_m: tile.water_feature_error_m,
                 best_error_m: tile
                     .best_certified_vertical_error_m
                     .filter(|e| e.is_finite() && *e >= 0.),
@@ -2083,6 +2092,7 @@ impl AdaptiveGpu {
                 guaranteed_solid: tile.guaranteed_solid_box,
                 proxy_bounds: tile.bounds,
                 certificate_kind: certificate_kind(tile),
+                water_feature_error_m: tile.water_feature_error_m,
                 best_error_m: tile
                     .best_certified_vertical_error_m
                     .filter(|e| e.is_finite() && *e >= 0.),
@@ -2360,6 +2370,7 @@ mod tests {
             canonical_bounds: [[0.; 3]; 2],
             proxy_bounds: [[0.; 3]; 2],
             cached_vertical_error_m: Some(1.),
+            water_feature_error_m: 0.,
             projected_error_px: error,
         };
         let mut forward = [None; 8];
