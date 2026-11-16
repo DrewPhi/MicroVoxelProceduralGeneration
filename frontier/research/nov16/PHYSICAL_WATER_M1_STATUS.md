@@ -58,8 +58,12 @@ regressions; neither is evidence of general correctness.
 M1 remains **not accepted**. The warm-start 60-second small hydrostatic rerun
 passes: peak speed 3.90e-11 m/s, peak centre shift 4.48e-12 m and peak drift
 4.59e-9 voxel volumes; signed/absolute roundoff is independently reported.
-No damping or increased support cutoff was applied. A native 64×64×32
-60-second probe continues separately; completion is not claimed here. Current
+No damping or increased support cutoff was applied. The native 64×64×32 60-second probe also completed: peak sampled speed
+6.04e-11 m/s, peak drift 6.96e-7 voxel volumes (1.06e-11 relative), final drift
+−6.35e-8 voxel volumes and zero wall leakage. CPU wall cost was 779 s under
+contention; this is an offline correctness result, not real-time performance.
+[Native summary](physical-water-baseline/native-hydrostatic-60s.json) preserves
+the parameters, peak/final statistics and cost. Current
 pressure boundaries place atmospheric pressure at dry cell centres, and velocity
 advection is dissipative rather than mass/momentum-consistent. Post-transport new
 interface cells can have substantially higher divergence than the projected
@@ -75,8 +79,8 @@ motion gate cannot pass from the front alone. There is no converged wave-period
 reference yet. Raw samples, parameters and comparisons are preserved under
 [physical-water-baseline](physical-water-baseline/metrics.json). There are no inspected 3D physical clips,
 validated obstacle wake, physical terrain-edit coupling or streaming-boundary
-model. The 60-second closed-volume and hydrostatic-motion gates are demonstrated only
-on the small hydrostatic probe; dynamic acceptance remains open.
+model. The 60-second closed-volume and hydrostatic-motion gates pass on both the small
+and native reference tanks; dynamic acceptance remains open.
 GPU parity, performance, moving residency, faithful distant liquid edits and
 integrated physical pickup remain later gates. Issue 88 is not complete.
 
@@ -131,3 +135,73 @@ The next controlled candidate will test a PLIC-derived ghost-fluid pressure
 interface against this centre-pressure baseline, with consistent theta factors in
 both matrix and gradient as described in Bridson section 4.5.1. It is not part of
 this frozen baseline, and no accuracy improvement is presumed.
+
+## Ghost-fluid candidate after d806e68
+
+The optional `--boundary ghost` uses the matching diagonal/gradient theta factors
+and PLIC-derived centre signs described in the M0 addendum. Default centre mode
+and its old checkpoints retain their behavior. Header flag bit1 records ghost
+mode explicitly; the byte layout used by the snapshot renderer is unchanged.
+
+At 0.25 s, ghost native/fine front99 errors versus ghost h/4 are 3.46%/1.41%;
+kinetic-energy errors are 15.68%/5.26%. The corresponding centre energy errors
+were 19.33%/6.87%. This is a measured improvement in this comparison, **not**
+acceptance: native energy loss is still substantial and the finest reference is
+not fully converged. The ghost 60-second small-tank reporter passes (peak speed
+1.86e-9 m/s, peak centre shift 1.31e-11 m); absolute pressure-depth and exact
+restart tests also pass. All outside-centre liquid is retained and diagnosed;
+isolated fractions lacking a pressure centre are unresolved dynamically.
+
+Raw [candidate comparisons](physical-water-ghost/metrics.json) and snapshots at
+`frontier/output/nov16/physical-dam-ghost` (1 s) and `physical-dam-ghost-fine`
+(0.5 s) support matched inspection. Full/interface divergence remains separate:
+large divergence in newly occupied/unpressurized cells is not disguised by the
+small pressure residual. No damping, mass deletion or global renormalization was
+introduced. A momentum-advection/convergence pass remains necessary before GPU
+promotion; the ghost candidate stays opt-in.
+
+## Final bounded MacCormack experiment: M1 remains blocked
+
+The one higher-order velocity experiment uses strict source-stencil extrema
+limits and is opt-in (`--advection maccormack`). It passes periodic uniform
+translation and steady shear, and reduces a smooth translated-wave L2 error from
+0.759 to 0.0632. Wave-energy retention improves from 75.85% to 99.15%, with no
+energy/extrema overshoot in that operator fixture. Exact combined-mode restart,
+closed-volume and 60-second small hydrostatic checks pass. Final standalone world
+verification: **126 passed, 5 ignored**; physical suite **20 passed, 2 ignored**.
+The offline centre/ghost hydrostatic reporters were also run separately.
+
+The matched ghost/MacCormack dam ladder improves the pre-impact comparison:
+at 0.25 s native energy/front errors versus h/4 are 3.36%/1.48%, and h/2 errors
+are 0.221%/0.016%. However the required post-impact check fails convergence:
+at 0.5 s native kinetic energy is 21.018 J, h/2 is 24.374 J and h/4 is 25.666 J.
+Native/fine errors are **18.11%/5.04%**, exceeding the proposed 5% gate. All fronts
+have reached the wall by this sample, so their small quantile-front difference
+cannot rescue the failed energy metric. No sampled total mechanical-energy
+overshoot was observed, but under-resolution/dissipation remains substantial.
+Raw [MacCormack evidence](physical-water-maccormack/metrics.json) includes all
+three levels, operator tests, volume/correction ledgers and broader probes.
+
+**Stop decision:** no further velocity-limiter tuning in this pass, no physical
+runtime integration, and no GPU liquid promotion. Default centre/SL and current
+CA playtest remain unchanged. Ghost and ghost/MacCormack are labeled offline
+candidates. A subsequent numerical pass should address consistent volume/momentum
+transport and free-surface/air-band coupling, and establish post-impact/wave
+convergence and inspected reference uncertainty. The current fraction-preserving
+but unpressurized interface volume is explicitly measured; isolated sub-half-cell
+fractions remain a resolution limitation. Broader obstacle/falling-flow/edit/
+stream-boundary acceptance and physical reference inspection remain open.
+
+Reproduce the final ladder (CPU timings here include contention and file output):
+
+```sh
+/tmp/physical-mac-probe --fixture dam --nx 12 --ny 12 --nz 4 --seconds 1 --dt 0.0025 --sample 0.025 --boundary ghost --advection maccormack --frames frontier/output/nov16/physical-dam-maccormack
+/tmp/physical-mac-probe --fixture dam --nx 24 --ny 24 --nz 8 --spacing 0.03125 --seconds 0.5 --dt 0.00125 --sample 0.025 --boundary ghost --advection maccormack --frames frontier/output/nov16/physical-dam-maccormack-fine
+/tmp/physical-mac-probe --fixture dam --nx 48 --ny 48 --nz 16 --spacing 0.015625 --seconds 0.5 --dt 0.000625 --sample 0.025 --boundary ghost --advection maccormack
+```
+
+Compile that binary with the same standalone probe command above, selecting
+`-o /tmp/physical-mac-probe`. Snapshots support independent isometric rendering;
+0.025s output samples require 40 fps for 1× simulation-time playback (other playback
+rates should be labeled slow/fast motion). These clips are offline references,
+not game performance captures. Root's renderer does not feed back into F.

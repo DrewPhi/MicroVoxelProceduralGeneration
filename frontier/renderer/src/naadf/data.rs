@@ -646,7 +646,14 @@ fn build_region_options(
     let mut edits = HashMap::<usize, Vec<(usize, u32)>>::new();
     let mut edit_payload_bytes = 0usize;
     let mut edit_extrema = HashMap::<(i64, i64), (i64, i64)>::new();
-    for (index, c) in world.edit_cells().enumerate() {
+    let local_edits = world.edit_cells_in_columns(
+        [min.x, min.z],
+        [
+            min.x.saturating_add(nx as i64 * 16),
+            min.z.saturating_add(nz as i64 * 16),
+        ],
+    );
+    for (index, c) in local_edits.iter().copied().enumerate() {
         if c.x >= min.x
             && c.x < min.x + nx as i64 * 16
             && c.z >= min.z
@@ -684,17 +691,11 @@ fn build_region_options(
             }
         }
     }
-    let edited_columns: HashSet<_> = world
-        .edit_cells()
-        .filter(|c| {
-            c.x >= min.x
-                && c.x < min.x + nx as i64 * 16
-                && c.z >= min.z
-                && c.z < min.z + nz as i64 * 16
-        })
-        .map(|c| ((c.x - min.x).div_euclid(16), (c.z - min.z).div_euclid(16)))
-        .collect();
-    let edit_workspace_bytes = edit_payload_bytes
+    let edited_columns: HashSet<_> = edit_extrema.keys().copied().collect();
+    let edit_workspace_bytes = local_edits
+        .capacity()
+        .saturating_mul(std::mem::size_of::<Cell>())
+        .saturating_add(edit_payload_bytes)
         .saturating_add(edits.capacity().saturating_mul(48))
         .saturating_add(edited_columns.capacity().saturating_mul(24));
     profile.workspace(budget(

@@ -363,8 +363,10 @@ fn edit_touches_plant(p: &PlantRecord, e: &Cell) -> bool {
 #[derive(Default)]
 struct PlantEdits {
     buckets: BTreeMap<(i64, i64), Vec<Cell>>,
+    world: Option<World>,
 }
 impl PlantEdits {
+    #[cfg(test)]
     fn new(edits: impl Iterator<Item = Cell>) -> Self {
         let mut value = Self::default();
         for cell in edits {
@@ -376,7 +378,36 @@ impl PlantEdits {
         }
         value
     }
+    fn from_world(world: &World) -> Self {
+        Self {
+            world: Some(world.clone()),
+            ..Default::default()
+        }
+    }
     fn id(&self, p: &PlantRecord) -> u64 {
+        if let Some(world) = &self.world {
+            let (lo, hi) = if p.species != Species::Rowan && p.variant == u8::MAX {
+                (
+                    [p.root.x, p.root.z],
+                    [p.root.x.saturating_add(128), p.root.z.saturating_add(128)],
+                )
+            } else {
+                let r = if p.species == Species::Rowan {
+                    vegetation::MAX_PLANT_RADIUS_CELLS
+                } else {
+                    8
+                };
+                (
+                    [p.root.x.saturating_sub(r), p.root.z.saturating_sub(r)],
+                    [
+                        p.root.x.saturating_add(r).saturating_add(1),
+                        p.root.z.saturating_add(r).saturating_add(1),
+                    ],
+                )
+            };
+            let cells = world.edit_cells_in_columns(lo, hi);
+            return edit_id_from(p, cells.iter());
+        }
         if self.buckets.is_empty() {
             return 0;
         }
@@ -885,7 +916,32 @@ impl VegetationStream {
                                     let edited: BTreeSet<Cell> = if key.edit_id == 0 {
                                         BTreeSet::new()
                                     } else {
-                                        w.edit_cells().collect()
+                                        w.edit_cells_in_columns(
+                                            [
+                                                p.root.x.saturating_sub(
+                                                    vegetation::MAX_PLANT_RADIUS_CELLS,
+                                                ),
+                                                p.root.z.saturating_sub(
+                                                    vegetation::MAX_PLANT_RADIUS_CELLS,
+                                                ),
+                                            ],
+                                            [
+                                                p.root
+                                                    .x
+                                                    .saturating_add(
+                                                        vegetation::MAX_PLANT_RADIUS_CELLS,
+                                                    )
+                                                    .saturating_add(1),
+                                                p.root
+                                                    .z
+                                                    .saturating_add(
+                                                        vegetation::MAX_PLANT_RADIUS_CELLS,
+                                                    )
+                                                    .saturating_add(1),
+                                            ],
+                                        )
+                                        .into_iter()
+                                        .collect()
                                     };
                                     let cells = model
                                         .voxels
@@ -919,7 +975,16 @@ impl VegetationStream {
                                         [p.root.x + 136, p.root.z + 136],
                                         p.species,
                                     );
-                                    let edited: BTreeSet<Cell> = w.edit_cells().collect();
+                                    let edited: BTreeSet<Cell> = w
+                                        .edit_cells_in_columns(
+                                            [p.root.x, p.root.z],
+                                            [
+                                                p.root.x.saturating_add(128),
+                                                p.root.z.saturating_add(128),
+                                            ],
+                                        )
+                                        .into_iter()
+                                        .collect();
                                     let Some(cells) =
                                         ground_cells_cached(&records, p.root, &edited, || {
                                             cancelled()
@@ -990,7 +1055,7 @@ impl VegetationStream {
             naadf_retirement: None,
             naadf_omitted: 0,
             naadf_omitted_keys: BTreeSet::new(),
-            edits: PlantEdits::new(world.edit_cells()),
+            edits: PlantEdits::from_world(&world),
             world,
             config,
             tx: Some(tx),
@@ -1139,7 +1204,7 @@ impl VegetationStream {
         self.stable_frame = None;
         if self.world.shares_source_lineage(&world) {
             let changed = self.world.changed_edit_cells(&world);
-            let next_edits = PlantEdits::new(world.edit_cells());
+            let next_edits = PlantEdits::from_world(&world);
             self.local_edit_updates += 1;
             self.local_edit_reused_tiles += self.tiles.len() as u64;
             // Placement and ecological shade are defined by the immutable
@@ -1177,7 +1242,7 @@ impl VegetationStream {
         self.shadow_lods.clear();
         self.shadow_lifecycle.clear();
         self.grouped_ground = None;
-        self.edits = PlantEdits::new(world.edit_cells());
+        self.edits = PlantEdits::from_world(&world);
         self.world = world;
         self.content_epoch = self.epoch.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         self.tiles.clear();

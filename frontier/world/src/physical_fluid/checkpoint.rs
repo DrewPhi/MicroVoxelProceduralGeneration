@@ -11,7 +11,9 @@ impl PhysicalFluid {
             self.config.dims[2] as u64,
             self.config.pressure_iterations as u64,
             self.config.max_substeps as u64,
-            u64::from(self.config.transport == Transport::Geometric),
+            u64::from(self.config.transport == Transport::Geometric)
+                | (u64::from(self.config.boundary == BoundaryMode::Ghost) << 1)
+                | (u64::from(self.config.advection == VelocityAdvection::LimitedMacCormack) << 2),
             self.phase,
         ] {
             n(v);
@@ -82,10 +84,26 @@ impl PhysicalFluid {
         let dims = [r.count()?, r.count()?, r.count()?];
         let pressure_iterations = r.count()?;
         let max_substeps = r.count()?;
-        let transport = match r.n()? {
-            0 => Transport::DonorCell,
-            1 => Transport::Geometric,
-            _ => return Err(err),
+        // Flags are versioned, not inferred from fraction/pressure contents.
+        // Bit0 geometric, bit1 ghost pressure, bit2 limited MacCormack velocity.
+        let flags = r.n()?;
+        if flags & !7 != 0 {
+            return Err(err);
+        }
+        let transport = if flags & 1 != 0 {
+            Transport::Geometric
+        } else {
+            Transport::DonorCell
+        };
+        let boundary = if flags & 2 != 0 {
+            BoundaryMode::Ghost
+        } else {
+            BoundaryMode::Center
+        };
+        let advection = if flags & 4 != 0 {
+            VelocityAdvection::LimitedMacCormack
+        } else {
+            VelocityAdvection::SemiLagrangian
         };
         let phase = r.n()?;
         let config = PhysicalConfig {
@@ -93,6 +111,8 @@ impl PhysicalFluid {
             pressure_iterations,
             max_substeps,
             transport,
+            boundary,
+            advection,
             spacing: r.f()?,
             density: r.f()?,
             gravity: [r.f()?, r.f()?, r.f()?],

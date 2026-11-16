@@ -110,3 +110,54 @@ The M1 physical gate requires refinement/time-step convergence, a selected finer
 offline reference with uncertainty, dam/wave metrics within the proposed 5%,
 and inspected offline voxel motion. Record failures honestly; GPU work and
 runtime promotion remain gated on that evidence.
+
+## Opt-in ghost-fluid candidate after baseline d806e68
+
+`BoundaryMode::Center` preserves the frozen baseline/default. `Ghost` derives a
+signed cell-centre distance from the mixed-cell PLIC plane; full/empty cells use
+−/+half-cell distance. Pressure centres have phi<0 (equivalently F>0.5). All
+outside-centre liquid remains in F, transport, checkpoints and mass statistics;
+its volume is reported as `unpressurized_volume_voxels`. Isolated fractional
+liquid without a negative-phi centre is consequently unresolved dynamically.
+
+For a liquid/air pair use theta=−phi_liquid/(phi_air−phi_liquid). Both the
+pressure diagonal and the face gradient multiply by 1/theta. The explicit theta
+floor is 1e-6, following the numerical safeguard discussed in Bridson section
+4.5.1; it changes no liquid volume. Two-layer velocity extension after projection
+supplies the unpressurized transport band. This does not make the air band
+globally divergence-free: volume/bounds and interface divergence remain gates.
+The force/projection/VOF splitting is first order in time; RK2 refers only to
+velocity backtracing, not a second-order complete liquid integrator.
+
+The FVPHYS01 byte layout is unchanged. Header word6 is now an explicit flags
+field: bit0 geometric transport, bit1 ghost pressure; bits above1 are rejected.
+Old0/1 values decode as centre pressure, while2/3 select ghost pressure. There
+is no mode inference or ambiguous restart. `--boundary center|ghost` chooses the
+probe candidate, and metadata names it. Promotion requires matched tests and the
+same physical/refinement gates; implementation alone is not acceptance.
+
+## One bounded higher-order velocity candidate
+
+`VelocityAdvection::LimitedMacCormack` is an opt-in comparison against the default
+semi-Lagrangian velocity path. With the old extended velocity frozen as carrier,
+advect forward, then backward with RK2 characteristics and trilinear sampling.
+Correct the forward value by half the old-minus-backward error. Limit each
+component to the minimum/maximum of the eight old source-stencil samples at the
+forward departure point. Pressure/solid constraints follow the velocity operator.
+
+Method reference: [Selle et al., An Unconditionally Stable MacCormack Method,
+JSC 35 (2008)](https://physbam.stanford.edu/papers/stanford2006-09.pdf). This is a
+new implementation of the forward/backward method and local extrema limiter;
+no reference source code is copied and no unconditional whole-solver stability
+claim is made. The force/VOF splitting remains first order. Neither velocity
+candidate is mass/momentum-consistent conservative momentum transport.
+
+Header flags bit2 records the velocity candidate: 0=semi-Lagrangian,
+1=limited MacCormack. Known flags are now 0..7; higher bits reject. The binary
+layout is unchanged, old flags retain their meaning, and exact restart tests
+cover the combined ghost/MacCormack candidate. Periodic sampling is used only
+for operator tests (uniform flow, steady shear, analytically translated smooth
+wave with error/energy checks), not as the physical tank's boundary model.
+`--advection sl|maccormack` selects the probe path. This is the last bounded
+velocity-method experiment in this pass; failure to materially improve the same
+three-level dam comparison remains an explicit M1 blocker.

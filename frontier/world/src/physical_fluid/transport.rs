@@ -121,6 +121,32 @@ fn reconstruction(d: [usize; 3], fraction: &[f64], solid: &[bool], i: usize) -> 
     (normal, 0.5 * (low + high))
 }
 impl PhysicalFluid {
+    /// PLIC plane distance at cell centres, in units of grid spacing. Full/empty
+    /// cells use +/-half a cell; mixed-cell signs agree with their central volume.
+    pub(super) fn signed_centres(&self) -> Vec<f64> {
+        self.fraction
+            .iter()
+            .enumerate()
+            .map(|(i, &f)| {
+                if f == 0. {
+                    return 0.5;
+                }
+                if f == 1. {
+                    return -0.5;
+                }
+                let (n, alpha) = reconstruction(self.config.dims, &self.fraction, &self.solid, i);
+                let length = n.iter().map(|n| n * n).sum::<f64>().sqrt();
+                let distance = (0.5 * n.iter().sum::<f64>() - alpha) / length;
+                if f > 0.5 {
+                    -distance.abs().max(1e-15)
+                } else if f < 0.5 {
+                    distance.abs().max(1e-15)
+                } else {
+                    0.
+                }
+            })
+            .collect()
+    }
     pub(super) fn transport(&mut self, dt: f64) -> Result<f64, PhysicalError> {
         let d = self.config.dims;
         let frozen: Vec<_> = self

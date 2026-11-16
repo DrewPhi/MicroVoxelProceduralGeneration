@@ -399,3 +399,175 @@ fn rotating_square_transport_conserves_volume_and_reduces_diffusion() {
     assert!(geometric.stats().volume_error_voxels.abs() < 1e-7);
     assert!(donor.stats().volume_error_voxels.abs() < 1e-7);
 }
+
+#[test]
+fn ghost_surface_has_correct_hydrostatic_distance_and_restart_mode() {
+    let cfg = PhysicalConfig {
+        boundary: BoundaryMode::Ghost,
+        ..config([6, 8, 4])
+    };
+    let mut w = PhysicalFluid::new(cfg, |p| (false, if p[1] < 4 { 1. } else { 0. })).unwrap();
+    for _ in 0..20 {
+        w.step(0.01).unwrap();
+    }
+    let expected = cfg.density * 9.81 * 3.5 * cfg.spacing;
+    assert!((w.pressure([2, 0, 2]).unwrap() - expected).abs() < 1e-6);
+    assert!(w.stats().max_speed < 1e-8, "{:?}", w.stats());
+    assert!(w.stats().volume_error_voxels.abs() < 1e-8);
+    let bytes = w.persist_bytes();
+    assert_eq!(bytes[56], 3);
+    let mut restored = PhysicalFluid::from_bytes(&bytes).unwrap();
+    assert_eq!(restored.config().boundary, BoundaryMode::Ghost);
+    assert_eq!(restored.step(0.01).unwrap(), w.step(0.01).unwrap());
+    assert_eq!(restored.persist_bytes(), w.persist_bytes());
+    let mut unknown = bytes;
+    unknown[56] = 8;
+    assert!(PhysicalFluid::from_bytes(&unknown).is_err());
+}
+#[test]
+fn ghost_outside_centre_liquid_is_retained_and_diagnosed() {
+    let cfg = PhysicalConfig {
+        boundary: BoundaryMode::Ghost,
+        ..config([4, 4, 4])
+    };
+    let mut w =
+        PhysicalFluid::new(cfg, |p| (false, if p == [2, 2, 2] { 0.2 } else { 0. })).unwrap();
+    w.step(0.01).unwrap();
+    let s = w.stats();
+    assert_eq!(w.fraction([2, 2, 2]), Some(0.2));
+    assert!((s.unpressurized_volume_voxels - 0.2).abs() < 1e-15);
+    assert_eq!(s.volume_error_voxels, 0.);
+    assert_eq!(s, w.clone().stats());
+}
+#[test]
+#[ignore = "offline ghost-fluid 60s hydrostatic acceptance reporter"]
+fn report_ghost_long_hydrostatic_gate() {
+    let cfg = PhysicalConfig {
+        boundary: BoundaryMode::Ghost,
+        ..config([6, 8, 4])
+    };
+    let mut w = PhysicalFluid::new(cfg, |p| (false, if p[1] < 4 { 1. } else { 0. })).unwrap();
+    let start = w.stats();
+    let (mut peak_speed, mut peak_com, mut peak_drift) = (0f64, 0f64, 0f64);
+    for _ in 0..600 {
+        w.step(0.1).unwrap();
+        let s = w.stats();
+        peak_speed = peak_speed.max(s.max_speed);
+        peak_drift = peak_drift.max(s.volume_error_voxels.abs());
+        peak_com = peak_com.max(
+            (0..3)
+                .map(|a| (s.centre_of_volume[a] - start.centre_of_volume[a]).abs())
+                .fold(0., f64::max),
+        );
+    }
+    eprintln!("ghost M1 hydrostatic accepted={}; peak_speed={peak_speed:e}, peak_com={peak_com:e}, peak_drift_voxels={peak_drift:e}, final={:?}",peak_speed<=1e-7&&peak_com<=1e-8,w.stats());
+    assert!(peak_drift < 1e-6);
+}
+
+fn periodic_velocity_fixture(mut cfg: PhysicalConfig, kind: usize) -> PhysicalFluid {
+    cfg.gravity = [0.; 3];
+    let mut w = PhysicalFluid::new(cfg, |_| (false, 1.)).unwrap();
+    for a in 0..3 {
+        let fd = face_dims(cfg.dims, a);
+        for i in 0..w.velocity[a].len() {
+            let p = coord(fd, i);
+            let x = (p[0] as f64 + if a == 0 { 0. } else { 0.5 }) * cfg.spacing;
+            let y = (p[1] as f64 + if a == 1 { 0. } else { 0.5 }) * cfg.spacing;
+            w.velocity[a][i] = match kind {
+                0 => [0.7, 0.2, -0.1][a],
+                1 => {
+                    if a == 0 {
+                        0.2 * (std::f64::consts::TAU * y / (cfg.dims[1] as f64 * cfg.spacing)).sin()
+                    } else {
+                        0.
+                    }
+                }
+                _ => {
+                    if a == 0 {
+                        0.7
+                    } else if a == 1 {
+                        0.2 * (std::f64::consts::TAU * x / (cfg.dims[0] as f64 * cfg.spacing)).sin()
+                    } else {
+                        0.
+                    }
+                }
+            };
+        }
+    }
+    w
+}
+#[test]
+fn limited_maccormack_preserves_periodic_uniform_flow_and_steady_shear() {
+    let cfg = PhysicalConfig {
+        advection: VelocityAdvection::LimitedMacCormack,
+        ..config([16, 16, 4])
+    };
+    for kind in [0, 1] {
+        let mut w = periodic_velocity_fixture(cfg, kind);
+        let initial = w.velocity.clone();
+        for _ in 0..20 {
+            w.advect_velocity_with_sampling(0.02, true);
+        }
+        for a in 0..3 {
+            assert!(w.velocity[a]
+                .iter()
+                .zip(&initial[a])
+                .all(|(a, b)| (a - b).abs() < 1e-13));
+        }
+    }
+}
+#[test]
+fn limited_maccormack_periodic_wave_has_less_error_without_energy_overshoot() {
+    let cfg = config([48, 8, 4]);
+    let mut sl = periodic_velocity_fixture(cfg, 2);
+    let mut mac = sl.clone();
+    mac.config.advection = VelocityAdvection::LimitedMacCormack;
+    let energy = |w: &PhysicalFluid| sum(w.velocity[1].iter().map(|v| v * v));
+    let initial_energy = energy(&sl);
+    for _ in 0..80 {
+        sl.advect_velocity_with_sampling(0.025, true);
+        mac.advect_velocity_with_sampling(0.025, true);
+    }
+    let error = |w: &PhysicalFluid| {
+        let fd = face_dims(cfg.dims, 1);
+        sum(w.velocity[1].iter().enumerate().map(|(i, v)| {
+            let x = (coord(fd, i)[0] as f64 + 0.5) * cfg.spacing - 0.7 * 2.;
+            let exact =
+                0.2 * (std::f64::consts::TAU * x / (cfg.dims[0] as f64 * cfg.spacing)).sin();
+            (v - exact).powi(2)
+        }))
+        .sqrt()
+    };
+    let (a, b) = (error(&sl), error(&mac));
+    let (energy_sl, energy_mac) = (energy(&sl), energy(&mac));
+    eprintln!("periodic smooth-wave L2 SL={a:e}, MacCormack={b:e}; energy initial={initial_energy:e}, SL={energy_sl:e}, Mac={energy_mac:e}");
+    assert!(b < a * 0.5);
+    assert!(energy_mac <= initial_energy * (1. + 1e-12));
+    assert!(energy_mac >= energy_sl);
+    assert!(mac.velocity[1].iter().all(|v| v.abs() <= 0.2));
+}
+#[test]
+fn maccormack_ghost_checkpoint_preserves_candidate_and_mass() {
+    let cfg = PhysicalConfig {
+        boundary: BoundaryMode::Ghost,
+        advection: VelocityAdvection::LimitedMacCormack,
+        ..config([12, 12, 4])
+    };
+    let mut w = PhysicalFluid::new(cfg, |[x, y, _]| {
+        (false, if x < 4 && y < 8 { 1. } else { 0. })
+    })
+    .unwrap();
+    for _ in 0..10 {
+        w.step(0.0025).unwrap();
+    }
+    let bytes = w.persist_bytes();
+    assert_eq!(bytes[56], 7);
+    let mut replay = PhysicalFluid::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        replay.config().advection,
+        VelocityAdvection::LimitedMacCormack
+    );
+    assert_eq!(w.step(0.0025).unwrap(), replay.step(0.0025).unwrap());
+    assert_eq!(w.persist_bytes(), replay.persist_bytes());
+    assert!(w.stats().volume_error_voxels.abs() < 1e-6);
+}

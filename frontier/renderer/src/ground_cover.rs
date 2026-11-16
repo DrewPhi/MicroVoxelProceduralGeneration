@@ -18,7 +18,7 @@ const EDGE: i64 = 16;
 const HEIGHT: usize = 16;
 #[path = "ground_cover_cache.rs"]
 mod shared_cache;
-pub(crate) const VERSION: u64 = 5;
+pub(crate) const VERSION: u64 = 6;
 const PROBE_MODE_SHIFT: u32 = 40;
 static COARSE_PROBE_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static COARSE_BUILDS: AtomicU64 = AtomicU64::new(0);
@@ -197,8 +197,8 @@ fn node(w: &World, mut key: Key, cancel: &mut impl FnMut() -> bool) -> Result<Su
         let min = [key.x * span - 8, key.z * span - 8];
         let max = [(key.x + 1) * span + 8, (key.z + 1) * span + 8];
         key.edits = w
-            .edit_cells()
-            .filter(|c| c.x >= min[0] && c.x < max[0] && c.z >= min[1] && c.z < max[1])
+            .edit_cells_in_columns(min, max)
+            .into_iter()
             .fold(0u64, |h, c| {
                 h.wrapping_mul(0x100000001b3)
                     ^ c.x as u64
@@ -347,7 +347,10 @@ fn leaf(
     }
     let center = [min[0] + EDGE / 2, min[1] + EDGE / 2];
     out.data[1][4][3] = w.column(center[0], center[1]).height_m() as f32;
-    let edited: HashSet<_> = w.edit_cells().collect();
+    let edited: HashSet<_> = w
+        .edit_cells_in_columns(min, min.map(|v| v.saturating_add(EDGE)))
+        .into_iter()
+        .collect();
     let mut cells = vec![None::<Paint>; (EDGE * EDGE) as usize * HEIGHT];
     let mut heights = HashMap::new();
     for species in [Species::Grass, Species::Edelweiss] {

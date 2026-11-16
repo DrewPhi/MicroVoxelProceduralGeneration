@@ -29,6 +29,7 @@ mod native_fbm;
 mod native_stream;
 mod options;
 mod page_terrain;
+pub mod physical_pressure_gpu;
 mod playability;
 mod player_edit;
 mod settings;

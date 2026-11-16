@@ -6,11 +6,20 @@ impl PhysicalFluid {
     pub(super) fn project(&mut self, dt: f64) -> Result<(usize, f64), PhysicalError> {
         let d = self.config.dims;
         let n = self.fraction.len();
-        let wet: Vec<_> = self
-            .fraction
-            .iter()
-            .map(|&f| f > self.config.pressure_fraction_floor)
-            .collect();
+        let wet: Vec<_> = (0..n).map(|i| self.supports_pressure(i)).collect();
+        let phi = if self.config.boundary == BoundaryMode::Ghost {
+            self.signed_centres()
+        } else {
+            Vec::new()
+        };
+        let coefficient = |liquid: usize, air: usize| {
+            if self.config.boundary == BoundaryMode::Center {
+                1.
+            } else {
+                let theta = (-phi[liquid] / (phi[air] - phi[liquid])).clamp(GHOST_THETA_FLOOR, 1.);
+                1. / theta
+            }
+        };
         let mut pin = vec![false; n];
         let mut visited = vec![false; n];
         // Find every pressure component and remove enclosed null spaces explicitly.
@@ -71,7 +80,7 @@ impl PhysicalFluid {
                     if self.solid[j] {
                         continue;
                     }
-                    diag[i] += 1.;
+                    diag[i] += if wet[j] { 1. } else { coefficient(i, j) };
                     if wet[j] && !pin[j] {
                         edges[i][2 * a + side] = j;
                     }
@@ -173,7 +182,15 @@ impl PhysicalFluid {
                 let (l, r) = adjacent(d, coord(fd, i), a);
                 if let (Some(l), Some(r)) = (l, r) {
                     if self.open_face(Some(l), Some(r)) && (wet[l] || wet[r]) {
-                        self.velocity[a][i] -= gradient * (self.pressure[r] - self.pressure[l]);
+                        let weight = if wet[l] && wet[r] {
+                            1.
+                        } else if wet[l] {
+                            coefficient(l, r)
+                        } else {
+                            coefficient(r, l)
+                        };
+                        self.velocity[a][i] -=
+                            gradient * weight * (self.pressure[r] - self.pressure[l]);
                     }
                 }
             }

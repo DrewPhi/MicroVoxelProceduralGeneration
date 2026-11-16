@@ -6,9 +6,10 @@ concurrent edits to shared renderer files. Canonical voxels remain 6.25 cm.
 | Work | Status |
 |---|---|
 | Edit publication fairness during continuous following | Implemented: bounded alternation between content and movement |
-| Bounded edit differences and constant-time fluid diagnostics | Implemented with branch/revert/eviction and independent counter oracles |
+| Bounded edit differences and constant-time fluid diagnostics | Implemented with branch/revert/eviction and independent counter oracles; capped spatial index accelerates local edit queries |
 | Resident procedural editing bounds and smaller-radius save reload | Implemented; resident ownership checks and dormant-state retention |
-| #88 CPU physical liquid reference | Offline MAC/PCG/geometric VOF; small 60-second still-water gate passes; dynamic energy/refinement blocks promotion |
+| #88 CPU physical liquid reference | Native 60-second still-water gate passes; ghost/MacCormack post-impact energy errors 18.11% native / 5.04% fine block promotion |
+| #88 GPU pressure component | Isolated GPU-resident PCG; actual Radeon parity passed three manufactured fixtures; not coupled to fluid/runtime |
 | #88 pickup, inventory, transactions and persistence | Implemented; actual X11 quick/hold/place test passed, FVWATER3 with V2 import |
 | #76/#77/#79 existing implementation acceptance | Audited; #76 per-chunk source shortcut fixed; full performance matrix still open |
 | #78 independent cosmetic scheduling | Opt-in worker no longer cancels valid work on every new geometry request; GPU evaluation pending |
@@ -53,3 +54,16 @@ Related evidence: [representation experiments](../../NOV16_REPRESENTATION_EXPERI
 [existing optimization audit](EXISTING_OPTIMIZATIONS.md),
 [physical numerical contract](PHYSICAL_WATER_M0.md),
 [physical acceptance status](PHYSICAL_WATER_M1_STATUS.md).
+
+## Checkpoint decision
+
+All delegated workers and numerical probes have stopped. Physical M1 is not accepted: post-impact convergence fails despite improved pre-impact results. No physical runtime promotion or whole-world fluid claim is made. See [numerical evidence](PHYSICAL_WATER_M1_STATUS.md) and [GPU pressure component](PHYSICAL_PRESSURE_GPU.md). Remaining optimization issues retain their visual/motion/performance gates; disabled experiments are not defaults.
+
+## Final validation
+
+- Integrated `cargo test --workspace --lib --bins`: **734 passed, 0 failed, 44 ignored**. Ignored hardware/long-running probes require explicit invocation.
+- Actual Radeon pressure parity separately passed three manufactured SPD systems; canonical seeded water GPU parity also passed.
+- Primary pre/post float capture was bit-identical. Actual X11 pickup/hold/place checkpoint test passed.
+- Python tooling suite: 40 passed.
+- Million-edit spatial query exactly matched full scan with 16 canonical map checks; this is a CPU diagnostic, not a whole-game speed claim.
+- Static 1080p control frame p50/p95/p99: 19.52/22.45/23.30 ms; matched 16-probe cover candidate 19.94/21.91/22.56 ms. Motion control p50/p95/p99: 25.87/34.06/50.12 ms. These are the measured cases, not universal frame-rate promises.

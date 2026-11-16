@@ -12,6 +12,8 @@ use std::{
 pub mod affine_bounds;
 mod alpine;
 pub mod edit;
+mod edit_index;
+pub use edit_index::EditQueryStats;
 pub mod fluid;
 pub mod physical_fluid;
 #[cfg(test)]
@@ -171,6 +173,7 @@ pub struct World {
     revision: u64,
     change_token: u64,
     changes: Arc<Mutex<ChangeJournal>>,
+    edit_index: Arc<Mutex<edit_index::EditIndex>>,
     counter: Arc<AtomicU64>,
 }
 
@@ -249,6 +252,7 @@ impl World {
             revision: 0,
             change_token: 0,
             changes: Arc::default(),
+            edit_index: Arc::default(),
             counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -277,6 +281,52 @@ impl World {
     /// Effective edit bounds are exposed for bounded exact extraction, never for LOD.
     pub fn edit_cells(&self) -> impl Iterator<Item = Cell> + '_ {
         self.edits.keys().chain(self.fluid.keys()).copied()
+    }
+    /// Exact sorted unique override addresses inside half-open native bounds.
+    /// The shared lineage index is disposable; candidates are checked against
+    /// this snapshot's canonical maps, and capacity exhaustion uses a full scan.
+    pub fn edit_cells_in_bounds(&self, min: Cell, max: Cell) -> Vec<Cell> {
+        self.edit_cells_in_bounds_with_stats(min, max).0
+    }
+    pub fn edit_cells_in_bounds_with_stats(
+        &self,
+        min: Cell,
+        max: Cell,
+    ) -> (Vec<Cell>, EditQueryStats) {
+        self.indexed_edit_cells(
+            [min.x, min.y, min.z].map(i128::from),
+            [max.x, max.y, max.z].map(i128::from),
+        )
+    }
+    /// Metre-column consumers need every height, including the i64::MAX cell.
+    /// X/Z bounds remain half open; no unrepresentable MAX+1 native Cell is needed.
+    pub fn edit_cells_in_columns(&self, min: [i64; 2], max: [i64; 2]) -> Vec<Cell> {
+        self.indexed_edit_cells(
+            [min[0] as i128, i64::MIN as i128, min[1] as i128],
+            [max[0] as i128, i64::MAX as i128 + 1, max[1] as i128],
+        )
+        .0
+    }
+    fn indexed_edit_cells(&self, min: [i128; 3], max: [i128; 3]) -> (Vec<Cell>, EditQueryStats) {
+        let (candidates, mut stats) = self.edit_index.lock().unwrap().query(min, max, |c| {
+            self.edits.contains_key(&c) || self.fluid.contains_key(&c)
+        });
+        let mut cells = if let Some(candidates) = candidates {
+            candidates
+        } else {
+            self.edit_cells()
+                .filter(|c| {
+                    stats.full_scan_cells += 1;
+                    [c.x, c.y, c.z]
+                        .into_iter()
+                        .enumerate()
+                        .all(|(a, v)| v as i128 >= min[a] && (v as i128) < max[a])
+                })
+                .collect::<Vec<_>>()
+        };
+        cells.sort_unstable();
+        cells.dedup();
+        (cells, stats)
     }
     /// True only for snapshots of one immutable source lineage. Reconstructed
     /// worlds conservatively require source-wide invalidation, even if their
@@ -403,6 +453,7 @@ impl World {
     }
 
     fn record_changes(&mut self, cells: Vec<Cell>) {
+        self.edit_index.lock().unwrap().record(&cells);
         self.change_token = self
             .changes
             .lock()

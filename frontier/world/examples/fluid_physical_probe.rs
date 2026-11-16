@@ -29,12 +29,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--nx" => cfg.dims[0] = value.parse()?,
             "--ny" => cfg.dims[1] = value.parse()?,
             "--spacing" => cfg.spacing = value.parse()?,
+            "--boundary" => {
+                cfg.boundary = match value.as_str() {
+                    "center" => BoundaryMode::Center,
+                    "ghost" => BoundaryMode::Ghost,
+                    _ => return Err("boundary must be center or ghost".into()),
+                }
+            }
             "--nz" => cfg.dims[2] = value.parse()?,
             "--transport" => {
                 cfg.transport = match value.as_str() {
                     "geometric" => Transport::Geometric,
                     "donor" => Transport::DonorCell,
                     _ => return Err("transport must be geometric or donor".into()),
+                }
+            }
+            "--advection" => {
+                cfg.advection = match value.as_str() {
+                    "sl" => VelocityAdvection::SemiLagrangian,
+                    "maccormack" => VelocityAdvection::LimitedMacCormack,
+                    _ => return Err("advection must be sl or maccormack".into()),
                 }
             }
             "--frames" => frames = Some(value.into()),
@@ -106,7 +120,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = 0;
     let mut total_substeps = 0;
     let mut total_iterations = 0;
-    println!("{{\"fixture\":\"{fixture}\",\"dims\":[{nx},{ny},{nz}],\"spacing_m\":{},\"transport\":\"{:?}\",\"experimental\":true,\"gate\":\"M1_not_accepted\"}}",cfg.spacing,cfg.transport);
+    println!("{{\"fixture\":\"{fixture}\",\"dims\":[{nx},{ny},{nz}],\"spacing_m\":{},\"transport\":\"{:?}\",\"boundary\":\"{:?}\",\"advection\":\"{:?}\",\"experimental\":true,\"gate\":\"M1_not_accepted\"}}",cfg.spacing,cfg.transport,cfg.boundary,cfg.advection);
     loop {
         let stats = world.stats();
         let mut front: f64 = 0.;
@@ -133,8 +147,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             prefix += volume;
         }
-        println!("{{\"time_s\":{:.9},\"volume_m3\":{:.15e},\"mass_kg\":{:.15e},\"rendered_voxels\":{},\"render_volume_bias_voxels\":{:.9e},\"volume_error_voxels\":{:.9e},\"roundoff_signed_voxels\":{:.9e},\"roundoff_absolute_voxels\":{:.9e},\"transport_residual_voxels\":{:.9e},\"trace_volume_voxels\":{:.9e},\"centre_m\":[{:.9},{:.9},{:.9}],\"kinetic_j\":{:.9e},\"max_speed_m_s\":{:.9e},\"front_m\":{:.9},\"volume99_x_m\":{:.9},\"max_div_s\":{:.9e},\"full_max_div_s\":{:.9e},\"interface_max_div_s\":{:.9e},\"rms_div_s\":{:.9e},\"wall_leak_m_s\":{:.9e},\"liquid_cells\":{},\"interface_cells\":{}}}",
-            t,stats.liquid_volume,stats.liquid_mass,occupied_voxels,occupied_voxels as f64-stats.liquid_volume/cfg.spacing.powi(3),stats.volume_error_voxels,stats.roundoff_adjustment_voxels,stats.roundoff_absolute_voxels,stats.transport_residual_voxels,stats.trace_volume_voxels,stats.centre_of_volume[0],stats.centre_of_volume[1],stats.centre_of_volume[2],stats.kinetic_energy,stats.max_speed,front,volume99x,
+        println!("{{\"time_s\":{:.9},\"volume_m3\":{:.15e},\"mass_kg\":{:.15e},\"rendered_voxels\":{},\"render_volume_bias_voxels\":{:.9e},\"volume_error_voxels\":{:.9e},\"roundoff_signed_voxels\":{:.9e},\"roundoff_absolute_voxels\":{:.9e},\"transport_residual_voxels\":{:.9e},\"trace_volume_voxels\":{:.9e},\"unpressurized_volume_voxels\":{:.9e},\"centre_m\":[{:.9},{:.9},{:.9}],\"kinetic_j\":{:.9e},\"max_speed_m_s\":{:.9e},\"front_m\":{:.9},\"volume99_x_m\":{:.9},\"max_div_s\":{:.9e},\"full_max_div_s\":{:.9e},\"interface_max_div_s\":{:.9e},\"rms_div_s\":{:.9e},\"wall_leak_m_s\":{:.9e},\"liquid_cells\":{},\"interface_cells\":{}}}",
+            t,stats.liquid_volume,stats.liquid_mass,occupied_voxels,occupied_voxels as f64-stats.liquid_volume/cfg.spacing.powi(3),stats.volume_error_voxels,stats.roundoff_adjustment_voxels,stats.roundoff_absolute_voxels,stats.transport_residual_voxels,stats.trace_volume_voxels,stats.unpressurized_volume_voxels,stats.centre_of_volume[0],stats.centre_of_volume[1],stats.centre_of_volume[2],stats.kinetic_energy,stats.max_speed,front,volume99x,
             stats.max_divergence,stats.full_max_divergence,stats.interface_max_divergence,stats.rms_divergence,stats.boundary_max_normal_speed,stats.liquid_cells,stats.interface_cells);
         if let Some(path) = &frames {
             write_frame(&world, path.join(format!("frame-{frame:05}.ppm")))?;

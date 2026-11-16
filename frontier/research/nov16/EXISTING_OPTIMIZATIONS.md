@@ -102,33 +102,72 @@ a frozen binary with the same uncached arithmetic and memory policy. Record
 bypasses separately from coalesced duplicates and measure the same startup /
 128 m turn-return route with equal source demand and readiness.
 
-## Remaining history-size costs (inspection only)
+## Spatial candidate index follow-up (November 16)
 
-The new bounded World change journal and O(1) fluid diagnostics do not eliminate
-all costs proportional to retained edit history:
+The inspection found full-history work before local cache lookups and during
+vegetation snapshot updates. A bounded derived index now addresses those caller
+scans without rewriting authoritative terrain/fluid storage.
 
-- `naadf/data.rs` scans `World::edit_cells()` for local values/extrema and again
-  for edited columns at each region build. Region size is bounded; the scanned
-  history is not bounded by the region.
-- `VegetationStream::set_world` reconstructs `PlantEdits` from all override
-  addresses for every same-lineage snapshot, even when the World journal
-  provides a tiny changed-cell set. Its pending-mesh filtering also checks each
-  mesh against changed cells.
-- Edited tree and grouped-ground mesh assembly collect all override addresses
-  into a `BTreeSet` before local masking.
-- `ground_cover::node` scans all override addresses and queries local materials
-  to calculate each node fingerprint before the cache lookup. Warm cache hits
-  still pay that scan. A leaf build separately creates a full-history `HashSet`.
-- `World::changed_edit_cells` uses bounded journal candidates for recent related
-  snapshots; old/evicted lineage or unrelated sources correctly fall back to an
-  exact full-history comparison. This fallback is not itself a correctness bug.
+- `world/src/edit_index.rs` stores 16³ native buckets as 512-byte bitsets. A
+  source-lineage-shared union retains candidate addresses from every snapshot
+  branch. Each query checks candidates against its own immutable terrain/fluid
+  maps before allocating result entries, so old branches and reverts cannot acquire another branch's overrides.
+- The budget is 32 MiB, with conservative 1 KiB charges per 512-byte bucket plus
+  a fixed overhead allowance. Reaching the cap marks the shared index incomplete
+  and drops derived buckets; every subsequent query uses an exact full scan.
+  Canonical edits, dormant water and dry tombstones are never evicted.
+- `record_changes` feeds the index before the bounded delta journal, including
+  hidden fluid-map updates whose visible world revision remains unchanged.
+- `World::edit_cells_in_bounds(min,max)` returns sorted unique addresses within
+  half-open native bounds. `edit_cells_in_columns` supports all-height consumers,
+  including the native `i64::MAX` height through checked internal i128 bounds.
+- Requested bucket ranges clip to the index's known extent. Queries choose the
+  smaller of bounded coordinate enumeration and stored-bucket traversal. Public
+  diagnostic counts distinguish bucket lookups, words, set bits, canonical-map
+  checks and fallback history scans.
+- NAADF edit indexing now requests its X/Z footprint once and derives edited
+  columns from the resulting extrema. Cover fingerprints/leaf masks query local
+  X/Z bounds. Vegetation production fingerprints are lazy snapshot-backed local
+  queries; edited tree/ground assembly also requests only its actual footprint.
+- Cover cache version moves from 5 to 6 because fingerprints now use sorted
+  unique addresses, rather than the terrain-map-then-fluid-map chain (which could
+  contain duplicates). Estimator arithmetic and visible content are unchanged.
 
-These are confirmed remaining algorithms, not measured frame stalls. The
-narrow follow-up is a persistent spatial override index / incremental per-region
-fingerprint updated by canonical terrain/fluid batches, preserving negative
-coordinates, material-sensitive cover identities and conservative plant halos.
-Do not repurpose the disposable delta journal as authoritative history or drop
-dormant fluid/tombstones to hide scan cost.
+Standalone optimized world tests (`rustc --edition=2021 --test -O
+frontier/world/src/lib.rs -o /tmp/nov16-world-index-tests`) passed **128 tests,
+6 ignored**. Four new ordinary index tests cover negative/extreme bounds,
+source branches/reverts, hidden-fluid tombstones, bulk restore and cap fallback
+against a full-scan oracle. The root coordinator still runs renderer caller
+regressions and the final workspace suite.
+
+The ignored `million_override_local_query_matches_full_scan_with_bounded_candidate_work`
+also passed. Its synthetic history is one million Stone overrides at native
+Y=16000, arranged as a 1000×1000 X/Z square. A 4×2×4 native query returns the
+same 16 sorted addresses as full scanning:
+
+| Work | Indexed query | Full-scan oracle |
+|---|---:|---:|
+| Retained override history | 1,000,000 | 1,000,000 |
+| Bucket lookups | 4 | — |
+| Bitset words visited | 256 | — |
+| Set bits visited | 1,024 | — |
+| Canonical map membership checks | 16 | — |
+| History addresses scanned | 0 | 1,000,000 |
+| One query elapsed time | 0.0144 ms | 9.225 ms |
+
+Constructing that synthetic batch plus index took 281 ms. This is one optimized
+CPU diagnostic on the development machine, not a controlled frame benchmark,
+renderer speedup or whole-game memory result. Exact candidate counts and the
+full-scan equality are the useful acceptance evidence.
+
+Remaining limits are explicit: index saturation falls back to O(history), broad
+requests may traverse all retained candidate buckets, and shared candidate
+unions retain false positives from old branches until saturation. Authoritative
+`Arc<BTreeMap>` copy-on-write can still clone a large map after a retained
+snapshot; this change does not make canonical mutation chunk-local. The World
+change journal likewise still falls back exactly when old lineage records have
+been evicted. No shader, representation or canonical state changes are hidden
+inside this indexing improvement.
 
 ## Reproduction requests
 

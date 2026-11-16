@@ -1,5 +1,6 @@
 //! Experimental dense f64 MAC/VOF reference; never selected by the playtest.
 //! Numerical contract and limitations: research/nov16/PHYSICAL_WATER_M0.md.
+mod advection;
 mod checkpoint;
 mod pressure;
 mod transport;
@@ -9,6 +10,18 @@ pub enum Transport {
     Geometric,
     DonorCell,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundaryMode {
+    Center,
+    Ghost,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VelocityAdvection {
+    SemiLagrangian,
+    LimitedMacCormack,
+}
+/// Minimum dimensionless centre-to-interface distance in the ghost candidate.
+pub const GHOST_THETA_FLOOR: f64 = 1e-6;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhysicalConfig {
     pub dims: [usize; 3],
@@ -22,6 +35,8 @@ pub struct PhysicalConfig {
     pub pressure_iterations: usize,
     pub max_substeps: usize,
     pub transport: Transport,
+    pub boundary: BoundaryMode,
+    pub advection: VelocityAdvection,
 }
 impl Default for PhysicalConfig {
     fn default() -> Self {
@@ -36,6 +51,8 @@ impl Default for PhysicalConfig {
             pressure_iterations: 2000,
             max_substeps: 4096,
             transport: Transport::Geometric,
+            boundary: BoundaryMode::Center,
+            advection: VelocityAdvection::SemiLagrangian,
         }
     }
 }
@@ -66,6 +83,7 @@ pub struct PhysicalStats {
     pub roundoff_absolute_voxels: f64,
     pub transport_residual_voxels: f64,
     pub trace_volume_voxels: f64,
+    pub unpressurized_volume_voxels: f64,
     pub centre_of_volume: [f64; 3],
     pub kinetic_energy: f64,
     pub max_speed: f64,
@@ -245,6 +263,13 @@ impl PhysicalFluid {
         self.enforce_faces();
         Ok(())
     }
+    fn supports_pressure(&self, i: usize) -> bool {
+        self.fraction[i]
+            > match self.config.boundary {
+                BoundaryMode::Center => self.config.pressure_fraction_floor,
+                BoundaryMode::Ghost => 0.5,
+            }
+    }
     fn open_face(&self, l: Option<usize>, r: Option<usize>) -> bool {
         matches!((l,r),(Some(l),Some(r)) if !self.solid[l] && !self.solid[r])
     }
@@ -255,10 +280,7 @@ impl PhysicalFluid {
             for i in 0..self.velocity[a].len() {
                 let (l, r) = adjacent(d, coord(fd, i), a);
                 if !self.open_face(l, r)
-                    || !l
-                        .into_iter()
-                        .chain(r)
-                        .any(|c| self.fraction[c] > self.config.pressure_fraction_floor)
+                    || !l.into_iter().chain(r).any(|c| self.supports_pressure(c))
                 {
                     self.velocity[a][i] = 0.;
                 }
@@ -298,6 +320,9 @@ impl PhysicalFluid {
                 continue;
             }
             s.liquid_cells += 1;
+            if !self.supports_pressure(i) {
+                s.unpressurized_volume_voxels += f;
+            }
             if f <= self.config.pressure_fraction_floor {
                 s.trace_volume_voxels += f;
             }
@@ -423,10 +448,7 @@ impl PhysicalFluid {
             let fd = face_dims(d, a);
             for i in 0..self.velocity[a].len() {
                 let (l, r) = adjacent(d, coord(fd, i), a);
-                if self.open_face(l, r)
-                    && l.into_iter()
-                        .chain(r)
-                        .any(|c| self.fraction[c] > self.config.pressure_fraction_floor)
+                if self.open_face(l, r) && l.into_iter().chain(r).any(|c| self.supports_pressure(c))
                 {
                     self.velocity[a][i] += dt * self.config.gravity[a];
                 }
@@ -435,42 +457,19 @@ impl PhysicalFluid {
         self.enforce_faces();
         let (iterations, residual) = self.project(dt)?;
         let div = (0..self.fraction.len())
-            .filter(|&i| self.fraction[i] > self.config.pressure_fraction_floor)
+            .filter(|&i| self.supports_pressure(i))
             .map(|i| self.divergence(i).abs())
             .fold(0., f64::max);
+        // The ghost pressure domain stops at the reconstructed interface. VOF
+        // still retains outside-centre liquid; extend its transport velocities
+        // into the same bounded air band instead of deleting that volume.
+        if self.config.boundary == BoundaryMode::Ghost {
+            self.extend_velocity();
+        }
         let courant = self.transport(dt)?;
         self.phase = self.phase.checked_add(1).ok_or(PhysicalError::WorkLimit)?;
         self.enforce_faces();
         Ok((iterations, residual, courant, div))
-    }
-    fn sample_component(&self, a: usize, pos: [f64; 3]) -> f64 {
-        let d = face_dims(self.config.dims, a);
-        let mut lo = [0; 3];
-        let mut hi = [0; 3];
-        let mut t = [0.; 3];
-        for b in 0..3 {
-            let p = (pos[b] / self.config.spacing - if a == b { 0. } else { 0.5 })
-                .clamp(0., (d[b] - 1) as f64);
-            lo[b] = p.floor() as usize;
-            hi[b] = (lo[b] + 1).min(d[b] - 1);
-            t[b] = p - lo[b] as f64;
-        }
-        let mut v = 0.;
-        for mask in 0..8 {
-            let mut p = [0; 3];
-            let mut w = 1.;
-            for b in 0..3 {
-                if mask & (1 << b) == 0 {
-                    p[b] = lo[b];
-                    w *= 1. - t[b];
-                } else {
-                    p[b] = hi[b];
-                    w *= t[b];
-                }
-            }
-            v += w * self.velocity[a][index(d, p)];
-        }
-        v
     }
     fn extend_velocity(&mut self) {
         let d = self.config.dims;
@@ -480,9 +479,7 @@ impl PhysicalFluid {
                 .map(|i| {
                     let (l, r) = adjacent(d, coord(fd, i), a);
                     self.open_face(l, r)
-                        && l.into_iter()
-                            .chain(r)
-                            .any(|c| self.fraction[c] > self.config.pressure_fraction_floor)
+                        && l.into_iter().chain(r).any(|c| self.supports_pressure(c))
                 })
                 .collect();
             for _ in 0..2 {
@@ -521,24 +518,6 @@ impl PhysicalFluid {
                 valid = next_valid;
             }
         }
-    }
-    fn advect_velocity(&mut self, dt: f64) {
-        self.extend_velocity();
-        let mut next = self.velocity.clone();
-        for a in 0..3 {
-            let d = face_dims(self.config.dims, a);
-            for (i, v) in next[a].iter_mut().enumerate() {
-                let p = coord(d, i);
-                let pos = std::array::from_fn(|b| {
-                    (p[b] as f64 + if a == b { 0. } else { 0.5 }) * self.config.spacing
-                });
-                let mid =
-                    std::array::from_fn(|b| pos[b] - 0.5 * dt * self.sample_component(b, pos));
-                let back = std::array::from_fn(|b| pos[b] - dt * self.sample_component(b, mid));
-                *v = self.sample_component(a, back);
-            }
-        }
-        self.velocity = next;
     }
 }
 
