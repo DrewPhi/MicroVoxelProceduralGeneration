@@ -243,7 +243,7 @@ fn cover_node(map:u32,node:u32,direction:vec2<f32>,view:vec3<f32>)->CoverSample 
         faces=FaceProfile(faces.top*scale,faces.px*scale,faces.nx*scale,faces.pz*scale,faces.nz*scale);
     }
     faces=mix_profile(faces,nadir,smoothstep(1.,4.,direction.y));
-    return CoverSample(faces,face_profiles[at+1u]);
+    return CoverSample(faces,extra);
 }
 fn mix_cover(a:CoverSample,b:CoverSample,t:f32)->CoverSample {
     return CoverSample(mix_profile(a.faces,b.faces,t),mix_profile(a.extra,b.extra,t));
@@ -284,7 +284,9 @@ fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:ve
     let top=1.;let bottom=0.;
     let area=view_coverage(p,view,normal);
     if area<=0.00001{return base;}
-    let c0=p.faces.top.rgb/max(p.faces.top.w,0.00001)*terrain_lighting(vec3(0.,1.,0.),visibility);
+    // Share the identical top-axis response with the blossom contribution.
+    let top_light=terrain_lighting(vec3(0.,1.,0.),visibility);
+    let c0=p.faces.top.rgb/max(p.faces.top.w,0.00001)*top_light;
     let c1=p.faces.px.rgb/max(p.faces.px.w,0.00001)*terrain_lighting(vec3(1.,0.,0.),visibility);
     let c2=p.faces.nx.rgb/max(p.faces.nx.w,0.00001)*terrain_lighting(vec3(-1.,0.,0.),visibility);
     let c3=p.faces.pz.rgb/max(p.faces.pz.w,0.00001)*terrain_lighting(vec3(0.,0.,1.),visibility);
@@ -314,7 +316,7 @@ fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:ve
     let flower=select(0.,1.,paint_hash(coarse_cell^vec3<u32>(131u,723u,391u))<bloom);
     // Preserve the mean blossom contribution as its stochastic detail becomes
     // subpixel. The birth field is shared with canonical placement.
-    let flower_color=vec3(0.75,0.74,0.67)*terrain_lighting(vec3(0.,1.,0.),visibility);
+    let flower_color=vec3(0.75,0.74,0.67)*top_light;
     plant+=mix(bloom,flower,attenuation)*max(vec3(0.),flower_color-plant);
     if cover_shell {return max(plant,vec3(0.));}
     if wrapper.top.z>0.5 {

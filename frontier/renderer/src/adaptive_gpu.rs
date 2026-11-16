@@ -441,7 +441,24 @@ impl LocalViewTransform {
 }
 
 fn sort_draw_order(order: &mut [(f64, TileKey)]) {
-    order.sort_by(|(da, ka), (db, kb)| da.total_cmp(db).then_with(|| ka.cmp(kb)));
+    static IN_PLACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let in_place = *IN_PLACE
+        .get_or_init(|| std::env::var("FRONTIER_TERRAIN_IN_PLACE_ORDER").as_deref() == Ok("1"));
+    sort_draw_order_impl(order, in_place);
+}
+
+fn sort_draw_order_impl(order: &mut [(f64, TileKey)], in_place: bool) {
+    // A TileKey occurs once in a resident draw domain. Depth plus key therefore
+    // defines a total order: unstable sorting preserves the same visible order
+    // without the stable sort's temporary allocation. Keep the control for A/B.
+    let compare = |(da, ka): &(f64, TileKey), (db, kb): &(f64, TileKey)| {
+        da.total_cmp(db).then_with(|| ka.cmp(kb))
+    };
+    if in_place {
+        order.sort_unstable_by(compare);
+    } else {
+        order.sort_by(compare);
+    }
 }
 
 // A previous sorted key sequence is only a starting order. All depth values
@@ -2691,6 +2708,36 @@ mod tests {
         replacement.source_revision += 1;
         assert!(!domain.matches(5, &HashSet::from([replacement])));
         assert!(!domain.matches(5, &HashSet::new()));
+    }
+
+    #[test]
+    fn in_place_sort_matches_control_through_ties_and_nonfinite_diagnostics() {
+        let mut keys: Vec<_> = (0..4096)
+            .map(|i| {
+                let key = super::TileKey {
+                    min: [i - 2048, -i],
+                    width_cells: 64,
+                    step_cells: 4,
+                    edge_steps: [4; 4],
+                    source_revision: 0,
+                };
+                ((i % 23) as f64, key)
+            })
+            .collect();
+        // Include deterministic signed-zero/nonfinite ordering for diagnostic
+        // inputs; production visibility independently rejects invalid bounds.
+        keys[0].0 = f64::NAN;
+        keys[1].0 = f64::NEG_INFINITY;
+        keys[2].0 = -0.;
+        keys.reverse();
+        let mut control = keys.clone();
+        super::sort_draw_order_impl(&mut control, false);
+        super::sort_draw_order_impl(&mut keys, true);
+        assert_eq!(keys.len(), control.len());
+        for (a, b) in keys.iter().zip(&control) {
+            assert_eq!(a.0.to_bits(), b.0.to_bits());
+            assert_eq!(a.1, b.1);
+        }
     }
 
     #[test]

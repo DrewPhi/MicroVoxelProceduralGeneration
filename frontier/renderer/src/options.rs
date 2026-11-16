@@ -3,6 +3,9 @@ use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
     pub live_water: bool,
+    pub player_edit: bool,
+    pub hand: frontier_world::edit::HandSettings,
+    pub inventory_capacity: u64,
     pub water_active_radius: u32,
     pub water_history_cells: usize,
     pub water_save: Option<PathBuf>,
@@ -73,6 +76,9 @@ fn parse_on_off(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<b
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     use crate::settings::ResourceProfile;
     let mut live_water = false;
+    let mut player_edit = None;
+    let mut hand = frontier_world::edit::HandSettings::default();
+    let mut inventory_capacity = 64u64;
     let mut water_active_radius = 1u32;
     let mut water_history_cells = 1_048_576usize;
     let mut water_save = None;
@@ -154,6 +160,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     return Err("--water-history-cells requires 32768..16777216".into());
                 }
             }
+            "--player-edit" => player_edit=Some(parse_on_off(&mut args,&arg)?),
+            "--pickup-reach" => hand.reach_m=args.next().ok_or("pickup reach requires metres")?.parse()?,
+            "--hand-volume-liters" => hand.volume_liters=args.next().ok_or("hand volume requires litres")?.parse()?,
+            "--hand-extent" => hand.extent_m=args.next().ok_or("hand extent requires metres")?.parse()?,
+            "--pickup-quick-ms" => hand.quick_seconds=args.next().ok_or("quick threshold requires milliseconds")?.parse::<f64>()?/1000.,
+            "--pickup-full-ms" => hand.full_seconds=args.next().ok_or("full charge requires milliseconds")?.parse::<f64>()?/1000.,
+            "--inventory-capacity" => inventory_capacity=args.next().ok_or("inventory requires voxel capacity")?.parse()?,
             "--live-water" => live_water = parse_on_off(&mut args, &arg)?,
             "--water-save" => {
                 water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?));
@@ -586,6 +599,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             }
             "--help" | "-h" => {
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius 1..256 (integer metres, enables experiment) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
+                println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
                 println!("Live native water (opt-in): --live-water on --water-save PATH saves terrain edits and fluid state atomically on clean exit, reloads the same source/seed on next launch. Requires adaptive scene, NAADF on/follow on/GPU distance off. --water-demo builds a two-chamber basin; dam opens after 20 fixed ticks (2 simulated seconds); G opens early, P adds one counted water cell at the aim. Left/right edit terrain. 10Hz physics; --water-active-radius 1|2 selects a 3m|5m active cube (default 1); --water-history-cells 32768..16777216 sets the persistent cell cap (default 1048576, at least the active cube). Sealed unloaded borders, dormant history retained until the cap; no swimming/pressure/erosion.");
                 println!("Visual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded Alpine adaptive geometry only). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
@@ -806,6 +820,27 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     adaptive_build_mib = visual.build_mib;
     adaptive_workers = visual.workers;
     adaptive_refinements = visual.refinements;
+    let player_edit = player_edit.unwrap_or(live_water);
+    if player_edit && !live_water {
+        return Err("--player-edit on currently requires --live-water on for atomic terrain/fluid/inventory saves".into());
+    }
+    if !hand.reach_m.is_finite()
+        || !(0.0625..=8.).contains(&hand.reach_m)
+        || !hand.volume_liters.is_finite()
+        || !(0.001..=16.).contains(&hand.volume_liters)
+        || !hand.extent_m.is_finite()
+        || !(0.0625..=0.5).contains(&hand.extent_m)
+        || !hand.quick_seconds.is_finite()
+        || !(0.01..=2.).contains(&hand.quick_seconds)
+        || !hand.full_seconds.is_finite()
+        || hand.full_seconds <= hand.quick_seconds
+        || hand.full_seconds > 10.
+        || !(1..=1_048_576).contains(&inventory_capacity)
+    {
+        return Err(
+            "invalid pickup reach/hand volume/extent/charge time or inventory capacity".into(),
+        );
+    }
     if live_water
         && water_history_cells < crate::live_water::active_cell_capacity(water_active_radius)
     {
@@ -827,6 +862,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     }
     Ok(Some(Options {
         live_water,
+        player_edit,
+        hand,
+        inventory_capacity,
         water_active_radius,
         water_history_cells,
         water_save,

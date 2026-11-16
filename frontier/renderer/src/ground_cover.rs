@@ -18,7 +18,67 @@ const EDGE: i64 = 16;
 const HEIGHT: usize = 16;
 #[path = "ground_cover_cache.rs"]
 mod shared_cache;
-pub(crate) const VERSION: u64 = 4;
+pub(crate) const VERSION: u64 = 5;
+const PROBE_MODE_SHIFT: u32 = 40;
+static COARSE_PROBE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static COARSE_BUILDS: AtomicU64 = AtomicU64::new(0);
+static COARSE_NANOS: AtomicU64 = AtomicU64::new(0);
+// Zero preserves the representative control. Modes are part of source/cache
+// identity; a page never mixes summaries made with different probe densities.
+fn probe_mode() -> u64 {
+    match std::env::var("FRONTIER_GROUND_COVER_PROBES").as_deref() {
+        Ok("16") => 1,
+        Ok("64") => 2,
+        _ => 0,
+    }
+}
+pub(crate) fn cache_version() -> u64 {
+    VERSION | (probe_mode() << PROBE_MODE_SHIFT)
+}
+fn probe_grid(source: [u64; 8]) -> i64 {
+    match (source[7] >> PROBE_MODE_SHIFT) & 3 {
+        1 => 4,
+        2 => 8,
+        _ => 1,
+    }
+}
+fn probe_hash(seed: u64, x: i64, z: i64, level: u8) -> u64 {
+    let mut h = seed
+        ^ (x as u64).wrapping_mul(0x9e3779b97f4a7c15)
+        ^ (z as u64).rotate_left(29)
+        ^ u64::from(level).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+    h ^ (h >> 31)
+}
+// A stratum's chosen leaf descends through world-aligned dyadic children.
+// Descendants reuse the same decisions, so every parent probe occurs in the
+// corresponding child's probe set. Work is logarithmic in span, never a
+// recursively expanding survey of all native leaves.
+fn representative_leaf(seed: u64, mut x: i64, mut z: i64, level: u8) -> [i64; 2] {
+    for level in (1..=level).rev() {
+        let h = probe_hash(seed, x, z, level);
+        x = x * 2 + (h & 1) as i64;
+        z = z * 2 + ((h >> 1) & 1) as i64;
+    }
+    [x, z]
+}
+fn coarse_probes(key: Key) -> Vec<[i64; 2]> {
+    let grid = probe_grid(key.source);
+    let level = key.level - grid.ilog2() as u8;
+    let mut probes = Vec::with_capacity((grid * grid) as usize);
+    for z in 0..grid {
+        for x in 0..grid {
+            probes.push(representative_leaf(
+                key.source[0],
+                key.x * grid + x,
+                key.z * grid + z,
+                level,
+            ));
+        }
+    }
+    probes
+}
 fn records() -> usize {
     if directional_enabled() {
         10
@@ -108,19 +168,23 @@ fn source(w: &World) -> [u64; 8] {
         p.amplitude.to_bits(),
         p.octaves as u64,
         p.roughness.to_bits(),
-        VERSION
+        cache_version()
             | ((w.fbm_terrain().is_some() as u64) << 32)
             | ((w.topology_base_cells().is_some() as u64) << 33),
     ]
 }
 pub(crate) fn stats_json() -> String {
     format!(
-        "{{\"directional\":{},\"enabled\":{},\"version\":{},\"leaf_build_ms\":{},\"shell\":{},{}}}",
+        "{{\"directional\":{},\"enabled\":{},\"version\":{},\"leaf_build_ms\":{},\"shell\":{},\"coarse_probe_budget\":{},\"coarse_probe_requests\":{},\"coarse_builds\":{},\"coarse_build_ms\":{},{}}}",
         directional_enabled(),
         enabled(),
         VERSION,
         NANOS.load(Ordering::Relaxed) as f64 / 1e6,
         shell_enabled(),
+        match probe_mode() { 1 => 16, 2 => 64, _ => 1 },
+        COARSE_PROBE_REQUESTS.load(Ordering::Relaxed),
+        COARSE_BUILDS.load(Ordering::Relaxed),
+        COARSE_NANOS.load(Ordering::Relaxed) as f64 / 1e6,
         cache().stats_json_fields()
     )
 }
@@ -181,6 +245,39 @@ fn node(w: &World, mut key: Key, cancel: &mut impl FnMut() -> bool) -> Result<Su
                 value.add(&child, 0.25);
             }
         }
+    } else if probe_grid(key.source) > 1 {
+        let probes = coarse_probes(key);
+        let weight = 1. / probes.len() as f32;
+        let mut second_moment = 0.;
+        for [x, z] in probes {
+            let child = node(
+                w,
+                Key {
+                    x,
+                    z,
+                    level: 0,
+                    ..key
+                },
+                cancel,
+            )?;
+            // Merge conditional luminance moments, including differences
+            // between sampled clump means instead of averaging their sigmas.
+            let coverage = child.data[1][4][0];
+            let rgb = child.data[0][0];
+            let mean =
+                (rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) / coverage.max(0.000001);
+            second_moment += weight * coverage * (child.data[1][4][2].powi(2) + mean * mean);
+            value.add(&child, weight);
+            COARSE_PROBE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        }
+        let coverage = value.data[1][4][0];
+        let rgb = value.data[0][0];
+        let mean = (rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) / coverage.max(0.000001);
+        value.data[1][4][2] = (second_moment / coverage.max(0.000001) - mean * mean)
+            .max(0.)
+            .sqrt();
+        COARSE_BUILDS.fetch_add(1, Ordering::Relaxed);
+        COARSE_NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     } else {
         // Bounded coarse population estimate. Fine render subdivisions share
         // this world-aligned representative; never survey their whole region.
@@ -558,6 +655,140 @@ mod tests {
         )
         .unwrap()
         .with_vegetation()
+    }
+    fn with_mode(w: &World, mode: u64, x: i64, z: i64, level: u8) -> Key {
+        let mut source = source(w);
+        source[7] = (source[7] & !(3 << PROBE_MODE_SHIFT)) | (mode << PROBE_MODE_SHIFT);
+        Key {
+            source,
+            x,
+            z,
+            level,
+            edits: 0,
+        }
+    }
+    #[test]
+    fn stratified_probes_are_bounded_nested_and_world_aligned() {
+        let w = world();
+        for mode in [1, 2] {
+            for level in [3, 4, 9, 16] {
+                let key = with_mode(&w, mode, -7, 11, level);
+                let probes = coarse_probes(key);
+                let grid = probe_grid(key.source);
+                assert_eq!(probes.len(), (grid * grid) as usize);
+                assert_eq!(
+                    probes.iter().copied().collect::<HashSet<_>>().len(),
+                    probes.len()
+                );
+                let side = 1i64 << level;
+                assert!(probes.iter().all(|p| p[0] >= key.x * side
+                    && p[0] < (key.x + 1) * side
+                    && p[1] >= key.z * side
+                    && p[1] < (key.z + 1) * side));
+                if level > 3 {
+                    let children: HashSet<_> = (0..2)
+                        .flat_map(|z| {
+                            (0..2).flat_map(move |x| {
+                                coarse_probes(Key {
+                                    x: key.x * 2 + x,
+                                    z: key.z * 2 + z,
+                                    level: level - 1,
+                                    ..key
+                                })
+                            })
+                        })
+                        .collect();
+                    assert!(probes.iter().all(|p| children.contains(p)));
+                }
+            }
+        }
+        assert_ne!(
+            with_mode(&w, 0, 0, 0, 3).source,
+            with_mode(&w, 1, 0, 0, 3).source
+        );
+        assert_ne!(
+            with_mode(&w, 1, 0, 0, 3).source,
+            with_mode(&w, 2, 0, 0, 3).source
+        );
+    }
+    #[test]
+    fn stratified_cover_compares_population_to_dense_native_leaf_oracle() {
+        let w = world();
+        let mut error = [[0f64; 3]; 3];
+        let mut active = false;
+        let start = Instant::now();
+        for [x, z] in [[-8, -6], [-6, -32], [-1, -1], [0, 0]] {
+            let mut dense = Summary::default();
+            let mut m2 = 0f64;
+            // Independent dense survey of all64 native1m leaves. Never used by
+            // production coarse construction and never recursively calls node.
+            for dz in 0..8 {
+                for dx in 0..8 {
+                    let leaf = leaf(
+                        &w,
+                        [(x * 8 + dx) * EDGE, (z * 8 + dz) * EDGE],
+                        &mut || false,
+                        directional_enabled(),
+                    )
+                    .unwrap();
+                    let cover = f64::from(leaf.data[1][4][0]);
+                    let rgb = leaf.data[0][0];
+                    let mean = f64::from(rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722)
+                        / cover.max(0.000001);
+                    m2 += cover * (f64::from(leaf.data[1][4][2]).powi(2) + mean * mean) / 64.;
+                    dense.add(&leaf, 1. / 64.);
+                }
+            }
+            let cover = f64::from(dense.data[1][4][0]);
+            let rgb = dense.data[0][0];
+            let mean = f64::from(rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722)
+                / cover.max(0.000001);
+            dense.data[1][4][2] = (m2 / cover.max(0.000001) - mean * mean).max(0.).sqrt() as f32;
+            active |= dense.coverage() > 0.;
+            for mode in 0..3 {
+                let key = with_mode(&w, mode, x, z, 3);
+                let candidate = node(&w, key, &mut || false).unwrap();
+                assert_eq!(node(&w, key, &mut || false).unwrap(), candidate);
+                for channel in 0..3 {
+                    error[mode as usize][0] +=
+                        f64::from(candidate.data[0][0][channel] - dense.data[0][0][channel])
+                            .powi(2)
+                            / 3.;
+                }
+                error[mode as usize][1] +=
+                    f64::from(candidate.data[1][4][0] - dense.data[1][4][0]).powi(2);
+                error[mode as usize][2] +=
+                    f64::from(candidate.data[1][4][2] - dense.data[1][4][2]).powi(2);
+                assert!(candidate
+                    .data
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .all(|v| v.is_finite()));
+                assert!(node(&w, key, &mut || true).is_err());
+            }
+        }
+        assert!(active, "oracle must contain native cover");
+        for (mode, errors) in error.into_iter().enumerate() {
+            let rmse = errors.map(|sum| (sum / 4.).sqrt());
+            eprintln!(
+                "cover_probe_oracle probes={} rgb_rmse={} coverage_rmse={} sigma_rmse={}",
+                [1, 16, 64][mode],
+                rmse[0],
+                rmse[1],
+                rmse[2]
+            );
+            if mode == 2 {
+                assert!(
+                    rmse.iter().all(|e| *e < 0.0001),
+                    "64probes must reproduce all64 dense leaves"
+                );
+            }
+        }
+        eprintln!(
+            "cover_probe_oracle total_ms={}",
+            start.elapsed().as_secs_f64() * 1000.
+        );
     }
     #[test]
     fn directional_lobes_preserve_probe_opacity_without_changing_the_fast_product() {

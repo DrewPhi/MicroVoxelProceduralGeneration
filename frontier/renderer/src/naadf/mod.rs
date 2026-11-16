@@ -13,6 +13,7 @@ pub(crate) mod ownership;
 mod prepare_profile;
 mod root_distance;
 mod scatter;
+mod scheduler;
 mod sparse_roots;
 mod startup;
 mod stream;
@@ -777,6 +778,7 @@ pub struct Experiment {
     active: Option<Volume>,
     source_world: Option<World>,
     refresh_world: Option<World>,
+    last_update_was_refresh: bool,
     pending: Option<Pending>,
     shift: Option<upload::PendingShift>,
     stream_upload: upload::UploadStats,
@@ -822,6 +824,7 @@ impl Default for Experiment {
             active: None,
             source_world: None,
             refresh_world: None,
+            last_update_was_refresh: false,
             pending: None,
             shift: None,
             stream_upload: upload::UploadStats::default(),
@@ -985,6 +988,7 @@ impl Experiment {
             self.request = Some(r);
             self.source_world = Some(world.clone());
             self.refresh_world = None;
+            self.last_update_was_refresh = false;
             self.pending = None;
             self.shift = None;
             self.shifting = false;
@@ -1209,68 +1213,6 @@ impl Experiment {
             self.status = "Preparing NAADF at new location".into();
             return;
         }
-        if local_edits
-            && !self.shifting
-            && !self.expanding
-            && !self.restoring_raster
-            && self.active.is_some()
-            && self.published_epoch == self.epoch
-            && self.error.is_none()
-            && self
-                .source_world
-                .as_ref()
-                .is_some_and(|old| old.revision() != world.revision())
-        {
-            let old = self.source_world.as_ref().unwrap();
-            let cells = old.changed_edit_cells(world);
-            self.refresh_world = Some(world.clone());
-            self.shifting = true;
-            self.shift_timing = ShiftTiming {
-                start: Some(Instant::now()),
-                ..Default::default()
-            };
-            self.worker.send(Job::Refresh(
-                self.epoch,
-                world.clone(),
-                cells,
-                self.effective_budget_mib * 1048576,
-            ));
-            self.status = "Updating changed voxel roots".into();
-        }
-        if self.growth_pending && !self.expanding && !self.shifting && self.error.is_none() {
-            if let Some(v) = &self.active {
-                let region = stream::Region {
-                    lo: v.bounds[0].map(|x| x as i64),
-                    hi: v.bounds[1].map(|x| x as i64),
-                };
-                let center = if r.follow {
-                    camera.position.to_array()
-                } else {
-                    std::array::from_fn(|a| (v.bounds[0][a] + v.bounds[1][a]) * 0.5)
-                };
-                let next = startup::next_region(region, r.radius, center);
-                self.expanding = true;
-                self.growth_pending = false;
-                self.shifting = true;
-                self.shift_timing = ShiftTiming {
-                    start: Some(Instant::now()),
-                    ..Default::default()
-                };
-                self.worker.stage.store(0, Ordering::Relaxed);
-                self.status = format!(
-                    "Expanding exact region: {} → {} m",
-                    v.resident_radius(),
-                    next.dims()[0] / 2
-                );
-                self.refresh_world = None;
-                self.worker.send(Job::Shift(
-                    self.epoch,
-                    self.source_world.as_ref().unwrap_or(world).clone(),
-                    next,
-                    self.effective_budget_mib * 1048576,
-                ));
-            }
-        }
         if let (Some(p), Some(v)) = (&mut self.shift, &mut self.active) {
             let (uploaded, frame_upload) = p.advance(gpu, v);
             self.stream_upload.record(frame_upload);
@@ -1354,6 +1296,93 @@ impl Experiment {
                 };
             }
         }
+        // Select only after publication releases the current job. Alternate
+        // pending content with demanded movement/growth so continuous edits and
+        // continuous travel each receive a bounded share of idle turns.
+        let following_target = if r.follow && !self.growth_pending {
+            self.active.as_ref().and_then(|v| {
+                stream::target(
+                    stream::Region {
+                        lo: v.bounds[0].map(|x| x as i64),
+                        hi: v.bounds[1].map(|x| x as i64),
+                    },
+                    camera.position.to_array(),
+                    self.eye_velocity.to_array(),
+                    stream_lead_seconds(),
+                )
+            })
+        } else {
+            None
+        };
+        let update = scheduler::next_update(
+            !self.shifting
+                && !self.expanding
+                && !self.restoring_raster
+                && self.active.is_some()
+                && self.published_epoch == self.epoch
+                && self.error.is_none(),
+            local_edits
+                && self
+                    .source_world
+                    .as_ref()
+                    .is_some_and(|old| old.revision() != world.revision()),
+            self.growth_pending,
+            following_target.is_some(),
+            self.last_update_was_refresh,
+        );
+        if update == Some(scheduler::Update::Refresh) {
+            self.last_update_was_refresh = true;
+            let old = self.source_world.as_ref().unwrap();
+            let cells = old.changed_edit_cells(world);
+            self.refresh_world = Some(world.clone());
+            self.shifting = true;
+            self.shift_timing = ShiftTiming {
+                start: Some(Instant::now()),
+                ..Default::default()
+            };
+            self.worker.send(Job::Refresh(
+                self.epoch,
+                world.clone(),
+                cells,
+                self.effective_budget_mib * 1048576,
+            ));
+            self.status = "Updating changed voxel roots".into();
+        }
+        if update == Some(scheduler::Update::Grow) {
+            self.last_update_was_refresh = false;
+            if let Some(v) = &self.active {
+                let region = stream::Region {
+                    lo: v.bounds[0].map(|x| x as i64),
+                    hi: v.bounds[1].map(|x| x as i64),
+                };
+                let center = if r.follow {
+                    camera.position.to_array()
+                } else {
+                    std::array::from_fn(|a| (v.bounds[0][a] + v.bounds[1][a]) * 0.5)
+                };
+                let next = startup::next_region(region, r.radius, center);
+                self.expanding = true;
+                self.growth_pending = false;
+                self.shifting = true;
+                self.shift_timing = ShiftTiming {
+                    start: Some(Instant::now()),
+                    ..Default::default()
+                };
+                self.worker.stage.store(0, Ordering::Relaxed);
+                self.status = format!(
+                    "Expanding exact region: {} → {} m",
+                    v.resident_radius(),
+                    next.dims()[0] / 2
+                );
+                self.refresh_world = None;
+                self.worker.send(Job::Shift(
+                    self.epoch,
+                    self.source_world.as_ref().unwrap_or(world).clone(),
+                    next,
+                    self.effective_budget_mib * 1048576,
+                ));
+            }
+        }
         if !self.shifting && !self.restoring_raster && self.published_epoch == self.epoch {
             if let Some(v) = &mut self.active {
                 if let Some(cache) = &mut v.root_distance {
@@ -1374,24 +1403,9 @@ impl Experiment {
                 self.stream_active_frames += 1;
                 self.stream_outside_frames += u64::from(self.camera_margin_m < VOXEL_SIZE);
             }
-            if r.follow
-                && !self.expanding
-                && !self.growth_pending
-                && !self.shifting
-                && !self.restoring_raster
-                && self.published_epoch == self.epoch
-                && self.error.is_none()
-            {
-                let region = stream::Region {
-                    lo: v.bounds[0].map(|x| x as i64),
-                    hi: v.bounds[1].map(|x| x as i64),
-                };
-                if let Some(next) = stream::target(
-                    region,
-                    eye,
-                    self.eye_velocity.to_array(),
-                    stream_lead_seconds(),
-                ) {
+            if update == Some(scheduler::Update::Follow) {
+                if let Some(next) = following_target {
+                    self.last_update_was_refresh = false;
                     self.shift_timing = ShiftTiming {
                         start: Some(Instant::now()),
                         ..Default::default()
@@ -1436,6 +1450,39 @@ impl Experiment {
                         let (ready, total) = cache.progress();
                         ready == total
                     }))
+    }
+    /// Whether a complete native voxel remains resident through the current
+    /// ownership handoff. Callers still validate hits against the live world.
+    pub fn owns_native_edit_cell(&self, cell: frontier_world::Cell) -> bool {
+        if !self.ready() || self.restoring_raster {
+            return false;
+        }
+        let Some(active) = &self.active else {
+            return false;
+        };
+        if active.sparse_roots {
+            return false;
+        }
+        let lo = [cell.x, cell.y, cell.z];
+        let Some(hi) = cell
+            .x
+            .checked_add(1)
+            .zip(cell.y.checked_add(1))
+            .zip(cell.z.checked_add(1))
+            .map(|((x, y), z)| [x, y, z])
+        else {
+            return false;
+        };
+        let bounds = [
+            lo.map(|x| x as f64 * VOXEL_SIZE),
+            hi.map(|x| x as f64 * VOXEL_SIZE),
+        ];
+        (0..3).all(|axis| bounds[1][axis] - bounds[0][axis] == VOXEL_SIZE)
+            && active.ownership.contains(bounds)
+            && self
+                .shift
+                .as_ref()
+                .is_none_or(|shift| shift.change.retiring.contains(bounds))
     }
     pub(crate) fn full_bounds(&self) -> Option<[[f64; 3]; 2]> {
         self.active.as_ref().map(|a| a.bounds)

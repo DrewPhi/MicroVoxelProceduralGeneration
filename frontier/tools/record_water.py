@@ -17,11 +17,11 @@ from record_walk import X11, ROOT
 def demo_flow(save_path):
     """Read the versioned demo checkpoint and verify mass crossed the dam.
 
-    This diagnostic intentionally understands only FVWATER2/FVFLUID1; it must
+    This diagnostic intentionally understands FVWATER2/3 and FVFLUID1; it must
     fail explicitly if the runtime changes its save layout.
     """
     data = save_path.read_bytes()
-    if data[:8] != b'FVWATER2':
+    if data[:8] not in (b'FVWATER2', b'FVWATER3'):
         raise RuntimeError('unexpected demo envelope')
     pos = 8 + 8 * 8
     edits = struct.unpack_from('<Q', data, pos)[0]
@@ -31,6 +31,8 @@ def demo_flow(save_path):
     pos += 1
     center = struct.unpack_from('<qqq', data, pos)
     pos += 24 + 8
+    if data[:8] == b'FVWATER3':
+        pos += 104  # Thirteen u64 inventory/sequence fields.
     if data[pos:pos + 8] != b'FVFLUID1':
         raise RuntimeError('unexpected fluid schema')
     pos += 8

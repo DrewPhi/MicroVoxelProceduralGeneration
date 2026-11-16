@@ -294,7 +294,7 @@ fn compact_overlay_preserves_exact_snapshots_with_plants_negative_edges_and_edit
                     );
                 }
             }
-            let build = |compact| {
+            let build = |compact, chunk_local| {
                 build_region_options(
                     &world,
                     min,
@@ -308,26 +308,29 @@ fn compact_overlay_preserves_exact_snapshots_with_plants_negative_edges_and_edit
                     false,
                     false,
                     compact,
+                    chunk_local,
                 )
                 .unwrap()
             };
-            let control = build(false);
-            let candidate = build(true);
-            if recipe == frontier_world::FbmRecipe::Alpine {
-                assert!(
-                    control.plant_cells > 0,
-                    "Alpine fixture must exercise plant overlay"
+            let control = build(false, false);
+            for (compact, chunk_local) in [(true, false), (false, true), (true, true)] {
+                let candidate = build(compact, chunk_local);
+                if recipe == frontier_world::FbmRecipe::Alpine {
+                    assert!(
+                        control.plant_cells > 0,
+                        "Alpine fixture must exercise plant overlay"
+                    );
+                }
+                assert_eq!(candidate.chunks, control.chunks);
+                assert_eq!(candidate.blocks, control.blocks);
+                assert_eq!(candidate.voxels, control.voxels);
+                assert_eq!(
+                    bytemuck::cast_slice::<Pigment, u8>(&candidate.palette),
+                    bytemuck::cast_slice::<Pigment, u8>(&control.palette)
                 );
+                assert_eq!(candidate.plant_cells, control.plant_cells);
+                assert_eq!(candidate.sampled_columns, control.sampled_columns);
             }
-            assert_eq!(candidate.chunks, control.chunks);
-            assert_eq!(candidate.blocks, control.blocks);
-            assert_eq!(candidate.voxels, control.voxels);
-            assert_eq!(
-                bytemuck::cast_slice::<Pigment, u8>(&candidate.palette),
-                bytemuck::cast_slice::<Pigment, u8>(&control.palette)
-            );
-            assert_eq!(candidate.plant_cells, control.plant_cells);
-            assert_eq!(candidate.sampled_columns, control.sampled_columns);
         }
     }
 }
@@ -578,6 +581,109 @@ fn dirty_root_proof_5bit_cuboids_match_naive_point_intersection() {
                         assert_eq!(
                             decoded, naive,
                             "axis={axis} counts={negative},{positive} delta={delta} width={width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn edits_at_different_heights_keep_unaffected_chunks_in_the_same_column_fast() {
+    for recipe in [
+        frontier_world::FbmRecipe::Legacy,
+        frontier_world::FbmRecipe::Alpine,
+        frontier_world::FbmRecipe::SeededWorld,
+    ] {
+        let mut world = World::fbm(
+            719,
+            frontier_world::FbmParams {
+                recipe,
+                amplitude: 16.,
+                horizontal_scale: 128.,
+                octaves: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x = -17;
+        let z = -33;
+        let ground = (world.ground_height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE)
+            / VOXEL_SIZE) as i64;
+        let min = Cell {
+            x,
+            y: ground.div_euclid(16) * 16 - 48,
+            z,
+        };
+        let dims = [1, 10, 1];
+        let build = |world: &World| {
+            build_region(
+                world,
+                min,
+                dims,
+                128 * 1048576,
+                &AtomicU32::new(0),
+                None,
+                false,
+                &|| false,
+            )
+            .unwrap()
+        };
+        let before = build(&world);
+        // Poison the old surface-band sample, remove underground terrain, and
+        // add actual fluid above the source. Each occupies a distinct y root.
+        world.set(
+            Cell {
+                x,
+                y: ground - 1,
+                z,
+            },
+            Material::Wood,
+        );
+        world.set(Cell { x, y: min.y + 1, z }, Material::Air);
+        world.set_fluid_occupancy([(
+            Cell {
+                x,
+                y: ground + 48,
+                z,
+            },
+            true,
+        )]);
+        let after = build(&world);
+        assert!(
+            !after.columns[0].fast,
+            "whole-column summaries remain edit-sensitive"
+        );
+        assert_eq!(after.edit_blocked_chunks, 3, "{recipe:?}");
+        assert!(before.fast_skipped_chunks >= 5, "{recipe:?}");
+        assert!(
+            after.fast_skipped_chunks >= before.fast_skipped_chunks.saturating_sub(3),
+            "{recipe:?}"
+        );
+        assert!(
+            after.constructed_chunks <= before.constructed_chunks + 3,
+            "{recipe:?}"
+        );
+        assert_eq!(after.fast_skipped_chunks + after.constructed_chunks, 10);
+        for dz in 0..16 {
+            for dx in 0..16 {
+                for dy in 0..160 {
+                    let c = Cell {
+                        x: x + dx as i64,
+                        y: min.y + dy as i64,
+                        z: z + dz as i64,
+                    };
+                    let actual = after.material([dx, dy, dz]);
+                    let pigment = &after.palette[(actual & (FULL - 1)) as usize];
+                    assert_eq!(pigment.material, id(world.material(c)), "{recipe:?} {c:?}");
+                    if dx != 0 || dz != 0 {
+                        let original = before.material([dx, dy, dz]);
+                        let original = &before.palette[(original & (FULL - 1)) as usize];
+                        assert_eq!(
+                            bytemuck::bytes_of(pigment),
+                            bytemuck::bytes_of(original),
+                            "{recipe:?} {c:?}"
                         );
                     }
                 }

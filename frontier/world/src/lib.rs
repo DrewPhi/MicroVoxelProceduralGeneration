@@ -5,13 +5,15 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
 pub mod affine_bounds;
 mod alpine;
+pub mod edit;
 pub mod fluid;
+pub mod physical_fluid;
 #[cfg(test)]
 mod seeded_bounds_tests;
 pub mod summary;
@@ -112,6 +114,48 @@ impl Material {
     }
 }
 
+// Disposable lineage metadata: snapshots retain only a token, never a chain of
+// parent snapshots. Eviction affects query cost, never authoritative edits.
+const CHANGE_JOURNAL_CELLS: usize = 4096;
+const CHANGE_JOURNAL_RECORDS: usize = 256;
+#[derive(Debug, Default)]
+struct ChangeJournal {
+    next: u64,
+    cells: usize,
+    records: BTreeMap<u64, (u64, Vec<Cell>)>,
+}
+impl ChangeJournal {
+    fn record(&mut self, parent: u64, cells: Vec<Cell>) -> u64 {
+        self.next = self.next.checked_add(1).expect("change token exhausted");
+        let token = self.next;
+        if cells.len() <= CHANGE_JOURNAL_CELLS {
+            while self.records.len() >= CHANGE_JOURNAL_RECORDS
+                || self.cells + cells.len() > CHANGE_JOURNAL_CELLS
+            {
+                let (_, (_, old)) = self.records.pop_first().unwrap();
+                self.cells -= old.len();
+            }
+            self.cells += cells.len();
+            self.records.insert(token, (parent, cells));
+        }
+        token
+    }
+    fn candidates(&self, mut a: u64, mut b: u64) -> Option<Vec<Cell>> {
+        let mut cells = Vec::new();
+        // Tokens strictly increase across every branch, so walking the newer
+        // side reaches the common ancestor without scanning unrelated records.
+        while a != b {
+            let newer = if a > b { &mut a } else { &mut b };
+            let (parent, delta) = self.records.get(newer)?;
+            cells.extend_from_slice(delta);
+            *newer = *parent;
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        Some(cells)
+    }
+}
+
 /// Clones share an immutable edit map; the next mutation uses copy-on-write.
 /// Revision changes only for effective material changes and is unique among
 /// divergent clones of this source lineage. Independently constructed worlds
@@ -125,6 +169,8 @@ pub struct World {
     edits: Arc<BTreeMap<Cell, Material>>,
     fluid: Arc<BTreeMap<Cell, bool>>,
     revision: u64,
+    change_token: u64,
+    changes: Arc<Mutex<ChangeJournal>>,
     counter: Arc<AtomicU64>,
 }
 
@@ -201,6 +247,8 @@ impl World {
             edits: Arc::default(),
             fluid: Arc::default(),
             revision: 0,
+            change_token: 0,
+            changes: Arc::default(),
             counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -244,15 +292,31 @@ impl World {
     }
     /// Exact override-map difference, including material changes and overrides
     /// removed by returning to an earlier immutable snapshot. Camera-independent.
+    /// Recent lineage changes inspect only touched cells (including branches and
+    /// reverts). Evicted/oversized deltas and replaced sources fall back to the
+    /// exact override scan; journal storage is bounded independently of history.
     pub fn changed_edit_cells(&self, other: &Self) -> Vec<Cell> {
         if Arc::ptr_eq(&self.edits, &other.edits) && Arc::ptr_eq(&self.fluid, &other.fluid) {
             return Vec::new();
         }
         let mut left = BTreeMap::new();
         let mut right = BTreeMap::new();
-        self.edit_cells()
-            .chain(other.edit_cells())
-            .collect::<std::collections::BTreeSet<_>>()
+        let candidates = if self.shares_source_lineage(other) {
+            self.changes
+                .lock()
+                .unwrap()
+                .candidates(self.change_token, other.change_token)
+        } else {
+            None
+        };
+        candidates
+            .unwrap_or_else(|| {
+                self.edit_cells()
+                    .chain(other.edit_cells())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
             .into_iter()
             .filter(|&c| {
                 if self.edits.get(&c) == other.edits.get(&c)
@@ -330,11 +394,20 @@ impl World {
         if updates.is_empty() {
             return;
         }
+        self.record_changes(updates.iter().map(|(c, _)| *c).collect());
         let map = Arc::make_mut(&mut self.fluid);
         map.extend(updates);
         if visible_changed {
             self.bump_revision();
         }
+    }
+
+    fn record_changes(&mut self, cells: Vec<Cell>) {
+        self.change_token = self
+            .changes
+            .lock()
+            .unwrap()
+            .record(self.change_token, cells);
     }
 
     fn bump_revision(&mut self) {
@@ -368,10 +441,22 @@ impl World {
         self.seed
     }
     pub fn set(&mut self, c: Cell, m: Material) {
-        if self.material(c) == m {
+        self.set_batch([(c, m)]);
+    }
+    /// Apply last-write-wins terrain edits atomically in one world revision.
+    /// Entries whose final material already matches the snapshot are omitted.
+    pub fn set_batch(&mut self, values: impl IntoIterator<Item = (Cell, Material)>) {
+        let updates: Vec<_> = values
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .filter(|&(c, m)| self.material(c) != m)
+            .collect();
+        if updates.is_empty() {
             return;
         }
-        Arc::make_mut(&mut self.edits).insert(c, m);
+        self.record_changes(updates.iter().map(|(c, _)| *c).collect());
+        Arc::make_mut(&mut self.edits).extend(updates);
         self.bump_revision();
     }
 
@@ -542,6 +627,33 @@ pub fn raycast(
     direction: [f64; 3],
     max_distance: f64,
 ) -> Option<RayHit> {
+    raycast_matching(world, origin, direction, max_distance, |m| {
+        m != Material::Air
+    })
+}
+/// Canonical solid-target policy: water and nonblocking foliage do not occlude
+/// terrain pickup. The first solid still prevents through-wall selection.
+pub fn raycast_solid(
+    world: &World,
+    origin: [f64; 3],
+    direction: [f64; 3],
+    max_distance: f64,
+) -> Option<RayHit> {
+    raycast_matching(
+        world,
+        origin,
+        direction,
+        max_distance,
+        Material::is_blocking,
+    )
+}
+fn raycast_matching(
+    world: &World,
+    origin: [f64; 3],
+    direction: [f64; 3],
+    max_distance: f64,
+    accepts: impl Fn(Material) -> bool,
+) -> Option<RayHit> {
     if !max_distance.is_finite() || max_distance < 0.0 || !direction.iter().all(|x| x.is_finite()) {
         return None;
     }
@@ -588,7 +700,7 @@ pub fn raycast(
             z: c[2],
         };
         let material = world.material(cell);
-        if material != Material::Air {
+        if accepts(material) {
             return Some(RayHit {
                 cell,
                 material,
@@ -655,6 +767,153 @@ mod live_water_overlay_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn full_edit_diff(a: &World, b: &World) -> Vec<Cell> {
+        a.edit_cells()
+            .chain(b.edit_cells())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|&c| {
+                (a.edits.get(&c) != b.edits.get(&c) || a.fluid.get(&c) != b.fluid.get(&c))
+                    && a.column(c.x, c.z).canonical_material(c.y)
+                        != b.column(c.x, c.z).canonical_material(c.y)
+            })
+            .collect()
+    }
+    #[test]
+    fn bounded_journal_matches_scan_across_branches_reverts_and_eviction() {
+        let mut world = World::new(9);
+        let oldest = world.clone();
+        for x in 0..2000 {
+            world.set(Cell { x, y: 10000, z: 0 }, Material::Stone);
+        }
+        assert!(world
+            .changes
+            .lock()
+            .unwrap()
+            .candidates(world.change_token, oldest.change_token)
+            .is_none());
+        assert_eq!(
+            world.changed_edit_cells(&oldest),
+            full_edit_diff(&world, &oldest)
+        );
+        let base = world.clone();
+        let mut snapshots = vec![base.clone()];
+        let mut random = 7349u64;
+        for tick in 0..600 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if tick % 7 == 0 {
+                world = snapshots[(random as usize) % snapshots.len()].clone();
+            }
+            let c = Cell {
+                x: (random % 31) as i64,
+                y: 10000,
+                z: 0,
+            };
+            if tick % 3 == 0 {
+                world.set_fluid_occupancy([(c, random & 32 != 0)]);
+            } else {
+                world.set(
+                    c,
+                    if random & 64 == 0 {
+                        Material::Air
+                    } else {
+                        Material::Stone
+                    },
+                );
+            }
+            let other = &snapshots[(random as usize / 32) % snapshots.len()];
+            assert_eq!(
+                world.changed_edit_cells(other),
+                full_edit_diff(&world, other)
+            );
+            assert_eq!(
+                other.changed_edit_cells(&world),
+                full_edit_diff(other, &world)
+            );
+            if tick % 11 == 0 {
+                snapshots.push(world.clone());
+            }
+            let journal = world.changes.lock().unwrap();
+            assert!(journal.cells <= CHANGE_JOURNAL_CELLS);
+            assert!(journal.records.len() <= CHANGE_JOURNAL_RECORDS);
+        }
+        // An immediate delta costs one candidate even with thousands of stored edits.
+        let before = world.clone();
+        world.set(
+            Cell {
+                x: -1,
+                y: 10000,
+                z: 0,
+            },
+            Material::Wood,
+        );
+        assert_eq!(
+            world
+                .changes
+                .lock()
+                .unwrap()
+                .candidates(world.change_token, before.change_token)
+                .unwrap()
+                .len(),
+            1
+        );
+        let replacement = World::new(44);
+        assert_eq!(
+            world.changed_edit_cells(&replacement),
+            full_edit_diff(&world, &replacement)
+        );
+        let replacement = base.clone().with_vegetation();
+        assert_eq!(
+            world.changed_edit_cells(&replacement),
+            full_edit_diff(&world, &replacement)
+        );
+        // An over-budget single batch is omitted, with exact scan fallback.
+        let before = world.clone();
+        world.set_fluid_occupancy((0..CHANGE_JOURNAL_CELLS + 1).map(|x| {
+            (
+                Cell {
+                    x: x as i64,
+                    y: 20000,
+                    z: 0,
+                },
+                true,
+            )
+        }));
+        assert!(world
+            .changes
+            .lock()
+            .unwrap()
+            .candidates(world.change_token, before.change_token)
+            .is_none());
+        assert_eq!(
+            world.changed_edit_cells(&before),
+            full_edit_diff(&world, &before)
+        );
+    }
+
+    #[test]
+    fn batch_edits_use_one_revision_and_last_write_wins() {
+        let mut world = World::new(5);
+        let a = Cell {
+            x: 0,
+            y: 10000,
+            z: 0,
+        };
+        let b = Cell { x: 1, ..a };
+        let initial = world.clone();
+        world.set_batch([
+            (a, Material::Wood),
+            (b, Material::Stone),
+            (a, Material::Air),
+        ]);
+        assert_eq!(world.revision(), 1);
+        assert_eq!(world.material(a), Material::Air);
+        assert_eq!(world.changed_edit_cells(&initial), vec![b]);
+        let revision = world.revision();
+        world.set_batch([(b, Material::Air), (b, Material::Stone)]);
+        assert_eq!(world.revision(), revision);
+    }
+
     #[test]
     fn local_edit_diff_and_source_lineage_handle_divergence_and_reverts() {
         let source = World::new(7).with_vegetation();

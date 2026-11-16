@@ -216,10 +216,11 @@ impl AdaptiveView {
         };
         let coherent =
             cover.owner == self.published_naadf_owner && cover.owner == self.desired_naadf_owner;
-        let idle = coherent
-            && !self.background_paused
-            && self.pending_count == 0
-            && self.gpu_pending_clusters == 0;
+        // Cover has its own bounded worker/queue. Pending refinement must not
+        // repeatedly cancel valid cosmetic work: on a walking camera geometry
+        // may never drain completely. Require coherent coverage for admission,
+        // and reserve upload bandwidth for geometry at promotion below.
+        let cover_admitted = coherent && !self.background_paused && self.coverage_ready;
         cover
             .tiles
             .retain(|key, _| self.owners.contains(key) && adaptive.appearance_pending(key));
@@ -229,7 +230,7 @@ impl AdaptiveView {
             .0
             .retain(|key, _| cover.tiles.contains_key(key));
         for (key, ticket) in &cover.tickets {
-            if !idle || !cover.tiles.contains_key(key) {
+            if !coherent || self.background_paused || !cover.tiles.contains_key(key) {
                 ticket.cancel();
             }
         }
@@ -266,7 +267,7 @@ impl AdaptiveView {
             {
                 cover.stale_results += 1;
                 cover.ready = None;
-            } else if idle && geometry_upload_idle {
+            } else if cover_admitted && geometry_upload_idle {
                 let started = Instant::now();
                 match adaptive.promote_appearance(device, queue, tile) {
                     Ok(()) => {
@@ -288,9 +289,10 @@ impl AdaptiveView {
                 cover.upload_ms += started.elapsed().as_secs_f64() * 1000.;
             }
         }
-        // Reserve the sole cosmetic slot only after mandatory terrain demand
-        // has drained. A new geometry request cancels it at native checkpoints.
-        if idle && cover.ready.is_none() {
+        // The single cosmetic worker cannot occupy a mandatory geometry slot.
+        // Obsolete owner/source products still cancel; ordinary camera demand
+        // retains useful work rather than starting over at every refinement.
+        if cover_admitted && cover.ready.is_none() {
             if let Some((&key, tile)) = cover
                 .tiles
                 .iter()

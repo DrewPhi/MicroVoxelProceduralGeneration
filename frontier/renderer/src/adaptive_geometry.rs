@@ -23,6 +23,11 @@ use std::{
     },
 };
 
+// Offline representation probe; no runtime selector or publication path.
+#[allow(dead_code)]
+#[path = "voxel_handoff.rs"]
+pub(crate) mod voxel_handoff;
+
 #[path = "deferred_cover.rs"]
 pub(crate) mod deferred_cover;
 
@@ -414,13 +419,8 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
     if !tile.exact && !proven_sea_plane {
         let min = tile.key.min.map(|v| v as f64 * VOXEL_SIZE);
         let max = min.map(|v| v + tile.key.width_cells as f64 * VOXEL_SIZE);
-        if terrain
-            .seeded_water_feature_spacing(min, max)
-            .is_some_and(|limit| tile.key.step_cells as f64 * VOXEL_SIZE > limit)
-        {
-            tile.water_feature_error_m =
-                tile.key.step_cells as f64 * VOXEL_SIZE * std::f64::consts::SQRT_2;
-        }
+        tile.water_feature_error_m =
+            terrain.seeded_water_feature_debt(min, max, tile.key.step_cells as f64 * VOXEL_SIZE);
     }
     let envelope = frontier_world::summary::fbm_height_envelope(terrain);
     tile.global_error_m = if tile.exact {

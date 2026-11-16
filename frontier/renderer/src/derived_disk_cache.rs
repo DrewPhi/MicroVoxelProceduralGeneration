@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 14;
+const REPRESENTATION_VERSION: u64 = 15;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -520,7 +520,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
         u64::from(w.vegetation_enabled() && crate::ground_cover::enabled()),
     );
     put(&mut b, u64::from(crate::ground_cover::shell_enabled()));
-    put(&mut b, crate::ground_cover::VERSION);
+    put(&mut b, crate::ground_cover::cache_version());
     put(&mut b, crate::ground_cover::directional_enabled() as u64);
     put(
         &mut b,

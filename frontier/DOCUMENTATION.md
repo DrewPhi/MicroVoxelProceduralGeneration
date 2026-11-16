@@ -40,6 +40,7 @@ These are evidence snapshots, not a chronological list of requirements to implem
 
 | Area | Reports |
 | --- | --- |
+| Latest implementation and research checkpoint | [November 16](research/nov16/README.md) |
 | Latest optimization measurements | [November 14](OPTIMIZATION_NOV14.md) |
 | Native traversal and storage | [NAADF optimization](NAADF_OPTIMIZATION.md), [seven experiments](NAADF_SEVEN_EXPERIMENTS.md), [follow-up](NAADF_OPTIMIZATION_FOLLOWUP.md), [next checkpoint](NAADF_NEXT_CHECKPOINT.md) |
 | Loading and motion | [Loading optimization](LOADING_OPTIMIZATION.md), [loading evidence](reference/loading/README.md), [playtest smoothness](PLAYTEST_SMOOTHNESS_CHECKPOINT.md) |

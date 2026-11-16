@@ -1,6 +1,7 @@
 //! Opt-in local fluid driver. Authoritative fluid history is never a render cache.
 use crate::{Camera, Result};
 use frontier_world::{
+    edit::{EditTransaction, Inventory},
     fluid::{FluidConfig, FluidRegion, FluidWorld, FLUID_CAPACITY},
     Cell, Material, World, VOXEL_SIZE,
 };
@@ -32,6 +33,7 @@ pub fn immutable_surface_world(world: &World) -> Result<World> {
 
 pub struct LiveWater {
     pub fluid: FluidWorld,
+    pub inventory: Inventory,
     path: Option<PathBuf>,
     active_radius: i64,
     clock: Instant,
@@ -76,6 +78,7 @@ impl LiveWater {
                 max_stored_cells: history_cells,
                 sleep_ticks: 4,
             }),
+            inventory: Inventory::default(),
             path,
             active_radius: active_radius as i64,
             clock: now,
@@ -214,6 +217,26 @@ impl LiveWater {
         self.fluid.notify_edit(c, solid(world, c));
         self.publish(world, [c]);
     }
+    pub fn apply_player_transaction(
+        &mut self,
+        world: &mut World,
+        transaction: &EditTransaction,
+        owns: impl Fn(Cell) -> bool,
+    ) -> std::result::Result<(), &'static str> {
+        if transaction.place.is_some()
+            && transaction.expected.iter().any(|&(c, _)| {
+                self.fluid.mass(c).is_some_and(|m| m > 0) || world.material(c) == Material::Water
+            })
+        {
+            return Err("Placement into water needs supported displacement");
+        }
+        let changed = transaction.apply(world, &mut self.inventory, owns)?;
+        for c in &changed {
+            self.fluid.notify_edit(*c, solid(world, *c));
+        }
+        self.publish(world, changed);
+        Ok(())
+    }
     /// A sealed two-chamber native-cell basin, with a removable central dam.
     /// Initial water is an explicitly counted addition, never an infinite source.
     pub fn demo(&mut self, world: &mut World, camera: &mut Camera) -> Result<()> {
@@ -334,7 +357,7 @@ impl LiveWater {
         Ok(())
     }
     fn checkpoint(&self, world: &World) -> Vec<u8> {
-        let mut b = b"FVWATER2".to_vec();
+        let mut b = b"FVWATER3".to_vec();
         for v in Self::identity(world) {
             b.extend(v.to_le_bytes());
         }
@@ -353,12 +376,14 @@ impl LiveWater {
             }
         }
         b.extend(self.demo_open_at.unwrap_or(u64::MAX).to_le_bytes());
+        b.extend(self.inventory.encode());
         b.extend(self.fluid.persist_bytes());
         b
     }
     fn restore(&mut self, world: &mut World, b: &[u8]) -> Result<()> {
         let mut pos = 8;
-        if b.get(..8) != Some(b"FVWATER2") {
+        let legacy = b.get(..8) == Some(b"FVWATER2");
+        if !legacy && b.get(..8) != Some(b"FVWATER3") {
             return Err("invalid water save header".into());
         }
         fn read(b: &[u8], p: &mut usize) -> Result<u64> {
@@ -415,11 +440,26 @@ impl LiveWater {
         };
         let open_at = read(b, &mut pos)?;
         self.demo_open_at = (open_at != u64::MAX).then_some(open_at);
+        let inventory = if legacy {
+            Inventory::default()
+        } else {
+            let bytes = b.get(pos..pos + 104).ok_or("truncated inventory")?;
+            pos += 104;
+            Inventory::decode(bytes).ok_or("invalid saved inventory")?
+        };
         let mut fluid = FluidWorld::from_bytes(&b[pos..])?;
-        fluid.set_config(self.fluid.config())?;
-        for (c, m) in edits {
-            world.set(c, m);
+        let config = self.fluid.config();
+        // Residency is a runtime window, while overrides (including dry
+        // tombstones) are authoritative history. A smaller restart window must
+        // deactivate the old window before its capacity can be applied.
+        if fluid.diagnostics().loaded_cells > config.max_loaded_cells {
+            let regions: Vec<_> = fluid.loaded_regions().collect();
+            for region in regions {
+                fluid.unload_region(region);
+            }
         }
+        fluid.set_config(config)?;
+        world.set_batch(edits);
         let occupancy: Vec<_> = fluid
             .overrides()
             .filter_map(|(c, m)| {
@@ -429,6 +469,7 @@ impl LiveWater {
             .collect();
         world.set_fluid_occupancy(occupancy);
         self.fluid = fluid;
+        self.inventory = inventory;
         Ok(())
     }
 }
@@ -480,6 +521,147 @@ mod tests {
         assert!(restored.fluid.diagnostics().conserved());
         let mut wrong = World::fbm(20, Default::default()).unwrap();
         assert!(restored.restore(&mut wrong, &saved).is_err());
+    }
+    #[test]
+    fn player_pickup_inventory_sequence_and_world_share_checkpoint_and_legacy_migrates() {
+        let mut world = World::fbm(19, Default::default()).unwrap();
+        let mut live = LiveWater::new(&mut world, None, 1, 1_048_576).unwrap();
+        let cell = Cell {
+            x: -4097,
+            y: 16000,
+            z: -8193,
+        };
+        world.set(cell, Material::Soil);
+        let pickup = EditTransaction::pickup(&live.inventory, vec![(cell, Material::Soil)]);
+        let revision = world.revision();
+        live.apply_player_transaction(&mut world, &pickup, |_| true)
+            .unwrap();
+        assert_eq!(world.revision(), revision + 1);
+        assert_eq!(live.inventory.total(), 1);
+        let saved = live.checkpoint(&world);
+        let mut other = World::fbm(19, Default::default()).unwrap();
+        let mut restored = LiveWater::new(&mut other, None, 1, 1_048_576).unwrap();
+        restored.restore(&mut other, &saved).unwrap();
+        assert_eq!(restored.inventory, live.inventory);
+        assert_eq!(other.material(cell), Material::Air);
+        assert!(restored
+            .apply_player_transaction(&mut other, &pickup, |_| true)
+            .is_err());
+        let place = EditTransaction::placement(&restored.inventory, cell, Material::Air);
+        restored
+            .apply_player_transaction(&mut other, &place, |_| true)
+            .unwrap();
+        assert_eq!(restored.inventory.total(), 0);
+        assert_eq!(restored.inventory.sequence, 2);
+        assert_eq!(other.material(cell), Material::Soil);
+        // V2 contained the same terrain/fluid payload but no inventory block.
+        let mut legacy = saved;
+        legacy[..8].copy_from_slice(b"FVWATER2");
+        let at = legacy.len() - live.fluid.persist_bytes().len() - 104;
+        legacy.drain(at..at + 104);
+        let mut old_world = World::fbm(19, Default::default()).unwrap();
+        let mut migrated = LiveWater::new(&mut old_world, None, 1, 1_048_576).unwrap();
+        migrated.restore(&mut old_world, &legacy).unwrap();
+        assert_eq!(migrated.inventory, Inventory::default());
+        assert_eq!(old_world.material(cell), Material::Air);
+    }
+    #[test]
+    fn wet_player_placement_rejects_without_mutating_inventory_terrain_or_water() {
+        let mut world = World::fbm(19, Default::default()).unwrap();
+        let mut live = LiveWater::new(&mut world, None, 1, 1_048_576).unwrap();
+        let cell = Cell {
+            x: -4097,
+            y: 16000,
+            z: -8193,
+        };
+        live.fluid
+            .load_region(
+                FluidRegion::new(
+                    cell,
+                    Cell {
+                        x: cell.x + 1,
+                        y: cell.y + 1,
+                        z: cell.z + 1,
+                    },
+                ),
+                |_| FLUID_CAPACITY,
+            )
+            .unwrap();
+        live.publish(&mut world, [cell]);
+        live.inventory.counts[Material::Stone as usize] = 1;
+        let before = live.checkpoint(&world);
+        let txn = EditTransaction::placement(&live.inventory, cell, Material::Air);
+        assert!(live
+            .apply_player_transaction(&mut world, &txn, |_| true)
+            .is_err());
+        assert_eq!(before, live.checkpoint(&world));
+        assert!(live.fluid.diagnostics().conserved());
+    }
+    #[test]
+    fn smaller_restart_window_preserves_dormant_mass_and_dry_tombstones() {
+        let mut world = World::fbm(19, Default::default()).unwrap();
+        let mut live = LiveWater::new(&mut world, None, 2, 1_048_576).unwrap();
+        let first = region([-14, 100, -2]);
+        let wet = first.min;
+        let dry = Cell {
+            x: wet.x + 1,
+            ..wet
+        };
+        let displaced = Cell {
+            x: wet.x + 2,
+            ..wet
+        };
+        world.set(wet, Material::Air);
+        world.set(displaced, Material::Air);
+        world.set(dry, Material::Water);
+        // 28 metre regions exceed radius one's 27-region capacity.
+        for x in -14..14 {
+            live.fluid
+                .load_region(region([x, 100, -2]), |c| {
+                    if c == wet || c == dry || c == displaced {
+                        FLUID_CAPACITY
+                    } else {
+                        0
+                    }
+                })
+                .unwrap();
+        }
+        live.fluid.set_mass(dry, 0).unwrap();
+        live.edit(&mut world, displaced, Material::Stone);
+        live.publish(&mut world, [wet, dry]);
+        let before = live.fluid.diagnostics();
+        assert!(before.loaded_cells > active_cell_capacity(1));
+        let overrides: Vec<_> = live.fluid.overrides().collect();
+        let saved = live.checkpoint(&world);
+        let mut other = World::fbm(19, Default::default()).unwrap();
+        let mut restored = LiveWater::new(&mut other, None, 1, 1_048_576).unwrap();
+        restored.restore(&mut other, &saved).unwrap();
+        let after = restored.fluid.diagnostics();
+        assert_eq!(after.loaded_cells, 0);
+        assert_eq!(after.resident_mass, 0);
+        assert_eq!(
+            after.dormant_mass,
+            before.resident_mass + before.dormant_mass
+        );
+        assert_eq!(after.displaced_mass, before.displaced_mass);
+        assert_eq!(after.initial_mass, before.initial_mass);
+        assert_eq!(after.additions, before.additions);
+        assert_eq!(after.removals, before.removals);
+        assert_eq!(after.tick, before.tick);
+        assert_eq!(after.stored_cells, before.stored_cells);
+        assert!(after.conserved());
+        assert_eq!(overrides, restored.fluid.overrides().collect::<Vec<_>>());
+        assert_eq!(other.material(wet), Material::Water);
+        assert_eq!(other.material(dry), Material::Air);
+        assert_eq!(other.material(displaced), Material::Stone);
+        restored
+            .fluid
+            .load_region(first, |_| FLUID_CAPACITY)
+            .unwrap();
+        assert_eq!(restored.fluid.mass(dry), Some(0));
+        assert_eq!(restored.fluid.mass(wet), Some(FLUID_CAPACITY));
+        assert_eq!(overrides, restored.fluid.overrides().collect::<Vec<_>>());
+        assert!(restored.fluid.diagnostics().conserved());
     }
     #[test]
     fn demo_dam_opens_and_real_conserved_mass_crosses_into_empty_chamber() {

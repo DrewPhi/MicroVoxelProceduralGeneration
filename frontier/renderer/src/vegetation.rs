@@ -18,7 +18,10 @@ use std::{
 mod distant_vegetation;
 #[path = "shadow_lifecycle.rs"]
 mod shadow_lifecycle;
-use distant_vegetation::{distant_tree_mesh, distant_tree_radius, tree_baseline};
+use distant_vegetation::{
+    distant_tree_mesh, distant_tree_radius, matched_transition_requested, matched_tree_stride,
+    recipe_tree_mesh, tree_baseline,
+};
 use shadow_lifecycle::ShadowLifecycle;
 pub use shadow_lifecycle::{ShadowCoverage, ShadowInspection, ShadowReason, ShadowTransition};
 #[cfg(test)]
@@ -264,6 +267,27 @@ fn selected_stride(distance: f64, projection: f64, config: &VegetationConfig) ->
         lod *= 2;
     }
     lod
+}
+fn tree_target_stride(
+    distance: f64,
+    projection: f64,
+    config: &VegetationConfig,
+    matched: bool,
+) -> u8 {
+    let near = selected_stride(distance, projection, config).min(4);
+    if config.reference {
+        return near;
+    }
+    if matched {
+        match matched_tree_stride(distance, projection, config.pixel_error as f64) {
+            4 => near,
+            coarse => coarse,
+        }
+    } else if distance > 220. {
+        16
+    } else {
+        near
+    }
 }
 // Keep the existing horizontal footprint policy while charging altitude from
 // canonical source bounds. An eye above/below a plant cannot demand near LOD
@@ -745,6 +769,7 @@ pub struct VegetationStream {
     shadow_lods: BTreeMap<MeshKey, u8>,
     shadow_lifecycle: ShadowLifecycle,
     shadow_transitions_enabled: bool,
+    matched_tree_lods: bool,
     grouped_ground: Option<(Vec<Tile>, GroundGroups)>,
     cpu_cache_bytes: usize,
     gpu_cache_bytes: usize,
@@ -757,6 +782,7 @@ pub struct VegetationStream {
 impl VegetationStream {
     pub fn new(world: World, config: VegetationConfig) -> Self {
         // Read once when the stream is created, never inside frame selection.
+        let matched_tree_lods = matched_transition_requested();
         let reference_flag = std::env::var("FRONTIER_VEGETATION_REFERENCE").ok();
         let config = config.with_reference_flag(reference_flag.as_deref());
         // Leave CPU capacity for terrain and the render thread; memory remains
@@ -833,9 +859,16 @@ impl VegetationStream {
                                         w.vegetation_records_species(min, max, species(t.species)),
                                     )
                                 }
-                                Job::Mesh(key, p, w, _) if key.lod == 16 && key.edit_id == 0 => {
+                                Job::Mesh(key, p, w, _)
+                                    if (key.lod == 16 || (matched_tree_lods && key.lod == 8))
+                                        && key.edit_id == 0 =>
+                                {
                                     let start = Instant::now();
-                                    let mesh = distant_tree_mesh(p.seed, p.variant, || cancelled());
+                                    let mesh = if key.lod == 16 {
+                                        distant_tree_mesh(p.seed, p.variant, || cancelled())
+                                    } else {
+                                        recipe_tree_mesh(p.seed, p.variant, key.lod, || cancelled())
+                                    };
                                     counters.mesh_nanos[kind].fetch_add(
                                         start.elapsed().as_nanos() as u64,
                                         Ordering::Relaxed,
@@ -952,6 +985,7 @@ impl VegetationStream {
                 config.tree_radius_m,
             ],
             shadows_enabled: true,
+            matched_tree_lods,
             naadf_owner: None,
             naadf_retirement: None,
             naadf_omitted: 0,
@@ -1837,11 +1871,8 @@ impl VegetationStream {
             let mut lod = selected_stride(distance, projection, &self.config);
             // More conservative tree contour than ground cover.
             if s == 2 {
-                lod = if distance > 220. && !self.config.reference {
-                    16
-                } else {
-                    lod.min(4)
-                };
+                lod =
+                    tree_target_stride(distance, projection, &self.config, self.matched_tree_lods);
             }
             let edit_id = edits.id(&p);
             let mut key = MeshKey {
@@ -1860,11 +1891,12 @@ impl VegetationStream {
             if s == 2 && !self.config.reference {
                 key.lod = hysteretic_stride(
                     key.lod,
-                    if distance * 0.9 > 220. {
-                        16
-                    } else {
-                        selected_stride(distance * 0.9, projection, &self.config).min(4)
-                    },
+                    tree_target_stride(
+                        distance * 0.9,
+                        projection,
+                        &self.config,
+                        self.matched_tree_lods,
+                    ),
                     previous,
                 );
             }
@@ -2238,7 +2270,29 @@ impl VegetationStream {
                 edit_id: edits.id(&p),
             };
             let previous = self.shadow_lods.get(&identity).copied();
-            let target = shadow_stride(distance, previous, self.config.reference);
+            let target = if self.matched_tree_lods && !self.config.reference {
+                let color = batches
+                    .keys()
+                    .find(|k| tree_identity(**k) == identity)
+                    .map(|k| k.lod);
+                color
+                    .unwrap_or_else(|| {
+                        let target = matched_tree_stride(
+                            distance,
+                            projection,
+                            self.config.pixel_error as f64,
+                        );
+                        let relaxed = matched_tree_stride(
+                            distance * 0.9,
+                            projection,
+                            self.config.pixel_error as f64,
+                        );
+                        hysteretic_stride(target, relaxed, previous)
+                    })
+                    .max(2)
+            } else {
+                shadow_stride(distance, previous, self.config.reference)
+            };
             shadow_remaining = shadow_remaining.saturating_sub(shadow_reservations[&identity]);
             let room = shadow_triangle_budget
                 .saturating_sub(shadow_used)
@@ -2351,7 +2405,7 @@ impl VegetationStream {
             }
         }
         let (shadow_batches, shadow_transitions, shadow_coverage) =
-            if self.shadow_transitions_enabled {
+            if self.shadow_transitions_enabled && !self.matched_tree_lods {
                 self.shadow_lifecycle.apply(
                     shadow_batches,
                     shadow_triangle_budget,
@@ -3881,6 +3935,104 @@ pub(crate) fn mesh_cells_scaled_reference(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matched_tree_transition_retains_current_until_intermediate_is_resident() {
+        use super::*;
+        let world = World::new(7);
+        let mut stream = VegetationStream::new(
+            world.clone(),
+            VegetationConfig {
+                grass_radius_m: 0.,
+                flower_radius_m: 0.,
+                tree_radius_m: 600.,
+                max_triangles: 10_000,
+                ..Default::default()
+            },
+        );
+        stream.matched_tree_lods = true;
+        stream.shadows_enabled = false;
+        for x in -22..=22 {
+            for z in -22..=22 {
+                stream
+                    .tiles
+                    .insert(Tile { species: 2, x, z }, (Vec::new(), 0));
+            }
+        }
+        let p = PlantRecord {
+            species: Species::Rowan,
+            seed: 941,
+            variant: 3,
+            root: Cell {
+                x: 0,
+                y: 0,
+                z: 4800,
+            },
+            rotation: 0,
+        };
+        stream
+            .tiles
+            .get_mut(&Tile {
+                species: 2,
+                x: 0,
+                z: 9,
+            })
+            .unwrap()
+            .0
+            .push(p);
+        let identity = MeshKey {
+            species: 2,
+            seed: p.seed,
+            variant: p.variant,
+            tile: [0; 2],
+            lod: 0,
+            edit_id: 0,
+        };
+        let mesh = |cost| {
+            Arc::new(VegetationMesh {
+                vertices: vec![],
+                indices: vec![0; cost * 3],
+            })
+        };
+        for (lod, cost) in [(4, 300), (16, 40)] {
+            let key = MeshKey { lod, ..identity };
+            stream.meshes.insert(key, (mesh(cost), 0));
+            stream.mesh_costs.insert(key, (cost, 0));
+        }
+        stream.previous_lods.insert(identity, 4);
+        let intermediate = MeshKey { lod: 8, ..identity };
+        stream.pending_meshes.insert(intermediate);
+        let fov = 60f32.to_radians();
+        let waiting = stream.update_view(
+            [0., 1.7, 40.],
+            1080,
+            fov,
+            world.revision(),
+            [0., 0., 1.],
+            16. / 9.,
+        );
+        assert_eq!(
+            waiting.batches[0].key.lod, 4,
+            "resident16 must not flash while8 is pending"
+        );
+        stream.meshes.insert(intermediate, (mesh(100), 0));
+        stream.mesh_costs.insert(intermediate, (100, 0));
+        stream.pending_meshes.remove(&intermediate);
+        for distance in [260., 255., 250., 249., 260., 300.] {
+            let frame = stream.update([0., 1.7, 300. - distance], 1080, fov, world.revision());
+            assert_eq!(frame.batches[0].key.lod, 8, "distance={distance}");
+            assert_eq!(frame.batches.len(), 1);
+        }
+        let projection = 1080. / (2. * (fov as f64 / 2.).tan());
+        assert_eq!(
+            tree_target_stride(260., projection, &stream.config, false),
+            16,
+            "old control retained"
+        );
+        assert_eq!(
+            tree_target_stride(150., projection, &stream.config, true),
+            selected_stride(150., projection, &stream.config).min(4)
+        );
+    }
     #[test]
     fn distant_tree_uses_cached_proxy_beyond_old_horizon_and_invalidates_for_edits() {
         use super::*;

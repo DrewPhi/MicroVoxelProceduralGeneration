@@ -19,6 +19,7 @@ pub struct SettingsUi {
     screen: ScreenDescriptor,
     started: std::time::Instant,
     settings_error: Option<String>,
+    player_overlay: crate::player_edit::Overlay,
 }
 
 impl SettingsUi {
@@ -47,6 +48,7 @@ impl SettingsUi {
         Self {
             started: std::time::Instant::now(),
             settings_error: None,
+            player_overlay: Default::default(),
             context,
             input,
             renderer: Renderer::new(device, format, None, 1, false),
@@ -62,6 +64,9 @@ impl SettingsUi {
         }
     }
 
+    pub fn set_player_overlay(&mut self, overlay: crate::player_edit::Overlay) {
+        self.player_overlay = overlay;
+    }
     pub fn restore_after_error(&mut self, previous: VisualSettings, message: String) {
         self.loading_draft = previous.clone();
         self.settings = previous;
@@ -133,6 +138,22 @@ impl SettingsUi {
             .native_pixels_per_point = Some(native_scale);
         let input = raw.take();
         let output = self.context.run(input, |ctx| {
+            if !self.player_overlay.text.is_empty() && !self.open {
+                egui::Area::new(egui::Id::new("player inventory"))
+                    .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {
+                        egui::Frame::popup(ui.style()).show(ui,|ui| {
+                            ui.label(&self.player_overlay.text);
+                            ui.add(egui::ProgressBar::new(self.player_overlay.charge).desired_width(240.));
+                        });
+                    });
+                let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("native pickup preview")));
+                let rect=ctx.screen_rect();
+                let project=|p:[f32;2]| egui::pos2(rect.left()+(p[0]+1.)*0.5*rect.width(),rect.top()+(1.-p[1])*0.5*rect.height());
+                for line in &self.player_overlay.lines {
+                    painter.line_segment([project(line[0]),project(line[1])],egui::Stroke::new(1.5,egui::Color32::YELLOW));
+                }
+                painter.circle_stroke(rect.center(),3.,egui::Stroke::new(1.,egui::Color32::WHITE));
+            }
             egui::Area::new(egui::Id::new("frontier telemetry"))
                 .anchor(egui::Align2::LEFT_TOP, [14., 14.])
                 .interactable(false)

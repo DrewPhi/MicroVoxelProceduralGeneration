@@ -107,6 +107,9 @@ pub struct FluidWorld {
     initial_mass: u64,
     additions: u64,
     removals: u64,
+    resident_mass: u64,
+    dormant_mass: u64,
+    displaced_mass: u64,
 }
 fn offset(c: Cell, d: [i64; 3]) -> Option<Cell> {
     Some(Cell {
@@ -137,6 +140,9 @@ impl FluidWorld {
             initial_mass: 0,
             additions: 0,
             removals: 0,
+            resident_mass: 0,
+            dormant_mass: 0,
+            displaced_mass: 0,
         }
     }
     pub fn config(&self) -> FluidConfig {
@@ -215,6 +221,12 @@ impl FluidWorld {
         for (c, m) in fresh {
             self.cells.insert(c, m);
             self.initial_mass += m as u64;
+            self.dormant_mass += m as u64;
+        }
+        for c in region.cells() {
+            let m = self.cells[&c] as u64;
+            self.dormant_mass -= m;
+            self.resident_mass += m;
         }
         self.loaded.extend(region.cells());
         self.regions.insert(region);
@@ -250,6 +262,9 @@ impl FluidWorld {
         if self.regions.remove(&region) {
             for c in region.cells() {
                 self.loaded.remove(&c);
+                let m = self.cells[&c] as u64;
+                self.resident_mass -= m;
+                self.dormant_mass += m;
                 self.awake.remove(&c);
             }
             // No mass crossing the boundary; dormant history remains untouched.
@@ -278,6 +293,12 @@ impl FluidWorld {
         } else {
             self.removals += (old - mass) as u64;
         }
+        let total = if self.loaded.contains(&c) {
+            &mut self.resident_mass
+        } else {
+            &mut self.dormant_mass
+        };
+        *total = *total - old as u64 + mass as u64;
         self.cells.insert(c, mass);
         self.dirty.insert(c);
         self.wake(c);
@@ -290,6 +311,12 @@ impl FluidWorld {
             if let Some(m) = self.cells.get_mut(&c) {
                 if *m > 0 {
                     *self.displaced.entry(c).or_default() += *m as u64;
+                    self.displaced_mass += *m as u64;
+                    if self.loaded.contains(&c) {
+                        self.resident_mass -= *m as u64;
+                    } else {
+                        self.dormant_mass -= *m as u64;
+                    }
                     *m = 0;
                     self.dirty.insert(c);
                 }
@@ -297,8 +324,9 @@ impl FluidWorld {
         }
         self.wake(c);
     }
+    /// Constant-time aggregate snapshot, independent of dormant history size.
     pub fn diagnostics(&self) -> FluidDiagnostics {
-        let mut d = FluidDiagnostics {
+        FluidDiagnostics {
             tick: self.tick,
             initial_mass: self.initial_mass,
             additions: self.additions,
@@ -306,17 +334,10 @@ impl FluidWorld {
             loaded_cells: self.loaded.len(),
             stored_cells: self.cells.len(),
             awake_cells: self.awake.len(),
-            displaced_mass: self.displaced.values().sum(),
-            ..Default::default()
-        };
-        for (c, m) in &self.cells {
-            if self.loaded.contains(c) {
-                d.resident_mass += *m as u64;
-            } else {
-                d.dormant_mass += *m as u64;
-            }
+            resident_mass: self.resident_mass,
+            dormant_mass: self.dormant_mass,
+            displaced_mass: self.displaced_mass,
         }
-        d
     }
     pub fn step(&mut self, mut solid: impl FnMut(Cell) -> bool) -> FluidStep {
         self.tick = self.tick.saturating_add(1);
@@ -361,6 +382,8 @@ impl FluidWorld {
                     if amount > 0 {
                         *m += amount as u16;
                         remaining -= amount;
+                        self.resident_mass += amount;
+                        self.displaced_mass -= amount;
                         changed.insert(n);
                     }
                 }
@@ -616,6 +639,16 @@ impl FluidWorld {
         {
             return Err(err);
         }
+        // Derived counters are reconstructed once; the v1 checkpoint bytes and
+        // ledger remain unchanged. Runtime diagnostics never scan history.
+        for (&c, &m) in &world.cells {
+            if world.loaded.contains(&c) {
+                world.resident_mass += m as u64;
+            } else {
+                world.dormant_mass += m as u64;
+            }
+        }
+        world.displaced_mass = world.displaced.values().sum();
         Ok(world)
     }
 }
@@ -633,6 +666,71 @@ mod tests {
     }
     fn region(min: [i64; 3], max: [i64; 3]) -> FluidRegion {
         FluidRegion::new(c(min[0], min[1], min[2]), c(max[0], max[1], max[2]))
+    }
+    fn assert_full_scan(w: &FluidWorld) {
+        let d = w.diagnostics();
+        let resident: u64 = w
+            .cells
+            .iter()
+            .filter(|(c, _)| w.loaded.contains(c))
+            .map(|(_, m)| *m as u64)
+            .sum();
+        let dormant: u64 = w
+            .cells
+            .iter()
+            .filter(|(c, _)| !w.loaded.contains(c))
+            .map(|(_, m)| *m as u64)
+            .sum();
+        assert_eq!(d.resident_mass, resident);
+        assert_eq!(d.dormant_mass, dormant);
+        assert_eq!(d.displaced_mass, w.displaced.values().sum::<u64>());
+        assert_eq!(
+            d.initial_mass as u128 + d.additions as u128,
+            d.removals as u128
+                + resident as u128
+                + dormant as u128
+                + w.displaced.values().map(|m| *m as u128).sum::<u128>()
+        );
+    }
+    #[test]
+    fn aggregate_counters_match_scan_through_random_activation_edits_and_replay() {
+        let mut w = FluidWorld::default();
+        let regions: Vec<_> = (0..8)
+            .map(|x| region([x * 3, 0, 0], [x * 3 + 3, 3, 2]))
+            .collect();
+        let mut random = 92u64;
+        for tick in 0..500 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let r = regions[(random as usize) % regions.len()];
+            match tick % 6 {
+                0 => w
+                    .load_region(r, |c| ((c.x * 37 + c.y * 11 + c.z) % 257) as u16)
+                    .unwrap(),
+                1 => w.unload_region(r),
+                2 => {
+                    if w.cells.contains_key(&r.min) {
+                        w.set_mass(r.min, (random % 257) as u16).unwrap();
+                    }
+                }
+                3 => w.notify_edit(r.min, true),
+                _ => {
+                    w.step(|c| c.x % 5 == 0 && c.y == 0);
+                }
+            }
+            assert_full_scan(&w);
+            if tick % 13 == 0 {
+                let bytes = w.persist_bytes();
+                let mut replay = FluidWorld::from_bytes(&bytes).unwrap();
+                assert_eq!(bytes, replay.persist_bytes());
+                assert_full_scan(&replay);
+                assert_eq!(w.diagnostics(), replay.diagnostics());
+                w.step(|_| false);
+                replay.step(|_| false);
+                assert_eq!(w.persist_bytes(), replay.persist_bytes());
+                assert_eq!(w.diagnostics(), replay.diagnostics());
+                w = replay;
+            }
+        }
     }
     #[test]
     fn sealed_box_conserves_every_tick_and_capacity() {

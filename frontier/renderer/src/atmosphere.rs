@@ -161,7 +161,24 @@ fn make_pipeline_groups(
         cache: None,
     })
 }
+/// Optional bounded spatial experiment; zero leaves the existing output path
+/// intact. No temporal history, reprojection or extra scene rays are involved.
+pub(crate) fn post_aa_strength() -> f32 {
+    static STRENGTH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *STRENGTH.get_or_init(|| {
+        std::env::var("FRONTIER_POST_AA_STRENGTH")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.)
+            .clamp(0., 1.)
+    })
+}
+
 fn shader_source(samples: u32) -> String {
+    shader_source_with_post_aa(samples, post_aa_strength() > 0.)
+}
+fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
     let (bindings, body) = if samples > 1 {
         ("@group(0) @binding(1) var scene: texture_multisampled_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_multisampled_2d;",
          "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) >= 1.0;\nif all_sky { return vec4(composite(vec3(0.0),1.0,in.uv),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
@@ -169,9 +186,25 @@ fn shader_source(samples: u32) -> String {
         ("@group(0) @binding(1) var scene: texture_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_2d;",
          "return vec4(composite(textureLoad(scene,pixel,0).rgb,textureLoad(depth,pixel,0),in.uv),1.0);")
     };
-    SHADER
-        .replace("// SCENE_BINDINGS", bindings)
-        .replace("// SAMPLE_COMPOSITE", body)
+    let mut source = SHADER.replace("// SCENE_BINDINGS", bindings);
+    if post_aa {
+        // Composite per sample before spatial filtering, matching the ordinary
+        // MSAA resolve and preserving fog/depth at each neighboring location.
+        let load = if samples > 1 {
+            "var color=vec3<f32>(0.); for(var s=0i;s<4i;s+=1i) { color+=composite(textureLoad(scene,p,s).rgb,textureLoad(depth,p,s),uv); } return color*.25;"
+        } else {
+            "return composite(textureLoad(scene,p,0).rgb,textureLoad(depth,p,0),uv);"
+        };
+        source.push_str(&format!("\nfn aa_color(p:vec2<i32>)->vec3<f32> {{ let uv=(vec2<f32>(p)+.5)/vec2<f32>(textureDimensions(scene)); {load} }}\n"));
+        source = source.replace(
+            "// SAMPLE_COMPOSITE",
+            "return vec4(edge_post_aa(pixel),1.);",
+        );
+        source.push_str(include_str!("edge_post_aa.wgsl"));
+        source
+    } else {
+        source.replace("// SAMPLE_COMPOSITE", body)
+    }
 }
 fn air_shader_source(samples: u32) -> String {
     let (binding, load) = if samples > 1 {
@@ -600,7 +633,10 @@ impl Atmosphere {
         time_seconds: f32,
     ) {
         self.effects_enabled.set(
-            settings.atmosphere || settings.exposure != 1.0 || self.scene_format != self.format,
+            settings.atmosphere
+                || settings.exposure != 1.0
+                || self.scene_format != self.format
+                || post_aa_strength() > 0.,
         );
         self.beauty_enabled
             .set(settings.beauty && settings.atmosphere);
@@ -635,7 +671,7 @@ impl Atmosphere {
                     0.0
                 },
                 atmosphere_debug() as f32,
-                0.0,
+                post_aa_strength(),
             ],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
@@ -777,6 +813,8 @@ mod tests {
         for source in [
             super::shader_source(1),
             super::shader_source(4),
+            super::shader_source_with_post_aa(1, true),
+            super::shader_source_with_post_aa(4, true),
             super::BLIT.to_owned(),
             super::air_shader_source(1),
             super::air_shader_source(4),

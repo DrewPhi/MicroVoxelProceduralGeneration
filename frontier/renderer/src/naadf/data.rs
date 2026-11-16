@@ -53,6 +53,9 @@ pub struct Snapshot {
     pub unique_blocks: usize,
     pub sampled_columns: usize,
     pub plant_cells: usize,
+    pub fast_skipped_chunks: usize,
+    pub constructed_chunks: usize,
+    pub edit_blocked_chunks: usize,
 }
 impl Snapshot {
     pub fn bytes(&self) -> usize {
@@ -484,6 +487,7 @@ pub fn build_region(
         prepare_profile::stack_blocks(),
         prepare_profile::column_extrema(),
         overlay::enabled(),
+        overlay::chunk_local_enabled(),
     )
 }
 
@@ -500,6 +504,7 @@ fn build_region_options(
     stack_blocks: bool,
     column_extrema: bool,
     compact_overlay: bool,
+    chunk_local_overlay: bool,
 ) -> Result<Snapshot, String> {
     let start = Instant::now();
     let mut profile = Collector::with_enabled(profiling);
@@ -532,6 +537,9 @@ fn build_region_options(
         unique_blocks: 0,
         sampled_columns: 0,
         plant_cells: 0,
+        fast_skipped_chunks: 0,
+        constructed_chunks: 0,
+        edit_blocked_chunks: 0,
     };
     let mut pigments = HashMap::new();
     let mut overlay = overlay::Overlay::new(compact_overlay);
@@ -602,7 +610,17 @@ fn build_region_options(
         profile.end(Stage::VegetationAssembly, phase);
     }
     let phase = profile.start();
-    overlay.resolve(
+    if chunk_local_overlay {
+        profile.workspace(budget(
+            &out,
+            overlay
+                .bytes()
+                .saturating_add(overlay::CHUNK_SORT_SCRATCH_BYTES),
+            pigments.capacity().saturating_mul(32),
+            limit,
+        )?);
+    }
+    overlay.resolve_ordered(
         |a| {
             let v = world
                 .vegetation_voxel(cell_at(a, min, dims))
@@ -610,6 +628,7 @@ fn build_region_options(
             pigment(&mut out.palette, &mut pigments, v.color, v.material)
         },
         &cancel,
+        chunk_local_overlay,
     )?;
     out.plant_cells = overlay.len();
     // Canonical overlap resolution may introduce a previously unseen wide
@@ -712,6 +731,7 @@ fn build_region_options(
                 let solid = min.y + ny as i64 * 16 < v.low - 12 && v.deep != 0;
                 if air || solid {
                     out.columns[cz * nx + cx] = v;
+                    out.fast_skipped_chunks += ny;
                     if solid {
                         out.chunks[(cz * nx + cx) * ny..(cz * nx + cx + 1) * ny]
                             .fill(FULL | v.deep);
@@ -719,7 +739,7 @@ fn build_region_options(
                     continue;
                 }
             }
-            let fast = world.fbm_terrain().is_some()
+            let source_fast = world.fbm_terrain().is_some()
                 // The fixture's ownership boundary is metre aligned. A shifted
                 // native tile can straddle it despite an unowned origin, so
                 // retain exact column queries for all nonaligned extractions.
@@ -729,8 +749,11 @@ fn build_region_options(
                     x: min.x + (cx * 16) as i64,
                     y: 0,
                     z: min.z + (cz * 16) as i64,
-                })
-                && !column_edited;
+                });
+            // Whole-column summaries/cache entries still require no overrides.
+            // Chunk classification can use immutable source samples despite
+            // edits elsewhere in this column; exact edit values apply last.
+            let fast = source_fast && !column_edited;
             let cache_x = min.x + (cx * 16) as i64;
             let cache_z = min.z + (cz * 16) as i64;
             let reusable = fast && super::column_cache::enabled();
@@ -742,29 +765,52 @@ fn build_region_options(
             let phase = profile.start();
             // Fixed-size tile scratch avoids three allocations per column tile.
             // Cache hits borrow immutable arrays rather than cloning their payload.
-            let columns = cached_samples.is_none().then(|| {
+            let columns = (cached_samples.is_none() && !source_fast).then(|| {
                 std::array::from_fn::<_, 256, _>(|i| {
                     world.column(cache_x + (i % 16) as i64, cache_z + (i / 16) as i64)
                 })
             });
-            let local_samples = columns.as_ref().map(|columns| {
-                let heights = std::array::from_fn(|i| (columns[i].height_m() / VOXEL_SIZE) as i64);
-                let ground_heights =
-                    std::array::from_fn(|i| (columns[i].ground_height_m() / VOXEL_SIZE) as i64);
-                let bands = std::array::from_fn(|i| {
-                    let h = ground_heights[i];
-                    [
-                        id(columns[i].material(h - 1)),
-                        id(columns[i].material(h - 2)),
-                        id(columns[i].material(h - 13)),
-                    ]
-                });
-                super::column_cache::Samples {
-                    heights,
-                    ground_heights,
-                    bands,
+            let local_samples = if cached_samples.is_none() && source_fast {
+                let terrain = world.fbm_terrain().unwrap();
+                let mut samples = super::column_cache::Samples {
+                    heights: [0; 256],
+                    ground_heights: [0; 256],
+                    bands: [[0; 3]; 256],
+                };
+                for i in 0..256 {
+                    let source =
+                        terrain.column_cells(cache_x + (i % 16) as i64, cache_z + (i / 16) as i64);
+                    let h = source.ground_top;
+                    samples.heights[i] = source.visible_top;
+                    samples.ground_heights[i] = h;
+                    samples.bands[i] = [
+                        id(source.material(h - 1)),
+                        id(source.material(h - 2)),
+                        id(source.material(h - 13)),
+                    ];
                 }
-            });
+                Some(samples)
+            } else {
+                columns.as_ref().map(|columns| {
+                    let heights =
+                        std::array::from_fn(|i| (columns[i].height_m() / VOXEL_SIZE) as i64);
+                    let ground_heights =
+                        std::array::from_fn(|i| (columns[i].ground_height_m() / VOXEL_SIZE) as i64);
+                    let bands = std::array::from_fn(|i| {
+                        let h = ground_heights[i];
+                        [
+                            id(columns[i].material(h - 1)),
+                            id(columns[i].material(h - 2)),
+                            id(columns[i].material(h - 13)),
+                        ]
+                    });
+                    super::column_cache::Samples {
+                        heights,
+                        ground_heights,
+                        bands,
+                    }
+                })
+            };
             let samples = cached_samples
                 .as_deref()
                 .or(local_samples.as_ref())
@@ -814,8 +860,9 @@ fn build_region_options(
                     cursor += 1;
                 }
                 let chunk_edits = edits.get(&ci);
+                out.edit_blocked_chunks += usize::from(chunk_edits.is_some());
                 let clean = cursor == plant_start && chunk_edits.is_none();
-                if fast
+                if source_fast
                     && clean
                     && (if column_extrema {
                         y0 >= high_height
@@ -823,9 +870,10 @@ fn build_region_options(
                         heights.iter().all(|h| y0 >= *h)
                     })
                 {
+                    out.fast_skipped_chunks += 1;
                     continue;
                 }
-                if fast
+                if source_fast
                     && clean
                     && (if column_extrema {
                         y0 + 15 < low_ground - 12 && uniform_deep
@@ -835,16 +883,20 @@ fn build_region_options(
                     })
                 {
                     out.chunks[ci] = FULL | bands[0][2] as u32;
+                    out.fast_skipped_chunks += 1;
                     continue;
                 }
                 // Both bounds are over every native x/z column in this tile.
                 // The complete clean chunk lies above every bed and below every
                 // visible top, so it is canonical water without cell assembly.
-                if fast && clean && has_water && y0 >= high_ground && y0 + 16 <= low_visible {
+                if source_fast && clean && has_water && y0 >= high_ground && y0 + 16 <= low_visible
+                {
                     out.chunks[ci] = FULL | id(Material::Water);
+                    out.fast_skipped_chunks += 1;
                     continue;
                 }
                 let phase = profile.start();
+                out.constructed_chunks += 1;
                 let mut cells = [0u32; 4096];
                 for z in 0..16 {
                     for x in 0..16 {
@@ -852,7 +904,7 @@ fn build_region_options(
                         let h = heights[col];
                         for y in 0..16 {
                             let py = y0 + y as i64;
-                            let ty = if fast {
+                            let ty = if source_fast {
                                 if py >= h {
                                     0
                                 } else if py >= ground_heights[col] {
@@ -1234,6 +1286,7 @@ fn preparation_profiling_and_stack_scratch_preserve_exact_snapshot() {
             stack,
             false,
             false,
+            false,
         )
         .unwrap()
     };
@@ -1306,6 +1359,7 @@ fn profile_region_preparation_stages() {
                 &|| false,
                 true,
                 stack,
+                false,
                 false,
                 false,
             )
@@ -1402,6 +1456,7 @@ fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_source
                             true,
                             false,
                             extrema,
+                            false,
                             false,
                         )
                         .unwrap()
@@ -1580,6 +1635,7 @@ fn deep_ocean_uniform_chunks_preserve_bed_air_and_edits() {
         true,
         false,
         true,
+        false,
         false,
     )
     .unwrap();

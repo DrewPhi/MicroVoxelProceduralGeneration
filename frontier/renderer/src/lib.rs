@@ -30,6 +30,7 @@ mod native_stream;
 mod options;
 mod page_terrain;
 mod playability;
+mod player_edit;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -115,7 +116,11 @@ fn renderer_appearance_json(world: &World, adaptive: bool) -> String {
         match appearance_map::map_prefilter() {appearance_map::MapPrefilter::Off=>"off",appearance_map::MapPrefilter::NativeBox{..}=>"native-box",appearance_map::MapPrefilter::Footprint=>"footprint"},
         appearance_method::map_filter_soft_surfaces(),
     );
-    result.push_str(&format!(",\"ground_cover\":{}", ground_cover::stats_json()));
+    result.push_str(&format!(
+        ",\"ground_cover\":{},\"post_aa_strength\":{}",
+        ground_cover::stats_json(),
+        atmosphere::post_aa_strength()
+    ));
     result
 }
 
@@ -1325,10 +1330,31 @@ fn edit_target(
     place: bool,
     pending: bool,
 ) -> Option<Cell> {
+    edit_target_in(world, origin, direction, place, pending, |cell| {
+        if let Some(base) = world.topology_base_cells() {
+            world.volume_owned(cell) && (base - 80..base + 160).contains(&cell.y)
+        } else {
+            inside_arena(cell)
+        }
+    })
+}
+/// The canonical hit and its placement neighbor must both belong to the
+/// supported native renderer. A procedural far surface alone grants no edits.
+fn edit_target_in(
+    world: &World,
+    origin: [f64; 3],
+    direction: [f64; 3],
+    place: bool,
+    pending: bool,
+    owns: impl Fn(Cell) -> bool,
+) -> Option<Cell> {
     if pending {
         return None;
     }
     let hit = frontier_world::raycast(world, origin, direction, 8.)?;
+    if !owns(hit.cell) {
+        return None;
+    }
     let cell = if place {
         if hit.normal == [0; 3] {
             return None;
@@ -1341,13 +1367,9 @@ fn edit_target(
     } else {
         hit.cell
     };
-    (if let Some(base) = world.topology_base_cells() {
-        world.volume_owned(cell) && (base - 80..base + 160).contains(&cell.y)
-    } else {
-        inside_arena(cell)
-    })
-    .then_some(cell)
+    owns(cell).then_some(cell)
 }
+
 struct PendingEdit {
     receiver: std::sync::mpsc::Receiver<(
         mesh::Mesh,
@@ -1454,6 +1476,7 @@ impl Default for EditTest {
 
 struct Viewer {
     live_water: Option<live_water::LiveWater>,
+    player_edit: player_edit::PlayerEdit,
     visual_settings: settings::VisualSettings,
     settings_ui: Option<settings_ui::SettingsUi>,
     atmosphere: Option<atmosphere::Atmosphere>,
@@ -1552,6 +1575,7 @@ struct Viewer {
 }
 impl Viewer {
     fn begin_teleport(&mut self, destination: [f64; 2]) -> Result<()> {
+        self.player_edit.cancel();
         let Some(stream) = &mut self.hybrid_stream else {
             return Ok(());
         };
@@ -1722,6 +1746,61 @@ impl Viewer {
             }
         }
     }
+    fn player_mouse(&mut self, button: MouseButton, state: ElementState) {
+        let Some(live) = &self.live_water else {
+            return;
+        };
+        let native = self.gpu.as_ref().and_then(|gpu| gpu.naadf.as_ref());
+        let transaction = match (button, state) {
+            (MouseButton::Left, ElementState::Pressed) => {
+                self.player_edit
+                    .begin(&self.world, &live.inventory, self.camera, native);
+                None
+            }
+            (MouseButton::Left, ElementState::Released) => {
+                self.player_edit
+                    .release(&self.world, &live.inventory, self.camera, native)
+            }
+            (MouseButton::Right, ElementState::Pressed) => self.player_edit.placement(
+                &self.world,
+                &live.inventory,
+                self.camera,
+                self.walking
+                    .physical_eye()
+                    .unwrap_or(self.camera.position.to_array()),
+                native,
+            ),
+            _ => None,
+        };
+        if let Some(transaction) = transaction {
+            let Some(live) = &mut self.live_water else {
+                return;
+            };
+            match live.apply_player_transaction(&mut self.world, &transaction, |c| {
+                native.is_some_and(|n| n.owns_native_edit_cell(c))
+            }) {
+                Ok(()) => {
+                    self.player_edit.message = format!("Committed action {}", transaction.sequence)
+                }
+                Err(message) => self.player_edit.message = message.into(),
+            }
+        }
+    }
+    fn pick_edit_target(&self, place: bool) -> Option<Cell> {
+        let origin = self.camera.position.to_array();
+        let direction = self.camera.direction().as_dvec3().to_array();
+        let pending = self.pending_edit.is_some();
+        if self.live_water.is_some() {
+            edit_target_in(&self.world, origin, direction, place, pending, |cell| {
+                self.gpu
+                    .as_ref()
+                    .and_then(|gpu| gpu.naadf.as_ref())
+                    .is_some_and(|native| native.owns_native_edit_cell(cell))
+            })
+        } else {
+            edit_target(&self.world, origin, direction, place, pending)
+        }
+    }
     fn edit(&mut self, place: bool) {
         if self.live_water.is_none()
             && self.world.fbm_terrain().is_some()
@@ -1732,13 +1811,7 @@ impl Viewer {
             );
             return;
         }
-        let Some(cell) = edit_target(
-            &self.world,
-            self.camera.position.to_array(),
-            self.camera.direction().as_dvec3().to_array(),
-            place,
-            self.pending_edit.is_some(),
-        ) else {
+        let Some(cell) = self.pick_edit_target(place) else {
             return;
         };
         if let Some(live) = &mut self.live_water {
@@ -1877,6 +1950,9 @@ impl Viewer {
         }
     }
     fn grab(&mut self, grabbed: bool) {
+        if !grabbed {
+            self.player_edit.cancel();
+        }
         if let Some(window) = &self.window {
             if grabbed {
                 self.grabbed = window
@@ -1942,6 +2018,23 @@ impl Viewer {
         }
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
+        if self.player_edit.enabled {
+            if !self.grabbed || self.pending_teleport.is_some() {
+                self.player_edit.cancel();
+            }
+            self.player_edit.update(
+                &self.world,
+                self.camera,
+                self.gpu.as_ref().and_then(|g| g.naadf.as_ref()),
+            );
+            if let (Some(ui), Some(live)) = (&mut self.settings_ui, &self.live_water) {
+                ui.set_player_overlay(self.player_edit.overlay(
+                    &live.inventory,
+                    self.camera,
+                    self.width as f32 / self.height.max(1) as f32,
+                ));
+            }
+        }
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
@@ -2623,18 +2716,20 @@ impl ApplicationHandler for Viewer {
                 self.keys.clear();
                 self.grab(false);
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
-                if self.benchmark_input_lock {
+            WindowEvent::MouseInput { state, button, .. } => {
+                if self.benchmark_input_lock || self.pending_teleport.is_some() {
                     return;
                 }
                 if !self.grabbed {
-                    self.grab(true);
+                    if state == ElementState::Pressed {
+                        self.grab(true);
+                    }
                 } else if button == MouseButton::Left || button == MouseButton::Right {
-                    self.edit(button == MouseButton::Right);
+                    if self.player_edit.enabled {
+                        self.player_mouse(button, state);
+                    } else if state == ElementState::Pressed {
+                        self.edit(button == MouseButton::Right);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -2648,19 +2743,27 @@ impl ApplicationHandler for Viewer {
                     }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
+                        if self.player_edit.enabled && !event.repeat {
+                            let slot = match key {
+                                KeyCode::Digit1 => Some(0),
+                                KeyCode::Digit2 => Some(1),
+                                KeyCode::Digit3 => Some(2),
+                                KeyCode::Digit4 => Some(3),
+                                KeyCode::Digit5 => Some(4),
+                                KeyCode::Digit6 => Some(5),
+                                _ => None,
+                            };
+                            if let (Some(slot), Some(live)) = (slot, &mut self.live_water) {
+                                live.inventory.select_slot(slot);
+                            }
+                        }
                         if key == KeyCode::KeyG && !event.repeat {
                             if let Some(live) = &mut self.live_water {
                                 live.open_dam(&mut self.world);
                             }
                         }
-                        if key == KeyCode::KeyP && !event.repeat {
-                            if let Some(c) = edit_target(
-                                &self.world,
-                                self.camera.position.to_array(),
-                                self.camera.direction().as_dvec3().to_array(),
-                                true,
-                                false,
-                            ) {
+                        if key == KeyCode::KeyP && !event.repeat && !self.player_edit.enabled {
+                            if let Some(c) = self.pick_edit_target(true) {
                                 if let Some(live) = &mut self.live_water {
                                     if let Err(e) = live.add_water(&mut self.world, c) {
                                         self.error = Some(e.to_string());
@@ -2767,6 +2870,9 @@ pub fn run() -> Result<()> {
     appearance_method::initialize_application();
     let Some(options::Options {
         live_water: live_water_enabled,
+        player_edit: player_edit_enabled,
+        hand,
+        inventory_capacity,
         water_active_radius,
         water_history_cells,
         water_save,
@@ -2875,6 +2981,12 @@ pub fn run() -> Result<()> {
     } else {
         None
     };
+    if let Some(live) = &mut live_water {
+        if live.inventory.total() > inventory_capacity {
+            return Err("saved inventory exceeds requested capacity".into());
+        }
+        live.inventory.capacity = inventory_capacity;
+    }
     if world.vegetation_enabled() {
         frontier_world::vegetation::prewarm_models();
     }
@@ -3448,6 +3560,7 @@ pub fn run() -> Result<()> {
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
         live_water,
+        player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -4086,6 +4199,38 @@ mod tests {
         );
         assert_eq!(edit_target(&world, origin, direction, false, true), None);
         assert_eq!(edit_target(&world, origin, direction, true, true), None);
+    }
+    #[test]
+    fn live_edit_picks_negative_nonorigin_terrain_only_with_native_residency() {
+        use super::*;
+        let mut world = World::fbm(SEED, Default::default()).unwrap();
+        let x = -4097;
+        let z = -8193;
+        let y = (world.ground_height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE) / VOXEL_SIZE)
+            as i64
+            + 32;
+        let target = Cell { x, y, z };
+        let neighbor = Cell { x: x - 1, ..target };
+        world.set(target, Material::Stone);
+        world.set(neighbor, Material::Air);
+        let origin = [
+            (x as f64 - 0.5) * VOXEL_SIZE,
+            (y as f64 + 0.5) * VOXEL_SIZE,
+            (z as f64 + 0.5) * VOXEL_SIZE,
+        ];
+        let pick = |place, pending, owns: &dyn Fn(Cell) -> bool| {
+            edit_target_in(&world, origin, [1., 0., 0.], place, pending, owns)
+        };
+        assert!(!inside_arena(target));
+        assert_eq!(pick(false, false, &|c| c == target), Some(target));
+        assert_eq!(
+            pick(true, false, &|c| c == target || c == neighbor),
+            Some(neighbor)
+        );
+        assert_eq!(pick(true, false, &|c| c == target), None);
+        assert_eq!(pick(true, false, &|c| c == neighbor), None);
+        assert_eq!(pick(false, false, &|_| false), None);
+        assert_eq!(pick(false, true, &|_| true), None);
     }
     #[test]
     fn edit_bounds_are_half_open_and_do_not_place_outside_mesh() {

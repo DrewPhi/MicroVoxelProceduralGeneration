@@ -6,6 +6,94 @@ pub(super) fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("FRONTIER_NAADF_COMPACT_OVERLAY").as_deref() == Ok("1"))
 }
+pub(super) fn chunk_local_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("FRONTIER_NAADF_CHUNK_LOCAL_OVERLAY").as_deref() == Ok("1"))
+}
+
+// In-place MSD radix buckets group native 16³ chunks. Only three 256-entry
+// tables are needed per address byte; payload capacity never grows. Within a
+// chunk ordinary sorting retains address-major/pigment-minor precedence.
+pub(super) const CHUNK_SORT_SCRATCH_BYTES: usize = 7 * 3 * 256 * std::mem::size_of::<usize>();
+
+fn sort_chunks<T: Copy + Ord>(
+    values: &mut [T],
+    chunk: impl Fn(T) -> u64 + Copy,
+    cancel: &impl Fn() -> bool,
+) -> Result<(), String> {
+    fn partition<T: Copy + Ord>(
+        values: &mut [T],
+        shift: u32,
+        chunk: impl Fn(T) -> u64 + Copy,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if cancel() {
+            return Err("NAADF build superseded".into());
+        }
+        if values.len() < 256 {
+            values.sort_unstable();
+            return Ok(());
+        }
+        let mut ends = [0usize; 256];
+        for (i, &value) in values.iter().enumerate() {
+            if i % 4096 == 0 && cancel() {
+                return Err("NAADF build superseded".into());
+            }
+            ends[((chunk(value) >> shift) & 255) as usize] += 1;
+        }
+        let mut starts = [0usize; 256];
+        let mut sum = 0;
+        for bucket in 0..256 {
+            starts[bucket] = sum;
+            sum += ends[bucket];
+            ends[bucket] = sum;
+        }
+        let mut next = starts;
+        let mut visits = 0usize;
+        for bucket in 0..256 {
+            if cancel() {
+                return Err("NAADF build superseded".into());
+            }
+            while next[bucket] < ends[bucket] {
+                if visits % 4096 == 0 && cancel() {
+                    return Err("NAADF build superseded".into());
+                }
+                visits += 1;
+                let index = next[bucket];
+                let destination = ((chunk(values[index]) >> shift) & 255) as usize;
+                if destination == bucket {
+                    next[bucket] += 1;
+                } else {
+                    values.swap(index, next[destination]);
+                    next[destination] += 1;
+                }
+            }
+        }
+        for bucket in 0..256 {
+            if cancel() {
+                return Err("NAADF build superseded".into());
+            }
+            let values = &mut values[starts[bucket]..ends[bucket]];
+            if shift == 0 {
+                values.sort_unstable();
+            } else if values.len() > 1 {
+                partition(values, shift - 8, chunk, cancel)?;
+            }
+        }
+        Ok(())
+    }
+    let mut max = 0u64;
+    for (i, &value) in values.iter().enumerate() {
+        if i % 4096 == 0 && cancel() {
+            return Err("NAADF build superseded".into());
+        }
+        max = max.max(chunk(value));
+    }
+    let shift = (63 - max.max(1).leading_zeros()) / 8 * 8;
+    partition(values, shift, chunk, cancel)
+}
+
 pub(super) enum Overlay {
     Narrow(Vec<u64>),
     Wide(Vec<u128>, usize),
@@ -72,17 +160,36 @@ impl Overlay {
             Self::Wide(v, _) => v[i] = ((address as u128) << 32) | u128::from(pigment),
         }
     }
+    #[cfg(test)]
     pub(super) fn resolve(
+        &mut self,
+        canonical: impl FnMut(u64) -> Result<u32, String>,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        self.resolve_ordered(canonical, cancel, false)
+    }
+    pub(super) fn resolve_ordered(
         &mut self,
         mut canonical: impl FnMut(u64) -> Result<u32, String>,
         cancel: &impl Fn() -> bool,
+        chunk_local: bool,
     ) -> Result<(), String> {
         match self {
-            Self::Narrow(v) => v.sort_unstable(),
+            Self::Narrow(v) => {
+                if chunk_local {
+                    sort_chunks(v, |v| v >> 28, cancel)?;
+                } else {
+                    v.sort_unstable();
+                }
+            }
             // Keep the ordinary wide control's inner loop unchanged; no enum
             // dispatch per comparison/read when the experiment is disabled.
             Self::Wide(v, _) => {
-                v.sort_unstable();
+                if chunk_local {
+                    sort_chunks(v, |v| (v >> 44) as u64, cancel)?;
+                } else {
+                    v.sort_unstable();
+                }
                 let (mut compact, mut i) = (0, 0);
                 while i < v.len() {
                     if i % 4096 == 0 && cancel() {
@@ -173,7 +280,9 @@ mod tests {
     }
     #[test]
     fn narrow_and_promoted_layouts_match_frozen_wide_order_and_overlaps() {
-        for mode in 0..4 {
+        for variant in 0..8 {
+            let mode = variant % 4;
+            let chunk_local = variant >= 4;
             let mut overlay = Overlay::new(true);
             let mut values = Vec::new();
             let mut rng = 8191u64;
@@ -218,12 +327,13 @@ mod tests {
                 canonical(a)
             });
             overlay
-                .resolve(
+                .resolve_ordered(
                     |a| {
                         calls.push(a);
                         Ok(canonical(a))
                     },
                     &|| false,
+                    chunk_local,
                 )
                 .unwrap();
             let mut actual = Vec::new();
@@ -235,6 +345,63 @@ mod tests {
             assert_eq!(matches!(overlay, Overlay::Narrow(_)), mode == 0);
         }
     }
+    #[test]
+    fn chunk_local_sort_cancels_before_and_during_partition() {
+        use std::cell::Cell;
+        for allowance in [0, 3, 50] {
+            let mut overlay = Overlay::new(false);
+            for i in 0..20000 {
+                overlay.push(((i * 7919) % 10007) * 4096 + i % 4096, 5);
+            }
+            let polls = Cell::new(0);
+            assert!(overlay
+                .resolve_ordered(
+                    |_| Ok(7),
+                    &|| {
+                        let n = polls.get();
+                        polls.set(n + 1);
+                        n >= allowance
+                    },
+                    true
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit synthetic overlay sorting timing; not a moving-window benchmark"]
+    fn benchmark_chunk_local_sort() {
+        for compact in [false, true] {
+            let mut results = Vec::new();
+            for chunk_local in [false, true] {
+                let mut overlay = Overlay::new(compact);
+                let mut rng = 8191u64;
+                for plant in 0..512u64 {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let chunk = rng % 8192;
+                    for voxel in 0..1024u64 {
+                        overlay.push(
+                            chunk * 4096 + (voxel * 7919 + plant) % 4096,
+                            (plant % 65535) as u32,
+                        );
+                    }
+                }
+                let entries = overlay.len();
+                let bytes = overlay.bytes();
+                let start = std::time::Instant::now();
+                overlay
+                    .resolve_ordered(|a| Ok((a % 65535) as u32), &|| false, chunk_local)
+                    .unwrap();
+                let ms = start.elapsed().as_secs_f64() * 1000.;
+                eprintln!("synthetic_overlay compact={compact} chunk_local={chunk_local} entries={entries} payload_bytes={bytes} scratch_bound_bytes={} sort_resolve_ms={ms:.3}", if chunk_local { CHUNK_SORT_SCRATCH_BYTES } else { 0 });
+                let mut result = Vec::new();
+                overlay.for_each(0, overlay.len(), |a, p| result.push((a, p)));
+                results.push(result);
+            }
+            assert_eq!(results[0], results[1]);
+        }
+    }
+
     #[test]
     fn narrow_payload_halves_staging_and_cancellation_and_error_propagate() {
         let mut narrow = Overlay::new(true);

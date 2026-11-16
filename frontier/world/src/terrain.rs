@@ -496,6 +496,41 @@ impl FbmTerrain {
             .reduce(f64::min)
     }
 
+    /// Horizontal visibility debt for unsampled water cores, capped by their
+    /// diameter rather than the display grid width. Vertical relief retains its
+    /// independent certified bound. This is not a water-area coverage proof.
+    pub fn seeded_water_feature_debt(&self, min: [f64; 2], max: [f64; 2], step_m: f64) -> f64 {
+        if self.params.recipe != FbmRecipe::SeededWorld {
+            return 0.;
+        }
+        let scale = self.params.horizontal_scale / 1800.;
+        // Large boxes use source-wide maximum lake diameter, without enumerating
+        // an unbounded collection of drainage descriptors.
+        if (0..2).any(|a| max[a] - min[a] > 9600. * scale) {
+            return if step_m > 4. * scale {
+                (step_m * std::f64::consts::SQRT_2).min(200. * scale)
+            } else {
+                0.
+            };
+        }
+        let pad = 1e-8 * (1. + min[0].abs() + min[1].abs() + max[0].abs() + max[1].abs());
+        self.seeded_reaches(min, max)
+            .into_iter()
+            .filter(|r| r.a.stage.max(r.b.stage) >= 0.)
+            .filter(|r| step_m > 0.5 * r.width.min(r.width_b))
+            .filter(|r| {
+                let radius = r.width.max(r.width_b) + pad;
+                r.a.x.min(r.b.x) - radius <= max[0]
+                    && r.a.x.max(r.b.x) + radius >= min[0]
+                    && r.a.z.min(r.b.z) - radius <= max[1]
+                    && r.a.z.max(r.b.z) + radius >= min[1]
+            })
+            .map(|r| {
+                (step_m * std::f64::consts::SQRT_2).min(2. * r.width.max(r.width_b) + 2. * pad)
+            })
+            .fold(0., f64::max)
+    }
+
     /// Analytical seeded-world range estimate over an axis-aligned meter box.
     /// Includes ground, water, banks and channels, but uses ordinary f64 interval
     /// endpoints. Certified callers must use outward-rounded interval arithmetic.
@@ -1422,6 +1457,37 @@ mod alpine_derivative_tests {
 #[cfg(test)]
 mod water_feature_spacing_tests {
     use super::*;
+    #[test]
+    fn water_debt_caps_coarse_spacing_and_clears_resolved_cores() {
+        let t = FbmTerrain::new(
+            19,
+            FbmParams {
+                recipe: FbmRecipe::SeededWorld,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let min = [-2400.; 2];
+        let max = [2400.; 2];
+        assert_eq!(t.seeded_water_feature_debt(min, max, 4.), 0.);
+        let coarse = t.seeded_water_feature_debt(min, max, 1024.);
+        assert!(coarse > 0. && coarse < 201.);
+        assert_eq!(
+            t.seeded_water_feature_debt([-100_000.; 2], [100_000.; 2], 4096.),
+            200.
+        );
+        let legacy = FbmTerrain::new(19, FbmParams::default()).unwrap();
+        assert_eq!(legacy.seeded_water_feature_debt(min, max, 4096.), 0.);
+        // Every unresolved descriptor's possible core diameter contributes;
+        // the cap must not use the smallest river when a lake is present.
+        for r in t.seeded_reaches(min, max) {
+            let center = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
+            let debt =
+                t.seeded_water_feature_debt(center.map(|v| v - 1.), center.map(|v| v + 1.), 1024.);
+            assert!(debt + 1e-6 >= 2. * r.width.max(r.width_b));
+        }
+    }
+
     #[test]
     fn descriptor_core_spacing_is_bounded_and_does_not_need_fine_columns() {
         let t = FbmTerrain::new(
