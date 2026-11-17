@@ -16,6 +16,7 @@ pub mod desert;
 pub mod discrete_water;
 pub mod edit;
 mod edit_index;
+pub mod garden;
 pub use edit_index::EditQueryStats;
 pub mod fluid;
 pub mod moving_water;

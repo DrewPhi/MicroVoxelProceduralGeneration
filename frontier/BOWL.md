@@ -32,7 +32,9 @@ returns whole water units to the world. This is a small local bowl transport mod
 not integration of a worldwide pressure solver. Stationary deposited water has
 no lateral pressure flow yet. Internal bowl sloshing is not simulated.
 
-The ledger is `scooped = held + airborne + absorbed + deposited`. Returning and
+The ledger is now `scooped = held + airborne + soil moisture + deposited + plant transfer`.
+[Planting and seedling growth](PLANTING.md) accounts for plant storage and
+transpiration. Legacy bowl-only saves migrate with zero plant transfer. Returning and
 recollecting water preserves it. The serialized state includes droplets in flight,
 source-removal tombstones, moisture, damp footprints, emission phase and counters.
 A size/identity/finite-value/duplicate/ledger check guards restore; writes use a
@@ -43,7 +45,7 @@ Moisture is independent of fertility: watering creates no nutrients or organic
 matter. The first visual implementation marks damp surface cells with the existing
 Soil color/material palette. Their original desert sand source is unchanged and
 the separate moisture record is authoritative; a dedicated wetness appearance
-channel remains a later rendering improvement. There is no evaporation yet.
+channel remains a later rendering improvement. There is no standalone soil evaporation; the plant update separately counts transpiration.
 
 `renderer/src/bowl_live.rs` handles controls, persistence and a procedural held
 voxel view model. Its tiny number of airborne cubes is projected in world space

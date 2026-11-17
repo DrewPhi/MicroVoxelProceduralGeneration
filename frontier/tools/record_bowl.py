@@ -7,7 +7,7 @@ from pathlib import Path
 from record_walk import X11,ROOT,I,P,U
 
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);a=p.parse_args();out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);p.add_argument('--plant',action='store_true',help='Dig, plant, cover, water and watch the first seedling');a=p.parse_args();out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
  binary=ROOT/'target/release/frontier';save=out/'world.bowl';cmd=[str(binary),'--preset','desert','--seed','19','--width','1920','--height','1080','--naadf-radius','16','--bowl-save',str(save),'--report',str(out/'game.json')]
  app=rec=x=window=None;events=[];start=time.monotonic();failure=None
  def note(s):events.append({'seconds':time.monotonic()-start,'action':s})
@@ -44,27 +44,45 @@ def main():
    for _ in range(30):relative(x.d,0,18,0);x.flush(x.d);pause(.025)
    pause(.7);note('scoop');scoop();pause(1.8)
    note('carry_to_sand');key('s',1.4);pause(1.)
+   if a.plant:
+    note('hands_dig');key('b',.06);pause(.25);click();pause(.4)
+    note('place_seed');key('p',.06);pause(.4)
+    note('bury_seed');x.button(x.d,3,1,0);x.button(x.d,3,0,0);x.flush(x.d);pause(.6)
+    key('b',.06);pause(.2)
    note('pour');x.button(x.d,3,1,0);x.flush(x.d)
    try:pause(2.)
    finally:x.button(x.d,3,0,0);x.flush(x.d)
    pause(3.);note('inspect_wet_sand');pause(2.)
-   note('return_to_pond');key('w',1.4);pause(.6);scoop();pause(1.5)
-   note('carry_second_bowl');key('s',1.2);pause(.8)
-   note('tip_and_spill');key('q',2.);pause(4.)
+   if a.plant:
+    key('b',.06);note('watch_growth');pause(28.)
+    note('step_back_for_view');key('s',.8)
+    for _ in range(25):relative(x.d,0,-10,0);x.flush(x.d);pause(.025)
+    note('seedling_view');pause(5.)
+   else:
+    note('return_to_pond');key('w',1.4);pause(.6);scoop();pause(1.5)
+    note('carry_second_bowl');key('s',1.2);pause(.8)
+    note('tip_and_spill');key('q',2.);pause(4.)
    note('close_and_save');x.request_close(window,app.pid);app.wait(timeout=90)
    if app.returncode:raise RuntimeError('game failed on exit')
    rec.terminate();rec.wait(timeout=15)
    report=json.loads((out/'game.json').read_text());b=report.get('bowl',{})
-   if not b.get('conserved') or b.get('scooped_units',0)<8 or b.get('spilled_units',0)==0 or b.get('absorbed_units',0)==0 or b.get('units')!=0:raise RuntimeError(f'bowl action checks failed: {b}')
-   for label,action in [('filled','carry_to_sand'),('wet_sand','inspect_wet_sand'),('spill','tip_and_spill')]:
-    begin=next(e['seconds'] for e in events if e['action']=='record_start');at=next(e['seconds'] for e in events if e['action']==action)-begin+.3
+   if not b.get('conserved') or b.get('scooped_units',0)<8 or (not a.plant and b.get('spilled_units',0)==0) or (b.get('absorbed_units',0)+(b.get('plant_transferred',0) if a.plant else 0))==0 or b.get('units')!=0:raise RuntimeError(f'bowl action checks failed: {b}')
+   if a.plant:
+    garden=b.get('garden',{})
+    if garden.get('plants')!=1 or garden.get('germinated')!=1 or garden.get('tissue_cells',0)<6 or not garden.get('water_ledger_matches'):raise RuntimeError(f'planting/growth failed: {garden}')
+   pictures=[('filled','carry_to_sand'),('wet_sand','inspect_wet_sand')]+([('seedling','seedling_view')] if a.plant else [('spill','tip_and_spill')])
+   for label,action in pictures:
+    begin=next(e['seconds'] for e in events if e['action']=='record_start');at=next(e['seconds'] for e in events if e['action']==action)-begin+(3. if label=='seedling' else .3)
     subprocess.run(['ffmpeg','-y','-loglevel','error','-ss',str(at),'-i',str(out/'bowl.mp4'),'-frames:v','1',str(out/f'{label}.png')],check=True)
    reload_cmd=cmd.copy();reload_cmd[reload_cmd.index('--report')+1]=str(out/'reload.json');reload_cmd+=['--seconds','4']
    with (out/'reload.log').open('w') as reload_log:
     subprocess.run(reload_cmd,cwd=ROOT,stdout=reload_log,stderr=subprocess.STDOUT,timeout=120,check=True)
    restored=json.loads((out/'reload.json').read_text()).get('bowl',{})
    persistent=['units','scooped_units','emitted_units','spilled_units','absorbed_units','damp_cells','deposited_units','conserved']
-   if any(restored.get(k)!=b[k] for k in persistent):raise RuntimeError('disk reload changed bowl/moisture ledger')
+   if a.plant:
+    rg=restored.get('garden',{})
+    if not restored.get('conserved') or not rg.get('water_ledger_matches') or rg.get('plants')!=1 or rg.get('tissue_cells',0)<b['garden']['tissue_cells'] or restored['scooped_units']!=b['scooped_units']:raise RuntimeError('disk reload lost plant or water state')
+   elif any(restored.get(k)!=b[k] for k in persistent):raise RuntimeError('disk reload changed bowl/moisture ledger')
    (out/'checks.json').write_text(json.dumps({'passed':True,'bowl':b,'frames':report['frames'],'reload_passed':True,'restored_bowl':restored},indent=2)+'\n')
  except Exception as e:failure=str(e);raise
  finally:

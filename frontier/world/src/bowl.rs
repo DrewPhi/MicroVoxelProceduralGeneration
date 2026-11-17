@@ -15,6 +15,8 @@ pub struct Bowl {
     pub scooped: u64,
     pub emitted: u64,
     pub spilled: u64,
+    /// Whole units transferred to plant storage/transpiration, never lost.
+    pub plant_transferred: u64,
     pub moisture: BTreeMap<Cell, u32>,
     pub removed: BTreeSet<Cell>,
     pub deposited: BTreeSet<Cell>,
@@ -30,6 +32,7 @@ impl Bowl {
                 + self.drops.len() as u64
                 + self.moisture.values().map(|v| u64::from(*v)).sum::<u64>()
                 + self.deposited.len() as u64
+                + self.plant_transferred
     }
     pub fn scoop(
         &mut self,
@@ -250,8 +253,14 @@ impl Bowl {
     }
     pub fn snapshot(&self, seed: u64) -> String {
         let mut s = format!(
-            "BOWL1 {seed} {} {} {} {} {} {}\n",
-            self.units, self.scooped, self.emitted, self.spilled, self.phase, self.simulated
+            "BOWL2 {seed} {} {} {} {} {} {} {}\n",
+            self.units,
+            self.scooped,
+            self.emitted,
+            self.spilled,
+            self.phase,
+            self.simulated,
+            self.plant_transferred
         );
         for &c in &self.removed {
             s += &format!("R {} {} {}\n", c.x, c.y, c.z);
@@ -291,7 +300,9 @@ impl Bowl {
             .ok_or("empty bowl save")?
             .split_whitespace()
             .collect();
-        if h.len() != 8 || h[0] != "BOWL1" || h[1].parse::<u64>().ok() != Some(seed) {
+        if !((h.len() == 8 && h[0] == "BOWL1") || (h.len() == 9 && h[0] == "BOWL2"))
+            || h[1].parse::<u64>().ok() != Some(seed)
+        {
             return Err("bowl save identity mismatch");
         }
         let number = |v: &str| v.parse::<u64>().map_err(|_| "invalid count");
@@ -303,6 +314,7 @@ impl Bowl {
         };
         let mut b = Self {
             units: u32::try_from(number(h[2])?).map_err(|_| "count overflow")?,
+            plant_transferred: if h.len() == 9 { number(h[8])? } else { 0 },
             scooped: number(h[3])?,
             emitted: number(h[4])?,
             spilled: number(h[5])?,
@@ -362,7 +374,8 @@ impl Bowl {
                 return Err("invalid or duplicate bowl record");
             }
         }
-        if b.removed.len() as u64 != b.scooped || !b.conserved() {
+        if b.removed.len() as u64 != b.scooped || b.plant_transferred > b.scooped || !b.conserved()
+        {
             return Err("bowl ledger mismatch");
         }
         Ok(b)
@@ -380,6 +393,14 @@ mod tests {
         let w = World::fbm(19, p).unwrap();
         let o = desert::oasis(19, 0, 0);
         (w, [o.x, o.stage + 1., o.z], [0., -1., 0.])
+    }
+    #[test]
+    fn rejects_impossible_transferred_water_before_ledger_arithmetic() {
+        let b = Bowl::default();
+        let s = b.snapshot(19);
+        let mut fields = s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        fields[8] = u64::MAX.to_string();
+        assert!(Bowl::restore(&fields.join(" "), 19).is_err());
     }
     #[test]
     fn return_to_pond_and_rescoop_preserve_the_original_ledger() {
@@ -429,7 +450,7 @@ mod tests {
             assert_eq!(fresh.material(*c), Material::Soil);
         }
         assert!(Bowl::restore(&s, 20).is_err());
-        assert!(Bowl::restore(&s.replace("BOWL1 19 0", "BOWL1 19 8"), 19).is_err());
+        assert!(Bowl::restore(&s.replace("BOWL2 19 0", "BOWL2 19 8"), 19).is_err());
     }
     #[test]
     fn blocked_or_distant_scoop_never_creates_water() {

@@ -2221,6 +2221,12 @@ impl Viewer {
                 self.camera,
                 self.keys.contains(&KeyCode::KeyQ),
                 self.grabbed && self.pending_teleport.is_none(),
+                atmosphere::sun_direction(
+                    self.visual_settings.sun_elevation,
+                    self.visual_settings.sun_azimuth,
+                )
+                .as_dvec3()
+                .to_array(),
             );
         }
         if let Some(live) = &mut self.live_water {
@@ -2851,6 +2857,12 @@ impl ApplicationHandler for Viewer {
                             if button == MouseButton::Right {
                                 bowl.pouring = state == ElementState::Pressed;
                             }
+                        } else if state == ElementState::Pressed {
+                            bowl.planting_action(
+                                &mut self.world,
+                                self.camera,
+                                if button == MouseButton::Left { 0 } else { 2 },
+                            );
                         }
                     } else if self.player_edit.enabled {
                         self.player_mouse(button, state);
@@ -2895,7 +2907,16 @@ impl ApplicationHandler for Viewer {
                                 live.open_dam(&mut self.world);
                             }
                         }
-                        if key == KeyCode::KeyP && !event.repeat && !self.player_edit.enabled {
+                        if key == KeyCode::KeyP && !event.repeat {
+                            if let Some(bowl) = &mut self.bowl {
+                                bowl.planting_action(&mut self.world, self.camera, 1);
+                            }
+                        }
+                        if key == KeyCode::KeyP
+                            && !event.repeat
+                            && !self.player_edit.enabled
+                            && self.bowl.is_none()
+                        {
                             if let Some(c) = self.pick_edit_target(true) {
                                 if let Some(live) = &mut self.live_water {
                                     if let Err(e) = live.add_water(&mut self.world, c) {

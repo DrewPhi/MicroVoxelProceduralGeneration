@@ -1,0 +1,161 @@
+{
+  "seed": 19,
+  "terrain": "Desert v2",
+  "native_voxel_m": 0.0625,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "naadf_radius_m": 16,
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "command": [
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+    "--preset",
+    "desert",
+    "--seed",
+    "19",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--naadf-radius",
+    "16",
+    "--bowl-save",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/planting-final-playtest/world.bowl",
+    "--report",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/planting-final-playtest/game.json"
+  ],
+  "events": [
+    {
+      "seconds": 12.711474244002602,
+      "action": "record_start"
+    },
+    {
+      "seconds": 13.711589825994452,
+      "action": "walk_to_shore"
+    },
+    {
+      "seconds": 19.26776089599298,
+      "action": "scoop"
+    },
+    {
+      "seconds": 28.31982792400231,
+      "action": "carry_to_sand"
+    },
+    {
+      "seconds": 30.803506480995566,
+      "action": "hands_dig"
+    },
+    {
+      "seconds": 31.59447770699626,
+      "action": "place_seed"
+    },
+    {
+      "seconds": 32.143961364999996,
+      "action": "bury_seed"
+    },
+    {
+      "seconds": 33.0848510539945,
+      "action": "pour"
+    },
+    {
+      "seconds": 38.08535719200154,
+      "action": "inspect_wet_sand"
+    },
+    {
+      "seconds": 40.2307642789965,
+      "action": "watch_growth"
+    },
+    {
+      "seconds": 68.23084996499529,
+      "action": "step_back_for_view"
+    },
+    {
+      "seconds": 69.7470437939919,
+      "action": "seedling_view"
+    },
+    {
+      "seconds": 74.74712817299587,
+      "action": "close_and_save"
+    }
+  ],
+  "bowl_and_garden": {
+    "units": 0,
+    "capacity": 8,
+    "litres": 0,
+    "scooped_units": 8,
+    "emitted_units": 8,
+    "spilled_units": 0,
+    "airborne": 0,
+    "absorbed_units": 0,
+    "damp_cells": 29,
+    "deposited_units": 0,
+    "conserved": true,
+    "simulation_debt": 0.0035134379999961773,
+    "save_count": 1,
+    "plant_transferred": 8,
+    "garden": {
+      "seeds": 0,
+      "holes": 1,
+      "plants": 1,
+      "germinated": 1,
+      "tissue_cells": 29,
+      "leaves": 13,
+      "water_stored": 0,
+      "transpired": 8,
+      "tick": 74,
+      "water_ledger_matches": true
+    }
+  },
+  "reload_passed": true,
+  "restored_bowl_and_garden": {
+    "units": 0,
+    "capacity": 8,
+    "litres": 0,
+    "scooped_units": 8,
+    "emitted_units": 8,
+    "spilled_units": 0,
+    "airborne": 0,
+    "absorbed_units": 0,
+    "damp_cells": 29,
+    "deposited_units": 0,
+    "conserved": true,
+    "simulation_debt": 0,
+    "save_count": 1,
+    "plant_transferred": 8,
+    "garden": {
+      "seeds": 0,
+      "holes": 1,
+      "plants": 1,
+      "germinated": 1,
+      "tissue_cells": 29,
+      "leaves": 13,
+      "water_stored": 0,
+      "transpired": 8,
+      "tick": 74,
+      "water_ledger_matches": true
+    }
+  },
+  "frames_including_recording_overhead": {
+    "sample_count": 4370,
+    "accepted_frames": 4370,
+    "missed_budget_frames": 2239,
+    "rejected_inputs": 0,
+    "p50_ms": 16.686684,
+    "p95_ms": 26.682278,
+    "p99_ms": 36.640179
+  },
+  "recorded_binary_sha256": "068541563edb21b332ddaf4d29f034c56d8ad22cdee6844e290afdebb0fd7d20",
+  "final_binary_sha256": "4002f0dcf70604aaddf34312443076ef876ea7db3046c230c453fa1573297878",
+  "binary_difference": "Final binary adds an impossible transferred-water save-counter rejection; valid planting and growth behavior matches the recording.",
+  "tests": {
+    "workspace_passed": 825,
+    "workspace_failed": 0,
+    "workspace_ignored": 45,
+    "final_world_after_save_counter_test_passed": 206,
+    "final_world_ignored": 6,
+    "combined_native_save_restore_test_passed": true,
+    "primary_identical": true,
+    "workspace_tests_compile": true
+  }
+}
