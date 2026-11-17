@@ -216,6 +216,18 @@ impl Drop for Worker {
         }
     }
 }
+pub(super) fn terrain_subpixel_strength() -> f32 {
+    static STRENGTH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *STRENGTH.get_or_init(|| {
+        std::env::var("FRONTIER_TERRAIN_SUBPIXEL_AA")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.)
+            .clamp(0., 1.)
+    })
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniform {
@@ -1611,8 +1623,16 @@ impl Experiment {
                 sun: [sun.x, sun.y, sun.z, if s.beauty { 1. } else { 0. }],
                 sky: [
                     s.overcast,
-                    0.,
-                    0.,
+                    if s.voxel_filter
+                        && gpu.polished_appearance
+                        && gpu.scene_format == wgpu::TextureFormat::Rgba16Float
+                        && a.samples == 1
+                    {
+                        terrain_subpixel_strength()
+                    } else {
+                        0.
+                    },
+                    gpu.native_sample_phase.get() as f32,
                     if s.visibility_benchmark { 1. } else { 0. },
                 ],
                 far_matrix: gpu
@@ -2001,6 +2021,10 @@ fn make_pipeline(
         u8::from(capture_layer() == CaptureLayer::Steps).into(),
     );
     constants.insert("traversal_beam".into(), u8::from(options.beam).into());
+    constants.insert(
+        "native_sand_footprint".into(),
+        u8::from(std::env::var("FRONTIER_NATIVE_SAND_FOOTPRINT").as_deref() != Ok("off")).into(),
+    );
     gpu.device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("NAADF exact native voxel pass"),

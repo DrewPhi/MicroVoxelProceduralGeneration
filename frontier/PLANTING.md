@@ -13,6 +13,13 @@ handful. Keys **1–4** swap that pocket with your hand; **E** stows the held it
 in the first empty pocket. A full inventory rejects stowing without losing items.
 The bowl keeps its water while stored. **B** remains a bowl shortcut.
 
+Hold the black seed and press **G** to open the Seed workshop. Drag tiles
+from the palette to add actions, drag existing tiles to reorder them, or select
+a tile and use **Earlier** and **Later**. **Next round** advances the preview
+through the active tips. **Rule text** lets you edit the same program directly.
+**Apply to seed** commits the draft and returns to the game. **Esc** or **Cancel**
+closes the workshop without applying the draft.
+
 ## Try it
 
 1. Select pocket **2**, scoop pond water with **left click**, walk to dry sand.
@@ -51,18 +58,19 @@ position still resets to the shore. `--bowl-save PATH` selects another save slot
   emerging shoot bootstrap the seed. Taller main shoots add a cross of stem cells
   around their centre, producing a thicker trunk.
 
-Those four intervals are plain `GrowthRules` data, saved with each plant. They
-are the first controls for a future visual seed editor; there is no GUI editor
-or arbitrary user-authored grammar yet. Every instruction has a face-adjacent
-parent. Blocked stems retire their descendant tips while other branches continue.
-Nothing prebuilds a full plant or adds free tissue when a tip rewrites.
+Unprogrammed seeds and older saves use the four saved growth intervals. A seed
+edited in the workshop uses its own tip rules after germination. Every growth
+instruction has a face-adjacent parent. A tip whose stem fails to grow stops,
+while other branches continue. Adaptive stems can queue adjacent reinforcement
+when supported tissue load increases. Reinforcement pays the same water and
+energy costs as new wood.
 
 There is no fixed number of generations. The engine currently guards each plant
 at 65,536 tissue cells, 512 queued tips and 262,144 generated instructions; the
 HUD reports the cell/instruction safety limit. New tips beyond the queue budget
 are suppressed while admitted tips continue. This keeps recursive growth bounded
-without a finished seedling shape. There is still no structural strength, falling
-branches, death, reproduction, mutation or decomposition.
+without a finished seedling shape. The load model currently covers reinforcement.
+Branch failure, death, reproduction, mutation and decomposition are future work.
 
 Tissue roles are seed, root, stem and photosynthetic leaf. Seed/Wood/Leaf are their
 current renderer materials; simulation roles remain separate. The initial seed
@@ -103,7 +111,7 @@ visual placeholder; it does not instantly recolor as roots consume moisture.
 
 `BOWL2` retains the transferred-water ledger while reading legacy `BOWL1` saves.
 `GARDEN3` stores the recursive rules, instruction cursor/history, queued buds,
-emergence and tissue. `GARDEN1`/`GARDEN2` remain readable: their existing seedling
+emergence and tissue, plus an applied seed program when present. `GARDEN1`/`GARDEN2` remain readable: their existing seedling
 and unfinished steps are preserved, then a recursive shoot continues at their tip.
 `POCKETS1` stores pockets, hand, terrain edits and the loose-material ledger:
 `picked + migrated = placed + carried`. Exactly one bowl and the remaining

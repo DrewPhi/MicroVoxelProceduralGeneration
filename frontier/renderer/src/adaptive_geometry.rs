@@ -2586,8 +2586,12 @@ impl Generator<'_> {
         soft_only: bool,
     ) -> Result<u32, String> {
         let origin = [self.key.min[0] + x, self.key.min[1] + z];
-        let allowed =
-            |rgb| !soft_only || rgb == Material::Grass.color() || rgb == Material::Soil.color();
+        let allowed = |rgb| {
+            !soft_only
+                || [Material::Grass, Material::Soil, Material::Sand]
+                    .iter()
+                    .any(|material| material.color() == rgb)
+        };
         let map = if !reuse {
             crate::appearance_map::build_map_with_config_and_predicate(
                 origin,
@@ -3826,6 +3830,7 @@ mod tests {
         for recipe in [
             frontier_world::FbmRecipe::Legacy,
             frontier_world::FbmRecipe::Alpine,
+            frontier_world::FbmRecipe::Desert,
             frontier_world::FbmRecipe::SeededWorld,
         ] {
             let world = World::fbm(

@@ -29,6 +29,7 @@ pub mod mesh;
 mod moving_water_live;
 mod naadf;
 mod native_fbm;
+mod native_history;
 mod native_stream;
 mod options;
 mod page_terrain;
@@ -37,6 +38,7 @@ mod playability;
 mod player_edit;
 mod procedural_water_live;
 mod scene_policy;
+mod seed_ui;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -249,6 +251,7 @@ struct Gpu {
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
     polished_appearance: bool,
+    native_sample_phase: std::cell::Cell<u32>,
     terrain_amplitude: f32,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -500,6 +503,7 @@ impl Gpu {
             visual_settings: None,
             regional_appearance: false,
             polished_appearance: false,
+            native_sample_phase: std::cell::Cell::new(0),
             terrain_amplitude: 1000.,
             device,
             queue,
@@ -1044,6 +1048,37 @@ impl Gpu {
                 settings,
                 0.,
             );
+            let accumulate_native = self.polished_appearance
+                && settings.voxel_filter
+                && atmosphere.has_native_history();
+            if accumulate_native {
+                // A still capture warms the same history as a stationary game
+                // camera. Submit each draw before changing its uniform data.
+                for _ in 0..15 {
+                    self.native_sample_phase
+                        .set(atmosphere.prepare_native_history(&self.queue, *camera, true, 0));
+                    let mut warmup = self.device.create_command_encoder(&Default::default());
+                    self.draw(
+                        &mut warmup,
+                        atmosphere.scene_view(),
+                        None,
+                        atmosphere.depth_view(),
+                        camera,
+                        rw,
+                        rh,
+                        None,
+                        None,
+                    );
+                    atmosphere.encode_with_shadows(
+                        &mut warmup,
+                        &target,
+                        self.adaptive.as_ref().map(|a| a.near_shadow_bind()),
+                    );
+                    self.queue.submit(Some(warmup.finish()));
+                }
+            }
+            self.native_sample_phase
+                .set(atmosphere.prepare_native_history(&self.queue, *camera, accumulate_native, 0));
             self.draw(
                 &mut encoder,
                 atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
@@ -2545,6 +2580,13 @@ impl Viewer {
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
             );
+            gpu.native_sample_phase
+                .set(atmosphere.prepare_native_history(
+                    &gpu.queue,
+                    self.camera,
+                    gpu.polished_appearance && self.visual_settings.voxel_filter,
+                    self.world.revision(),
+                ));
             gpu.draw(
                 &mut encoder,
                 atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
@@ -2910,7 +2952,16 @@ impl ApplicationHandler for Viewer {
                                 bowl.toggle_bowl();
                             }
                         }
-                        if key == KeyCode::KeyG && !event.repeat {
+                        if key == KeyCode::KeyG && !event.repeat && self.pending_teleport.is_none()
+                        {
+                            if let (Some(bowl), Some(ui)) = (&self.bowl, &mut self.settings_ui) {
+                                if bowl.holds_seed() {
+                                    ui.open_seed_editor(bowl.seed_program());
+                                    self.keys.clear();
+                                    self.grab(false);
+                                    return;
+                                }
+                            }
                             if let Some(live) = &mut self.live_water {
                                 live.open_dam(&mut self.world);
                             }

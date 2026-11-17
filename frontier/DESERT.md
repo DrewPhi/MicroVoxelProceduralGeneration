@@ -30,6 +30,15 @@ Historical comparison sources remain unchanged. The disk cache already includes
 the appearance mode in its signature, so old desert appearance products cannot
 silently satisfy the new policy even when using the same cache directory.
 
+The playable hybrid defaults to one primary sample with native temporal filtering.
+For subpixel sand terraces, NAADF estimates the pixel footprint using a local
+slope fit from native columns and shades the projected mix of voxel tops and
+sides. Exact hit depth is retained. Set `FRONTIER_NATIVE_SAND_FOOTPRINT=off` to
+compare with face-by-face shading under the same renderer.
+The historical Alpine raster sampling setup can also be used on the desert with
+`./run.sh --preset desert --seed 19 --naadf off --msaa 4`. On the raster terrain,
+sand, grass and soil receive the soft-ground appearance-map prefilter.
+
 The separate live-water demos are not enabled by the alpine preset either.
 The planting bowl's static-lake integration gap is independent of rendering;
 copying these settings does not activate the pressure/flow solver for that lake.

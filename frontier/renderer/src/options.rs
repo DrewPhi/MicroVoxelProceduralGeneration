@@ -271,15 +271,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--preset" => {
                 let preset = args.next().ok_or("--preset requires alpine|seeded-world|desert")?;
                 seeded_preset = matches!(preset.as_str(), "seeded-world" | "world");
-                if preset == "desert" {
-                    params = frontier_world::FbmParams {recipe:frontier_world::FbmRecipe::Desert,..Default::default()};
-                    scene="adaptive".into(); camera_preset="desert".into();
-                    capture_far=Some(6000.);view_levels=11;pixel_error=3.;adaptive_cache_mib=640;
-                    adaptive_disk_cache=Some(PathBuf::from("output/cache/desert-v2"));
-                    atmosphere=Some(true);visual.apply_polished_presentation();
-                    visual.vegetation=false;visual.walking=true;
-                    continue;
-                }
                 if seeded_preset {
                     params = frontier_world::FbmParams {
                         recipe: frontier_world::FbmRecipe::SeededWorld,
@@ -306,24 +297,25 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     visual.walking = true;
                     continue;
                 }
-                if preset != "alpine" {
-                    return Err("--preset requires alpine|seeded-world|desert".into());
-                }
-                params = frontier_world::FbmParams {
-                    recipe: frontier_world::FbmRecipe::Alpine,
-                    ..Default::default()
+                let (recipe, cache) = match preset.as_str() {
+                    "alpine" => {
+                        start_xz = [frontier_world::terrain::alpine_path_center_m(-250.), -250.];
+                        (frontier_world::FbmRecipe::Alpine, "output/cache/alpine-terrain")
+                    }
+                    "desert" => (frontier_world::FbmRecipe::Desert, "output/cache/desert-v2"),
+                    _ => return Err("--preset requires alpine|seeded-world|desert".into()),
                 };
+                params = frontier_world::FbmParams { recipe, ..Default::default() };
                 scene = "adaptive".into();
                 capture_far = Some(6000.);
                 view_levels = 11;
                 pixel_error = 3.;
-                camera_preset = "alpine".into();
+                camera_preset = preset;
                 adaptive_cache_mib = 640;
-                adaptive_disk_cache = Some(std::path::PathBuf::from("output/cache/alpine-terrain"));
-                start_xz = [frontier_world::terrain::alpine_path_center_m(-250.), -250.];
+                adaptive_disk_cache = Some(PathBuf::from(cache));
                 atmosphere = Some(true);
                 visual.apply_polished_presentation();
-                visual.vegetation = true;
+                visual.vegetation = recipe == frontier_world::FbmRecipe::Alpine;
                 visual.walking = true;
             }
             "--sun-elevation"

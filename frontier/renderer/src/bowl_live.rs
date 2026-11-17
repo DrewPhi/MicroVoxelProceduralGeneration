@@ -130,6 +130,18 @@ impl BowlLive {
             Err(e) => self.message = e.into(),
         }
     }
+    pub(crate) fn holds_seed(&self) -> bool {
+        self.pockets.hand == Some(Item::Seed)
+    }
+    pub(crate) fn seed_program(&self) -> frontier_world::growth::SeedProgram {
+        self.garden.seed_program.clone().unwrap_or_default()
+    }
+    pub(crate) fn apply_seed_program(&mut self, program: frontier_world::growth::SeedProgram) {
+        if self.holds_seed() {
+            self.garden.seed_program = Some(program);
+            self.message = "Seed programmed. Place it, cover it with sand, then water it.".into();
+        }
+    }
     pub fn select_pocket(&mut self, index: usize) {
         self.gesture = None;
         self.pouring = false;
@@ -413,6 +425,9 @@ impl BowlLive {
             .as_ref()
             .map_or("Empty".into(), Item::name);
         out.text=format!("Hands: {hands} • bowl {:.2} L\n{pockets}\n1–4 swap pocket • E stow • Empty hands: hold left to gather • Right/R: place/pour\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
+        if self.holds_seed() {
+            out.text.push_str("\nG · Program seed");
+        }
         if let Some(g) = &self.gesture {
             let n = Self::hand_settings()
                 .count_at(g.started.elapsed().as_secs_f64())

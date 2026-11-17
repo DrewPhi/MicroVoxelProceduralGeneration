@@ -14,6 +14,8 @@ pub struct SettingsUi {
     settings: VisualSettings,
     loading_draft: VisualSettings,
     open: bool,
+    seed_editor: Option<crate::seed_ui::SeedEditor>,
+    seed_applied: Option<frontier_world::growth::SeedProgram>,
     paint_jobs: Vec<egui::ClippedPrimitive>,
     free_textures: Vec<egui::TextureId>,
     screen: ScreenDescriptor,
@@ -57,6 +59,8 @@ impl SettingsUi {
             loading_draft: settings.clone(),
             settings,
             open: false,
+            seed_editor: None,
+            seed_applied: None,
             paint_jobs: Vec::new(),
             free_textures: Vec::new(),
             screen: ScreenDescriptor {
@@ -79,7 +83,13 @@ impl SettingsUi {
         self.open = true;
     }
     pub fn menu_open(&self) -> bool {
-        self.open
+        self.open || self.seed_editor.is_some()
+    }
+    pub(crate) fn open_seed_editor(&mut self, draft: frontier_world::growth::SeedProgram) {
+        self.seed_editor = Some(crate::seed_ui::SeedEditor::new(draft));
+    }
+    pub(crate) fn take_seed_program(&mut self) -> Option<frontier_world::growth::SeedProgram> {
+        self.seed_applied.take()
     }
 
     pub fn set_walking(&mut self, walking: bool) {
@@ -97,13 +107,15 @@ impl SettingsUi {
         if let WindowEvent::KeyboardInput { event, .. } = event {
             if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                 if event.state == ElementState::Pressed && !event.repeat {
-                    self.open = !self.open;
+                    if self.seed_editor.take().is_none() {
+                        self.open = !self.open;
+                    }
                 }
                 return true;
             }
         }
         let response = self.input.on_window_event(window, event);
-        self.open
+        self.menu_open()
             && (response.consumed
                 || matches!(
                     event,
@@ -143,6 +155,15 @@ impl SettingsUi {
             .native_pixels_per_point = Some(native_scale);
         let input = raw.take();
         let output = self.context.run(input, |ctx| {
+            if let Some(editor) = &mut self.seed_editor {
+                if let Some(action) = editor.show(ctx) {
+                    if let crate::seed_ui::Action::Apply(program) = action {
+                        self.seed_applied = Some(program);
+                    }
+                    self.seed_editor = None;
+                }
+                return;
+            }
             if !self.open && !self.bowl_overlay.text.is_empty() {
                 egui::Area::new(egui::Id::new("bowl controls")).anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui|{
                     egui::Frame::popup(ui.style()).show(ui,|ui|{ui.label(&self.bowl_overlay.text);ui.add(egui::ProgressBar::new(self.bowl_overlay.fill).desired_width(250.));});

@@ -1,6 +1,8 @@
 //! Resource-limited recursive plants: local whole-unit water uptake and a deterministic
 //! branching grammar. Native tissue is authoritative; display LOD never grows it.
-use crate::growth::{GrowthRules, Step, Tip, MAX_CELLS, MAX_STEPS, MAX_TIPS};
+use crate::growth::{
+    reinforcement, GrowthRules, SeedProgram, Step, Tip, MAX_CELLS, MAX_STEPS, MAX_TIPS,
+};
 use crate::{bowl::Bowl, Cell, Material, World, VOXEL_SIZE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 const LIMIT: usize = 32;
@@ -10,8 +12,14 @@ pub enum Tissue {
     Root = 1,
     Stem = 2,
     Leaf = 3,
+    AdaptiveStem = 4,
+    Reinforcement = 5,
 }
 impl Tissue {
+    pub fn is_stem(self) -> bool {
+        matches!(self, Self::Stem | Self::AdaptiveStem)
+    }
+
     pub fn material(self) -> Material {
         if self == Self::Seed {
             Material::Seed
@@ -32,7 +40,7 @@ impl Tissue {
         match self {
             Self::Leaf => 0.008,
             Self::Root => 0.004,
-            Self::Stem => 0.001,
+            Self::Stem | Self::AdaptiveStem | Self::Reinforcement => 0.001,
             Self::Seed => 0.,
         }
     }
@@ -66,6 +74,7 @@ pub struct Plant {
 #[derive(Clone, Debug)]
 pub struct Garden {
     pub seeds: u32,
+    pub seed_program: Option<SeedProgram>,
     pub sand: u32,
     pub soil: u32,
     pub holes: Vec<Hole>,
@@ -77,6 +86,7 @@ impl Default for Garden {
     fn default() -> Self {
         Self {
             seeds: 1,
+            seed_program: None,
             sand: 0,
             soil: 0,
             holes: Vec::new(),
@@ -186,7 +196,7 @@ impl Plant {
     }
     /// Only expand exhausted instructions. Successor tips wait until their parents
     /// have actually grown; blocked stems retire their tips, not unrelated branches.
-    fn prepare_step(&mut self) {
+    fn prepare_step(&mut self, program: Option<&SeedProgram>) {
         for _ in 0..32 {
             if self.cursor < self.program.len() || self.at_capacity() || !self.rules.valid() {
                 return;
@@ -194,10 +204,13 @@ impl Plant {
             let Some(tip) = self.tips.pop_front() else {
                 return;
             };
-            if self.tissue.get(&tip.cell) != Some(&Tissue::Stem) {
+            if !self.tissue.get(&tip.cell).is_some_and(|t| t.is_stem()) {
                 continue;
             }
-            let (steps, tips) = tip.rewrite(self.rules);
+            let (steps, tips) = match program {
+                Some(program) => program.expand(tip),
+                None => tip.rewrite(self.rules),
+            };
             for step in steps {
                 if self.program.len() >= MAX_STEPS {
                     break;
@@ -256,6 +269,16 @@ impl Garden {
         world.set_batch([(hit, Material::Air), (seed, Material::Air)]);
         Ok(())
     }
+    fn planted_tips(&self, seed: u64, anchor: Cell, emergence: u8) -> VecDeque<Tip> {
+        let mut tips = initial_tips(seed, anchor, emergence, false);
+        if let Some(program) = &self.seed_program {
+            tips = program
+                .tips(tips.pop_front().expect("bootstrap tip"))
+                .into();
+        }
+        tips
+    }
+
     pub fn plant(&mut self, world: &mut World, index: usize) -> Result<(), &'static str> {
         if self.seeds == 0 {
             return Err("Your single seed is already planted");
@@ -286,7 +309,7 @@ impl Garden {
             emergence: 2,
             program: bootstrap(world.seed(), anchor, 2),
             rules: GrowthRules::default(),
-            tips: initial_tips(world.seed(), anchor, 2, false),
+            tips: self.planted_tips(world.seed(), anchor, 2),
             reserved: bootstrap(world.seed(), anchor, 2)
                 .iter()
                 .map(|s| s.cell)
@@ -322,10 +345,11 @@ impl Garden {
             .ground_height_m(anchor.x as f64 * VOXEL_SIZE, anchor.z as f64 * VOXEL_SIZE)
             / VOXEL_SIZE) as i64;
         let emergence = (ground - anchor.y).clamp(1, 6) as u8;
+        let tips = self.planted_tips(world.seed(), anchor, emergence);
         let p = self.plants.last_mut().unwrap();
         p.emergence = emergence;
         p.program = bootstrap(world.seed(), anchor, emergence);
-        p.tips = initial_tips(world.seed(), anchor, emergence, false);
+        p.tips = tips;
         p.reserved = p.program.iter().map(|s| s.cell).collect();
         Ok(())
     }
@@ -491,9 +515,22 @@ impl Garden {
             p.energy = (p.energy - p.tissue.values().map(|t| t.maintenance()).sum::<f64>()).max(0.);
             // Small seedlings grow one cell/s; larger canopies grow up to eight.
             // Every cell still pays full energy/water cost. No unbounded rewrite.
+            if self.seed_program.is_some()
+                && p.age % 12 == 0
+                && p.cursor == p.program.len()
+                && p.energy >= Tissue::Reinforcement.cost()
+                && (p.water > 0 || p.hydration > 0)
+            {
+                let remaining = MAX_STEPS.saturating_sub(p.program.len());
+                p.program.extend(
+                    reinforcement(&p.program, &p.tissue, &mut p.reserved)
+                        .into_iter()
+                        .take(remaining),
+                );
+            }
             let budget = (1 + p.lit_leaves / 8).min(8);
             for _ in 0..budget {
-                p.prepare_step();
+                p.prepare_step(self.seed_program.as_ref());
                 if p.cursor >= p.program.len() || p.at_capacity() {
                     break;
                 }
@@ -505,7 +542,7 @@ impl Garden {
                 let m = world.material(next.cell);
                 let allowed = m == Material::Air
                     || ((next.tissue == Tissue::Root
-                        || (next.tissue == Tissue::Stem
+                        || (next.tissue.is_stem()
                             && next.cell.y <= h.seed.y + i64::from(p.emergence)))
                         && matches!(m, Material::Sand | Material::Soil));
                 if !allowed {
@@ -558,6 +595,13 @@ impl Garden {
             "GARDEN3 {} {} {} {} {}\n",
             self.seeds, self.sand, self.soil, self.tick, self.phase
         );
+        if let Some(program) = &self.seed_program {
+            let (start, rules) = program.source();
+            s += &format!("G {start}\n");
+            for rule in rules.lines() {
+                s += &format!("L {rule}\n");
+            }
+        }
         for h in &self.holes {
             s += &format!(
                 "H {} {} {} {} {} {}\n",
@@ -657,9 +701,22 @@ impl Garden {
             return Err("invalid garden header");
         }
         let mut rules_seen = BTreeSet::new();
+        let mut seed_start = None;
+        let mut seed_source = String::new();
         for line in lines {
             let v: Vec<_> = line.split_whitespace().collect();
             match v.first().copied() {
+                Some("G") if h[0] == "GARDEN3" && v.len() == 2 && seed_start.is_none() => {
+                    seed_start = Some(v[1]);
+                }
+                Some("L") if h[0] == "GARDEN3" && seed_start.is_some() => {
+                    let rule = line.strip_prefix("L ").ok_or("invalid seed rule")?;
+                    if seed_source.len() + rule.len() >= 8192 {
+                        return Err("Seed rules too long");
+                    }
+                    seed_source.push_str(rule);
+                    seed_source.push('\n');
+                }
                 Some("H") if v.len() == 7 => {
                     if g.holes.len() >= LIMIT {
                         return Err("too many holes");
@@ -789,6 +846,8 @@ impl Garden {
                             "1" => Tissue::Root,
                             "2" => Tissue::Stem,
                             "3" => Tissue::Leaf,
+                            "4" if seed_start.is_some() => Tissue::AdaptiveStem,
+                            "5" if seed_start.is_some() => Tissue::Reinforcement,
                             _ => return Err("bad instruction tissue"),
                         };
                         if p.program.len() >= MAX_STEPS
@@ -836,6 +895,8 @@ impl Garden {
                         "1" => Tissue::Root,
                         "2" => Tissue::Stem,
                         "3" => Tissue::Leaf,
+                        "4" if seed_start.is_some() => Tissue::AdaptiveStem,
+                        "5" if seed_start.is_some() => Tissue::Reinforcement,
                         _ => return Err("invalid tissue"),
                     };
                     if p.tissue.len() >= MAX_CELLS || p.tissue.insert(c, t).is_some() {
@@ -844,6 +905,9 @@ impl Garden {
                 }
                 _ => return Err("invalid garden record"),
             }
+        }
+        if let Some(start) = seed_start {
+            g.seed_program = Some(SeedProgram::parse(start, &seed_source)?);
         }
         if g.seeds as usize + g.plants.len() != 1 {
             return Err("seed conservation failed");
@@ -892,10 +956,16 @@ impl Garden {
                 }
             }
             for tip in &p.tips {
-                if p.tissue.get(&tip.cell) != Some(&Tissue::Stem)
+                if g.seed_program
+                    .as_ref()
+                    .is_some_and(|program| !program.has_rule(tip.segment))
+                {
+                    return Err("Undefined saved tip");
+                }
+                if !p.tissue.get(&tip.cell).is_some_and(|t| t.is_stem())
                     && instructions
                         .get(&tip.cell)
-                        .is_none_or(|(_, s)| s.tissue != Tissue::Stem)
+                        .is_none_or(|(_, s)| !s.tissue.is_stem())
                 {
                     return Err("unsupported growth tip");
                 }
@@ -934,6 +1004,35 @@ mod tests {
         }
         b.scooped = b.removed.len() as u64;
     }
+    #[test]
+    fn programmed_seed_grows_adaptive_stems_and_reloads_its_pending_tips() {
+        let (mut world, mut garden, mut bowl, top) = scene();
+        let program = SeedProgram::parse("X", "X = V2 L X").unwrap();
+        garden.seed_program = Some(program.clone());
+        let unplanted = Garden::restore(&garden.snapshot(), 19).unwrap();
+        assert_eq!(unplanted.seed_program, Some(program.clone()));
+        garden.dig(&mut world, top).unwrap();
+        garden.plant(&mut world, 0).unwrap();
+        garden.cover(&mut world, 0).unwrap();
+        supply(&mut bowl, top, 40);
+        for _ in 0..320 {
+            garden.advance(&mut world, &mut bowl, 0.25, [0., 1., 0.]);
+        }
+        let plant = &garden.plants[0];
+        assert!(plant.tissue.values().any(|t| *t == Tissue::AdaptiveStem));
+        assert!(plant.tips.iter().all(|tip| tip.segment == u32::from('X')));
+        let snapshot = garden.snapshot();
+        let mut restored = Garden::restore(&snapshot, 19).unwrap();
+        assert_eq!(restored.seed_program, Some(program));
+        let (mut other, mut water) = (world.clone(), bowl.clone());
+        for _ in 0..40 {
+            garden.advance(&mut world, &mut bowl, 0.25, [0., 1., 0.]);
+            restored.advance(&mut other, &mut water, 0.25, [0., 1., 0.]);
+        }
+        assert_eq!(restored.snapshot(), garden.snapshot());
+        assert_eq!(water.snapshot(19), bowl.snapshot(19));
+    }
+
     #[test]
     fn shade_and_finite_water_constrain_growth_without_creating_resources() {
         let (mut w, mut g, mut b, top) = scene();

@@ -76,6 +76,9 @@ impl Viewer {
         gpu.queue.submit(Some(encoder.finish()));
         let now_open = ui.menu_open();
         let settings = ui.settings().clone();
+        if let (Some(program), Some(bowl)) = (ui.take_seed_program(), &mut self.bowl) {
+            bowl.apply_seed_program(program);
+        }
         if was_open && !now_open {
             self.keys.clear();
             self.grab(true);

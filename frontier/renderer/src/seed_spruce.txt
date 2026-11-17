@@ -1,0 +1,17 @@
+A = V36 T
+T = [B] + [C] + [B] + [C] + V20 + N
+N = [B] + [D] + [C] + [B] + V20 + P
+P = [C] + [D] + [C] + [D] + V20 + Q
+Q = [D] + [E] + [D] + [C] + V20 + R
+R = [D] + [E] + [D] + [E] + V20 + S
+S = [E] + [G] + [E] + [D] + V20 + H
+H = [G] + [E] + [G] + [G] + V20 + M
+M = [K] + [G] + [K] + [G] + V20 + X
+X = [K] + [K] + [K] + [K] + U4 L4 U4 L4 U4
+B = F16 [ + J ] F4 L4 [ - J ] F8 [ + J ] F4 L4 [ - J ] F4 U4 F4 [ + K ] F4 L4 F4 [ - K ] F4 U4 F4 L4 F4 L4
+C = F12 [ - J ] F4 L4 [ + J ] F8 U4 [ - K ] F4 L4 [ + K ] F8 L4 F4 U4 F4 L4 F4 L4
+D = F12 [ + J ] F4 U4 L4 [ - K ] F8 L4 [ + K ] F4 U4 F4 L4
+E = F8 [ + K ] F4 L4 [ - K ] F4 U4 F4 L4 F4 L4
+G = F4 [ + K ] F4 L4 U4 F4 L4
+J = F4 L4 F4 L4 U4 F4 L4 F4 L4
+K = F4 L4 F4 U4 L4

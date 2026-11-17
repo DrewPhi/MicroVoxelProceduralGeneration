@@ -1,6 +1,6 @@
 //! Inexpensive, independently switchable sky / height fog / cloud composition.
 //! This pass uses physical scene depth, never streaming readiness or LOD state.
-use crate::settings::VisualSettings;
+use crate::{native_history::NativeHistory, settings::VisualSettings, Camera};
 use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -62,6 +62,7 @@ pub(crate) struct Atmosphere {
     composite: wgpu::TextureView,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    native_history: Option<(NativeHistory, [wgpu::BindGroup; 2])>,
     blit_group: wgpu::BindGroup,
     clear_air_group: wgpu::BindGroup,
     effects_enabled: std::cell::Cell<bool>,
@@ -84,7 +85,7 @@ pub(crate) struct Atmosphere {
     sample_count: u32,
 }
 
-fn texture(
+pub(super) fn texture(
     device: &wgpu::Device,
     label: &str,
     format: wgpu::TextureFormat,
@@ -109,7 +110,7 @@ fn texture(
         })
         .create_view(&Default::default())
 }
-fn make_pipeline(
+pub(super) fn make_pipeline(
     device: &wgpu::Device,
     label: &str,
     layout: &wgpu::BindGroupLayout,
@@ -339,32 +340,43 @@ impl Atmosphere {
                 },
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atmosphere"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(msaa.as_ref().unwrap_or(&scene)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&air),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&sky),
-                },
-            ],
-        });
+        let scene_group = |input: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("atmosphere"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&air),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&sky),
+                    },
+                ],
+            })
+        };
+        let bind_group = scene_group(msaa.as_ref().unwrap_or(&scene));
+        let native_history = (sample_count == 1
+            && scene_format == wgpu::TextureFormat::Rgba16Float
+            && crate::naadf::terrain_subpixel_strength() > 0.)
+            .then(|| {
+                let history = NativeHistory::new(device, &scene, &depth, width, height);
+                let groups = std::array::from_fn(|i| scene_group(&history.views[i]));
+                (history, groups)
+            });
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky inputs"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -546,6 +558,7 @@ impl Atmosphere {
             composite,
             uniform,
             bind_group,
+            native_history,
             blit_group,
             clear_air_group,
             effects_enabled: std::cell::Cell::new(true),
@@ -612,7 +625,15 @@ impl Atmosphere {
         );
         let samples = u64::from(self.sample_count);
         let scene_samples = 1 + if self.msaa.is_some() { samples } else { 0 };
-        pixels * (scene_bpp * scene_samples + 4 * samples + composite_bpp) + half_pixels * 8 * 2 + 4
+        let history_bytes = if self.native_history.is_some() {
+            pixels * 16
+        } else {
+            0
+        };
+        history_bytes
+            + pixels * (scene_bpp * scene_samples + 4 * samples + composite_bpp)
+            + half_pixels * 8 * 2
+            + 4
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -622,6 +643,26 @@ impl Atmosphere {
     pub(crate) fn set_medium_ground_height(&self, height_m: f32) {
         self.medium_ground_height
             .set(if height_m.is_finite() { height_m } else { 0.0 });
+    }
+    pub(crate) fn prepare_native_history(
+        &self,
+        queue: &wgpu::Queue,
+        camera: Camera,
+        enabled: bool,
+        revision: u64,
+    ) -> u32 {
+        self.native_history.as_ref().map_or(0, |(history, _)| {
+            history.prepare(
+                queue,
+                camera,
+                self.width as f32 / self.height as f32,
+                enabled,
+                revision,
+            )
+        })
+    }
+    pub(crate) fn has_native_history(&self) -> bool {
+        self.native_history.is_some()
     }
     pub(crate) fn prepare(
         &self,
@@ -728,11 +769,16 @@ impl Atmosphere {
                 pass.draw(0..3, 0..1);
             }
         }
+        let atmosphere_group = self
+            .native_history
+            .as_ref()
+            .and_then(|(history, groups)| Some(&groups[history.encode(encoder)?]))
+            .unwrap_or(&self.bind_group);
         for (view, pipeline, group, label) in [
             (
                 &self.composite,
                 &self.pipeline,
-                &self.bind_group,
+                atmosphere_group,
                 "atmosphere",
             ),
             (
