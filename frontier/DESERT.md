@@ -13,6 +13,27 @@ shore spawn. F switches between walking and free flight. Native voxels remain
 static water above a real voxel bed. It does not add the old man model. The [bowl interaction](BOWL.md) is now
 available in this preset.
 
+## Shared rendering baseline
+
+Desert and alpine now share the same playable renderer policy: detailed appearance
+maps, spatial profile filtering, half-footprint filtering, four-cell profile probes,
+near-camera error reserve and urgent refinement priority, source-cache allocation,
+HDR scene targets, terrain shadows, development resource profiles, sky, clouds,
+haze, lighting and exposure. Both presets request pixel error 3 and eleven view
+levels, and use the same NAADF/AA defaults and Esc controls. The desert source,
+spawn and generated content remain desert-specific; alpine meadow vegetation is
+not inserted. Existing planting, pockets and saves are preserved.
+
+`renderer/src/scene_policy.rs` centralizes capabilities previously hard-coded to
+Alpine. `VisualSettings::apply_polished_presentation` supplies the shared look.
+Historical comparison sources remain unchanged. The disk cache already includes
+the appearance mode in its signature, so old desert appearance products cannot
+silently satisfy the new policy even when using the same cache directory.
+
+The separate live-water demos are not enabled by the alpine preset either.
+The planting bowl's static-lake integration gap is independent of rendering;
+copying these settings does not activate the pressure/flow solver for that lake.
+
 ## Source
 
 `world/src/desert.rs` composes low-frequency four-octave FBM, elongated warped

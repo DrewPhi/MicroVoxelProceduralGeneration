@@ -1,0 +1,147 @@
+{
+  "date": "2026-11-17",
+  "scope": "Share the existing Alpine renderer baseline with Desert; terrain, source IDs, spawn, saved state and no-meadow content stay distinct.",
+  "shared_features": [
+    "HDR float scene target",
+    "detailed appearance maps",
+    "four-cell profile probes",
+    "spatial profiles and half footprints",
+    "protected near-camera refinement and error reserve",
+    "source sample cache reservation",
+    "terrain shadows and shadow reporting",
+    "development and constrained resource profiles",
+    "pixel error 3 and eleven view levels",
+    "same lighting, sky, haze, clouds and exposure",
+    "same Esc-menu rendering/loading controls"
+  ],
+  "source_policy": "renderer/src/scene_policy.rs",
+  "shared_presentation": "VisualSettings::apply_polished_presentation",
+  "renderer_tests": {
+    "passed": 558,
+    "ignored": 39,
+    "harness": "renderer opt-level=0/debug=0; dependency profiles unchanged"
+  },
+  "primary_visual_regression": {
+    "pixel_identical": true,
+    "max_abs": 0,
+    "current": "output/desert-parity-primary/realtime.linear_rgb.f32",
+    "baseline": "output/nov16-primary-after/realtime.linear_rgb.f32"
+  },
+  "comparison": {
+    "before": "output/desert-renderer-parity/before.png",
+    "after": "output/desert-renderer-parity/after.png",
+    "preset": "desert",
+    "seed": 19,
+    "eye": [
+      944,
+      67.5,
+      437
+    ],
+    "target": [
+      955.47,
+      68,
+      448.03
+    ],
+    "size": [
+      1280,
+      720
+    ],
+    "naadf_radius_m": 32,
+    "native_voxel_m": 0.0625,
+    "save": "output/recursive-plant-scaled-energy/world.bowl",
+    "before_binary_sha256": "f89b5e5ef923c975fd04e98296e99b811568e81f420cb41dd84a3b9d29be65fd",
+    "after_binary_sha256": "cf7733ab782e0aa60df6e6883fcf65a426899712e31f30086eb27ac2c783efce",
+    "note": "Full preset transfer, including changed sun/fog/exposure, not an isolated filtering performance A/B."
+  },
+  "playtest": {
+    "passed": true,
+    "reload_passed": true,
+    "keyboard_backup_used": "R",
+    "seed": 19,
+    "resolution": [
+      1920,
+      1080
+    ],
+    "naadf_radius_m": 16,
+    "video": "output/desert-renderer-parity/playtest/bowl.mp4",
+    "bowl": {
+      "units": 0,
+      "capacity": 8,
+      "litres": 0,
+      "scooped_units": 8,
+      "emitted_units": 8,
+      "spilled_units": 0,
+      "airborne": 0,
+      "absorbed_units": 0,
+      "damp_cells": 29,
+      "deposited_units": 0,
+      "conserved": true,
+      "simulation_debt": 0.02065026699999501,
+      "save_count": 1,
+      "plant_transferred": 8,
+      "garden": {
+        "seeds": 0,
+        "holes": 1,
+        "plants": 1,
+        "germinated": 1,
+        "tissue_cells": 27,
+        "leaves": 8,
+        "water_stored": 0,
+        "transpired": 8,
+        "tick": 88,
+        "water_ledger_matches": true
+      },
+      "pockets": {
+        "hand": "Empty",
+        "slots": [
+          "Bowl",
+          "Empty",
+          "Empty",
+          "Empty"
+        ],
+        "picked_voxels": 9,
+        "placed_voxels": 9,
+        "carried_voxels": 0,
+        "handful_limit": 4,
+        "loose_conserved": true,
+        "inventory_valid": true
+      }
+    },
+    "frame_intervals": {
+      "sample_count": 5198,
+      "accepted_frames": 5198,
+      "missed_budget_frames": 2627,
+      "rejected_inputs": 0,
+      "p50_ms": 16.67435,
+      "p95_ms": 23.954181000000002,
+      "p99_ms": 36.643015
+    },
+    "visual": {
+      "atmosphere": true,
+      "render_scale": 1,
+      "exposure": 1.3,
+      "fog_density": 4.5e-05,
+      "fog_height_falloff": 0.0012,
+      "sun_elevation": 20,
+      "sun_azimuth": 22,
+      "cloud_coverage": 0.22,
+      "cloud_speed": 0,
+      "overcast": 0.08,
+      "terrain_shadows_requested": true,
+      "terrain_shadows_active": true,
+      "shadow_map_size": 2048,
+      "shadow_footprint_m": 2048,
+      "shadow_casters": "published_adaptive_terrain_owners_only",
+      "menu_enabled": true,
+      "gpu_timing_scope": "opaque_scene_pass_without_atmosphere_or_ui",
+      "settings_may_have_changed": true
+    },
+    "note": "Includes screen recording overhead; not an isolated performance comparison. Different NAADF radius from still captures."
+  },
+  "remaining_water_gap": "Both scene presets leave the separate live-water demos disabled. Bowl drops/absorption work, but static lake occupancy does not respond to scooping via the full pressure/flow solver. Rendering parity does not fix that integration.",
+  "limits": [
+    "No claim that all aliasing is eliminated; the native voxel/AA path is the same as Alpine.",
+    "No alpine meadow vegetation is generated in Desert.",
+    "No isolated performance speedup claim; quality settings now match."
+  ]
+}

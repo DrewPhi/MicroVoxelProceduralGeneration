@@ -36,6 +36,7 @@ pub mod physical_pressure_gpu;
 mod playability;
 mod player_edit;
 mod procedural_water_live;
+mod scene_policy;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -247,7 +248,7 @@ struct BrickCacheMetrics {
 struct Gpu {
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
-    alpine_appearance: bool,
+    polished_appearance: bool,
     terrain_amplitude: f32,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -498,7 +499,7 @@ impl Gpu {
             naadf_gpu_stages,
             visual_settings: None,
             regional_appearance: false,
-            alpine_appearance: false,
+            polished_appearance: false,
             terrain_amplitude: 1000.,
             device,
             queue,
@@ -2706,7 +2707,7 @@ impl ApplicationHandler for Viewer {
                 self.voxel_filter,
                 self.world
                     .fbm_terrain()
-                    .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine),
+                    .is_some_and(|s| scene_policy::polished(s.params().recipe)),
             ))?;
             gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
@@ -3608,7 +3609,7 @@ pub fn run() -> Result<()> {
             &mesh,
             msaa,
             voxel_filter,
-            !capture_linear && params.recipe == frontier_world::FbmRecipe::Alpine,
+            !capture_linear && scene_policy::polished(params.recipe),
         ))?;
         gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();
@@ -4039,7 +4040,7 @@ pub fn run() -> Result<()> {
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,
-            visual.overcast, visual.terrain_shadows, visual.terrain_shadows && scene.starts_with("adaptive") && viewer.world.fbm_terrain().is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine) && visual.sun_elevation > 0., viewer.visual_menu_enabled, viewer.visual_menu_enabled,
+            visual.overcast, visual.terrain_shadows, visual.terrain_shadows && scene.starts_with("adaptive") && viewer.world.fbm_terrain().is_some_and(|s| scene_policy::polished(s.params().recipe)) && visual.sun_elevation > 0., viewer.visual_menu_enabled, viewer.visual_menu_enabled,
             viewer.camera.fov_y, viewer.camera.far
         ));
         json.pop();

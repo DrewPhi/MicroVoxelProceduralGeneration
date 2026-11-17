@@ -215,9 +215,9 @@ impl Viewer {
 }
 impl Gpu {
     pub(super) fn configure_visuals(&mut self, world: &World, settings: &VisualSettings) {
-        self.alpine_appearance = world
+        self.polished_appearance = world
             .fbm_terrain()
-            .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine);
+            .is_some_and(|s| crate::scene_policy::polished(s.params().recipe));
         self.regional_appearance = world
             .fbm_terrain()
             .is_some_and(|s| s.params().recipe != frontier_world::FbmRecipe::Legacy);

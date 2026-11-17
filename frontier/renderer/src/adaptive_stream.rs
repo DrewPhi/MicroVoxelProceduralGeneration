@@ -19,15 +19,11 @@ use std::{
 /// Internal convergence reserve; the reported quality contract is unchanged.
 pub(crate) const REFINEMENT_RESERVE: f64 = 0.8;
 
-/// Alpine spends extra error budget near the camera; other recipes retain their policy.
+/// Current playable scenes spend extra error budget near the camera.
 pub(crate) fn near_detail_setting(world: &World) -> bool {
-    near_detail_for_alpine(
-        world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine),
-    )
+    near_detail_for_scene(crate::scene_policy::polished_world(world))
 }
-pub(crate) fn near_detail_for_alpine(alpine: bool) -> bool {
+pub(crate) fn near_detail_for_scene(polished: bool) -> bool {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     OVERRIDE
         .get_or_init(|| match std::env::var("FRONTIER_NEAR_DETAIL").as_deref() {
@@ -35,11 +31,11 @@ pub(crate) fn near_detail_for_alpine(alpine: bool) -> bool {
             Ok("0") => Some(false),
             _ => None,
         })
-        .unwrap_or(alpine)
+        .unwrap_or(polished)
 }
 
 /// Spend additional detail near the camera without weakening the certified
-/// bound or changing far selection. This is an Alpine near-camera quality reserve, not
+/// bound or changing far selection. This is a playable-scene near-camera quality reserve, not
 /// a change to canonical source geometry or the geometric error certificate.
 fn near_detail_weight(distance_m: f64) -> f64 {
     let t = ((distance_m - 16.) / 48.).clamp(0., 1.);
@@ -883,11 +879,11 @@ impl AdaptiveStream {
             self.settings.pixel_error,
             self.settings.refinements_per_transaction,
         );
-        let alpine = self
+        let polished = self
             .world
             .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine);
-        let (refine, predicted_footprint) = if alpine && !near.is_empty() {
+            .is_some_and(|t| crate::scene_policy::polished(t.params().recipe));
+        let (refine, predicted_footprint) = if polished && !near.is_empty() {
             (near, None)
         } else {
             select_with_prediction(

@@ -1594,7 +1594,7 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
     })
 }
 
-/// Source-derived display settings. Only Alpine opts into spatial filtering by
+/// Source-derived display settings. Current playable scenes opt into spatial filtering by
 /// default; explicit process overrides retain the comparison/experiment modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AppearanceMode {
@@ -1604,13 +1604,13 @@ pub(crate) struct AppearanceMode {
 }
 impl AppearanceMode {
     fn defaults(world: &World) -> Self {
-        let alpine = world
+        let polished = world
             .fbm_terrain()
-            .is_some_and(|terrain| terrain.params().recipe == frontier_world::FbmRecipe::Alpine);
+            .is_some_and(|terrain| crate::scene_policy::polished(terrain.params().recipe));
         Self {
-            probe_cells: if alpine { 4 } else { 1 },
-            spatial_profiles: alpine,
-            half_footprint: alpine,
+            probe_cells: if polished { 4 } else { 1 },
+            spatial_profiles: polished,
+            half_footprint: polished,
         }
     }
 }
@@ -3250,14 +3250,14 @@ fn source_budget_for(total: usize, override_mib: Option<&str>) -> usize {
 impl GeometryCache {
     pub fn new(world: World, budget_bytes: usize) -> Self {
         let override_mib = std::env::var("FRONTIER_SOURCE_CACHE_MIB").ok();
-        let alpine = world
+        let polished = world
             .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine);
+            .is_some_and(|t| crate::scene_policy::polished(t.params().recipe));
         let source_budget = source_budget_for(
             budget_bytes,
             override_mib
                 .as_deref()
-                .or(if alpine { Some("128") } else { None }),
+                .or(if polished { Some("128") } else { None }),
         );
         Self {
             naadf_owner: None,
@@ -3861,13 +3861,14 @@ mod tests {
         }
     }
     #[test]
-    fn alpine_appearance_defaults_are_scoped_and_explicit_overrides_remain_available() {
+    fn polished_appearance_defaults_are_scoped_and_explicit_overrides_remain_available() {
         use frontier_world::FbmRecipe;
         for recipe in [
             FbmRecipe::Legacy,
             FbmRecipe::Regional,
             FbmRecipe::RegionalUnwarped,
             FbmRecipe::Alpine,
+            FbmRecipe::Desert,
         ] {
             let world = World::fbm(
                 7,
@@ -3878,13 +3879,13 @@ mod tests {
             )
             .unwrap();
             let defaults = AppearanceMode::defaults(&world);
-            let alpine = recipe == FbmRecipe::Alpine;
+            let polished = crate::scene_policy::polished(recipe);
             assert_eq!(
                 defaults,
                 AppearanceMode {
-                    probe_cells: if alpine { 4 } else { 1 },
-                    spatial_profiles: alpine,
-                    half_footprint: alpine,
+                    probe_cells: if polished { 4 } else { 1 },
+                    spatial_profiles: polished,
+                    half_footprint: polished,
                 }
             );
             let baseline = AppearanceOverrides {

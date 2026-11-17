@@ -931,7 +931,7 @@ impl AdaptiveGpu {
         &mut self,
         settings: &crate::settings::VisualSettings,
         regional: bool,
-        alpine: bool,
+        polished: bool,
         amplitude: f32,
     ) {
         // With no plant pass there is no depth-map clear/draw. Do not sample
@@ -941,7 +941,7 @@ impl AdaptiveGpu {
             self.prepared_view = None;
         }
         self.near_beauty = near_beauty;
-        self.near_detail = crate::adaptive_stream::near_detail_for_alpine(alpine);
+        self.near_detail = crate::adaptive_stream::near_detail_for_scene(polished);
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
         let value = [
             sun.x,
@@ -949,7 +949,7 @@ impl AdaptiveGpu {
             sun.z,
             if regional { 1. } else { 0. },
             settings.overcast,
-            if alpine && settings.terrain_shadows && sun.y > 0. {
+            if polished && settings.terrain_shadows && sun.y > 0. {
                 1.
             } else {
                 0.

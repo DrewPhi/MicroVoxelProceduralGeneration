@@ -17,8 +17,8 @@ pub struct VisualSettings {
     pub cache_mib: usize,
     pub upload_mib: usize,
     pub resource_profile: ResourceProfile,
-    /// Keeps the fixed Alpine baseline independent of the vegetation toggle.
-    pub resource_alpine: bool,
+    /// Shared playable-scene budgets, independent of the vegetation toggle.
+    pub resource_polished: bool,
     pub memory: MemorySnapshot,
     pub native_radius_m: f64,
     pub naadf_enabled: bool,
@@ -36,7 +36,7 @@ pub struct VisualSettings {
     pub triangle_budget: usize,
     pub voxel_filter: bool,
     pub atmosphere: bool,
-    /// Bounded directional shadow map; enabled only for the Alpine adaptive scene.
+    /// Bounded directional shadow map for current playable adaptive scenes.
     pub terrain_shadows: bool,
     pub fog_density: f32,
     pub fog_height_falloff: f32,
@@ -70,7 +70,7 @@ impl Default for VisualSettings {
             cache_mib: 512,
             upload_mib: 2,
             resource_profile: ResourceProfile::Constrained,
-            resource_alpine: false,
+            resource_polished: false,
             memory: MemorySnapshot::detect(),
             native_radius_m: 0.,
             naadf_enabled: false,
@@ -129,18 +129,31 @@ pub struct SettingsChanges {
 }
 
 impl VisualSettings {
+    /// Shared look of the current playable renderer. Scene presets vary terrain,
+    /// spawn and generated content, rather than silently selecting older rendering.
+    pub fn apply_polished_presentation(&mut self) {
+        self.sun_elevation = 20.;
+        self.sun_azimuth = 22.;
+        self.exposure = 1.30;
+        self.fog_density = 0.000045;
+        self.cloud_coverage = 0.22;
+        self.cloud_speed = 0.;
+        self.overcast = 0.08;
+        self.terrain_shadows = true;
+        self.beauty = true;
+    }
     /// Reuse the startup/explicit-refresh snapshot: resident engine memory must
     /// not make repeated profile application shrink its own budgets.
-    pub fn apply_resource_profile(&mut self, profile: ResourceProfile, alpine: bool) {
+    pub fn apply_resource_profile(&mut self, profile: ResourceProfile, polished: bool) {
         self.resource_profile = profile;
-        self.resource_alpine = alpine;
+        self.resource_polished = polished;
         if profile == ResourceProfile::Custom {
             return;
         }
         let budgets = if profile == ResourceProfile::Development {
             ResourceBudgets::development(self.memory)
         } else {
-            ResourceBudgets::constrained(alpine)
+            ResourceBudgets::constrained(polished)
         };
         self.cache_mib = budgets.terrain_cpu_mib;
         self.build_mib = budgets.build_mib;

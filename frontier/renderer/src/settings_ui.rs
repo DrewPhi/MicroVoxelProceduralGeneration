@@ -295,7 +295,7 @@ impl SettingsUi {
                             ui.separator();
                             ui.heading("Light & atmosphere");
                             ui.checkbox(&mut self.settings.beauty, "Meadow lighting, foliage occlusion and sky");
-                            ui.checkbox(&mut self.settings.terrain_shadows, "Bounded Alpine terrain shadows");
+                            ui.checkbox(&mut self.settings.terrain_shadows, "Bounded terrain shadows");
                             let mut clear_air = !self.settings.atmosphere;
                             if ui
                                 .checkbox(&mut clear_air, "Clear air · disable atmosphere")
@@ -377,11 +377,11 @@ impl SettingsUi {
                                 }
                             });
                             if profile_before != self.loading_draft.resource_profile {
-                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_alpine);
+                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_polished);
                             }
                             if ui.button("Refresh available RAM").on_hover_text("Re-measures free capacity. Close other large apps first; current game residency reduces the new recommendation.").clicked() {
                                 self.loading_draft.memory = crate::settings::MemorySnapshot::detect();
-                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_alpine);
+                                self.loading_draft.apply_resource_profile(self.loading_draft.resource_profile, self.loading_draft.resource_polished);
                             }
                             let memory = self.loading_draft.memory;
                             ui.small(format!("RAM available {} / {} MiB{} · suggested working budgets {} MiB",
@@ -449,7 +449,7 @@ impl SettingsUi {
                                 self.settings.cache_mib = self.loading_draft.cache_mib;
                                 self.settings.upload_mib = self.loading_draft.upload_mib;
                                 self.settings.resource_profile = self.loading_draft.resource_profile;
-                                self.settings.resource_alpine = self.loading_draft.resource_alpine;
+                                self.settings.resource_polished = self.loading_draft.resource_polished;
                                 self.settings.memory = self.loading_draft.memory;
                                 self.settings.native_radius_m = self.loading_draft.native_radius_m;
                                 self.settings.vegetation_near_m = self.loading_draft.vegetation_near_m;
@@ -494,7 +494,7 @@ impl SettingsUi {
         visual_previous.cache_mib = self.settings.cache_mib;
         visual_previous.upload_mib = self.settings.upload_mib;
         visual_previous.resource_profile = self.settings.resource_profile;
-        visual_previous.resource_alpine = self.settings.resource_alpine;
+        visual_previous.resource_polished = self.settings.resource_polished;
         visual_previous.memory = self.settings.memory;
         visual_previous.naadf_auto_memory = self.settings.naadf_auto_memory;
         visual_previous.naadf_enabled = self.settings.naadf_enabled;
