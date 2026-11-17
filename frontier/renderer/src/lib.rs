@@ -2872,6 +2872,22 @@ impl ApplicationHandler for Viewer {
                         }
                         return;
                     }
+                    // Laptop alternative to right mouse: press to place, hold to
+                    // pour. Ignore OS key repeat so holding never repeats placement.
+                    if key == KeyCode::KeyR
+                        && !event.repeat
+                        && self.grabbed
+                        && self.pending_teleport.is_none()
+                    {
+                        if let Some(bowl) = &mut self.bowl {
+                            bowl.hand_mouse(
+                                &mut self.world,
+                                self.camera,
+                                false,
+                                event.state == ElementState::Pressed,
+                            );
+                        }
+                    }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
                         if self.player_edit.enabled && !event.repeat {

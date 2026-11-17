@@ -19,10 +19,10 @@ The bowl keeps its water while stored. **B** remains a bowl shortcut.
 2. Press **E** to stow the bowl and empty your hands.
 3. Aim at nearby sand: tap **left click** for one voxel, or hold and release
    for up to four (0.977 L). The selection outline and charge bar show the amount.
-4. Carry the handful, **E** to pocket it, or **right click** elsewhere to drop it.
-5. Select the black seed's pocket and **right click** into the hole.
-6. Gather another handful, aim into the hole and **right click** to bury the seed.
-7. Select the bowl's pocket and hold **right click** to water the planting spot.
+4. Carry the handful, **E** to pocket it, or **right click or R** elsewhere to drop it.
+5. Select the black seed's pocket and **right click or R** into the hole.
+6. Gather another handful, aim into the hole and **right click or R** to bury the seed.
+7. Select the bowl's pocket and hold **right click or R** to water the planting spot.
 8. Stow the bowl and watch the shoot emerge. Water again when it becomes thirsty.
 
 Seed placement and sand placement use actual canonical cells; there is no

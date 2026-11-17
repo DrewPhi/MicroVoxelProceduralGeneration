@@ -241,7 +241,7 @@ impl BowlLive {
                             "pockets pickup count={n} conserved={}",
                             self.pockets.conserved()
                         );
-                        format!("Holding {n} voxels — right click to drop, E to pocket")
+                        format!("Holding {n} voxels — right click/R to drop, E to pocket")
                     }
                     Err(e) => e.into(),
                 };
@@ -392,7 +392,7 @@ impl BowlLive {
         out
     }
     pub fn overlay(&self, world: &World, camera: Camera, aspect: f32) -> Overlay {
-        let mut out=Overlay{text:format!("WOODEN BOWL   {:.2} / {:.2} L\nLeft click: scoop • Hold right: pour • Hold Q: tip/spill • B: equip\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,CAPACITY as f64*VOXEL_SIZE.powi(3)*1000.,self.message),fill:self.state.units as f32/CAPACITY as f32,..Default::default()};
+        let mut out=Overlay{text:format!("WOODEN BOWL   {:.2} / {:.2} L\nLeft click: scoop • Hold right/R: pour • Hold Q: tip/spill • B: equip\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,CAPACITY as f64*VOXEL_SIZE.powi(3)*1000.,self.message),fill:self.state.units as f32/CAPACITY as f32,..Default::default()};
         let pockets = self
             .pockets
             .slots
@@ -412,7 +412,7 @@ impl BowlLive {
             .hand
             .as_ref()
             .map_or("Empty".into(), Item::name);
-        out.text=format!("Hands: {hands} • bowl {:.2} L\n{pockets}\n1–4 swap pocket • E stow • Empty hands: hold left to gather • Right: place/pour\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
+        out.text=format!("Hands: {hands} • bowl {:.2} L\n{pockets}\n1–4 swap pocket • E stow • Empty hands: hold left to gather • Right/R: place/pour\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
         if let Some(g) = &self.gesture {
             let n = Self::hand_settings()
                 .count_at(g.started.elapsed().as_secs_f64())
