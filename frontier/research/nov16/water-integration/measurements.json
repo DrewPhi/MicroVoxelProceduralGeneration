@@ -1,0 +1,387 @@
+{
+  "schema": 1,
+  "date": "2026-11-16",
+  "source_base": "e7d73ba + water integration working tree",
+  "voxel_m": 0.0625,
+  "detailed_dimensions": [
+    32,
+    32,
+    32
+  ],
+  "native_footprint_dimensions": [
+    64,
+    64,
+    64
+  ],
+  "naadf_radius_m": 8,
+  "vegetation": false,
+  "seed": 19,
+  "runs": [
+    {
+      "name": "walk",
+      "recorded": true,
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "seeded-world",
+        "--seed",
+        "19",
+        "--water-model",
+        "moving",
+        "--walk",
+        "on",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--naadf-radius",
+        "8",
+        "--water-save",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/world.save",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/walk/game.json",
+        "--capture-on-exit",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/walk/exit.png",
+        "--vegetation",
+        "off"
+      ],
+      "binary_sha256": "71af93e542ddb247a3830e3965a70b9376c46ae0be72eef184d848d0dac87ede",
+      "events": [
+        {
+          "seconds_from_launch": 0.7638,
+          "action": "moving_water_ready"
+        },
+        {
+          "seconds_from_launch": 3.8453,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 4.4454,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 4.8964,
+          "action": "release_w"
+        },
+        {
+          "seconds_from_launch": 7.9871,
+          "action": "hold_s"
+        },
+        {
+          "seconds_from_launch": 8.4374,
+          "action": "release_s"
+        },
+        {
+          "seconds_from_launch": 11.5428,
+          "action": "turn_begin"
+        },
+        {
+          "seconds_from_launch": 12.5491,
+          "action": "turn_end"
+        },
+        {
+          "seconds_from_launch": 12.6357,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 13.086,
+          "action": "release_w"
+        },
+        {
+          "seconds_from_launch": 16.1969,
+          "action": "hold_s"
+        },
+        {
+          "seconds_from_launch": 16.6472,
+          "action": "release_s"
+        },
+        {
+          "seconds_from_launch": 19.6472,
+          "action": "final_settle"
+        },
+        {
+          "seconds_from_launch": 23.3127,
+          "action": "saved_and_closed"
+        }
+      ],
+      "frames": {
+        "sample_count": 962,
+        "accepted_frames": 962,
+        "missed_budget_frames": 593,
+        "rejected_inputs": 0,
+        "p50_ms": 21.528948999999997,
+        "p95_ms": 47.149785,
+        "p99_ms": 58.433882
+      },
+      "live_water": {
+        "model": "moving",
+        "camera_following": true,
+        "detailed_cells": 32768,
+        "tick": 2269,
+        "simtime": 21.21144510760127,
+        "wall_elapsed": 22.05125003000001,
+        "wall_lag": 0.8398049223987378,
+        "deferred_seconds": 0.8398049223987307,
+        "detailed_units": 517,
+        "stored_units": 111329,
+        "initial": 111862,
+        "supplied": 253,
+        "drained": 269,
+        "conserved": true,
+        "migrations": 7,
+        "history_tiles": 140,
+        "history_cap": 4096,
+        "native_payload_bytes": 41287680,
+        "pending_relaxations": 508,
+        "relax_queries": 4553,
+        "relax_moves": 50,
+        "publish_ms": 0.115577,
+        "edit_epoch": 0,
+        "environmental_features": 1,
+        "upstream_attempted": 2715,
+        "upstream_added": 253,
+        "upstream_suppressed": 2462,
+        "downstream_attempted": 2715,
+        "downstream_removed": 269,
+        "downstream_unsatisfied": 2446,
+        "last_step_ms": 81.27379,
+        "boundary_transfers": 2,
+        "max_speed_mps": 2.3708622455596924,
+        "pressure_residual_rms": 0.0042713459492457655,
+        "pending_snapshots": 0,
+        "river_units_per_second": 128,
+        "paused_error": ""
+      },
+      "process_memory": {
+        "rss_bytes": 385892352,
+        "peak_rss_bytes": 419725312,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_mean_ms": 18.003807457122804,
+      "motion": {
+        "max_displacement_m": 1.6881789486145038,
+        "yaw_range_radians": 1.2800026
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      }
+    },
+    {
+      "name": "reload_return",
+      "recorded": true,
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "seeded-world",
+        "--seed",
+        "19",
+        "--water-model",
+        "moving",
+        "--walk",
+        "on",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--naadf-radius",
+        "8",
+        "--water-save",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/world.save",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/reload_return/game.json",
+        "--capture-on-exit",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/moving-water-walk1080-v2/reload_return/exit.png",
+        "--vegetation",
+        "off"
+      ],
+      "binary_sha256": "71af93e542ddb247a3830e3965a70b9376c46ae0be72eef184d848d0dac87ede",
+      "events": [
+        {
+          "seconds_from_launch": 0.7824,
+          "action": "moving_water_ready"
+        },
+        {
+          "seconds_from_launch": 3.8639,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 4.4875,
+          "action": "hold_s"
+        },
+        {
+          "seconds_from_launch": 4.9381,
+          "action": "release_s"
+        },
+        {
+          "seconds_from_launch": 8.0444,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 8.4948,
+          "action": "release_w"
+        },
+        {
+          "seconds_from_launch": 11.5789,
+          "action": "turn_begin"
+        },
+        {
+          "seconds_from_launch": 12.5858,
+          "action": "turn_end"
+        },
+        {
+          "seconds_from_launch": 12.6662,
+          "action": "hold_s"
+        },
+        {
+          "seconds_from_launch": 13.1164,
+          "action": "release_s"
+        },
+        {
+          "seconds_from_launch": 16.2369,
+          "action": "hold_w"
+        },
+        {
+          "seconds_from_launch": 16.6874,
+          "action": "release_w"
+        },
+        {
+          "seconds_from_launch": 19.6875,
+          "action": "final_settle"
+        },
+        {
+          "seconds_from_launch": 23.2534,
+          "action": "saved_and_closed"
+        }
+      ],
+      "frames": {
+        "sample_count": 1152,
+        "accepted_frames": 1152,
+        "missed_budget_frames": 645,
+        "rejected_inputs": 0,
+        "p50_ms": 16.856946,
+        "p95_ms": 39.58881,
+        "p99_ms": 52.964594
+      },
+      "live_water": {
+        "model": "moving",
+        "camera_following": true,
+        "detailed_cells": 32768,
+        "tick": 4824,
+        "simtime": 44.68980478700002,
+        "wall_elapsed": 44.68980478700002,
+        "wall_lag": 0,
+        "deferred_seconds": 0,
+        "detailed_units": 413,
+        "stored_units": 139783,
+        "initial": 140212,
+        "supplied": 619,
+        "drained": 635,
+        "conserved": true,
+        "migrations": 14,
+        "history_tiles": 173,
+        "history_cap": 4096,
+        "native_payload_bytes": 51019776,
+        "pending_relaxations": 799,
+        "relax_queries": 8017,
+        "relax_moves": 50,
+        "publish_ms": 0.15096099999999998,
+        "edit_epoch": 0,
+        "environmental_features": 1,
+        "upstream_attempted": 5720,
+        "upstream_added": 619,
+        "upstream_suppressed": 5101,
+        "downstream_attempted": 5720,
+        "downstream_removed": 635,
+        "downstream_unsatisfied": 5085,
+        "last_step_ms": 67.841569,
+        "boundary_transfers": 1,
+        "max_speed_mps": 1.9827569723129272,
+        "pressure_residual_rms": 0.003451602502550701,
+        "pending_snapshots": 0,
+        "river_units_per_second": 128,
+        "paused_error": ""
+      },
+      "process_memory": {
+        "rss_bytes": 404566016,
+        "peak_rss_bytes": 456118272,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_mean_ms": 17.067909238918304,
+      "motion": {
+        "max_displacement_m": 1.767558547132889,
+        "yaw_range_radians": 1.28000063
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      }
+    },
+    {
+      "name": "stationary",
+      "recorded": false,
+      "frames": {
+        "sample_count": 991,
+        "accepted_frames": 991,
+        "missed_budget_frames": 987,
+        "rejected_inputs": 0,
+        "p50_ms": 25.154083,
+        "p95_ms": 26.796995,
+        "p99_ms": 28.752014
+      },
+      "live_water": {
+        "model": "moving",
+        "camera_following": true,
+        "detailed_cells": 32768,
+        "tick": 2337,
+        "simtime": 24.834014935999992,
+        "wall_elapsed": 24.83401493599999,
+        "wall_lag": 0,
+        "deferred_seconds": 0,
+        "detailed_units": 364,
+        "stored_units": 13272,
+        "initial": 13652,
+        "supplied": 0,
+        "drained": 16,
+        "conserved": true,
+        "migrations": 0,
+        "history_tiles": 64,
+        "history_cap": 4096,
+        "native_payload_bytes": 18874368,
+        "pending_relaxations": 3,
+        "relax_queries": 42,
+        "relax_moves": 0,
+        "publish_ms": 0.11967599999999999,
+        "edit_epoch": 0,
+        "environmental_features": 1,
+        "upstream_attempted": 3178,
+        "upstream_added": 0,
+        "upstream_suppressed": 3178,
+        "downstream_attempted": 3178,
+        "downstream_removed": 16,
+        "downstream_unsatisfied": 3162,
+        "last_step_ms": 61.861194000000005,
+        "boundary_transfers": 0,
+        "max_speed_mps": 2.2339425086975098,
+        "pressure_residual_rms": 0.0002537739846791305,
+        "pending_snapshots": 0,
+        "river_units_per_second": 128,
+        "paused_error": ""
+      },
+      "process_memory": {
+        "rss_bytes": 296075264,
+        "peak_rss_bytes": 307851264,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_mean_ms": 22.83699056488037,
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "command": "target/release/frontier --preset seeded-world --seed 19 --water-model moving --walk on --vegetation off --width 1920 --height 1080 --naadf-radius 8 --seconds 25 --route static --water-save output/moving-water-bench.save --report output/moving-water-bench.json"
+    }
+  ]
+}

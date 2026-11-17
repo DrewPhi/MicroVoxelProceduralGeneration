@@ -4,6 +4,9 @@ mod arena;
 mod column_cache;
 mod data;
 mod diagnostics;
+mod dynamic_water;
+#[cfg(test)]
+mod dynamic_water_test;
 pub(crate) mod fixture;
 pub(crate) mod gpu_stages;
 mod leaf;
@@ -236,6 +239,8 @@ struct Uniform {
 }
 struct Volume {
     resources: Bindings,
+    dynamic_water_key: Option<(frontier_world::Cell, [u32; 3], u64)>,
+    dynamic_water_binding: u64,
     ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
     height: Option<traversal::Height>,
@@ -564,6 +569,7 @@ impl Pending {
             blocks: blocks.clone(),
             voxels: voxels.clone(),
             palette: palette.clone(),
+            dynamic_water: dynamic_water::empty(&gpu.device),
         };
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NAADF snapshot"),
@@ -578,6 +584,8 @@ impl Pending {
         });
         let volume = Volume {
             resources,
+            dynamic_water_key: None,
+            dynamic_water_binding: 0,
             ownership: snapshot.ownership.clone(),
             pipeline,
             height,
@@ -1429,6 +1437,21 @@ impl Experiment {
     pub fn ready(&self) -> bool {
         self.active.is_some() && self.published_epoch == self.epoch && self.error.is_none()
     }
+    /// Water advances only against the exact static source already published.
+    /// A local edit keeps the previous revision visible until all replacement
+    /// roots publish; camera-only streaming does not change source identity.
+    pub(crate) fn ready_for_water_source(&self, world: &World) -> bool {
+        self.ready()
+            && !self.restoring_raster
+            && self.refresh_world.is_none()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.revision == world.revision())
+            && self.source_world.as_ref().is_some_and(|source| {
+                source.shares_source_lineage(world) && source.revision() == world.revision()
+            })
+    }
     /// Full requested-region gate for captures and locked benchmarks.
     /// Normal interactive readiness still permits progressive startup.
     pub(crate) fn ready_for_capture(&self) -> bool {
@@ -1622,13 +1645,19 @@ impl Experiment {
         );
     }
     pub(crate) fn shadow_bindings(&self) -> Option<(u64, Bindings)> {
-        self.active
-            .as_ref()
-            .map(|a| (a.ownership.id, a.resources.clone()))
+        self.active.as_ref().map(|a| {
+            let id = if a.dynamic_water_binding != 0 {
+                a.dynamic_water_binding
+            } else {
+                a.ownership.id
+            };
+            (id, a.resources.clone())
+        })
     }
     pub fn gpu_bytes(&self) -> usize {
         let allocated = |a: &Volume| {
             a.root_bytes()
+                + a.resources.dynamic_water.size() as usize
                 + a.capacities.iter().sum::<usize>()
                 + a.root_distance
                     .as_ref()
@@ -1809,9 +1838,10 @@ pub(crate) struct Bindings {
     pub blocks: wgpu::Buffer,
     pub voxels: wgpu::Buffer,
     pub palette: wgpu::Buffer,
+    pub dynamic_water: wgpu::Buffer,
 }
 pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..8)
+    (0..9)
         .map(|i| wgpu::BindGroupLayoutEntry {
             binding: first + i,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1887,6 +1917,10 @@ impl Bindings {
                 binding: first + 7,
                 resource: self.diagnostics.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: first + 8,
+                resource: self.dynamic_water.as_entire_binding(),
+            },
         ]
     }
     pub fn empty(device: &wgpu::Device) -> Self {
@@ -1923,6 +1957,7 @@ impl Bindings {
             blocks: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),
+            dynamic_water: dynamic_water::empty(device),
         }
     }
 }

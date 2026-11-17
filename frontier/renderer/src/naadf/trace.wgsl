@@ -10,6 +10,20 @@ struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE+5u) var root_distance:texture_3d<u32>;
 @group(NAADF_GROUP) @binding(NAADF_BASE+6u) var heights:texture_2d<u32>;
 @group(NAADF_GROUP) @binding(NAADF_BASE+7u) var<storage,read_write> trace_metrics:array<atomic<u32>>;
+struct DynamicWater {origin:vec4<i32>,size:vec4<u32>,states:array<u32>};
+@group(NAADF_GROUP) @binding(NAADF_BASE+8u) var<storage,read> dynamic_water:DynamicWater;
+fn water_state(cell:vec3<i32>)->u32 {
+    let p=cell-dynamic_water.origin.xyz;
+    if any(p<vec3(0)) || any(p>=vec3<i32>(dynamic_water.size.xyz)) {return 0u;}
+    let c=vec3<u32>(p);
+    return dynamic_water.states[c.x+dynamic_water.size.x*(c.y+dynamic_water.size.y*c.z)];
+}
+fn water_node(node:u32)->bool {
+    return (node&0x40000000u)!=0u && palette[node&0x3fffffffu].material==7u;
+}
+fn water_overlaps(lo:vec3<i32>,hi:vec3<i32>)->bool {
+    return all(dynamic_water.size.xyz>vec3(0u)) && all(hi>dynamic_water.origin.xyz) && all(lo<dynamic_water.origin.xyz+vec3<i32>(dynamic_water.size.xyz));
+}
 override traversal_metrics:bool=false;
 // Exact integer-only experiment: fixed-lane proof decoding and bit-scan faces.
 // No event-time, hit-position or shading floating-point arithmetic changes.
@@ -336,7 +350,7 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
                 node=naadf_leaf_word((node&0x3fffffffu)+vp.x+4u*(vp.y+4u*vp.z));
             }
         }
-        let solid=(node&0x40000000u)!=0u;
+        let solid=(node&0x40000000u)!=0u && !(all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_state(cell)==1u);
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,0u);}
         if solid && !was_solid && faces!=0u {
             return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,0u);
@@ -523,6 +537,10 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
                 scale=1u;parent_lo=vec3<i32>((c/4u)*4u);parent_hi=parent_lo+vec3(4);
             }
         }
+        if all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
+            scale=1u;
+            if water_state(cell)==1u {node=0u;}
+        }
         let solid=(node&0x40000000u)!=0u;
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,flags);}
         if solid && !was_solid && faces!=0u {
@@ -606,7 +624,7 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
     if all(cell>=vec3(0)) && all(cell<extent) {flags|=TRACE_STALLED;}
     return VoxelHit(false,t,vec3(0.),0u,visits,flags);
 }
-fn trace_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,measure:bool)->VoxelHit {
+fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,measure:bool)->VoxelHit {
     let lane=u32(occlusion);
     trace_metric(lane,0u,1u);
     var h=trace_impl(o,d,max(minimum,prefix),occlusion,measure,true);
@@ -656,6 +674,52 @@ fn trace_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,
     }
     trace_metric(lane,select(23u,24u,h.found),1u);
     return h;
+}
+// Water uses an independent native DDA, so static empty-space/height/beam
+// proofs never skip a newly wet cell. This bound crosses every possible plane.
+fn trace_water(o:vec3<f32>,d:vec3<f32>,minimum:f32,maximum:f32,occlusion:bool)->VoxelHit {
+    var miss=VoxelHit(false,0.,vec3(0.),7u,vec3(0u),0u);
+    if dynamic_water.origin.w==0 || any(dynamic_water.size.xyz==vec3(0u)) {return miss;}
+    let lo=dynamic_water.origin.xyz;
+    let hi=lo+vec3<i32>(dynamic_water.size.xyz);
+    let native_interval=voxel_interval(o,d);
+    var entry=max(minimum,max(0.,native_interval.x));var exit=min(maximum,native_interval.y);var entry_faces=0u;
+    for(var a=0u;a<3u;a++) {
+        if d[a]==0. {if o[a]<f32(lo[a]) || o[a]>=f32(hi[a]) {return miss;}}
+        else {
+            let ta=(f32(lo[a])-o[a])/d[a];let tb=(f32(hi[a])-o[a])/d[a];
+            let near=min(ta,tb);exit=min(exit,max(ta,tb));
+            if near>entry {entry=near;entry_faces=0u;}
+            if near==entry {entry_faces|=1u<<(a*2u+select(1u,0u,d[a]>0.));}
+        }
+    }
+    if entry>=exit {return miss;}
+    var t=entry;var faces=entry_faces;var was_wet=false;
+    var cell=clamp(forward_cell(o+d*t,d),lo,hi-vec3(1));
+    let budget=dynamic_water.size.x+dynamic_water.size.y+dynamic_water.size.z+3u;
+    for(var i=0u;i<budget;i++) {
+        if any(cell<lo) || any(cell>=hi) {break;}
+        let wet=water_state(cell)==2u;
+        if wet {
+            // The static hit wins equal distances, preserving solid authority.
+            if occlusion || (!was_wet && faces!=0u) {return VoxelHit(true,t,trace_normal(faces),7u,vec3(0u),0u);}
+        }
+        was_wet=wet;
+        var next=vec3(1e30);
+        for(var a=0u;a<3u;a++) {if d[a]!=0. {next[a]=native_plane_time(cell[a]+select(0,1,d[a]>0.),o[a],d[a]);}}
+        let crossing=min(next.x,min(next.y,next.z));
+        if crossing>=exit {break;}
+        faces=0u;
+        for(var a=0u;a<3u;a++) {if next[a]==crossing {cell[a]+=select(-1,1,d[a]>0.);faces|=1u<<(a*2u+select(1u,0u,d[a]>0.));}}
+        t=max(t,crossing);
+    }
+    return miss;
+}
+fn trace_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,measure:bool)->VoxelHit {
+    let solid=trace_static_prefixed(o,d,minimum,prefix,occlusion,measure);
+    let water=trace_water(o,d,minimum,select(1e30,solid.t,solid.found),occlusion);
+    if water.found {return water;}
+    return solid;
 }
 fn trace_counted(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)->VoxelHit {
     return trace_prefixed(o,d,minimum,minimum,occlusion,measure);

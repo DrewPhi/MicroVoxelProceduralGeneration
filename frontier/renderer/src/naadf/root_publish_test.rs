@@ -277,6 +277,7 @@ fn directly_published_roots_match_native_corner_primary_and_shadow() {
             blocks: empty.clone(),
             voxels: empty.clone(),
             palette: empty,
+            dynamic_water: crate::naadf::dynamic_water::empty(&device),
         };
         let mut entries = binding_layout(0);
         for entry in &mut entries {

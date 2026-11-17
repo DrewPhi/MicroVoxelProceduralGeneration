@@ -106,6 +106,9 @@ impl Volume {
         self.resources.blocks = self.blocks.clone();
         self.resources.voxels = self.voxels.clone();
         self.resources.palette = self.palette.clone();
+        if self.dynamic_water_binding != 0 {
+            self.dynamic_water_binding = super::dynamic_water::binding_id();
+        }
         self.bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NAADF resized arenas"),
             layout: &self.pipeline.get_bind_group_layout(0),

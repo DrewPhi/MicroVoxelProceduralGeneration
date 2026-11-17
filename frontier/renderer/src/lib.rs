@@ -15,6 +15,7 @@ pub mod column_mesh;
 mod derived_disk_cache;
 mod derived_disk_writeback;
 mod development_resources;
+mod discrete_water_live;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
@@ -24,6 +25,7 @@ mod hybrid_gpu;
 mod integrated_profiles;
 mod live_water;
 pub mod mesh;
+mod moving_water_live;
 mod naadf;
 mod native_fbm;
 mod native_stream;
@@ -32,6 +34,7 @@ mod page_terrain;
 pub mod physical_pressure_gpu;
 mod playability;
 mod player_edit;
+mod procedural_water_live;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -1476,8 +1479,9 @@ impl Default for EditTest {
 }
 
 struct Viewer {
-    live_water: Option<live_water::LiveWater>,
+    live_water: Option<discrete_water_live::WaterDriver>,
     player_edit: player_edit::PlayerEdit,
+    queued_player_action: Option<(frontier_world::edit::EditTransaction, Instant, Camera)>,
     visual_settings: settings::VisualSettings,
     settings_ui: Option<settings_ui::SettingsUi>,
     atmosphere: Option<atmosphere::Atmosphere>,
@@ -1748,6 +1752,10 @@ impl Viewer {
         }
     }
     fn player_mouse(&mut self, button: MouseButton, state: ElementState) {
+        if self.queued_player_action.is_some() {
+            self.player_edit.message = "Action waiting for water step".into();
+            return;
+        }
         let Some(live) = &self.live_water else {
             return;
         };
@@ -1755,16 +1763,16 @@ impl Viewer {
         let transaction = match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
                 self.player_edit
-                    .begin(&self.world, &live.inventory, self.camera, native);
+                    .begin(&self.world, live.inventory(), self.camera, native);
                 None
             }
             (MouseButton::Left, ElementState::Released) => {
                 self.player_edit
-                    .release(&self.world, &live.inventory, self.camera, native)
+                    .release(&self.world, live.inventory(), self.camera, native)
             }
             (MouseButton::Right, ElementState::Pressed) => self.player_edit.placement(
                 &self.world,
-                &live.inventory,
+                live.inventory(),
                 self.camera,
                 self.walking
                     .physical_eye()
@@ -1783,8 +1791,59 @@ impl Viewer {
                 Ok(()) => {
                     self.player_edit.message = format!("Committed action {}", transaction.sequence)
                 }
+                Err("Water step pending; retry edit") => {
+                    self.queued_player_action = Some((transaction, Instant::now(), self.camera));
+                    self.player_edit.message = "Action queued for water step (up to 500 ms)".into();
+                }
                 Err(message) => self.player_edit.message = message.into(),
             }
+        }
+    }
+    fn retry_queued_player_action(&mut self) {
+        let Some((transaction, queued, pose)) = self.queued_player_action.take() else {
+            return;
+        };
+        let moved = pose.position.distance(self.camera.position) > 0.25
+            || pose.direction().dot(self.camera.direction()) < 0.98;
+        let eye = self
+            .walking
+            .physical_eye()
+            .unwrap_or(self.camera.position.to_array());
+        let valid = transaction.expected.iter().all(|&(c, _)| {
+            player_edit::reachable(c, self.camera, self.player_edit.settings.reach_m)
+                && (transaction.place.is_none() || !player_edit::intersects_player(c, eye))
+        });
+        if queued.elapsed().as_secs_f64() > 0.5
+            || moved
+            || !valid
+            || !self.grabbed
+            || self.pending_teleport.is_some()
+        {
+            self.player_edit.message = "Queued action expired or player moved; retry edit".into();
+            return;
+        }
+        let Some(live) = &mut self.live_water else {
+            return;
+        };
+        let native = self.gpu.as_ref().and_then(|g| g.naadf.as_ref());
+        if live
+            .static_world()
+            .is_some_and(|source| !native.is_some_and(|n| n.ready_for_water_source(source)))
+        {
+            self.queued_player_action = Some((transaction, queued, pose));
+            return;
+        }
+        match live.apply_player_transaction(&mut self.world, &transaction, |c| {
+            native.is_some_and(|n| n.owns_native_edit_cell(c))
+        }) {
+            Ok(()) => {
+                self.player_edit.message =
+                    format!("Committed queued action {}", transaction.sequence)
+            }
+            Err("Water step pending; retry edit") => {
+                self.queued_player_action = Some((transaction, queued, pose))
+            }
+            Err(message) => self.player_edit.message = message.into(),
         }
     }
     fn pick_edit_target(&self, place: bool) -> Option<Cell> {
@@ -2020,6 +2079,7 @@ impl Viewer {
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
         if self.player_edit.enabled {
+            self.retry_queued_player_action();
             if !self.grabbed || self.pending_teleport.is_some() {
                 self.player_edit.cancel();
             }
@@ -2030,7 +2090,7 @@ impl Viewer {
             );
             if let (Some(ui), Some(live)) = (&mut self.settings_ui, &self.live_water) {
                 ui.set_player_overlay(self.player_edit.overlay(
-                    &live.inventory,
+                    live.inventory(),
                     self.camera,
                     self.width as f32 / self.height.max(1) as f32,
                 ));
@@ -2145,11 +2205,15 @@ impl Viewer {
             self.camera.pitch = pose.pitch as f32;
         }
         if let Some(live) = &mut self.live_water {
+            live.observe_camera(self.camera);
             if self
                 .gpu
                 .as_ref()
                 .and_then(|g| g.naadf.as_ref())
-                .is_some_and(|n| n.ready())
+                .is_some_and(|n| {
+                    live.static_world()
+                        .map_or_else(|| n.ready(), |source| n.ready_for_water_source(source))
+                })
             {
                 live.update(&mut self.world, self.camera)?;
             } else {
@@ -2165,7 +2229,15 @@ impl Viewer {
                 .atmosphere
                 .as_ref()
                 .map_or((self.width, self.height), |a| a.dimensions());
-            gpu.update_vegetation(&self.world, self.camera, width, height)?;
+            gpu.update_vegetation(
+                self.live_water
+                    .as_ref()
+                    .and_then(|v| v.static_world())
+                    .unwrap_or(&self.world),
+                self.camera,
+                width,
+                height,
+            )?;
         }
         let vegetation_ms = plants_started.elapsed().as_secs_f64() * 1000.;
         if let Some(gpu) = &self.gpu {
@@ -2196,7 +2268,33 @@ impl Viewer {
                 && self.adaptive_view.as_ref().is_none_or(|v| {
                     Some(v.published_naadf_owner) == restore_id && v.coverage_ready
                 });
-            gpu.update_naadf(&self.world, self.camera);
+            gpu.update_naadf(
+                self.live_water
+                    .as_ref()
+                    .and_then(|v| v.static_world())
+                    .unwrap_or(&self.world),
+                self.camera,
+            );
+            if let Some((origin, dimensions, generation, states)) =
+                self.live_water.as_ref().and_then(|v| v.dynamic_water())
+            {
+                if let Some(mut experiment) = gpu.naadf.take() {
+                    if self
+                        .live_water
+                        .as_ref()
+                        .and_then(|v| v.static_world())
+                        .is_some_and(|source| experiment.ready_for_water_source(source))
+                    {
+                        experiment
+                            .set_dynamic_water(gpu, origin, dimensions, generation, states)?;
+                    }
+                    if let Some(adaptive) = &mut gpu.adaptive {
+                        adaptive.set_naadf_shadow(&gpu.device, experiment.shadow_bindings());
+                    }
+                    gpu.naadf = Some(experiment);
+                }
+            }
+
             let owner = gpu.naadf.as_ref().and_then(|n| n.desired_owner());
             if let Some(view) = &mut self.adaptive_view {
                 view.set_naadf_owner(owner.clone());
@@ -2755,7 +2853,7 @@ impl ApplicationHandler for Viewer {
                                 _ => None,
                             };
                             if let (Some(slot), Some(live)) = (slot, &mut self.live_water) {
-                                live.inventory.select_slot(slot);
+                                live.inventory_mut().select_slot(slot);
                             }
                         }
                         if key == KeyCode::KeyG && !event.repeat {
@@ -2871,6 +2969,10 @@ pub fn run() -> Result<()> {
     appearance_method::initialize_application();
     let Some(options::Options {
         live_water: live_water_enabled,
+        discrete_water,
+        procedural_water,
+        moving_water,
+        water_river_rate,
         player_edit: player_edit_enabled,
         hand,
         inventory_capacity,
@@ -2973,20 +3075,24 @@ pub fn run() -> Result<()> {
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
     let mut live_water = if live_water_enabled {
-        Some(live_water::LiveWater::new(
+        Some(discrete_water_live::WaterDriver::new(
             &mut world,
             water_save,
             water_active_radius,
             water_history_cells,
+            discrete_water,
+            procedural_water,
+            moving_water,
+            water_river_rate,
         )?)
     } else {
         None
     };
     if let Some(live) = &mut live_water {
-        if live.inventory.total() > inventory_capacity {
+        if live.inventory().total() > inventory_capacity {
             return Err("saved inventory exceeds requested capacity".into());
         }
-        live.inventory.capacity = inventory_capacity;
+        live.inventory_mut().capacity = inventory_capacity;
     }
     if world.vegetation_enabled() {
         frontier_world::vegetation::prewarm_models();
@@ -3062,16 +3168,10 @@ pub fn run() -> Result<()> {
         camera.far = capture_far.unwrap_or(20000.);
         camera.fov_y = fov_y;
         if let Some(live) = &mut live_water {
-            if water_demo && live.demo_center.is_none() {
+            if water_demo && live.demo_center().is_none() {
                 live.demo(&mut world, &mut camera)?;
-            } else if let Some(c) = live.demo_center {
-                camera.position = DVec3::new(
-                    c.x as f64 * frontier_world::VOXEL_SIZE,
-                    c.y as f64 * frontier_world::VOXEL_SIZE + 2.2,
-                    c.z as f64 * frontier_world::VOXEL_SIZE - 2.,
-                );
-                camera.yaw = 0.;
-                camera.pitch = -0.7;
+            } else if live.demo_center().is_some() {
+                live.position_demo_camera(&mut camera);
             }
         }
         // Far surface pages remain immutable. Live terrain/fluid overrides are
@@ -3562,6 +3662,7 @@ pub fn run() -> Result<()> {
     let mut viewer = Viewer {
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
+        queued_player_action: None,
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -3685,8 +3786,8 @@ pub fn run() -> Result<()> {
         pending_edit: None,
     };
     EventLoop::new()?.run_app(&mut viewer)?;
-    if let Some(live) = &viewer.live_water {
-        live.save(&viewer.world)?;
+    if let Some(live) = &mut viewer.live_water {
+        live.save(&mut viewer.world)?;
     }
     let route_elapsed_seconds = if viewer.adaptive_route_started {
         viewer.route_started.elapsed().as_secs_f64()
@@ -3696,7 +3797,23 @@ pub fn run() -> Result<()> {
     if let Some(path) = capture_on_exit {
         if let (Some(gpu), Some(config)) = (&mut viewer.gpu, &viewer.config) {
             if viewer.live_water.is_some() {
-                gpu.settle_naadf(&viewer.world, viewer.camera)?;
+                gpu.settle_naadf(
+                    viewer
+                        .live_water
+                        .as_ref()
+                        .and_then(|v| v.static_world())
+                        .unwrap_or(&viewer.world),
+                    viewer.camera,
+                )?;
+                if let Some((origin, dimensions, generation, states)) =
+                    viewer.live_water.as_ref().and_then(|v| v.dynamic_water())
+                {
+                    if let Some(mut experiment) = gpu.naadf.take() {
+                        experiment
+                            .set_dynamic_water(gpu, origin, dimensions, generation, states)?;
+                        gpu.naadf = Some(experiment);
+                    }
+                }
             }
             gpu.capture(&viewer.camera, &path, config.width, config.height)?;
             if let Some(adaptive) = &viewer.adaptive_view {
@@ -3950,9 +4067,8 @@ pub fn run() -> Result<()> {
             json.push_str(&format!(",\"brick_directional_cache\":{{\"builds\":{},\"latest_build_ms\":{},\"total_build_ms\":{},\"gpu_bytes\":{},\"uploaded_bytes\":{},\"latest_scratch_bytes\":{},\"peak_scratch_bytes\":{},\"immutable_revision_publication\":true}}}}", m.builds, m.latest_build_ms, m.total_build_ms, m.latest_gpu_bytes, m.uploaded_bytes, m.latest_scratch_bytes, m.peak_scratch_bytes));
         }
         if let Some(live) = &viewer.live_water {
-            let d = live.fluid.diagnostics();
             json.pop();
-            json.push_str(&format!(",\"live_water\":{{\"tick\":{},\"tick_seconds\":0.1,\"last_step_ms\":{},\"loaded_cells\":{},\"stored_cells\":{},\"initial_mass\":{},\"additions\":{},\"removals\":{},\"resident_mass\":{},\"dormant_mass\":{},\"displaced_mass\":{},\"conserved\":{},\"activation_error\":{:?}}}}}",d.tick,live.last_step_ms,d.loaded_cells,d.stored_cells,d.initial_mass,d.additions,d.removals,d.resident_mass,d.dormant_mass,d.displaced_mass,d.conserved(),live.activation_error.as_deref().unwrap_or("")));
+            json.push_str(&format!(",\"live_water\":{}}}", live.diagnostics_json()));
         }
         json.pop();
         json.push_str(&format!(",\"topology_owner\":{{\"enabled\":{},\"world_revision\":{},\"exact_at_all_distances\":{},\"full_G3_passed\":false}}}}",viewer.world.topology_base_cells().is_some(),viewer.world.revision(),viewer.world.topology_base_cells().is_some()));

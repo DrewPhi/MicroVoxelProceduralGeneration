@@ -63,6 +63,10 @@ def demo_flow(save_path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--model', choices=['ca', 'discrete', 'procedural', 'moving'], default='ca')
+    p.add_argument('--duration', type=float, default=15.)
+    p.add_argument('--width', type=int, default=1280)
+    p.add_argument('--height', type=int, default=720)
     p.add_argument('--binary', type=Path, default=ROOT / 'target/release/frontier')
     p.add_argument('game_args', nargs=argparse.REMAINDER)
     a = p.parse_args()
@@ -71,11 +75,13 @@ def main():
     extra = a.game_args[1:] if a.game_args[:1] == ['--'] else a.game_args
     cmd = [
         str(a.binary.resolve()), '--preset', 'seeded-world', '--seed', '19',
-        '--water-demo', '--width', '1280', '--height', '720', '--naadf-radius', '8',
+        '--water-demo', '--width', str(a.width), '--height', str(a.height), '--naadf-radius', '8',
         '--water-save', str(out / 'world.save'),
         '--capture-on-exit', str(out / 'exit.png'),
         '--report', str(out / 'game.json'),
     ] + extra
+    if a.model != 'ca':
+        cmd += ['--water-model', a.model]
     x = None
     app = None
     rec = None
@@ -102,13 +108,14 @@ def main():
             x.focus(window, app.pid)
             rec = subprocess.Popen([
                 'ffmpeg', '-y', '-f', 'x11grab', '-framerate', '20',
-                '-window_id', str(window), '-video_size', '1280x720',
-                '-draw_mouse', '0', '-i', os.environ['DISPLAY'], '-t', '40', '-an',
+                '-window_id', str(window), '-video_size', f'{a.width}x{a.height}',
+                '-draw_mouse', '0', '-i', os.environ['DISPLAY'], '-t', str(120 + a.duration), '-an',
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22',
                 '-threads', '2', '-pix_fmt', 'yuv420p', str(out / 'water.mp4'),
             ], stdout=rlog, stderr=subprocess.STDOUT)
             note('record_start')
-            for marker, label in [('water simulation started', 'before'), ('water demo dam opened', 'breach')]:
+            markers = ([(a.model + ' water simulation started', 'before')] if a.model != 'ca' else [('water simulation started', 'before'), ('water demo dam opened', 'breach')])
+            for marker, label in markers:
                 while marker not in (out / 'game.log').read_text():
                     if app.poll() is not None:
                         raise RuntimeError('game exited while awaiting ' + marker)
@@ -116,7 +123,7 @@ def main():
                         raise RuntimeError('timeout awaiting ' + marker)
                     time.sleep(0.02)
                 note(label)
-            time.sleep(6)
+            time.sleep(a.duration if a.model != 'ca' else 6)
             note('after')
             x.request_close(window, app.pid)
             app.wait(timeout=30)
@@ -129,7 +136,7 @@ def main():
             frame_times = {
                 'before': min(
                     marks['before'] - marks['record_start'] + 0.7,
-                    marks['breach'] - marks['record_start'] - 0.5,
+                    marks.get('breach', marks['after']) - marks['record_start'] - 0.5,
                 ),
                 'after': marks['after'] - marks['record_start'] - 0.3,
             }
@@ -142,7 +149,18 @@ def main():
             report = json.loads((out / 'game.json').read_text())
             if not report.get('live_water', {}).get('conserved'):
                 raise RuntimeError('water report conservation failed')
-            flow = demo_flow(out / 'world.save')
+            if a.model == 'discrete':
+                flow = report['live_water']
+                if flow.get('additions', 0) <= 0 or flow.get('removals', 0) <= 0:
+                    raise RuntimeError('continuous flow did not reach both source and outlet')
+                if not (out / 'world.save').stat().st_size:
+                    raise RuntimeError('empty discrete checkpoint')
+            elif a.model in ('procedural', 'moving'):
+                flow = report['live_water']
+                if not (out / 'world.save').stat().st_size:
+                    raise RuntimeError('empty procedural checkpoint')
+            else:
+                flow = demo_flow(out / 'world.save')
             (out / 'flow.json').write_text(json.dumps(flow, indent=2) + '\n')
     finally:
         if x:

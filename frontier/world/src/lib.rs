@@ -11,11 +11,14 @@ use std::{
 
 pub mod affine_bounds;
 mod alpine;
+pub mod discrete_water;
 pub mod edit;
 mod edit_index;
 pub use edit_index::EditQueryStats;
 pub mod fluid;
+pub mod moving_water;
 pub mod physical_fluid;
+pub mod procedural_water;
 #[cfg(test)]
 mod seeded_bounds_tests;
 pub mod summary;
@@ -410,6 +413,59 @@ impl World {
             |&wet| if wet { Material::Water } else { Material::Air },
         )
     }
+    /// Immutable static-render input retaining terrain edits and vegetation.
+    /// Cache this snapshot until solids change: creating it each fluid tick
+    /// would unnecessarily give static extraction a new revision.
+    pub fn without_fluid_snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        if !snapshot.fluid.is_empty() {
+            let changed = snapshot.fluid.keys().copied().collect();
+            snapshot.fluid = Arc::new(BTreeMap::new());
+            snapshot.record_changes(changed);
+            snapshot.bump_revision();
+        }
+        snapshot
+    }
+    /// Static-render snapshot without fluid overrides inside this half-open box.
+    /// Wet cells and dry source-water tombstones outside the box remain owned by
+    /// this snapshot. Terrain, vegetation and edits are shared unchanged. Empty
+    /// or reversed bounds return an unchanged clone with the same revision.
+    pub fn without_fluid_in_bounds(&self, min: Cell, max_exclusive: Cell) -> Self {
+        let mut snapshot = self.clone();
+        if min.x >= max_exclusive.x || min.y >= max_exclusive.y || min.z >= max_exclusive.z {
+            return snapshot;
+        }
+        // Cell order is x/y/z. Restrict the ordered scan to the requested x
+        // slab, then select exact y/z bounds without integer boundary arithmetic.
+        let slab_min = Cell {
+            x: min.x,
+            y: i64::MIN,
+            z: i64::MIN,
+        };
+        let slab_max = Cell {
+            x: max_exclusive.x,
+            y: i64::MIN,
+            z: i64::MIN,
+        };
+        let removed: Vec<_> = self
+            .fluid
+            .range(slab_min..slab_max)
+            .filter_map(|(&c, _)| {
+                (c.y >= min.y && c.y < max_exclusive.y && c.z >= min.z && c.z < max_exclusive.z)
+                    .then_some(c)
+            })
+            .collect();
+        if removed.is_empty() {
+            return snapshot;
+        }
+        let fluid = Arc::make_mut(&mut snapshot.fluid);
+        for c in &removed {
+            fluid.remove(c);
+        }
+        snapshot.record_changes(removed);
+        snapshot.bump_revision();
+        snapshot
+    }
     /// Batch only changed visible occupancies. Fractional mass remains in the
     /// simulator, while each occupied cell renders on the native voxel lattice.
     pub fn set_fluid_occupancy(&mut self, values: impl IntoIterator<Item = (Cell, bool)>) {
@@ -420,10 +476,15 @@ impl World {
             if self.fluid.get(&c) == Some(&wet) {
                 continue;
             }
-            let column = columns
-                .entry((c.x, c.z))
-                .or_insert_with(|| self.column(c.x, c.z));
-            let base = column.canonical_material_without_fluid(c.y);
+            // Explicit edits already determine canonical terrain/vegetation.
+            // A live edited basin must not regenerate its procedural column
+            // every time one of its water cells moves.
+            let base = self.edits.get(&c).copied().unwrap_or_else(|| {
+                columns
+                    .entry((c.x, c.z))
+                    .or_insert_with(|| self.column(c.x, c.z))
+                    .canonical_material_without_fluid(c.y)
+            });
             if !matches!(base, Material::Air | Material::Water) {
                 // A solid edit hides the cell, but its fluid tombstone must
                 // replace any old wet override before the solid is removed.
@@ -781,6 +842,176 @@ fn raycast_matching(
 #[cfg(test)]
 mod live_water_overlay_tests {
     use super::*;
+    #[test]
+    fn static_snapshot_retains_edits_without_mutating_live_water() {
+        let mut world = World::fbm(7, Default::default()).unwrap();
+        let c = Cell {
+            x: 0,
+            y: world.height_cells(0, 0) + 30,
+            z: 0,
+        };
+        let stone = Cell { x: 1, ..c };
+        world.set(stone, Material::Stone);
+        world.set_fluid_occupancy([(c, true)]);
+        let frozen = world.without_fluid_snapshot();
+        assert_eq!(frozen.material(c), Material::Air);
+        assert_eq!(frozen.material(stone), Material::Stone);
+        assert_eq!(world.material(c), Material::Water);
+        assert_ne!(frozen.revision(), world.revision());
+        assert_eq!(frozen.changed_edit_cells(&world), vec![c]);
+        world.set_fluid_occupancy([(c, false)]);
+        assert_eq!(frozen.material(c), Material::Air);
+        assert_eq!(
+            frozen.without_fluid_snapshot().revision(),
+            frozen.revision()
+        );
+    }
+    #[test]
+    fn bounded_static_snapshots_preserve_dormant_wet_cells_and_dry_tombstones() {
+        let mut world = World::fbm(7, Default::default()).unwrap().with_vegetation();
+        let y = 16000;
+        let a_wet = Cell { x: -2, y, z: -2 };
+        let a_dry = Cell { x: -1, y, z: -2 };
+        let a_hidden = Cell {
+            x: -2,
+            y: y + 1,
+            z: -2,
+        };
+        let b_wet = Cell { x: 2, y, z: 2 };
+        let b_dry = Cell { x: 3, y, z: 2 };
+        let on_x_max = Cell { x: 0, y, z: -2 };
+        let on_y_max = Cell {
+            x: -2,
+            y: y + 2,
+            z: -2,
+        };
+        let on_z_max = Cell { x: -2, y, z: 0 };
+        world.set_batch([(a_dry, Material::Water), (b_dry, Material::Water)]);
+        world.set_fluid_occupancy([
+            (a_wet, true),
+            (a_dry, false),
+            (a_hidden, true),
+            (b_wet, true),
+            (b_dry, false),
+            (on_x_max, true),
+            (on_y_max, true),
+            (on_z_max, true),
+        ]);
+        world.set(a_hidden, Material::Stone);
+        let original = world.clone();
+        let a = world.without_fluid_in_bounds(
+            Cell { x: -3, y, z: -3 },
+            Cell {
+                x: 0,
+                y: y + 2,
+                z: 0,
+            },
+        );
+        let b = world.without_fluid_in_bounds(
+            Cell { x: 2, y, z: 2 },
+            Cell {
+                x: 4,
+                y: y + 1,
+                z: 3,
+            },
+        );
+        assert_eq!(a.material(a_wet), Material::Air);
+        assert_eq!(a.material(a_dry), Material::Water);
+        assert_eq!(a.material(a_hidden), Material::Stone);
+        assert_eq!(a.material(b_wet), Material::Water);
+        assert_eq!(a.material(b_dry), Material::Air);
+        assert_eq!(b.material(a_wet), Material::Water);
+        assert_eq!(b.material(a_dry), Material::Air);
+        assert_eq!(b.material(b_wet), Material::Air);
+        assert_eq!(b.material(b_dry), Material::Water);
+        for c in [on_x_max, on_y_max, on_z_max] {
+            assert_eq!(a.material(c), Material::Water);
+        }
+        assert_eq!(*world.fluid, *original.fluid);
+        assert_eq!(world.revision(), original.revision());
+        assert_eq!(world.change_token, original.change_token);
+        for snapshot in [&a, &b] {
+            assert!(snapshot.shares_source_lineage(&world));
+            assert!(Arc::ptr_eq(&snapshot.edits, &world.edits));
+            assert_eq!(
+                snapshot.terrain_edits().collect::<Vec<_>>(),
+                world.terrain_edits().collect::<Vec<_>>()
+            );
+            for c in [a_wet, a_dry, a_hidden, b_wet, b_dry] {
+                assert_eq!(
+                    snapshot.material_without_fluid(c),
+                    world.material_without_fluid(c)
+                );
+            }
+        }
+        let mut removed = vec![a_wet, a_dry, a_hidden];
+        removed.sort_unstable();
+        assert_eq!(
+            world
+                .changes
+                .lock()
+                .unwrap()
+                .candidates(a.change_token, world.change_token),
+            Some(removed)
+        );
+        assert_eq!(
+            world
+                .changes
+                .lock()
+                .unwrap()
+                .candidates(b.change_token, world.change_token),
+            Some(vec![b_wet, b_dry])
+        );
+    }
+    #[test]
+    fn empty_reversed_and_disjoint_fluid_bounds_do_not_change_snapshot_revision() {
+        let mut world = World::new(7);
+        let c = Cell {
+            x: -4,
+            y: 16000,
+            z: -4,
+        };
+        world.set_fluid_occupancy([(c, true)]);
+        let bounds = [
+            (c, c),
+            (Cell { x: c.x + 1, ..c }, c),
+            (
+                c,
+                Cell {
+                    x: c.x + 1,
+                    y: c.y - 1,
+                    z: c.z + 1,
+                },
+            ),
+            (
+                c,
+                Cell {
+                    x: c.x + 1,
+                    y: c.y + 1,
+                    z: c.z - 1,
+                },
+            ),
+            (
+                Cell {
+                    x: i64::MAX - 1,
+                    y: i64::MIN,
+                    z: i64::MIN,
+                },
+                Cell {
+                    x: i64::MAX,
+                    y: i64::MAX,
+                    z: i64::MAX,
+                },
+            ),
+        ];
+        for (min, max) in bounds {
+            let snapshot = world.without_fluid_in_bounds(min, max);
+            assert_eq!(snapshot.revision(), world.revision());
+            assert_eq!(snapshot.change_token, world.change_token);
+            assert!(Arc::ptr_eq(&snapshot.fluid, &world.fluid));
+            assert_eq!(snapshot.material(c), Material::Water);
+        }
+    }
     #[test]
     fn native_column_overlay_snapshots_diff_and_solidity_agree() {
         let mut world = World::fbm(7, Default::default()).unwrap();

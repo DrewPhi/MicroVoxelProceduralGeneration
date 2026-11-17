@@ -207,7 +207,7 @@ impl PlayerEdit {
         out
     }
 }
-fn reachable(cell: Cell, camera: Camera, reach: f64) -> bool {
+pub(crate) fn reachable(cell: Cell, camera: Camera, reach: f64) -> bool {
     let p = [cell.x, cell.y, cell.z];
     let eye = camera.position.to_array();
     (0..3)
