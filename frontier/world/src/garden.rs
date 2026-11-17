@@ -1,7 +1,8 @@
-//! Seed-to-seedling prototype: local whole-unit water uptake and a deterministic
+//! Resource-limited recursive plants: local whole-unit water uptake and a deterministic
 //! branching grammar. Native tissue is authoritative; display LOD never grows it.
+use crate::growth::{GrowthRules, Step, Tip, MAX_CELLS, MAX_STEPS, MAX_TIPS};
 use crate::{bowl::Bowl, Cell, Material, World, VOXEL_SIZE};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 const LIMIT: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tissue {
@@ -43,12 +44,6 @@ pub struct Hole {
     pub base: Material,
     pub covered: bool,
 }
-#[derive(Clone, Copy, Debug)]
-struct Step {
-    cell: Cell,
-    parent: Cell,
-    tissue: Tissue,
-}
 #[derive(Clone, Debug)]
 pub struct Plant {
     pub hole: usize,
@@ -64,6 +59,9 @@ pub struct Plant {
     pub tissue: BTreeMap<Cell, Tissue>,
     pub emergence: u8,
     program: Vec<Step>,
+    pub rules: GrowthRules,
+    tips: VecDeque<Tip>,
+    reserved: BTreeSet<Cell>,
 }
 #[derive(Clone, Debug)]
 pub struct Garden {
@@ -97,7 +95,7 @@ fn offset(c: Cell, d: [i64; 3]) -> Cell {
 }
 /// Rewriting rule: extend the main tip, grow a short rotating lateral tip,
 /// attach a three-leaf fan, repeat. All offsets/parents are native neighbors.
-fn program(seed: u64, anchor: Cell, emergence: u8) -> Vec<Step> {
+fn legacy_program(seed: u64, anchor: Cell, emergence: u8) -> Vec<Step> {
     let mut result = Vec::new();
     let mut seen = BTreeSet::from([anchor]);
     let mut push = |d: [i64; 3], parent: [i64; 3], tissue| {
@@ -147,6 +145,74 @@ fn program(seed: u64, anchor: Cell, emergence: u8) -> Vec<Step> {
         }
     }
     result
+}
+fn bootstrap(seed: u64, anchor: Cell, emergence: u8) -> Vec<Step> {
+    legacy_program(seed, anchor, emergence)
+        .into_iter()
+        .take(3 + usize::from(emergence) + 2)
+        .collect()
+}
+fn initial_tips(seed: u64, anchor: Cell, emergence: u8, legacy: bool) -> VecDeque<Tip> {
+    let dir = match (seed ^ (anchor.x as u64).wrapping_mul(31) ^ anchor.z as u64) % 4 {
+        0 => (1, 0),
+        1 => (0, 1),
+        2 => (-1, 0),
+        _ => (0, -1),
+    };
+    VecDeque::from([Tip {
+        cell: offset(
+            anchor,
+            [0, i64::from(emergence) + if legacy { 6 } else { 0 }, 0],
+        ),
+        shoot: true,
+        dx: dir.0,
+        dz: dir.1,
+        segment: 0,
+    }])
+}
+impl Plant {
+    /// Storage capacity grows with living tissue; extra capacity creates no energy.
+    pub fn energy_capacity(&self) -> f64 {
+        30. + self.tissue.len() as f64 * 0.04
+    }
+    pub fn active_tips(&self) -> usize {
+        self.tips.len()
+    }
+    pub fn has_growth(&self) -> bool {
+        self.cursor < self.program.len() || !self.tips.is_empty()
+    }
+    pub fn at_capacity(&self) -> bool {
+        self.tissue.len() >= MAX_CELLS || self.program.len() >= MAX_STEPS
+    }
+    /// Only expand exhausted instructions. Successor tips wait until their parents
+    /// have actually grown; blocked stems retire their tips, not unrelated branches.
+    fn prepare_step(&mut self) {
+        for _ in 0..32 {
+            if self.cursor < self.program.len() || self.at_capacity() || !self.rules.valid() {
+                return;
+            }
+            let Some(tip) = self.tips.pop_front() else {
+                return;
+            };
+            if self.tissue.get(&tip.cell) != Some(&Tissue::Stem) {
+                continue;
+            }
+            let (steps, tips) = tip.rewrite(self.rules);
+            for step in steps {
+                if self.program.len() >= MAX_STEPS {
+                    break;
+                }
+                if self.reserved.insert(step.cell) {
+                    self.program.push(step);
+                }
+            }
+            for tip in tips {
+                if self.tips.len() < MAX_TIPS {
+                    self.tips.push_back(tip);
+                }
+            }
+        }
+    }
 }
 impl Garden {
     pub fn dig(&mut self, world: &mut World, hit: Cell) -> Result<(), &'static str> {
@@ -218,7 +284,13 @@ impl Garden {
             lit_leaves: 0,
             tissue: BTreeMap::from([(anchor, Tissue::Seed)]),
             emergence: 2,
-            program: program(world.seed(), anchor, 2),
+            program: bootstrap(world.seed(), anchor, 2),
+            rules: GrowthRules::default(),
+            tips: initial_tips(world.seed(), anchor, 2, false),
+            reserved: bootstrap(world.seed(), anchor, 2)
+                .iter()
+                .map(|s| s.cell)
+                .collect(),
         });
         Ok(())
     }
@@ -252,7 +324,9 @@ impl Garden {
         let emergence = (ground - anchor.y).clamp(1, 6) as u8;
         let p = self.plants.last_mut().unwrap();
         p.emergence = emergence;
-        p.program = program(world.seed(), anchor, emergence);
+        p.program = bootstrap(world.seed(), anchor, emergence);
+        p.tips = initial_tips(world.seed(), anchor, emergence, false);
+        p.reserved = p.program.iter().map(|s| s.cell).collect();
         Ok(())
     }
     pub fn apply_tissue(&self, world: &mut World) {
@@ -374,10 +448,23 @@ impl Garden {
             }
             p.lit_leaves = 0;
             if sun[1] > 0. && (p.water > 0 || p.hydration > 0) {
-                for (&c, &t) in &p.tissue {
-                    if t != Tissue::Leaf {
-                        continue;
-                    }
+                let leaves = p
+                    .tissue
+                    .iter()
+                    .filter(|(_, t)| **t == Tissue::Leaf)
+                    .map(|(&c, _)| c)
+                    .collect::<Vec<_>>();
+                let stride = leaves.len().div_ceil(64).max(1);
+                let mut sampled = 0;
+                let mut lit = 0;
+                for c in leaves
+                    .iter()
+                    .skip(p.age as usize % stride)
+                    .step_by(stride)
+                    .take(64)
+                    .copied()
+                {
+                    sampled += 1;
                     let center = c.center_m();
                     let exit = VOXEL_SIZE * 0.5001 / sun.iter().map(|v| v.abs()).fold(0., f64::max);
                     let origin = std::array::from_fn(|a| center[a] + sun[a] * exit);
@@ -390,43 +477,55 @@ impl Garden {
                         world.height_m(x, z) > center[1] + sun[1] * distance
                     });
                     if !blocked {
-                        p.lit_leaves += 1;
+                        lit += 1;
                     }
                 }
-                p.energy = (p.energy + p.lit_leaves as f64 * 0.55 * sun[1]).min(30.);
+                p.lit_leaves = if sampled == 0 {
+                    0
+                } else {
+                    (lit * leaves.len() / sampled) as u32
+                };
+                p.energy =
+                    (p.energy + p.lit_leaves as f64 * 0.55 * sun[1]).min(p.energy_capacity());
             }
             p.energy = (p.energy - p.tissue.values().map(|t| t.maintenance()).sum::<f64>()).max(0.);
-            if p.cursor >= p.program.len() {
-                continue;
-            }
-            let next = p.program[p.cursor];
-            if !p.tissue.contains_key(&next.parent) {
+            // Small seedlings grow one cell/s; larger canopies grow up to eight.
+            // Every cell still pays full energy/water cost. No unbounded rewrite.
+            let budget = (1 + p.lit_leaves / 8).min(8);
+            for _ in 0..budget {
+                p.prepare_step();
+                if p.cursor >= p.program.len() || p.at_capacity() {
+                    break;
+                }
+                let next = p.program[p.cursor];
+                if !p.tissue.contains_key(&next.parent) {
+                    p.cursor += 1;
+                    continue;
+                }
+                let m = world.material(next.cell);
+                let allowed = m == Material::Air
+                    || ((next.tissue == Tissue::Root
+                        || (next.tissue == Tissue::Stem
+                            && next.cell.y <= h.seed.y + i64::from(p.emergence)))
+                        && matches!(m, Material::Sand | Material::Soil));
+                if !allowed {
+                    p.cursor += 1;
+                    continue;
+                }
+                if p.energy < next.tissue.cost() || (p.hydration == 0 && p.water == 0) {
+                    break;
+                }
+                if p.hydration == 0 {
+                    p.water -= 1;
+                    p.transpired += 1;
+                    p.hydration = 4;
+                }
+                p.energy -= next.tissue.cost();
+                p.hydration -= 1;
                 p.cursor += 1;
-                continue;
+                p.tissue.insert(next.cell, next.tissue);
+                world.set(next.cell, next.tissue.material());
             }
-            let m = world.material(next.cell);
-            let allowed = m == Material::Air
-                || ((next.tissue == Tissue::Root
-                    || (next.tissue == Tissue::Stem
-                        && next.cell.y <= h.seed.y + i64::from(p.emergence)))
-                    && matches!(m, Material::Sand | Material::Soil));
-            if !allowed {
-                p.cursor += 1;
-                continue;
-            }
-            if p.energy < next.tissue.cost() || (p.hydration == 0 && p.water == 0) {
-                continue;
-            }
-            if p.hydration == 0 {
-                p.water -= 1;
-                p.transpired += 1;
-                p.hydration = 4;
-            }
-            p.energy -= next.tissue.cost();
-            p.hydration -= 1;
-            p.cursor += 1;
-            p.tissue.insert(next.cell, next.tissue);
-            world.set(next.cell, next.tissue.material());
         }
         debug_assert!(bowl.conserved());
         debug_assert!(self.water_accounted() == bowl.plant_transferred);
@@ -456,7 +555,7 @@ impl Garden {
     }
     pub fn snapshot(&self) -> String {
         let mut s = format!(
-            "GARDEN2 {} {} {} {} {}\n",
+            "GARDEN3 {} {} {} {} {}\n",
             self.seeds, self.sand, self.soil, self.tick, self.phase
         );
         for h in &self.holes {
@@ -484,6 +583,37 @@ impl Garden {
                 p.uptake,
                 p.emergence
             );
+            s += &format!(
+                "R {i} {} {} {} {}\n",
+                p.rules.shoot_branch_every,
+                p.rules.branch_fork_every,
+                p.rules.branch_rise_every,
+                p.rules.leaf_every
+            );
+            for step in &p.program {
+                s += &format!(
+                    "A {i} {} {} {} {} {} {} {}\n",
+                    step.cell.x,
+                    step.cell.y,
+                    step.cell.z,
+                    step.parent.x,
+                    step.parent.y,
+                    step.parent.z,
+                    step.tissue as u8
+                );
+            }
+            for tip in &p.tips {
+                s += &format!(
+                    "T {i} {} {} {} {} {} {} {}\n",
+                    tip.cell.x,
+                    tip.cell.y,
+                    tip.cell.z,
+                    u8::from(tip.shoot),
+                    tip.dx,
+                    tip.dz,
+                    tip.segment
+                );
+            }
             for (c, t) in &p.tissue {
                 s += &format!("C {i} {} {} {} {}\n", c.x, c.y, c.z, *t as u8);
             }
@@ -491,7 +621,7 @@ impl Garden {
         s
     }
     pub fn restore(s: &str, seed: u64) -> Result<Self, &'static str> {
-        if s.len() > 2_000_000 {
+        if s.len() > 32_000_000 {
             return Err("garden save too large");
         }
         let mut lines = s.lines();
@@ -507,7 +637,7 @@ impl Garden {
                 .filter(|v| v.is_finite())
                 .ok_or("invalid garden number")
         };
-        if h.len() != 6 || !matches!(h[0], "GARDEN1" | "GARDEN2") {
+        if h.len() != 6 || !matches!(h[0], "GARDEN1" | "GARDEN2" | "GARDEN3") {
             return Err("invalid garden version");
         }
         let mut g = Self {
@@ -526,6 +656,7 @@ impl Garden {
         {
             return Err("invalid garden header");
         }
+        let mut rules_seen = BTreeSet::new();
         for line in lines {
             let v: Vec<_> = line.split_whitespace().collect();
             match v.first().copied() {
@@ -564,7 +695,7 @@ impl Garden {
                 }
                 Some("P")
                     if (h[0] == "GARDEN1" && v.len() == 10)
-                        || (h[0] == "GARDEN2" && v.len() == 11) =>
+                        || (matches!(h[0], "GARDEN2" | "GARDEN3") && v.len() == 11) =>
                 {
                     let i = usize::try_from(num(v[1])?).map_err(|_| "invalid hole")?;
                     let hole = g.holes.get(i).ok_or("missing hole")?;
@@ -588,28 +719,109 @@ impl Garden {
                         } else {
                             2
                         },
-                        program: program(
-                            seed,
-                            hole.seed,
-                            if v.len() == 11 {
-                                u8::try_from(num(v[10])?).map_err(|_| "bad emergence")?
-                            } else {
-                                2
-                            },
-                        ),
+                        program: if h[0] == "GARDEN3" {
+                            Vec::new()
+                        } else {
+                            legacy_program(
+                                seed,
+                                hole.seed,
+                                if v.len() == 11 {
+                                    u8::try_from(num(v[10])?).map_err(|_| "bad emergence")?
+                                } else {
+                                    2
+                                },
+                            )
+                        },
+                        rules: GrowthRules::default(),
+                        tips: VecDeque::new(),
+                        reserved: BTreeSet::new(),
                     };
                     if !(1..=6).contains(&p.emergence)
                         || p.age > g.tick
                         || p.germination > 4
-                        || !(0. ..=30.).contains(&p.energy)
+                        || !(0. ..=(30. + MAX_CELLS as f64 * 0.04)).contains(&p.energy)
                         || p.water > 2
                         || p.hydration > 4
-                        || p.cursor > p.program.len()
+                        || p.cursor > MAX_STEPS
+                        || (h[0] != "GARDEN3" && p.cursor > p.program.len())
                         || p.transpired.checked_add(u64::from(p.water)) != Some(p.uptake)
                     {
                         return Err("invalid plant state");
                     }
                     g.plants.push(p);
+                }
+                Some("R") if h[0] == "GARDEN3" && v.len() == 6 => {
+                    let i = usize::try_from(num(v[1])?).map_err(|_| "bad plant")?;
+                    let p = g.plants.get_mut(i).ok_or("missing plant")?;
+                    let count = |v: &str| u32::try_from(num(v)?).map_err(|_| "bad rule");
+                    let rules = GrowthRules {
+                        shoot_branch_every: count(v[2])?,
+                        branch_fork_every: count(v[3])?,
+                        branch_rise_every: count(v[4])?,
+                        leaf_every: count(v[5])?,
+                    };
+                    if !rules.valid() || !rules_seen.insert(i) {
+                        return Err("invalid or duplicate rules");
+                    }
+                    p.rules = rules;
+                }
+                Some("A" | "T") if h[0] == "GARDEN3" && v.len() == 9 => {
+                    let i = usize::try_from(num(v[1])?).map_err(|_| "bad plant")?;
+                    let p = g.plants.get_mut(i).ok_or("missing plant")?;
+                    let coord = |v: &str| {
+                        v.parse::<i64>()
+                            .ok()
+                            .filter(|v| v.unsigned_abs() <= 1u64 << 40)
+                            .ok_or("invalid growth coordinate")
+                    };
+                    let cell = Cell {
+                        x: coord(v[2])?,
+                        y: coord(v[3])?,
+                        z: coord(v[4])?,
+                    };
+                    if v[0] == "A" {
+                        let parent = Cell {
+                            x: coord(v[5])?,
+                            y: coord(v[6])?,
+                            z: coord(v[7])?,
+                        };
+                        let tissue = match v[8] {
+                            "1" => Tissue::Root,
+                            "2" => Tissue::Stem,
+                            "3" => Tissue::Leaf,
+                            _ => return Err("bad instruction tissue"),
+                        };
+                        if p.program.len() >= MAX_STEPS
+                            || !p.reserved.insert(cell)
+                            || cell.x.abs_diff(parent.x)
+                                + cell.y.abs_diff(parent.y)
+                                + cell.z.abs_diff(parent.z)
+                                != 1
+                        {
+                            return Err("invalid growth instruction");
+                        }
+                        p.program.push(Step {
+                            cell,
+                            parent,
+                            tissue,
+                        });
+                    } else {
+                        let tip = Tip {
+                            cell,
+                            shoot: match v[5] {
+                                "1" => true,
+                                "0" => false,
+                                _ => return Err("invalid bud kind"),
+                            },
+                            dx: v[6].parse().map_err(|_| "bad bud direction")?,
+                            dz: v[7].parse().map_err(|_| "bad bud direction")?,
+                            segment: u32::try_from(num(v[8])?).map_err(|_| "bad bud age")?,
+                        };
+                        if !tip.valid() || p.tips.len() >= MAX_TIPS {
+                            return Err("invalid growth tip");
+                        }
+                        p.tips.push_back(tip);
+                    }
                 }
                 Some("C") if v.len() == 6 => {
                     let i = usize::try_from(num(v[1])?).map_err(|_| "invalid plant")?;
@@ -626,15 +838,8 @@ impl Garden {
                         "3" => Tissue::Leaf,
                         _ => return Err("invalid tissue"),
                     };
-                    let valid = if t == Tissue::Seed {
-                        c == g.holes[p.hole].seed
-                    } else {
-                        p.program[..p.cursor]
-                            .iter()
-                            .any(|n| n.cell == c && n.tissue == t)
-                    };
-                    if !valid || p.tissue.insert(c, t).is_some() {
-                        return Err("invalid tissue placement");
+                    if p.tissue.len() >= MAX_CELLS || p.tissue.insert(c, t).is_some() {
+                        return Err("duplicate or excessive tissue");
                     }
                 }
                 _ => return Err("invalid garden record"),
@@ -644,24 +849,55 @@ impl Garden {
             return Err("seed conservation failed");
         }
         let mut occupied = BTreeSet::new();
-        for p in &g.plants {
+        for (i, p) in g.plants.iter_mut().enumerate() {
             let anchor = g.holes[p.hole].seed;
             if p.tissue.get(&anchor) != Some(&Tissue::Seed) {
                 return Err("missing seed");
             }
+            if h[0] != "GARDEN3" {
+                p.reserved = p.program.iter().map(|s| s.cell).collect();
+                p.tips = initial_tips(seed, anchor, p.emergence, true);
+            } else if !rules_seen.contains(&i) {
+                return Err("missing growth rules");
+            }
+            if p.cursor > p.program.len() || p.energy > p.energy_capacity() {
+                return Err("invalid growth cursor or energy capacity");
+            }
+            let instructions = p
+                .program
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.cell, (i, s)))
+                .collect::<BTreeMap<_, _>>();
             for (&c, &t) in &p.tissue {
                 if !occupied.insert(c) {
                     return Err("overlapping tissue");
                 }
-                if t != Tissue::Seed {
-                    let step = p
-                        .program
-                        .iter()
-                        .find(|n| n.cell == c)
-                        .ok_or("unknown tissue")?;
-                    if !p.tissue.contains_key(&step.parent) {
-                        return Err("unsupported tissue");
+                if t == Tissue::Seed {
+                    if c != anchor {
+                        return Err("invalid seed position");
                     }
+                } else {
+                    let &(i, step) = instructions.get(&c).ok_or("unknown tissue")?;
+                    if i >= p.cursor || t != step.tissue || !p.tissue.contains_key(&step.parent) {
+                        return Err("invalid or unsupported tissue");
+                    }
+                }
+            }
+            for (j, step) in p.program.iter().enumerate() {
+                if step.parent != anchor
+                    && instructions.get(&step.parent).is_none_or(|(i, _)| *i >= j)
+                {
+                    return Err("invalid instruction parent");
+                }
+            }
+            for tip in &p.tips {
+                if p.tissue.get(&tip.cell) != Some(&Tissue::Stem)
+                    && instructions
+                        .get(&tip.cell)
+                        .is_none_or(|(_, s)| s.tissue != Tissue::Stem)
+                {
+                    return Err("unsupported growth tip");
                 }
             }
         }
@@ -794,6 +1030,88 @@ mod tests {
         assert_eq!(w.material(blocked), Material::Stone);
         assert!(!g.plants[0].tissue.contains_key(&offset(blocked, [0, 1, 0])));
         assert!(Garden::restore(&g.snapshot(), 19).is_ok());
+    }
+    #[test]
+    fn recursive_growth_becomes_large_and_restart_keeps_the_frontier() {
+        let (mut w, mut g, mut b, top) = scene();
+        g.dig(&mut w, top).unwrap();
+        g.plant(&mut w, 0).unwrap();
+        g.cover(&mut w, 0).unwrap();
+        supply(&mut b, top, 5000);
+        for _ in 0..12000 {
+            g.advance(&mut w, &mut b, 0.25, [0.2, 0.95, 0.24]);
+        }
+        let p = &g.plants[0];
+        let height = p.tissue.keys().map(|c| c.y).max().unwrap() - g.holes[0].seed.y;
+        eprintln!(
+            "recursive plant cells={} height_cells={height} tips={}",
+            p.tissue.len(),
+            p.active_tips()
+        );
+        assert!(p.tissue.len() > 10_000);
+        assert!(p.energy_capacity() > 400.);
+        assert!(height > 64);
+        assert!(p.active_tips() > 4);
+        assert!(p.has_growth());
+        assert!(p.program.iter().all(|s| s.cell.x.abs_diff(s.parent.x)
+            + s.cell.y.abs_diff(s.parent.y)
+            + s.cell.z.abs_diff(s.parent.z)
+            == 1));
+        let saved = g.snapshot();
+        let mut restored = Garden::restore(&saved, 19).unwrap();
+        assert_eq!(restored.snapshot(), saved);
+        let mut other_world = w.clone();
+        let mut other_water = b.clone();
+        for _ in 0..80 {
+            g.advance(&mut w, &mut b, 0.25, [0.2, 0.95, 0.24]);
+            restored.advance(&mut other_world, &mut other_water, 0.25, [0.2, 0.95, 0.24]);
+        }
+        assert_eq!(restored.snapshot(), g.snapshot());
+        assert_eq!(other_water.snapshot(19), b.snapshot(19));
+        assert!(b.conserved());
+        let malformed = saved.replacen("R 0 8 12 3 2", "R 0 0 12 3 2", 1);
+        assert!(Garden::restore(&malformed, 19).is_err());
+    }
+    #[test]
+    fn legacy_seedling_continues_with_recursive_tips_and_rules_are_data() {
+        let (mut w, mut g, mut b, top) = scene();
+        g.dig(&mut w, top).unwrap();
+        g.plant(&mut w, 0).unwrap();
+        g.cover(&mut w, 0).unwrap();
+        let anchor = g.holes[0].seed;
+        g.plants[0].program = legacy_program(19, anchor, 2);
+        g.plants[0].reserved = g.plants[0].program.iter().map(|s| s.cell).collect();
+        g.plants[0].tips = initial_tips(19, anchor, 2, true);
+        supply(&mut b, top, 500);
+        for _ in 0..40 {
+            g.advance(&mut w, &mut b, 0.25, [0., 1., 0.]);
+        }
+        let legacy = g
+            .snapshot()
+            .lines()
+            .filter(|l| !matches!(l.as_bytes().first(), Some(b'R' | b'A' | b'T')))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("GARDEN3", "GARDEN2");
+        let mut restored = Garden::restore(&legacy, 19).unwrap();
+        assert_eq!(restored.plants[0].tissue, g.plants[0].tissue);
+        for _ in 0..1600 {
+            restored.advance(&mut w, &mut b, 0.25, [0., 1., 0.]);
+        }
+        assert!(restored.cells() > 100);
+        assert!(Garden::restore(&restored.snapshot(), 19).is_ok());
+        let tip = Tip {
+            cell: anchor,
+            shoot: false,
+            dx: 1,
+            dz: 0,
+            segment: 3,
+        };
+        let mut rules = GrowthRules::default();
+        rules.branch_fork_every = 4;
+        assert_eq!(tip.rewrite(rules).1.len(), 2);
+        rules.branch_fork_every = 8;
+        assert_eq!(tip.rewrite(rules).1.len(), 1);
     }
     #[test]
     fn old_bowl_saves_migrate_without_losing_water() {

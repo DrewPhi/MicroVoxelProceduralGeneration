@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-17",
+  "seed": 19,
+  "source": "Desert v2",
+  "voxel_m": 0.0625,
+  "fixture_command": "cargo run --release --locked -p frontier-world --example grow_recursive -- output/recursive-plant-scaled-energy/world.bowl 4000",
+  "simulated_seconds": 4000,
+  "cells": 14965,
+  "leaves": 5908,
+  "height_above_seed_m": 7,
+  "queued_tips": 512,
+  "water_scooped_units": 3952,
+  "rules": {
+    "shoot_branch_every": 8,
+    "branch_fork_every": 12,
+    "branch_rise_every": 3,
+    "leaf_every": 2
+  },
+  "bounded_work": {
+    "growth_cells_per_second": [
+      1,
+      8
+    ],
+    "light_rays_per_second_max": 64,
+    "tip_rewrites_per_growth_attempt_max": 32
+  },
+  "safety_limits": {
+    "tissue_cells": 65536,
+    "queued_tips": 512,
+    "generated_instructions": 262144
+  },
+  "capture": {
+    "png": "output/recursive-plant-scaled-energy/preview.png",
+    "resolution": [
+      1280,
+      720
+    ],
+    "eye": [
+      944,
+      67.5,
+      437
+    ],
+    "target": [
+      955.47,
+      68,
+      448.03
+    ],
+    "naadf_radius_m": 32,
+    "binary_sha256": "f89b5e5ef923c975fd04e98296e99b811568e81f420cb41dd84a3b9d29be65fd"
+  },
+  "verification": {
+    "world_tests_passed": 213,
+    "world_tests_ignored": 6,
+    "recursive_tests_passed": 7,
+    "large_restart_continuation_exact": true,
+    "legacy_garden_migration": "GARDEN1/2 supported; existing geometry/program preserved and recursive shoot appended",
+    "combined_renderer_save_test": "passed on final code; renderer test harness opt-level=0/debug=0, world remains optimized",
+    "fmt_and_diff_check": "passed",
+    "large_test": "Over 10,000 cells, height >4 m, live recursive frontier, exact continuation after reload",
+    "legacy_runtime_upgrade": {
+      "passed": true,
+      "garden": {
+        "seeds": 0,
+        "holes": 1,
+        "plants": 1,
+        "germinated": 1,
+        "tissue_cells": 25,
+        "leaves": 10,
+        "water_stored": 0,
+        "transpired": 8,
+        "tick": 88,
+        "water_ledger_matches": true
+      },
+      "inventory_valid": true,
+      "water_conserved": true
+    },
+    "renderer_test_command": "cargo test -p frontier-renderer --lib garden_save_tests --locked --config 'profile.test.package.frontier-renderer.opt-level=0' --config 'profile.test.package.frontier-renderer.debug=0'"
+  },
+  "limitations": [
+    "Accelerated fixture supplies real scooped pond water directly to soil; it bypasses bowl transport, not growth costs.",
+    "Normal gameplay still needs watering and sunlight. This is not one-bowl growth.",
+    "No arbitrary grammar editor, reproduction, mortality or structural physics yet.",
+    "Large-canopy photosynthesis estimates lit area from up to 64 deterministic rotating leaf samples.",
+    "Root moisture access remains the existing seed-neighborhood approximation.",
+    "The 512-tip budget suppresses extra forks, without stopping accepted tips."
+  ],
+  "energy_storage": {
+    "base": 30,
+    "per_living_tissue_cell": 0.04,
+    "capacity_creates_no_energy": true
+  },
+  "fixture_sun_direction": [
+    0.2,
+    0.95,
+    0.24
+  ]
+}

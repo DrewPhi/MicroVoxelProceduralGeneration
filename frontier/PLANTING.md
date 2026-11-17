@@ -1,4 +1,4 @@
-# Planting and first seedling growth
+# Planting and recursive growth
 
 From `frontier/`, rebuild and play:
 
@@ -39,27 +39,45 @@ position still resets to the shore. `--bowl-save PATH` selects another save slot
 
 ## What grows
 
-`world/src/garden.rs` generates a small branching program from repeating rules:
-extend a root, extend the shoot, attach early leaves, then repeat a main tip,
-rotating lateral tip and leaf fan. These are integer-cell steps with explicit
-parent connections. A blocked action is skipped and its unsupported descendants
-cannot grow; another branch can continue. No finished mesh or plant model is
-placed. All grown tissue becomes canonical editable world voxels.
+`world/src/growth.rs` defines a small recursive bud grammar. The runtime in
+`world/src/garden.rs` executes it lazily, only when more growth is needed:
 
-There is one starter pattern in this checkpoint. A visual growth editor,
-reproduction/mutations and seed collection are later steps. This is a modest
-seedling, not the final tree/organism system.
+- **Shoot → stem upward + shoot**, with leaves every two segments and a lateral
+  branch every eight. Successive branch sites rotate around the trunk.
+- **Branch → stem outward/upward + branch**, with leaves every two segments,
+  rising every third segment and forking into a perpendicular branch every twelve.
+  The child uses exactly the same branch rule, so it can fork again.
+- **Leaf → terminal photosynthetic voxel.** Three initial root cells and an
+  emerging shoot bootstrap the seed. Taller main shoots add a cross of stem cells
+  around their centre, producing a thicker trunk.
+
+Those four intervals are plain `GrowthRules` data, saved with each plant. They
+are the first controls for a future visual seed editor; there is no GUI editor
+or arbitrary user-authored grammar yet. Every instruction has a face-adjacent
+parent. Blocked stems retire their descendant tips while other branches continue.
+Nothing prebuilds a full plant or adds free tissue when a tip rewrites.
+
+There is no fixed number of generations. The engine currently guards each plant
+at 65,536 tissue cells, 512 queued tips and 262,144 generated instructions; the
+HUD reports the cell/instruction safety limit. New tips beyond the queue budget
+are suppressed while admitted tips continue. This keeps recursive growth bounded
+without a finished seedling shape. There is still no structural strength, falling
+branches, death, reproduction, mutation or decomposition.
 
 Tissue roles are seed, root, stem and photosynthetic leaf. Seed/Wood/Leaf are their
 current renderer materials; simulation roles remain separate. The initial seed
 contains 10 arbitrary energy units. Buried, moist seeds take four simulation
-seconds to germinate. Growth proposes one new cell per second and waits if its
-energy or hydration budget cannot pay for it.
+seconds to germinate. Small seedlings attempt one new cell per second; larger lit canopies can attempt
+up to eight. Each cell pays its full energy and water cost. Growth waits when
+those resources are insufficient.
 
 Each new tissue cell costs energy; existing roots, stems and leaves cost energy
-per second. Exposed leaves earn energy only when hydrated. Local native rays
+per second. Exposed leaves earn energy only when hydrated. Energy storage is 30 units plus
+0.04 per living tissue voxel; adding capacity does not grant energy. Local native rays
 check self-shading/nearby obstruction; a few farther height samples approximate
-terrain shadow. This is an intentionally bounded lighting approximation, not a
+terrain shadow. For large plants, at most 64 leaves are tested per second and
+the lit fraction estimates total photosynthetic area; the deterministic sample
+rotates with plant age. Maintenance still includes every tissue cell. This is an intentionally bounded lighting approximation, not a
 certified visibility calculation over the entire world.
 
 Nearby stored bowl moisture supplies roots within a bounded 37.5 cm neighborhood.
@@ -84,7 +102,9 @@ visual placeholder; it does not instantly recolor as roots consume moisture.
 ## Persistence and verification
 
 `BOWL2` retains the transferred-water ledger while reading legacy `BOWL1` saves.
-`GARDEN2` stores growth and emergence depth; `GARDEN1` remains readable.
+`GARDEN3` stores the recursive rules, instruction cursor/history, queued buds,
+emergence and tissue. `GARDEN1`/`GARDEN2` remain readable: their existing seedling
+and unfinished steps are preserved, then a recursive shoot continues at their tip.
 `POCKETS1` stores pockets, hand, terrain edits and the loose-material ledger:
 `picked + migrated = placed + carried`. Exactly one bowl and the remaining
 seed stock are validated. Legacy loose sand/soil migrate into available slots;
@@ -119,3 +139,17 @@ picked up and placed nine cells, grew 25 tissue cells including 10 leaves, and
 passed disk reload with both ledgers intact. Verification and replay metadata
 are documented in `pockets-checkpoint.json`. Earlier planting recordings describe the previous
 shortcut interaction and are retained only as historical checkpoints.
+
+## Accelerated recursive-growth fixture
+
+```sh
+cargo run --release -p frontier-world --example grow_recursive -- output/recursive-plant-scaled-energy/world.bowl 4000
+```
+
+This executes 4,000 simulation seconds using the same runtime growth rules. It
+supplies finite pond water directly into local soil, bypassing bowl transport for
+validation. It is not an actual-input playthrough or evidence that one bowl
+produces a mature plant. The measured fixture grew 14,965 cells including 5,908
+leaves, reached 7 m, and retained 512 queued tips. It used 3,952 whole water units.
+The output is a loadable desert save plus a plain cell export for inspection.
+See `recursive-growth-checkpoint.json` for verification and capture settings.

@@ -17,6 +17,7 @@ pub mod discrete_water;
 pub mod edit;
 mod edit_index;
 pub mod garden;
+pub mod growth;
 pub mod pockets;
 pub use edit_index::EditQueryStats;
 pub mod fluid;

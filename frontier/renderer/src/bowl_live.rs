@@ -432,18 +432,23 @@ impl BowlLive {
                 } else {
                     "Seed germinating"
                 }
+            } else if p.at_capacity() {
+                "Plant reached the current engine safety limit"
+            } else if !p.has_growth() {
+                "Plant tips blocked — no open growth directions"
             } else if p.water == 0 && p.hydration == 0 {
-                "Seedling thirsty — water near its base"
+                "Plant thirsty — water near its base"
             } else if p.energy < 0.85 {
-                "Seedling low on energy — needs sunlight"
+                "Plant low on energy — needs sunlight"
             } else {
-                "Seedling growing"
+                "Recursive plant growing"
             };
             out.text.push_str(&format!(
-                "\n{stage} • {} tissue cells • energy {:.1} • {} lit leaves",
+                "\n{stage} • {} cells • energy {:.1} • {} lit leaves • {} growing tips",
                 p.tissue.len(),
                 p.energy,
-                p.lit_leaves
+                p.lit_leaves,
+                p.active_tips()
             ));
         }
         let matrix = camera.matrix(camera.position, aspect);
