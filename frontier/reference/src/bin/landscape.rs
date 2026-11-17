@@ -359,6 +359,7 @@ fn main() -> Result<()> {
                     "regional" => FbmRecipe::Regional,
                     "alpine" => FbmRecipe::Alpine,
                     "seeded-world" | "world" => FbmRecipe::SeededWorld,
+                    "desert" => FbmRecipe::Desert,
                     _ => return Err("recipe must be legacy|regional|alpine|seeded-world".into()),
                 }
             }

@@ -1191,6 +1191,22 @@ fn elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             c,
         );
     }
+    if p.recipe == FbmRecipe::Desert {
+        let scale = 1800.;
+        let x = x.scale(scale);
+        let z = z.scale(scale);
+        let lo = [x.range().lo, z.range().lo];
+        let hi = [x.range().hi, z.range().hi];
+        // Bound descriptor enumeration for extremely large spatial queries.
+        // This is an explicit coarse interval, never a sampled certificate.
+        if hi[0] - lo[0] > 5600. || hi[1] - lo[1] > 5600. {
+            return Aa::interval(-32., 320.).scale(p.amplitude / 1000.);
+        }
+        return crate::desert::elevation(seed, x, z, lo, hi, true, |x, z, s| {
+            noise(x, z, seed ^ s, c)
+        })
+        .scale(p.amplitude / 1000.);
+    }
     if p.recipe == FbmRecipe::Alpine {
         return crate::alpine::elevation(x, z, p, true, |x, z, salt| noise(x, z, seed ^ salt, c));
     }

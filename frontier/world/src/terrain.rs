@@ -61,6 +61,8 @@ pub enum FbmRecipe {
     Alpine,
     /// Continuous climate, continental relief and globally addressed local drainage.
     SeededWorld,
+    /// Wind-shaped sand, exposed rock and sparse level oasis basins.
+    Desert,
 }
 
 /// Physical source settings, not display/LOD settings. Changing them changes the world.
@@ -145,6 +147,7 @@ impl FbmTerrain {
     /// source/cache identity. Elevation and material recipes evolve separately.
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
+            FbmRecipe::Desert => crate::desert::VERSION,
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
@@ -153,6 +156,7 @@ impl FbmTerrain {
     }
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
+            FbmRecipe::Desert => crate::desert::VERSION,
             FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
@@ -169,7 +173,10 @@ impl FbmTerrain {
         self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
-        if self.params.recipe == FbmRecipe::SeededWorld {
+        if matches!(
+            self.params.recipe,
+            FbmRecipe::SeededWorld | FbmRecipe::Desert
+        ) {
             return self.column_cells(x, z).visible_top;
         }
         let x = (x as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
@@ -178,6 +185,15 @@ impl FbmTerrain {
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
+            FbmRecipe::Desert => {
+                crate::desert::heights(
+                    self.seed,
+                    self.params,
+                    x * self.params.horizontal_scale,
+                    z * self.params.horizontal_scale,
+                )
+                .1
+            }
             FbmRecipe::SeededWorld => {
                 seeded_world::fields(
                     self.seed,
@@ -395,7 +411,10 @@ impl FbmTerrain {
     /// and continuous moisture, never a display normal or an independent patch map.
     /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
-        if self.params.recipe == FbmRecipe::SeededWorld {
+        if matches!(
+            self.params.recipe,
+            FbmRecipe::SeededWorld | FbmRecipe::Desert
+        ) {
             let c = Cell::from_meters([x, 0.0, z]);
             return self.column_cells(c.x, c.z).top_material();
         }
@@ -549,6 +568,9 @@ impl FbmTerrain {
     pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
         let xm = (x as f64 + 0.5) * VOXEL_SIZE;
         let zm = (z as f64 + 0.5) * VOXEL_SIZE;
+        if self.params.recipe == FbmRecipe::Desert {
+            return crate::desert::column(self.seed, self.params, xm, zm);
+        }
         if self.params.recipe == FbmRecipe::SeededWorld {
             return seeded_world::column(self.seed, self.params, xm, zm);
         }

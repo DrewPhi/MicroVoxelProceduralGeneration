@@ -21,6 +21,7 @@ fn noise3(p:vec3<f32>)->f32 {
     return mix(a,b,u.z);
 }
 fn density(p:vec3<f32>)->f32 {
+    if atmosphere.weather.x <= .001 { return 0.; }
     let height=(p.y-1720.)/680.;
     let wind=vec3(1.,0.,.32)*atmosphere.weather.w*atmosphere.weather.y;
     let q=p*vec3(.0030,.0038,.0030)+wind;

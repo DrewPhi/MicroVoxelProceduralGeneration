@@ -3145,6 +3145,18 @@ pub fn run() -> Result<()> {
                     terrain::seeded_world_heading(source, start_x, start_z);
             }
         }
+        if camera_preset == "desert" {
+            let o = frontier_world::desert::oasis(world.seed(), 0, 0);
+            let scale = world.fbm_terrain().unwrap().params().horizontal_scale / 1800.;
+            let target = DVec3::new(
+                (o.x + 18.) * scale,
+                o.stage * world.fbm_terrain().unwrap().params().amplitude / 1000. + 2.,
+                (o.z + 18.) * scale,
+            );
+            let direction = (target - camera.position).normalize();
+            camera.yaw = direction.x.atan2(direction.z) as f32;
+            camera.pitch = direction.y.asin() as f32;
+        }
         if camera_preset == "alpine" {
             let target = DVec3::new(0., 650., 3300.);
             let direction = (target - camera.position).normalize();

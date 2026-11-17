@@ -62,7 +62,10 @@ impl CachedPage {
             .fbm_terrain()
             .ok_or("ordered profiles require FBM")?
             .params();
-        if params.recipe == frontier_world::FbmRecipe::SeededWorld {
+        if matches!(
+            params.recipe,
+            frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+        ) {
             return Err("ordered profile experiment does not support static-water columns".into());
         }
         if world.topology_base_cells().is_some()

@@ -1043,10 +1043,12 @@ fn build_surface(
         tile.appearance = appearance;
         return Ok(tile);
     }
-    let defer_profiles = world
-        .fbm_terrain()
-        .is_none_or(|t| t.params().recipe != frontier_world::FbmRecipe::SeededWorld)
-        && samples.gpu_profiles.enabled
+    let defer_profiles = world.fbm_terrain().is_none_or(|t| {
+        !matches!(
+            t.params().recipe,
+            frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+        )
+    }) && samples.gpu_profiles.enabled
         && !near_profile_shared()
         && samples.gpu_job_allowed
         && appearance_mode(world).probe_cells == 1
@@ -1528,15 +1530,18 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
             if TRACK_EXTREMA {
                 note([x, z], h);
             }
-            let water_column = (terrain.params().recipe == frontier_world::FbmRecipe::SeededWorld)
-                .then(|| {
-                    let c = terrain.column_cells(x, z);
-                    NativeColumn {
-                        height: c.visible_top,
-                        ground_height: c.ground_top,
-                        bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
-                    }
-                });
+            let water_column = (matches!(
+                terrain.params().recipe,
+                frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+            ))
+            .then(|| {
+                let c = terrain.column_cells(x, z);
+                NativeColumn {
+                    height: c.visible_top,
+                    ground_height: c.ground_top,
+                    bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
+                }
+            });
             let top = if let Some(c) = water_column {
                 c.material(h - 1)
             } else if reuse_top {
@@ -2288,10 +2293,12 @@ impl Generator<'_> {
         self.record_affine(x, z, s, start_index);
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
-        let seeded = self
-            .world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+        let seeded = self.world.fbm_terrain().is_some_and(|t| {
+            matches!(
+                t.params().recipe,
+                frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+            )
+        });
         let method = crate::appearance_method::for_world(self.world);
         let shared_near = near_profile_shared();
         #[cfg(test)]
@@ -2835,10 +2842,12 @@ impl Generator<'_> {
             }
         };
         let weight = (stride * stride) as f32;
-        let seeded = self
-            .world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+        let seeded = self.world.fbm_terrain().is_some_and(|t| {
+            matches!(
+                t.params().recipe,
+                frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+            )
+        });
         let probe = if !seeded && self.key.width_cells > MAX_NATIVE_WIDTH && stride > 1 {
             appearance_mode(self.world).probe_cells.min(stride)
         } else {

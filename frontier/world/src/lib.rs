@@ -11,6 +11,7 @@ use std::{
 
 pub mod affine_bounds;
 mod alpine;
+pub mod desert;
 pub mod discrete_water;
 pub mod edit;
 mod edit_index;
@@ -609,7 +610,12 @@ impl World {
         let column = self
             .terrain
             .as_ref()
-            .filter(|t| t.params().recipe == FbmRecipe::SeededWorld)
+            .filter(|t| {
+                matches!(
+                    t.params().recipe,
+                    FbmRecipe::SeededWorld | FbmRecipe::Desert
+                )
+            })
             .map(|t| t.column_cells(c.x, c.z));
         let h = column.map_or_else(|| self.height_cells(c.x, c.z), |v| v.visible_top);
         self.source_with_column(c, h, column)
@@ -651,7 +657,10 @@ impl World {
             }
         }
         if let Some(terrain) = &self.terrain {
-            if terrain.params().recipe == FbmRecipe::SeededWorld {
+            if matches!(
+                terrain.params().recipe,
+                FbmRecipe::SeededWorld | FbmRecipe::Desert
+            ) {
                 return column.expect("FBM source column").material(c.y);
             }
             return if c.y >= h {

@@ -52,10 +52,12 @@ pub(crate) fn selected() -> Method {
 /// hierarchy/visibility experiments still assume three bands and fall back.
 pub(crate) fn for_world(world: &frontier_world::World) -> Method {
     let method = selected();
-    if world
-        .fbm_terrain()
-        .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld)
-        && matches!(method, Method::Hierarchy | Method::Visibility)
+    if world.fbm_terrain().is_some_and(|t| {
+        matches!(
+            t.params().recipe,
+            frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+        )
+    }) && matches!(method, Method::Hierarchy | Method::Visibility)
     {
         Method::Baseline
     } else {

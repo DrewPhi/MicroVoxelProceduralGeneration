@@ -69,7 +69,7 @@ pub fn generate_visual(world: &World, request: VisualRequest) -> Result<VisualPa
         return Err("stale source or edit revision");
     }
     let p = terrain.params();
-    if p.recipe == FbmRecipe::SeededWorld {
+    if matches!(p.recipe, FbmRecipe::SeededWorld | FbmRecipe::Desert) {
         return Err("seeded-world uses cached canonical columns; legacy omitted-band accounting is unavailable");
     }
     if request.retained_octaves == 0 || request.retained_octaves > p.octaves {
@@ -127,7 +127,7 @@ pub fn generate_visual(world: &World, request: VisualRequest) -> Result<VisualPa
         p.octaves
     };
     let per_sample = match p.recipe {
-        FbmRecipe::SeededWorld => unreachable!("rejected above"),
+        FbmRecipe::Desert | FbmRecipe::SeededWorld => unreachable!("rejected above"),
         FbmRecipe::Legacy => 3 + retained,
         FbmRecipe::Regional => 11 + p.octaves,
         FbmRecipe::RegionalUnwarped => 9 + p.octaves,

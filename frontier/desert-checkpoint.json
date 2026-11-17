@@ -1,0 +1,45 @@
+{
+  "seed": 19,
+  "recipe": "Desert v2",
+  "voxel_m": 0.0625,
+  "eye": [
+    861.6608261514164,
+    63.2,
+    431.71849120397883
+  ],
+  "target": [
+    862.4920601892925,
+    63.11873679310084,
+    432.2684422804864
+  ],
+  "resolution": [
+    1920,
+    1080
+  ],
+  "naadf_radius_m": 16,
+  "coverage_ready": true,
+  "quality_ready": false,
+  "resident_clusters": 6916,
+  "pending_clusters": 70,
+  "triangles": 1974906,
+  "frames": {
+    "sample_count": 2953,
+    "accepted_frames": 2953,
+    "missed_budget_frames": 1509,
+    "rejected_inputs": 0,
+    "p50_ms": 16.688492999999998,
+    "p95_ms": 21.495682,
+    "p99_ms": 32.205703
+  },
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "timings_provisional": "Rust compilation overlapped the visual capture; not an isolated performance benchmark.",
+  "command": "./run.sh --preset desert --seed 19 --width 1920 --height 1080 --naadf-radius 16 --seconds 50 --route static --capture-on-exit output/desert-first/oasis-player.png --report output/desert-first/oasis-player.json",
+  "checks": {
+    "world_passed": 196,
+    "world_ignored": 6,
+    "renderer_passed": 556,
+    "renderer_ignored": 39,
+    "workspace_tests_check": true,
+    "primary_rgb_identical": true
+  }
+}

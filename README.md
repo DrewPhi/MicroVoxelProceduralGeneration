@@ -4,6 +4,12 @@ A Rust voxel-world engine in early development, targeting editable 6.25 cm voxel
 stable distant terrain, caves and bounded streaming work. Production quality and
 performance gates remain open.
 
+On the `cellular-automata-game` branch, we are building a desert restoration game
+about designing seeds and growing an ecosystem. See [the game plan](GAME_PLAN.md)
+for the concept, agreed mechanics, open decisions, and first playable checkpoint.
+The first [procedural desert preset](frontier/DESERT.md) is available with
+`./run.sh --preset desert --seed 19` from `frontier/`.
+
 ## Build and play
 
 Rust 1.99.1 is pinned in `frontier/rust-toolchain.toml`. Linux requires X11/XWayland,

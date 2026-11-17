@@ -72,6 +72,10 @@ impl TerrainSummary {
 pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     let p = terrain.params();
     match p.recipe {
+        FbmRecipe::Desert => [
+            -32. * p.amplitude / 1000. - VOXEL_SIZE,
+            320. * p.amplitude / 1000.,
+        ],
         FbmRecipe::SeededWorld => [
             (-402.0 * p.amplitude / 1000.0).next_down() - VOXEL_SIZE,
             (1663.0 * p.amplitude / 1000.0).next_up(),
@@ -115,7 +119,7 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
     let n = 16.0;
     match p.recipe {
         // Local river banks are bounded through the source-specific affine path.
-        FbmRecipe::SeededWorld => f64::INFINITY,
+        FbmRecipe::Desert | FbmRecipe::SeededWorld => f64::INFINITY,
         FbmRecipe::Alpine => {
             // Work in authored scene meters then scale to physical meters.
             // smooth(1-d²) has |gradient|<=3|gradient d| on its active support.
@@ -215,7 +219,10 @@ pub fn conservative_grid_error_at(
     let p = terrain.params();
     // The older floating-point operation-count certificate predates Alpine's
     // spatial masks. Its affine bounds independently certify Alpine regions.
-    if matches!(p.recipe, FbmRecipe::Alpine | FbmRecipe::SeededWorld) {
+    if matches!(
+        p.recipe,
+        FbmRecipe::Alpine | FbmRecipe::SeededWorld | FbmRecipe::Desert
+    ) {
         return GeometryError::Uncertified;
     }
     if p.validate().is_err() {
