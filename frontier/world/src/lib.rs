@@ -11,6 +11,7 @@ use std::{
 
 pub mod affine_bounds;
 mod alpine;
+pub mod bowl;
 pub mod desert;
 pub mod discrete_water;
 pub mod edit;

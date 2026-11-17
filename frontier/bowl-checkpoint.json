@@ -1,0 +1,126 @@
+{
+  "seed": 19,
+  "terrain": "Desert v2",
+  "native_voxel_m": 0.0625,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "naadf_radius_m": 16,
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "frames_including_recording_overhead": {
+    "sample_count": 2929,
+    "accepted_frames": 2929,
+    "missed_budget_frames": 1486,
+    "rejected_inputs": 0,
+    "p50_ms": 16.676305,
+    "p95_ms": 20.845132999999997,
+    "p99_ms": 32.908159
+  },
+  "bowl": {
+    "units": 0,
+    "capacity": 8,
+    "litres": 0,
+    "scooped_units": 15,
+    "emitted_units": 15,
+    "spilled_units": 7,
+    "airborne": 0,
+    "absorbed_units": 15,
+    "damp_cells": 58,
+    "deposited_units": 0,
+    "conserved": true,
+    "simulation_debt": 0.009176176999997183,
+    "save_count": 1
+  },
+  "reload_passed": true,
+  "restored_bowl": {
+    "units": 0,
+    "capacity": 8,
+    "litres": 0,
+    "scooped_units": 15,
+    "emitted_units": 15,
+    "spilled_units": 7,
+    "airborne": 0,
+    "absorbed_units": 15,
+    "damp_cells": 58,
+    "deposited_units": 0,
+    "conserved": true,
+    "simulation_debt": 0,
+    "save_count": 1
+  },
+  "command": [
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+    "--preset",
+    "desert",
+    "--seed",
+    "19",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--naadf-radius",
+    "16",
+    "--bowl-save",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/bowl-lip-playtest/world.bowl",
+    "--report",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/bowl-lip-playtest/game.json"
+  ],
+  "events": [
+    {
+      "seconds": 12.725321344987606,
+      "action": "record_start"
+    },
+    {
+      "seconds": 13.725456136991852,
+      "action": "walk_to_shore"
+    },
+    {
+      "seconds": 19.26621696598886,
+      "action": "scoop"
+    },
+    {
+      "seconds": 28.305415033988538,
+      "action": "carry_to_sand"
+    },
+    {
+      "seconds": 30.789268508000532,
+      "action": "pour"
+    },
+    {
+      "seconds": 35.78971129799902,
+      "action": "inspect_wet_sand"
+    },
+    {
+      "seconds": 37.78984301300079,
+      "action": "return_to_pond"
+    },
+    {
+      "seconds": 41.825671528989915,
+      "action": "carry_second_bowl"
+    },
+    {
+      "seconds": 43.90873530200042,
+      "action": "tip_and_spill"
+    },
+    {
+      "seconds": 49.99003867799183,
+      "action": "close_and_save"
+    }
+  ],
+  "recorded_binary_sha256": "3b2bfc93310afbf0194404d8ba9886a1d17839398aa039541c474b538ab43cd2",
+  "final_binary_sha256": "25b59433360c0b8356c9998b82a7e002e25b89435b2844c10c7ee053eca1d36a",
+  "binary_difference": "Final binary adds restored native-edit / immutable far-source startup fix; interactive scoop/pour/spill code matches recording. Final binary tested by actual saved-world reload.",
+  "tests": {
+    "world_library": {
+      "passed": 200,
+      "ignored": 6,
+      "scope": "before final camera-relative lip adjustment"
+    },
+    "bowl_focused": {
+      "passed": 4,
+      "scope": "after lip adjustment"
+    },
+    "workspace_tests_compile": true,
+    "primary_identical": true
+  }
+}

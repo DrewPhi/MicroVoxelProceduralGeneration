@@ -19,6 +19,7 @@ pub struct SettingsUi {
     screen: ScreenDescriptor,
     started: std::time::Instant,
     settings_error: Option<String>,
+    bowl_overlay: crate::bowl_live::Overlay,
     player_overlay: crate::player_edit::Overlay,
 }
 
@@ -48,6 +49,7 @@ impl SettingsUi {
         Self {
             started: std::time::Instant::now(),
             settings_error: None,
+            bowl_overlay: Default::default(),
             player_overlay: Default::default(),
             context,
             input,
@@ -64,6 +66,9 @@ impl SettingsUi {
         }
     }
 
+    pub fn set_bowl_overlay(&mut self, overlay: crate::bowl_live::Overlay) {
+        self.bowl_overlay = overlay;
+    }
     pub fn set_player_overlay(&mut self, overlay: crate::player_edit::Overlay) {
         self.player_overlay = overlay;
     }
@@ -138,6 +143,15 @@ impl SettingsUi {
             .native_pixels_per_point = Some(native_scale);
         let input = raw.take();
         let output = self.context.run(input, |ctx| {
+            if !self.open && !self.bowl_overlay.text.is_empty() {
+                egui::Area::new(egui::Id::new("bowl controls")).anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui|{
+                    egui::Frame::popup(ui.style()).show(ui,|ui|{ui.label(&self.bowl_overlay.text);ui.add(egui::ProgressBar::new(self.bowl_overlay.fill).desired_width(250.));});
+                });
+                let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("bowl model")));
+                let r=ctx.screen_rect();let project=|p:[f32;2]|egui::pos2(r.left()+(p[0]+1.)*0.5*r.width(),r.top()+(1.-p[1])*0.5*r.height());
+                for (points,color) in &self.bowl_overlay.faces {painter.add(egui::Shape::convex_polygon(points.map(project).to_vec(),egui::Color32::from_rgb(color[0],color[1],color[2]),egui::Stroke::NONE));}
+                painter.circle_stroke(r.center(),3.,egui::Stroke::new(1.,egui::Color32::WHITE));
+            }
             if !self.player_overlay.text.is_empty() && !self.open {
                 egui::Area::new(egui::Id::new("player inventory"))
                     .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {

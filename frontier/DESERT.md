@@ -10,7 +10,8 @@ cargo build --release --locked -p frontier-tools --bin frontier
 `--seed random` chooses a reproducible new seed. `--start-xz X,Z` overrides the
 shore spawn. F switches between walking and free flight. Native voxels remain
 6.25 cm. This preset disables vegetation and live water; ponds are canonical
-static water above a real voxel bed. It does not add the old man model or bowl.
+static water above a real voxel bed. It does not add the old man model. The [bowl interaction](BOWL.md) is now
+available in this preset.
 
 ## Source
 

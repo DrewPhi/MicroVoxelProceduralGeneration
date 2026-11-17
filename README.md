@@ -8,7 +8,9 @@ On the `cellular-automata-game` branch, we are building a desert restoration gam
 about designing seeds and growing an ecosystem. See [the game plan](GAME_PLAN.md)
 for the concept, agreed mechanics, open decisions, and first playable checkpoint.
 The first [procedural desert preset](frontier/DESERT.md) is available with
-`./run.sh --preset desert --seed 19` from `frontier/`.
+`./run.sh --preset desert --seed 19` from `frontier/`. The
+[first bowl interaction](frontier/BOWL.md) supports scooping, carrying, pouring,
+spilling and saved soil moisture.
 
 ## Build and play
 

@@ -8,6 +8,7 @@ mod appearance_map;
 mod appearance_method;
 mod appearance_visibility;
 mod atmosphere;
+mod bowl_live;
 pub mod brick_ray;
 mod build_memory;
 mod cold_source_cache;
@@ -1479,6 +1480,7 @@ impl Default for EditTest {
 }
 
 struct Viewer {
+    bowl: Option<bowl_live::BowlLive>,
     live_water: Option<discrete_water_live::WaterDriver>,
     player_edit: player_edit::PlayerEdit,
     queued_player_action: Option<(frontier_world::edit::EditTransaction, Instant, Camera)>,
@@ -2096,6 +2098,15 @@ impl Viewer {
                 ));
             }
         }
+        if let Some(bowl) = &self.bowl {
+            if let Some(ui) = &mut self.settings_ui {
+                ui.set_bowl_overlay(bowl.overlay(
+                    &self.world,
+                    self.camera,
+                    self.width as f32 / self.height.max(1) as f32,
+                ));
+            }
+        }
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
@@ -2203,6 +2214,14 @@ impl Viewer {
             }
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
+        }
+        if let Some(bowl) = &mut self.bowl {
+            bowl.update(
+                &mut self.world,
+                self.camera,
+                self.keys.contains(&KeyCode::KeyQ),
+                self.grabbed && self.pending_teleport.is_none(),
+            );
         }
         if let Some(live) = &mut self.live_water {
             live.observe_camera(self.camera);
@@ -2824,7 +2843,16 @@ impl ApplicationHandler for Viewer {
                         self.grab(true);
                     }
                 } else if button == MouseButton::Left || button == MouseButton::Right {
-                    if self.player_edit.enabled {
+                    if let Some(bowl) = &mut self.bowl {
+                        if bowl.equipped {
+                            if button == MouseButton::Left && state == ElementState::Pressed {
+                                bowl.scoop(&mut self.world, self.camera);
+                            }
+                            if button == MouseButton::Right {
+                                bowl.pouring = state == ElementState::Pressed;
+                            }
+                        }
+                    } else if self.player_edit.enabled {
                         self.player_mouse(button, state);
                     } else if state == ElementState::Pressed {
                         self.edit(button == MouseButton::Right);
@@ -2854,6 +2882,12 @@ impl ApplicationHandler for Viewer {
                             };
                             if let (Some(slot), Some(live)) = (slot, &mut self.live_water) {
                                 live.inventory_mut().select_slot(slot);
+                            }
+                        }
+                        if key == KeyCode::KeyB && !event.repeat {
+                            if let Some(bowl) = &mut self.bowl {
+                                bowl.equipped = !bowl.equipped;
+                                bowl.pouring = false;
                             }
                         }
                         if key == KeyCode::KeyG && !event.repeat {
@@ -2968,6 +3002,7 @@ fn capture_pose(
 pub fn run() -> Result<()> {
     appearance_method::initialize_application();
     let Some(options::Options {
+        bowl_save,
         live_water: live_water_enabled,
         discrete_water,
         procedural_water,
@@ -3074,6 +3109,11 @@ pub fn run() -> Result<()> {
         World::fbm(seed, params)?
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
+    let bowl = if params.recipe == frontier_world::FbmRecipe::Desert && !live_water_enabled {
+        Some(bowl_live::BowlLive::new(&mut world, bowl_save)?)
+    } else {
+        None
+    };
     let mut live_water = if live_water_enabled {
         Some(discrete_water_live::WaterDriver::new(
             &mut world,
@@ -3188,7 +3228,7 @@ pub fn run() -> Result<()> {
         }
         // Far surface pages remain immutable. Live terrain/fluid overrides are
         // presented by the canonical native volume and its ownership mask.
-        let surface_world = if live_water.is_some() {
+        let surface_world = if live_water.is_some() || bowl.is_some() {
             live_water::immutable_surface_world(&world)?
         } else {
             world.clone()
@@ -3672,6 +3712,7 @@ pub fn run() -> Result<()> {
     let now = Instant::now();
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
+        bowl,
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
@@ -3798,6 +3839,9 @@ pub fn run() -> Result<()> {
         pending_edit: None,
     };
     EventLoop::new()?.run_app(&mut viewer)?;
+    if let Some(bowl) = &mut viewer.bowl {
+        bowl.save(viewer.world.seed())?;
+    }
     if let Some(live) = &mut viewer.live_water {
         live.save(&mut viewer.world)?;
     }
@@ -4077,6 +4121,10 @@ pub fn run() -> Result<()> {
             let m = &gpu.brick_cache_metrics;
             json.pop();
             json.push_str(&format!(",\"brick_directional_cache\":{{\"builds\":{},\"latest_build_ms\":{},\"total_build_ms\":{},\"gpu_bytes\":{},\"uploaded_bytes\":{},\"latest_scratch_bytes\":{},\"peak_scratch_bytes\":{},\"immutable_revision_publication\":true}}}}", m.builds, m.latest_build_ms, m.total_build_ms, m.latest_gpu_bytes, m.uploaded_bytes, m.latest_scratch_bytes, m.peak_scratch_bytes));
+        }
+        if let Some(bowl) = &viewer.bowl {
+            json.pop();
+            json.push_str(&format!(",\"bowl\":{}}}", bowl.json()));
         }
         if let Some(live) = &viewer.live_water {
             json.pop();

@@ -2,6 +2,7 @@
 use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
+    pub bowl_save: Option<PathBuf>,
     pub live_water: bool,
     pub discrete_water: bool,
     pub procedural_water: bool,
@@ -79,6 +80,7 @@ fn parse_on_off(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<b
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     use crate::settings::ResourceProfile;
+    let mut bowl_save = None;
     let mut live_water = false;
     let mut discrete_water = false;
     let mut procedural_water = false;
@@ -217,6 +219,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--water-save" => {
                 water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?));
             }
+            "--bowl-save" => bowl_save=Some(PathBuf::from(args.next().ok_or("--bowl-save requires a path")?)),
             "--water-demo" => {
                 live_water = true;
                 water_demo = true;
@@ -933,6 +936,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         );
     }
     Ok(Some(Options {
+        bowl_save,
         live_water,
         discrete_water,
         procedural_water,
