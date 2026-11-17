@@ -150,6 +150,7 @@ impl SettingsUi {
                 let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("bowl model")));
                 let r=ctx.screen_rect();let project=|p:[f32;2]|egui::pos2(r.left()+(p[0]+1.)*0.5*r.width(),r.top()+(1.-p[1])*0.5*r.height());
                 for (points,color) in &self.bowl_overlay.faces {painter.add(egui::Shape::convex_polygon(points.map(project).to_vec(),egui::Color32::from_rgb(color[0],color[1],color[2]),egui::Stroke::NONE));}
+                for line in &self.bowl_overlay.lines {painter.line_segment([project(line[0]),project(line[1])],egui::Stroke::new(1.3,egui::Color32::YELLOW));}
                 painter.circle_stroke(r.center(),3.,egui::Stroke::new(1.,egui::Color32::WHITE));
             }
             if !self.player_overlay.text.is_empty() && !self.open {

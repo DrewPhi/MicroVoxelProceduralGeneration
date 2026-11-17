@@ -17,6 +17,7 @@ pub mod discrete_water;
 pub mod edit;
 mod edit_index;
 pub mod garden;
+pub mod pockets;
 pub use edit_index::EditQueryStats;
 pub mod fluid;
 pub mod moving_water;
@@ -101,8 +102,10 @@ pub enum Material {
     Water,
     Sand,
     Snow,
+    Seed,
 }
 impl Material {
+    pub const COUNT: usize = 11;
     pub fn is_blocking(self) -> bool {
         !matches!(self, Self::Air | Self::Leaf | Self::Flower | Self::Water)
     }
@@ -118,6 +121,7 @@ impl Material {
             Self::Water => [0.035, 0.19, 0.29],
             Self::Sand => [0.62, 0.52, 0.32],
             Self::Snow => [0.88, 0.92, 0.96],
+            Self::Seed => [0.002, 0.002, 0.002],
         }
     }
 }

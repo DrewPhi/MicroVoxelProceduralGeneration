@@ -3,7 +3,7 @@
 use crate::{Cell, Material, World, VOXEL_SIZE};
 use std::collections::{BTreeSet, VecDeque};
 
-pub const MATERIALS: [Material; 10] = [
+pub const MATERIALS: [Material; 11] = [
     Material::Air,
     Material::Grass,
     Material::Soil,
@@ -14,6 +14,7 @@ pub const MATERIALS: [Material; 10] = [
     Material::Water,
     Material::Sand,
     Material::Snow,
+    Material::Seed,
 ];
 #[derive(Clone, Copy, Debug)]
 pub struct HandSettings {
@@ -107,6 +108,7 @@ impl Inventory {
         let total = counts.iter().try_fold(0u64, |sum, x| sum.checked_add(*x))?;
         if total > values[10]
             || values[10] > 1_048_576
+            || selected as usize >= counts.len()
             || !selected.is_blocking()
             || MATERIALS
                 .iter()
@@ -156,7 +158,7 @@ pub fn select(
     owns: impl Fn(Cell) -> bool,
 ) -> Vec<(Cell, Material)> {
     let material = world.material_without_fluid(anchor);
-    if !material.is_blocking() || !owns(anchor) || count == 0 {
+    if material == Material::Seed || !material.is_blocking() || !owns(anchor) || count == 0 {
         return vec![];
     }
     let mut selected = Vec::new();
@@ -226,6 +228,7 @@ impl EditTransaction {
         let mut next = inventory.clone();
         let changes: Vec<_> = if let Some(material) = self.place {
             if self.expected.len() != 1
+                || material as usize >= next.counts.len()
                 || !material.is_blocking()
                 || next.counts[material as usize] == 0
                 || self.expected[0].1 != Material::Air
@@ -239,7 +242,7 @@ impl EditTransaction {
                 return Err("inventory full");
             }
             for &(_, m) in &self.expected {
-                if !m.is_blocking() {
+                if m as usize >= next.counts.len() || !m.is_blocking() {
                     return Err("pickup requires solid terrain");
                 }
                 next.counts[m as usize] += 1;

@@ -99,6 +99,7 @@ pub fn id(m: Material) -> u32 {
         Material::Water => 7,
         Material::Sand => 8,
         Material::Snow => 9,
+        Material::Seed => 10,
     }
 }
 fn palette() -> Vec<Pigment> {
@@ -113,6 +114,7 @@ fn palette() -> Vec<Pigment> {
         Material::Water.color(),
         Material::Sand.color(),
         Material::Snow.color(),
+        Material::Seed.color(),
     ]
     .into_iter()
     .enumerate()

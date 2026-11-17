@@ -11,7 +11,8 @@ The first [procedural desert preset](frontier/DESERT.md) is available with
 `./run.sh --preset desert --seed 19` from `frontier/`. The
 [first bowl interaction](frontier/BOWL.md) supports scooping, carrying, pouring,
 spilling and saved soil moisture. [Planting and basic seedling growth](frontier/PLANTING.md)
-adds a single seed, digging/burying, sunlight, energy budgets and local root water uptake.
+adds four selectable pockets, visible held items, charged handful pickup/drop,
+a black seed, physical burial, sunlight, energy budgets and local root water uptake.
 
 ## Build and play
 

@@ -46,6 +46,7 @@ fn material_id(m: Material) -> u16 {
         Material::Water => 7,
         Material::Sand => 8,
         Material::Snow => 9,
+        Material::Seed => 10,
     }
 }
 impl BrickSnapshot {

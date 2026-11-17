@@ -2850,20 +2850,12 @@ impl ApplicationHandler for Viewer {
                     }
                 } else if button == MouseButton::Left || button == MouseButton::Right {
                     if let Some(bowl) = &mut self.bowl {
-                        if bowl.equipped {
-                            if button == MouseButton::Left && state == ElementState::Pressed {
-                                bowl.scoop(&mut self.world, self.camera);
-                            }
-                            if button == MouseButton::Right {
-                                bowl.pouring = state == ElementState::Pressed;
-                            }
-                        } else if state == ElementState::Pressed {
-                            bowl.planting_action(
-                                &mut self.world,
-                                self.camera,
-                                if button == MouseButton::Left { 0 } else { 2 },
-                            );
-                        }
+                        bowl.hand_mouse(
+                            &mut self.world,
+                            self.camera,
+                            button == MouseButton::Left,
+                            state == ElementState::Pressed,
+                        );
                     } else if self.player_edit.enabled {
                         self.player_mouse(button, state);
                     } else if state == ElementState::Pressed {
@@ -2898,8 +2890,7 @@ impl ApplicationHandler for Viewer {
                         }
                         if key == KeyCode::KeyB && !event.repeat {
                             if let Some(bowl) = &mut self.bowl {
-                                bowl.equipped = !bowl.equipped;
-                                bowl.pouring = false;
+                                bowl.toggle_bowl();
                             }
                         }
                         if key == KeyCode::KeyG && !event.repeat {
@@ -2907,9 +2898,21 @@ impl ApplicationHandler for Viewer {
                                 live.open_dam(&mut self.world);
                             }
                         }
-                        if key == KeyCode::KeyP && !event.repeat {
+                        if !event.repeat {
                             if let Some(bowl) = &mut self.bowl {
-                                bowl.planting_action(&mut self.world, self.camera, 1);
+                                let slot = match key {
+                                    KeyCode::Digit1 => Some(0),
+                                    KeyCode::Digit2 => Some(1),
+                                    KeyCode::Digit3 => Some(2),
+                                    KeyCode::Digit4 => Some(3),
+                                    _ => None,
+                                };
+                                if let Some(slot) = slot {
+                                    bowl.select_pocket(slot);
+                                }
+                                if key == KeyCode::KeyE {
+                                    bowl.stow();
+                                }
                             }
                         }
                         if key == KeyCode::KeyP
@@ -3861,7 +3864,7 @@ pub fn run() -> Result<()> {
     };
     EventLoop::new()?.run_app(&mut viewer)?;
     if let Some(bowl) = &mut viewer.bowl {
-        bowl.save(viewer.world.seed())?;
+        bowl.save(&viewer.world)?;
     }
     if let Some(live) = &mut viewer.live_water {
         live.save(&mut viewer.world)?;

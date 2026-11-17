@@ -7,12 +7,12 @@ cargo build --release --locked -p frontier-tools --bin frontier
 ./run.sh --preset desert --seed 19
 ```
 
-The desert automatically equips the first-person voxel bowl. Walk to the water's
-edge and aim at water within 2.2 m.
+The desert starts with empty hands. Press **2** to equip the first-person voxel
+bowl from its pocket. Walk to the water's edge and aim at water within 2.2 m.
 
 - Left click scoops real water, up to eight whole native units (1.953125 L).
 - Hold right mouse to tilt and pour; release to stop.
-- Hold Q to tip farther and spill. B equips/unequips the bowl.
+- Hold Q to tip farther and spill. E stows it; 1–4 swap pockets. B is a bowl shortcut.
 - Escape releases mouse/opens settings. The first click captures mouse input.
 
 Clean exit saves the bowl, removed pond water, deposited water, moisture and damp

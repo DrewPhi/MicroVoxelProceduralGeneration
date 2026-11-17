@@ -440,7 +440,7 @@ fn gpu_matches_canonical_rays_for_source(
             let mut seen_water = 0;
             let mut seen_bed = 0;
             let mut seen_air = 0;
-            let mut seen_materials = [0_usize; 10];
+            let mut seen_materials = [0_usize; 11];
             let views = if seeded {
                 vec![(0., -1.55, false), (3., 0.3, false)]
             } else {

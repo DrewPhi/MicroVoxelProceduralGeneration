@@ -12,7 +12,9 @@ pub enum Tissue {
 }
 impl Tissue {
     pub fn material(self) -> Material {
-        if self == Self::Leaf {
+        if self == Self::Seed {
+            Material::Seed
+        } else if self == Self::Leaf {
             Material::Leaf
         } else {
             Material::Wood
@@ -60,6 +62,7 @@ pub struct Plant {
     pub uptake: u64,
     pub lit_leaves: u32,
     pub tissue: BTreeMap<Cell, Tissue>,
+    pub emergence: u8,
     program: Vec<Step>,
 }
 #[derive(Clone, Debug)]
@@ -94,7 +97,7 @@ fn offset(c: Cell, d: [i64; 3]) -> Cell {
 }
 /// Rewriting rule: extend the main tip, grow a short rotating lateral tip,
 /// attach a three-leaf fan, repeat. All offsets/parents are native neighbors.
-fn program(seed: u64, anchor: Cell) -> Vec<Step> {
+fn program(seed: u64, anchor: Cell, emergence: u8) -> Vec<Step> {
     let mut result = Vec::new();
     let mut seen = BTreeSet::from([anchor]);
     let mut push = |d: [i64; 3], parent: [i64; 3], tissue| {
@@ -110,13 +113,15 @@ fn program(seed: u64, anchor: Cell) -> Vec<Step> {
     push([0, -1, 0], [0, 0, 0], Tissue::Root);
     push([-1, -1, 0], [0, -1, 0], Tissue::Root);
     push([1, -1, 0], [0, -1, 0], Tissue::Root);
-    push([0, 1, 0], [0, 0, 0], Tissue::Stem);
-    push([0, 2, 0], [0, 1, 0], Tissue::Stem);
-    push([1, 2, 0], [0, 2, 0], Tissue::Leaf);
-    push([-1, 2, 0], [0, 2, 0], Tissue::Leaf);
+    let emergence = i64::from(emergence);
+    for y in 1..=emergence {
+        push([0, y, 0], [0, y - 1, 0], Tissue::Stem);
+    }
+    push([1, emergence, 0], [0, emergence, 0], Tissue::Leaf);
+    push([-1, emergence, 0], [0, emergence, 0], Tissue::Leaf);
     let rotation = (seed ^ (anchor.x as u64).wrapping_mul(31) ^ anchor.z as u64) % 4;
     for segment in 0..6i64 {
-        let y = 3 + segment;
+        let y = emergence + 1 + segment;
         push([0, y, 0], [0, y - 1, 0], Tissue::Stem);
         let dir = match (segment + rotation as i64) % 4 {
             0 => [1, 0],
@@ -198,7 +203,7 @@ impl Garden {
             return Err("The seed needs an open planting hole");
         }
         let anchor = hole.seed;
-        world.set(anchor, Material::Wood);
+        world.set(anchor, Material::Seed);
         self.seeds -= 1;
         self.plants.push(Plant {
             hole: index,
@@ -212,9 +217,50 @@ impl Garden {
             uptake: 0,
             lit_leaves: 0,
             tissue: BTreeMap::from([(anchor, Tissue::Seed)]),
-            program: program(world.seed(), anchor),
+            emergence: 2,
+            program: program(world.seed(), anchor, 2),
         });
         Ok(())
+    }
+    /// A loose seed settles onto dry soil; burial is detected from real cover.
+    pub fn plant_at(&mut self, world: &mut World, anchor: Cell) -> Result<(), &'static str> {
+        if self.seeds != 1 {
+            return Err("Your seed is already planted");
+        }
+        if self.holes.len() >= LIMIT
+            || world.material(anchor) != Material::Air
+            || world.material(offset(anchor, [0, 1, 0])) != Material::Air
+            || !matches!(
+                world.material(offset(anchor, [0, -1, 0])),
+                Material::Sand | Material::Soil
+            )
+        {
+            return Err("The seed needs dry soil and open space");
+        }
+        let soil = world.material(offset(anchor, [0, -1, 0]));
+        self.holes.push(Hole {
+            seed: anchor,
+            cap: soil,
+            base: soil,
+            covered: false,
+        });
+        let i = self.holes.len() - 1;
+        self.plant(world, i)?;
+        let ground = (world
+            .ground_height_m(anchor.x as f64 * VOXEL_SIZE, anchor.z as f64 * VOXEL_SIZE)
+            / VOXEL_SIZE) as i64;
+        let emergence = (ground - anchor.y).clamp(1, 6) as u8;
+        let p = self.plants.last_mut().unwrap();
+        p.emergence = emergence;
+        p.program = program(world.seed(), anchor, emergence);
+        Ok(())
+    }
+    pub fn apply_tissue(&self, world: &mut World) {
+        world.set_batch(
+            self.plants
+                .iter()
+                .flat_map(|p| p.tissue.iter().map(|(&c, &t)| (c, t.material()))),
+        );
     }
     pub fn cover(&mut self, world: &mut World, index: usize) -> Result<(), &'static str> {
         let h = self
@@ -298,9 +344,10 @@ impl Garden {
         });
         for p in &mut self.plants {
             p.age += 1;
-            let h = &self.holes[p.hole];
+            let h = &mut self.holes[p.hole];
             let cap = offset(h.seed, [0, 1, 0]);
             if p.germination < 4 {
+                h.covered = matches!(world.material(cap), Material::Sand | Material::Soil);
                 if !h.covered || !matches!(world.material(cap), Material::Sand | Material::Soil) {
                     p.germination = 0;
                     continue;
@@ -359,7 +406,9 @@ impl Garden {
             }
             let m = world.material(next.cell);
             let allowed = m == Material::Air
-                || ((next.tissue == Tissue::Root || next.cell == cap)
+                || ((next.tissue == Tissue::Root
+                    || (next.tissue == Tissue::Stem
+                        && next.cell.y <= h.seed.y + i64::from(p.emergence)))
                     && matches!(m, Material::Sand | Material::Soil));
             if !allowed {
                 p.cursor += 1;
@@ -407,7 +456,7 @@ impl Garden {
     }
     pub fn snapshot(&self) -> String {
         let mut s = format!(
-            "GARDEN1 {} {} {} {} {}\n",
+            "GARDEN2 {} {} {} {} {}\n",
             self.seeds, self.sand, self.soil, self.tick, self.phase
         );
         for h in &self.holes {
@@ -423,7 +472,7 @@ impl Garden {
         }
         for (i, p) in self.plants.iter().enumerate() {
             s += &format!(
-                "P {} {} {} {} {} {} {} {} {}\n",
+                "P {} {} {} {} {} {} {} {} {} {}\n",
                 p.hole,
                 p.age,
                 p.germination,
@@ -432,7 +481,8 @@ impl Garden {
                 p.hydration,
                 p.cursor,
                 p.transpired,
-                p.uptake
+                p.uptake,
+                p.emergence
             );
             for (c, t) in &p.tissue {
                 s += &format!("C {i} {} {} {} {}\n", c.x, c.y, c.z, *t as u8);
@@ -457,7 +507,7 @@ impl Garden {
                 .filter(|v| v.is_finite())
                 .ok_or("invalid garden number")
         };
-        if h.len() != 6 || h[0] != "GARDEN1" {
+        if h.len() != 6 || !matches!(h[0], "GARDEN1" | "GARDEN2") {
             return Err("invalid garden version");
         }
         let mut g = Self {
@@ -512,7 +562,10 @@ impl Garden {
                         covered,
                     });
                 }
-                Some("P") if v.len() == 10 => {
+                Some("P")
+                    if (h[0] == "GARDEN1" && v.len() == 10)
+                        || (h[0] == "GARDEN2" && v.len() == 11) =>
+                {
                     let i = usize::try_from(num(v[1])?).map_err(|_| "invalid hole")?;
                     let hole = g.holes.get(i).ok_or("missing hole")?;
                     if g.plants.len() >= LIMIT || g.plants.iter().any(|p| p.hole == i) {
@@ -530,9 +583,23 @@ impl Garden {
                         uptake: num(v[9])?,
                         lit_leaves: 0,
                         tissue: BTreeMap::new(),
-                        program: program(seed, hole.seed),
+                        emergence: if v.len() == 11 {
+                            u8::try_from(num(v[10])?).map_err(|_| "bad emergence")?
+                        } else {
+                            2
+                        },
+                        program: program(
+                            seed,
+                            hole.seed,
+                            if v.len() == 11 {
+                                u8::try_from(num(v[10])?).map_err(|_| "bad emergence")?
+                            } else {
+                                2
+                            },
+                        ),
                     };
-                    if p.age > g.tick
+                    if !(1..=6).contains(&p.emergence)
+                        || p.age > g.tick
                         || p.germination > 4
                         || !(0. ..=30.).contains(&p.energy)
                         || p.water > 2

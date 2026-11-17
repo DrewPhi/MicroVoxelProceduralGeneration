@@ -1,0 +1,240 @@
+{
+  "date": "2026-11-17",
+  "seed": 19,
+  "terrain": "Desert v2",
+  "native_voxel_m": 0.0625,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "naadf_radius_m": 16,
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "command": [
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+    "--preset",
+    "desert",
+    "--seed",
+    "19",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--naadf-radius",
+    "16",
+    "--bowl-save",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/pockets-release-playtest/world.bowl",
+    "--report",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/pockets-release-playtest/game.json"
+  ],
+  "binary_sha256": "87f9f269bf1296cf29d8d974ce34bf5ac8761aa9157c65f76bbd6b19e2e2f1b0",
+  "video": "output/pockets-release-playtest/bowl.mp4",
+  "events": [
+    {
+      "seconds": 12.066412389001925,
+      "action": "record_start"
+    },
+    {
+      "seconds": 13.066514303005533,
+      "action": "walk_to_shore"
+    },
+    {
+      "seconds": 18.35701087700727,
+      "action": "scoop"
+    },
+    {
+      "seconds": 27.406805401013116,
+      "action": "carry_to_sand"
+    },
+    {
+      "seconds": 31.570218471999397,
+      "action": "pocket_the_filled_bowl"
+    },
+    {
+      "seconds": 32.230879904003814,
+      "action": "quick_single_voxel"
+    },
+    {
+      "seconds": 33.63126597700466,
+      "action": "charge_full_handful"
+    },
+    {
+      "seconds": 35.28160765900975,
+      "action": "held_handful"
+    },
+    {
+      "seconds": 36.2816926939995,
+      "action": "stow_sand_in_pocket"
+    },
+    {
+      "seconds": 38.30648051200842,
+      "action": "set_sand_aside"
+    },
+    {
+      "seconds": 39.609953797000344,
+      "action": "black_seed_in_hand"
+    },
+    {
+      "seconds": 41.27084776900301,
+      "action": "seed_in_hole"
+    },
+    {
+      "seconds": 43.074050044000614,
+      "action": "gather_burial_handful"
+    },
+    {
+      "seconds": 45.02791435000836,
+      "action": "bury_with_real_sand"
+    },
+    {
+      "seconds": 46.98871927001164,
+      "action": "step_closer_to_water_seed"
+    },
+    {
+      "seconds": 47.59931153101206,
+      "action": "pour"
+    },
+    {
+      "seconds": 52.59959892400366,
+      "action": "inspect_wet_sand"
+    },
+    {
+      "seconds": 54.76018562100944,
+      "action": "watch_growth"
+    },
+    {
+      "seconds": 82.76027774800605,
+      "action": "step_back_for_view"
+    },
+    {
+      "seconds": 83.82272247401124,
+      "action": "seedling_view"
+    },
+    {
+      "seconds": 88.82281442001113,
+      "action": "close_and_save"
+    }
+  ],
+  "checks": {
+    "passed": true,
+    "bowl": {
+      "units": 0,
+      "capacity": 8,
+      "litres": 0,
+      "scooped_units": 8,
+      "emitted_units": 8,
+      "spilled_units": 0,
+      "airborne": 0,
+      "absorbed_units": 0,
+      "damp_cells": 29,
+      "deposited_units": 0,
+      "conserved": true,
+      "simulation_debt": 0.0018988499999952231,
+      "save_count": 1,
+      "plant_transferred": 8,
+      "garden": {
+        "seeds": 0,
+        "holes": 1,
+        "plants": 1,
+        "germinated": 1,
+        "tissue_cells": 25,
+        "leaves": 10,
+        "water_stored": 0,
+        "transpired": 8,
+        "tick": 88,
+        "water_ledger_matches": true
+      },
+      "pockets": {
+        "hand": "Empty",
+        "slots": [
+          "Bowl",
+          "Empty",
+          "Empty",
+          "Empty"
+        ],
+        "picked_voxels": 9,
+        "placed_voxels": 9,
+        "carried_voxels": 0,
+        "handful_limit": 4,
+        "loose_conserved": true,
+        "inventory_valid": true
+      }
+    },
+    "frames": {
+      "sample_count": 5211,
+      "accepted_frames": 5211,
+      "missed_budget_frames": 2605,
+      "rejected_inputs": 0,
+      "p50_ms": 16.666344,
+      "p95_ms": 20.398019,
+      "p99_ms": 34.913291
+    },
+    "reload_passed": true,
+    "restored_bowl": {
+      "units": 0,
+      "capacity": 8,
+      "litres": 0,
+      "scooped_units": 8,
+      "emitted_units": 8,
+      "spilled_units": 0,
+      "airborne": 0,
+      "absorbed_units": 0,
+      "damp_cells": 29,
+      "deposited_units": 0,
+      "conserved": true,
+      "simulation_debt": 0,
+      "save_count": 1,
+      "plant_transferred": 8,
+      "garden": {
+        "seeds": 0,
+        "holes": 1,
+        "plants": 1,
+        "germinated": 1,
+        "tissue_cells": 25,
+        "leaves": 10,
+        "water_stored": 0,
+        "transpired": 8,
+        "tick": 88,
+        "water_ledger_matches": true
+      },
+      "pockets": {
+        "hand": "Empty",
+        "slots": [
+          "Bowl",
+          "Empty",
+          "Empty",
+          "Empty"
+        ],
+        "picked_voxels": 9,
+        "placed_voxels": 9,
+        "carried_voxels": 0,
+        "handful_limit": 4,
+        "loose_conserved": true,
+        "inventory_valid": true
+      }
+    }
+  },
+  "visual_regression": {
+    "command": "python3 tools/primary_visual_check.py --skip-build --scene hybrid --reference output/naadf-next-primary/reference256 --output output/pockets-primary-regression",
+    "baseline": "output/nov16-primary-after/realtime.linear_rgb.f32",
+    "pixel_identical": true,
+    "max_abs_error": 0,
+    "note": "Palette-change release capture; final subsequent change only updates save material synchronization."
+  },
+  "verification": {
+    "workspace_tests_passed": 830,
+    "workspace_tests_ignored": 45,
+    "final_world_tests_passed": 211,
+    "final_world_tests_ignored": 6,
+    "final_combined_save_test": "passed; includes native material equality at every pocket-edited cell",
+    "fmt": "passed",
+    "python_compile": "passed",
+    "diff_check": "passed"
+  },
+  "limits": [
+    "Four native voxels per handful; a bounded vertical selection/drop, not granular sand physics.",
+    "Wet soil containing stored moisture cannot yet be carried.",
+    "One starter seed program; editing, reproduction and decomposition remain future work.",
+    "Capture includes screen recording overhead; frame percentiles are not an isolated performance benchmark."
+  ],
+  "replay_debugging": "Earlier failed recordings retained: collision rejection at feet, downhill target outside reach, then watering short of seed. Final actual-input route faces uphill and moves the bowl closer. No collision or reach guard was weakened."
+}

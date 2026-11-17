@@ -4,6 +4,7 @@ use crate::{Camera, Result};
 use frontier_world::{
     bowl::{Bowl, CAPACITY},
     garden::{Garden, Tissue},
+    pockets::{Item, Pockets, HANDFUL},
     Cell, Material, World, VOXEL_SIZE,
 };
 use std::{path::PathBuf, time::Instant};
@@ -12,11 +13,17 @@ pub struct Overlay {
     pub text: String,
     pub fill: f32,
     pub faces: Vec<([[f32; 2]; 4], [u8; 3])>,
+    pub lines: Vec<[[f32; 2]; 2]>,
+}
+struct HandGesture {
+    started: Instant,
+    cells: Vec<(Cell, Material)>,
 }
 pub struct BowlLive {
     pub state: Bowl,
     pub garden: Garden,
-    pub equipped: bool,
+    pub pockets: Pockets,
+    gesture: Option<HandGesture>,
     pub pouring: bool,
     pub tilt: f32,
     pub message: String,
@@ -53,25 +60,46 @@ impl BowlLive {
             if id != identity {
                 return Err("bowl save belongs to another terrain source".into());
             }
-            let (water, plants) = body
-                .split_once("\nGARDEN1 ")
-                .map_or((body, None), |(water, plants)| {
-                    (water, Some(format!("GARDEN1 {plants}")))
-                });
+            let pocket_start = body.find("\nPOCKETS1 ");
+            let (body, pocket_text) =
+                pocket_start.map_or((body, None), |i| (&body[..i], Some(&body[i + 1..])));
+            let garden_start = body.find("\nGARDEN");
+            let (water, plants) =
+                garden_start.map_or((body, None), |i| (&body[..i], Some(&body[i + 1..])));
             state = Bowl::restore(water, world.seed())?;
             if let Some(plants) = plants {
-                garden = Garden::restore(&plants, world.seed())?;
+                garden = Garden::restore(plants, world.seed())?;
             }
             if garden.water_accounted() != state.plant_transferred {
                 return Err("plant/water save ledger mismatch".into());
             }
             state.apply(world);
+            if let Some(text) = pocket_text {
+                let pockets = Pockets::restore(text, garden.seeds)?;
+                pockets.apply(world);
+                garden.apply_tissue(world);
+                return Ok(Self::with_state(state, garden, pockets, path, identity));
+            }
             garden.apply(world);
         }
-        Ok(Self {
+        let pockets = Pockets::migrate(world, &garden)?;
+        garden.sand = 0;
+        garden.soil = 0;
+        garden.apply_tissue(world);
+        Ok(Self::with_state(state, garden, pockets, path, identity))
+    }
+    fn with_state(
+        state: Bowl,
+        garden: Garden,
+        pockets: Pockets,
+        path: PathBuf,
+        identity: String,
+    ) -> Self {
+        Self {
             state,
             garden,
-            equipped: true,
+            pockets,
+            gesture: None,
             pouring: false,
             tilt: 0.,
             message: "Find the shoreline and scoop some water".into(),
@@ -80,7 +108,7 @@ impl BowlLive {
             debt: 0.,
             clock: Instant::now(),
             saves: 0,
-        })
+        }
     }
     pub fn scoop(&mut self, world: &mut World, camera: Camera) {
         match self.state.scoop(
@@ -102,49 +130,166 @@ impl BowlLive {
             Err(e) => self.message = e.into(),
         }
     }
-    pub fn planting_action(&mut self, world: &mut World, camera: Camera, action: u8) {
-        if self.equipped {
-            self.message = "Press B to put away the bowl and use your hands".into();
-            return;
-        }
-        let hit = frontier_world::raycast_solid(
-            world,
-            camera.position.to_array(),
-            camera.direction().as_dvec3().to_array(),
-            2.2,
-        );
-        let result = if let Some(hit) = hit {
-            if action == 0 {
-                self.garden.dig(world, hit.cell)
-            } else if let Some(i) = self.garden.nearest_hole(hit.cell) {
-                if action == 1 {
-                    self.garden.plant(world, i)
-                } else {
-                    self.garden.cover(world, i)
-                }
-            } else {
-                Err("Aim at your planting hole")
-            }
-        } else {
-            Err("Aim at nearby ground within 2.2 m")
-        };
-        self.message = match result {
-            Ok(()) => {
-                let message = match action {
-                    0 => "Dug a little hole — aim at it and press P to place your seed",
-                    1 => "Seed placed — right click to cover it with sand",
-                    _ => "Seed covered — water this patch with the bowl",
-                };
-                eprintln!(
-                    "garden action={action} seeds={} holes={} plants={}",
-                    self.garden.seeds,
-                    self.garden.holes.len(),
-                    self.garden.plants.len()
-                );
-                message.into()
-            }
+    pub fn select_pocket(&mut self, index: usize) {
+        self.gesture = None;
+        self.pouring = false;
+        self.message = match self.pockets.select(index) {
+            Ok(()) => format!(
+                "Hands: {}",
+                self.pockets
+                    .hand
+                    .as_ref()
+                    .map_or("empty".into(), Item::name)
+            ),
             Err(e) => e.into(),
         };
+    }
+    pub fn stow(&mut self) {
+        self.gesture = None;
+        self.pouring = false;
+        self.message = match self.pockets.stow() {
+            Ok(()) => "Item put in your pocket".into(),
+            Err(e) => e.into(),
+        };
+    }
+    pub fn toggle_bowl(&mut self) {
+        if self.pockets.bowl() {
+            self.stow();
+        } else if let Some(i) = self
+            .pockets
+            .slots
+            .iter()
+            .position(|v| v == &Some(Item::Bowl))
+        {
+            self.select_pocket(i);
+        }
+    }
+    fn hand_settings() -> frontier_world::edit::HandSettings {
+        frontier_world::edit::HandSettings {
+            volume_liters: HANDFUL as f64 * VOXEL_SIZE.powi(3) * 1000. + 0.0001,
+            extent_m: 0.25,
+            reach_m: 2.2,
+            ..Default::default()
+        }
+    }
+    pub fn hand_mouse(&mut self, world: &mut World, camera: Camera, left: bool, pressed: bool) {
+        if pressed {
+            eprintln!(
+                "hand_pose [{},{},{},{},{}]",
+                camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch
+            );
+        }
+        if self.pockets.bowl() {
+            if left && pressed {
+                self.scoop(world, camera);
+            }
+            if !left {
+                self.pouring = pressed;
+            }
+            return;
+        }
+        if left && pressed && self.pockets.hand.is_none() {
+            if let Some(hit) = frontier_world::raycast(
+                world,
+                camera.position.to_array(),
+                camera.direction().as_dvec3().to_array(),
+                2.2,
+            ) {
+                let cells = Pockets::selection(world, hit.cell)
+                    .into_iter()
+                    .take_while(|(c, _)| crate::player_edit::reachable(*c, camera, 2.2))
+                    .collect::<Vec<_>>();
+                if !cells.is_empty() {
+                    self.gesture = Some(HandGesture {
+                        started: Instant::now(),
+                        cells,
+                    });
+                    self.message = "Hold to gather a larger handful, then release".into();
+                } else {
+                    self.message = "Empty hands can gather sand; select the bowl for water".into();
+                }
+            }
+        } else if left && !pressed {
+            if let Some(g) = self.gesture.take() {
+                let hit = frontier_world::raycast(
+                    world,
+                    camera.position.to_array(),
+                    camera.direction().as_dvec3().to_array(),
+                    2.2,
+                );
+                if hit.is_none_or(|h| h.cell != g.cells[0].0)
+                    || g.cells
+                        .iter()
+                        .any(|(c, _)| !crate::player_edit::reachable(*c, camera, 2.2))
+                {
+                    self.message = "Gathering cancelled: aim or reach changed".into();
+                    return;
+                }
+                let n = Self::hand_settings()
+                    .count_at(g.started.elapsed().as_secs_f64())
+                    .min(g.cells.len());
+                if g.cells[..n]
+                    .iter()
+                    .any(|(c, _)| self.state.moisture.get(c).copied().unwrap_or(0) > 0)
+                {
+                    self.message = "That soil holds water — gather dry sand for now".into();
+                    return;
+                }
+                self.message = match self.pockets.pickup(world, &g.cells[..n]) {
+                    Ok(()) => {
+                        eprintln!(
+                            "pockets pickup count={n} conserved={}",
+                            self.pockets.conserved()
+                        );
+                        format!("Holding {n} voxels — right click to drop, E to pocket")
+                    }
+                    Err(e) => e.into(),
+                };
+            }
+        } else if !left && pressed {
+            self.gesture = None;
+            let Some(hit) = frontier_world::raycast(
+                world,
+                camera.position.to_array(),
+                camera.direction().as_dvec3().to_array(),
+                2.2,
+            ) else {
+                self.message = "Aim at nearby ground to place what you hold".into();
+                return;
+            };
+            let start = Cell {
+                x: hit.cell.x + i64::from(hit.normal[0]),
+                y: hit.cell.y + i64::from(hit.normal[1]),
+                z: hit.cell.z + i64::from(hit.normal[2]),
+            };
+            let can_place =
+                |c| !crate::player_edit::intersects_player(c, camera.position.to_array());
+            self.message = match self.pockets.hand.as_ref() {
+                Some(Item::Seed) => {
+                    match self
+                        .pockets
+                        .drop_seed(world, &mut self.garden, start, can_place)
+                    {
+                        Ok(()) => {
+                            eprintln!("pockets seed placed black=true");
+                            "Black seed placed — cover it by dropping sand on it".into()
+                        }
+                        Err(e) => e.into(),
+                    }
+                }
+                Some(Item::Sand(_)) => match self.pockets.drop_sand(world, start, can_place) {
+                    Ok(n) => {
+                        eprintln!(
+                            "pockets drop count={n} conserved={}",
+                            self.pockets.conserved()
+                        );
+                        format!("Dropped {n} sand voxels onto the ground")
+                    }
+                    Err(e) => e.into(),
+                },
+                _ => "Your hands are empty — select a pocket".into(),
+            };
+        }
     }
     pub fn update(
         &mut self,
@@ -158,11 +303,12 @@ impl BowlLive {
         self.clock = Instant::now();
         if !active {
             self.pouring = false;
+            self.gesture = None;
             return;
         }
         self.debt += elapsed;
-        let pouring = self.equipped && self.pouring;
-        let spill = self.equipped && spill;
+        let pouring = self.pockets.bowl() && self.pouring;
+        let spill = self.pockets.bowl() && spill;
         let target = if spill {
             1.35
         } else if pouring {
@@ -205,15 +351,31 @@ impl BowlLive {
             self.message = "Bowl empty — the water is now in the world".into();
         }
     }
-    pub fn save(&mut self, seed: u64) -> Result<()> {
+    pub fn save(&mut self, world: &World) -> Result<()> {
+        let seed = world.seed();
+        // Water may have recolored placed sand since its placement was recorded.
+        // Persist its current terrain material; tissue is restored separately.
+        for (cell, material) in &mut self.pockets.edits {
+            let current = world.material(*cell);
+            if matches!(current, Material::Air | Material::Sand | Material::Soil) {
+                *material = current;
+            }
+        }
+        if !self.pockets.validate(self.garden.seeds)
+            || !self.state.conserved()
+            || self.garden.water_accounted() != self.state.plant_transferred
+        {
+            return Err("game inventory/water ledger mismatch; save refused".into());
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let bytes = format!(
-            "{}\n{}{}",
+            "{}\n{}{}{}",
             self.identity,
             self.state.snapshot(seed),
-            self.garden.snapshot()
+            self.garden.snapshot(),
+            self.pockets.snapshot()
         );
         let temporary = self.path.with_extension("bowl.tmp");
         std::fs::write(&temporary, bytes)?;
@@ -225,12 +387,41 @@ impl BowlLive {
         let mut out=format!("{{\"units\":{},\"capacity\":{},\"litres\":{},\"scooped_units\":{},\"emitted_units\":{},\"spilled_units\":{},\"airborne\":{},\"absorbed_units\":{},\"damp_cells\":{},\"deposited_units\":{},\"conserved\":{},\"simulation_debt\":{},\"save_count\":{}}}",self.state.units,CAPACITY,self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.state.scooped,self.state.emitted,self.state.spilled,self.state.drops.len(),self.state.moisture.values().sum::<u32>(),self.state.damp.len(),self.state.deposited.len(),self.state.conserved(),self.debt,self.saves);
         out.pop();
         out.push_str(&format!(",\"plant_transferred\":{},\"garden\":{{\"seeds\":{},\"holes\":{},\"plants\":{},\"germinated\":{},\"tissue_cells\":{},\"leaves\":{},\"water_stored\":{},\"transpired\":{},\"tick\":{},\"water_ledger_matches\":{}}}}}",self.state.plant_transferred,self.garden.seeds,self.garden.holes.len(),self.garden.plants.len(),self.garden.plants.iter().filter(|p|p.germination==4).count(),self.garden.cells(),self.garden.plants.iter().flat_map(|p|p.tissue.values()).filter(|&&t|t==Tissue::Leaf).count(),self.garden.plants.iter().map(|p|p.water).sum::<u32>(),self.garden.plants.iter().map(|p|p.transpired).sum::<u64>(),self.garden.tick,self.garden.water_accounted()==self.state.plant_transferred));
+        out.pop();
+        out.push_str(&format!(",\"pockets\":{{\"hand\":{:?},\"slots\":{},\"picked_voxels\":{},\"placed_voxels\":{},\"carried_voxels\":{},\"handful_limit\":{},\"loose_conserved\":{},\"inventory_valid\":{}}}}}",self.pockets.hand.as_ref().map_or("Empty".into(),Item::name),format!("[{}]",self.pockets.slots.iter().map(|v|format!("{:?}",v.as_ref().map_or("Empty".into(),Item::name))).collect::<Vec<_>>().join(",")),self.pockets.picked,self.pockets.placed,self.pockets.carried(),HANDFUL,self.pockets.conserved(),self.pockets.validate(self.garden.seeds)));
         out
     }
     pub fn overlay(&self, world: &World, camera: Camera, aspect: f32) -> Overlay {
         let mut out=Overlay{text:format!("WOODEN BOWL   {:.2} / {:.2} L\nLeft click: scoop • Hold right: pour • Hold Q: tip/spill • B: equip\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,CAPACITY as f64*VOXEL_SIZE.powi(3)*1000.,self.message),fill:self.state.units as f32/CAPACITY as f32,..Default::default()};
-        if !self.equipped {
-            out.text=format!("HANDS • {} seed • {} loose sand cells • bowl {:.2} L\nLeft click: dig • P: place seed • Right click: cover • B: bowl\n{}",self.garden.seeds,self.garden.sand+self.garden.soil,self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
+        let pockets = self
+            .pockets
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                format!(
+                    "{}: {}",
+                    i + 1,
+                    v.as_ref().map_or("Empty".into(), Item::name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  |  ");
+        let hands = self
+            .pockets
+            .hand
+            .as_ref()
+            .map_or("Empty".into(), Item::name);
+        out.text=format!("Hands: {hands} • bowl {:.2} L\n{pockets}\n1–4 swap pocket • E stow • Empty hands: hold left to gather • Right: place/pour\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
+        if let Some(g) = &self.gesture {
+            let n = Self::hand_settings()
+                .count_at(g.started.elapsed().as_secs_f64())
+                .min(g.cells.len());
+            out.fill = n as f32 / HANDFUL as f32;
+            out.text.push_str(&format!(
+                "\nGathering {n}/{HANDFUL} voxels ({:.2} L max)",
+                HANDFUL as f64 * VOXEL_SIZE.powi(3) * 1000.
+            ));
         }
         if let Some(p) = self.garden.plants.first() {
             let stage = if p.germination < 4 {
@@ -256,6 +447,32 @@ impl BowlLive {
             ));
         }
         let matrix = camera.matrix(camera.position, aspect);
+        if let Some(g) = &self.gesture {
+            let n = Self::hand_settings()
+                .count_at(g.started.elapsed().as_secs_f64())
+                .min(g.cells.len());
+            for &(cell, _) in &g.cells[..n] {
+                let corners: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
+                    let p = glam::DVec3::new(
+                        (cell.x as f64 + (i & 1) as f64) * VOXEL_SIZE,
+                        (cell.y as f64 + ((i >> 1) & 1) as f64) * VOXEL_SIZE,
+                        (cell.z as f64 + ((i >> 2) & 1) as f64) * VOXEL_SIZE,
+                    ) - camera.position;
+                    let q = matrix * p.as_vec3().extend(1.);
+                    (q.w > 0.025).then_some([q.x / q.w, q.y / q.w])
+                });
+                for i in 0..8 {
+                    for axis in [1, 2, 4] {
+                        if i & axis == 0 {
+                            if let (Some(a), Some(b)) = (corners[i], corners[i | axis]) {
+                                out.lines.push([a, b]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Small bounded particle count: nearest-solid occlusion comes from canonical
         // cells, not approximate LOD depths. Each displayed droplet is a whole cube.
         let mut drops = self.state.drops.iter().collect::<Vec<_>>();
@@ -290,26 +507,48 @@ impl BowlLive {
                 &mut out.faces,
             );
         }
-        if self.equipped {
+        if let Some(held) = &self.pockets.hand {
             let mut voxels = Vec::new();
-            for y in 0..3 {
-                for z in -2i64..=2 {
-                    for x in -2i64..=2 {
-                        let r = x * x + z * z;
-                        if r <= 4 && (y == 0 || r > 1) {
-                            voxels.push((Cell { x, y, z }, [139, 83, 42]));
+            match held {
+                Item::Bowl => {
+                    for y in 0..3 {
+                        for z in -2i64..=2 {
+                            for x in -2i64..=2 {
+                                let r = x * x + z * z;
+                                if r <= 4 && (y == 0 || r > 1) {
+                                    voxels.push((Cell { x, y, z }, [139, 83, 42]));
+                                }
+                            }
+                        }
+                    }
+                    let mut water = 0;
+                    for y in 1..3 {
+                        for z in -1i64..=1 {
+                            for x in -1i64..=1 {
+                                if x * x + z * z <= 1 && water < self.state.units {
+                                    water += 1;
+                                    voxels.push((Cell { x, y, z }, [43, 153, 188]));
+                                }
+                            }
                         }
                     }
                 }
-            }
-            let mut water = 0;
-            for y in 1..3 {
-                for z in -1i64..=1 {
-                    for x in -1i64..=1 {
-                        if x * x + z * z <= 1 && water < self.state.units {
-                            water += 1;
-                            voxels.push((Cell { x, y, z }, [43, 153, 188]));
-                        }
+                Item::Seed => voxels.push((Cell { x: 0, y: 1, z: 0 }, [12, 12, 12])),
+                Item::Sand(cells) => {
+                    for (i, m) in cells.iter().enumerate() {
+                        let color = if *m == Material::Sand {
+                            [205, 172, 108]
+                        } else {
+                            [125, 88, 55]
+                        };
+                        voxels.push((
+                            Cell {
+                                x: (i % 2) as i64,
+                                y: 1,
+                                z: (i / 2) as i64,
+                            },
+                            color,
+                        ));
                     }
                 }
             }
@@ -425,9 +664,33 @@ mod garden_save_tests {
         let x = o.x + 60.;
         let z = o.z;
         let top = Cell::from_meters([x, world.ground_height_m(x, z) - VOXEL_SIZE, z]);
-        live.garden.dig(&mut world, top).unwrap();
-        live.garden.plant(&mut world, 0).unwrap();
-        live.garden.cover(&mut world, 0).unwrap();
+        let cells = Pockets::selection(&world, top);
+        live.pockets.pickup(&mut world, &cells).unwrap();
+        live.pockets
+            .drop_sand(
+                &mut world,
+                Cell {
+                    x: top.x + 5,
+                    ..top
+                },
+                |_| true,
+            )
+            .unwrap();
+        live.pockets.select(0).unwrap();
+        live.pockets
+            .drop_seed(&mut world, &mut live.garden, top, |_| true)
+            .unwrap();
+        let pile = *live
+            .pockets
+            .edits
+            .iter()
+            .filter(|(c, m)| c.x == top.x + 5 && **m != Material::Air)
+            .max_by_key(|(c, _)| c.y)
+            .unwrap()
+            .0;
+        let cells = Pockets::selection(&world, pile);
+        live.pockets.pickup(&mut world, &cells).unwrap();
+        live.pockets.drop_sand(&mut world, top, |_| true).unwrap();
         live.state
             .scoop(&mut world, [o.x, o.stage + 1., o.z], [0., -1., 0.])
             .unwrap();
@@ -441,11 +704,14 @@ mod garden_save_tests {
         }
         assert!(live.garden.cells() > 6);
         assert!(live.state.conserved());
-        live.save(19).unwrap();
+        live.save(&world).unwrap();
         let mut restored_world = World::fbm(19, p).unwrap();
         let restored = BowlLive::new(&mut restored_world, Some(path.clone())).unwrap();
         assert_eq!(restored.state.snapshot(19), live.state.snapshot(19));
         assert_eq!(restored.garden.snapshot(), live.garden.snapshot());
+        for cell in live.pockets.edits.keys() {
+            assert_eq!(restored_world.material(*cell), world.material(*cell));
+        }
         assert_eq!(
             restored.garden.water_accounted(),
             restored.state.plant_transferred

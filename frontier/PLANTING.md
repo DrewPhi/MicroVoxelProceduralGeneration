@@ -7,26 +7,35 @@ cargo build --release --locked -p frontier-tools --bin frontier
 ./run.sh --preset desert --seed 19
 ```
 
-Your desert save now starts with one seed. Existing bowl-only saves migrate
-without resetting their water or damp ground. `--bowl-save PATH` still selects a
-separate experiment/save slot; the garden and water now share that atomic file.
+New desert saves start with **empty hands**, a **black seed in pocket 1**, and
+a **bowl in pocket 2**. There are four pockets, each holding one item or one
+handful. Keys **1–4** swap that pocket with your hand; **E** stows the held item
+in the first empty pocket. A full inventory rejects stowing without losing items.
+The bowl keeps its water while stored. **B** remains a bowl shortcut.
 
 ## Try it
 
-1. Scoop water at the pond with the bowl, then move onto dry sand.
-2. Press **B** to put the bowl away and use your hands.
-3. Aim down at nearby sand and **left click** to dig a small two-cell-deep hole.
-   The removed sand is retained in your hands (0.488 L at the native scale).
-4. Keep aiming at the hole and press **P** to place your single seed.
-5. **Right click** to cover it using the sand you dug up.
-6. Press **B**, then hold **right mouse** to water the patch around the seed.
-7. Watch it germinate and grow. Water near its base again when it becomes thirsty.
+1. Select pocket **2**, scoop pond water with **left click**, walk to dry sand.
+2. Press **E** to stow the bowl and empty your hands.
+3. Aim at nearby sand: tap **left click** for one voxel, or hold and release
+   for up to four (0.977 L). The selection outline and charge bar show the amount.
+4. Carry the handful, **E** to pocket it, or **right click** elsewhere to drop it.
+5. Select the black seed's pocket and **right click** into the hole.
+6. Gather another handful, aim into the hole and **right click** to bury the seed.
+7. Select the bowl's pocket and hold **right click** to water the planting spot.
+8. Stow the bowl and watch the shoot emerge. Water again when it becomes thirsty.
 
-The hole selection has a small aim tolerance. Actions require a canonical solid
-hit within 2.2 m; digging underwater, planting into blocked holes and duplicating
-the seed are rejected. The HUD explains whether the seed needs covering, moisture,
-energy or further watering. The seed, hole, tissue, resource state, bowl and wet
-patches survive a clean exit/restart. Camera position still resets to the shore.
+Seed placement and sand placement use actual canonical cells; there is no
+special plant/cover shortcut. Placement settles vertically onto support and
+rejects water or overlap with your body. A deeper hole requires a longer emerging
+shoot. Gather within 2.2 m; aiming steeply downhill can put the ground beyond reach.
+Currently, soil containing stored bowl moisture cannot be pocketed, to preserve
+its water until wet-soil transport is implemented. Sand settles as a bounded
+column operation, not a general granular-physics simulation.
+
+The HUD lists all pocket contents, the hand and action feedback. Terrain edits,
+pockets, seed, tissue, bowl and wet patches survive clean exit/restart. Camera
+position still resets to the shore. `--bowl-save PATH` selects another save slot.
 
 ## What grows
 
@@ -41,7 +50,7 @@ There is one starter pattern in this checkpoint. A visual growth editor,
 reproduction/mutations and seed collection are later steps. This is a modest
 seedling, not the final tree/organism system.
 
-Tissue roles are seed, root, stem and photosynthetic leaf. Wood/Leaf are their
+Tissue roles are seed, root, stem and photosynthetic leaf. Seed/Wood/Leaf are their
 current renderer materials; simulation roles remain separate. The initial seed
 contains 10 arbitrary energy units. Buried, moist seeds take four simulation
 seconds to germinate. Growth proposes one new cell per second and waits if its
@@ -74,12 +83,18 @@ visual placeholder; it does not instantly recolor as roots consume moisture.
 
 ## Persistence and verification
 
-`BOWL2` adds the transferred-water ledger while reading legacy `BOWL1` saves.
-A `GARDEN1` section stores the seed stock, loose sand, holes, actual grown tissue,
-program cursors, resource reserves, clocks and counters. Restore validates counts,
-program membership, parent support, seed conservation and the paired water ledger.
-Renderer initialization keeps the immutable distant source separate from these
-native edits, as it does for the bowl's damp patches.
+`BOWL2` retains the transferred-water ledger while reading legacy `BOWL1` saves.
+`GARDEN2` stores growth and emergence depth; `GARDEN1` remains readable.
+`POCKETS1` stores pockets, hand, terrain edits and the loose-material ledger:
+`picked + migrated = placed + carried`. Exactly one bowl and the remaining
+seed stock are validated. Legacy loose sand/soil migrate into available slots;
+excess becomes actual nearby piles. Native seed material is ID 10; the first ten
+material IDs and legacy inventory format are unchanged.
+
+Restore validates seed/water/material conservation, growth program membership,
+parent support and resource bounds. Pocket edits restore before actual tissue;
+restoration does not clear physically placed burial sand. Renderer initialization
+keeps the immutable distant source separate from these native edits.
 
 Core checks exercise dry/unburied seeds, water-limited pauses, sunlight/energy
 limits, connected growth, stone obstacles, exact restart continuation and old-save
@@ -98,14 +113,9 @@ video, frames, controls, binary hash and explicit restart checks are retained.
 A still/video does not establish broad biome simulation or distant edited-plant
 LOD quality. Native display currently supplies the visible planted geometry.
 
-The final actual-input run is `output/planting-final-playtest/bowl.mp4`; its
-angled view is `output/planting-final-playtest/seedling.png`. One bowl (8 whole
-water units) produced a 29-cell seedling with 13 leaf cells before water shortage
-paused growth. The plant and paired water ledger survived restart. Replay
-commands, counters and binary hashes are retained in `planting-checkpoint.json`.
-
-The workspace suite passed 825 tests (45 ignored). After adding a corrupt-save
-water-counter guard, the final world suite passed 206 tests (6 ignored). The
-combined renderer garden-save test passed, workspace test targets compile, and
-the approved hybrid primary image remains pixel-identical. Final source differs
-from the recorded binary only by the extra impossible-save-counter guard.
+Current pocket/handful recording: `output/pockets-release-playtest/bowl.mp4`.
+Its final plant view is `output/pockets-release-playtest/seedling.png`. The run
+picked up and placed nine cells, grew 25 tissue cells including 10 leaves, and
+passed disk reload with both ledgers intact. Verification and replay metadata
+are documented in `pockets-checkpoint.json`. Earlier planting recordings describe the previous
+shortcut interaction and are retained only as historical checkpoints.
