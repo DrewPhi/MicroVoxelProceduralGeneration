@@ -1656,7 +1656,8 @@ impl AdaptiveGpu {
                 (c.origin.z * 16.) as i64 as u32,
                 (self.voxel_filter as u32)
                     | ((c.exact as u32) << 1)
-                    | (((self.lighting[11] > 0.5) as u32) << 2),
+                    | (((self.lighting[11] > 0.5) as u32) << 2)
+                    | (((c.native_quads && !c.exact) as u32) << 3),
             ];
             bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
             let mut lighting = self.lighting;
