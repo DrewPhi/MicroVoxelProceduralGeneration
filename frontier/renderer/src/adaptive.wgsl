@@ -428,7 +428,11 @@ fn shade(in: VertexOut) -> vec4<f32> {
     // Ownership follows the occupied native cell, including faces on box edges.
     if near_shadow.naadf_hi.w>0.5 {
         let point=(floor(in.local*16.-in.normal*0.01)+0.5)/16.-camera.eye.xyz;
-        if all(point>=near_shadow.naadf_lo.xyz)&&all(point<near_shadow.naadf_hi.xyz) {discard;}
+        // Coarse roofs can straddle the exact clip plane. Let their depth
+        // compete only within the raster apron reserved by Ownership::terrain.
+        let inset=select(0.,1.,(camera.paint_origin.w&8u)!=0u);
+        if all(point>=near_shadow.naadf_lo.xyz+vec3(inset))
+            && all(point<near_shadow.naadf_hi.xyz-vec3(inset)) {discard;}
     }
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
