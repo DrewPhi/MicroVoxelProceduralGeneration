@@ -20,6 +20,8 @@ use std::{
 use wgpu::util::DeviceExt;
 #[path = "adaptive_shadow.rs"]
 pub(crate) mod adaptive_shadow;
+#[path = "coarse_batch.rs"]
+pub(crate) mod coarse_batch;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
 use adaptive_shadow::ShadowResources;
@@ -268,6 +270,8 @@ pub struct DrawStats {
     pub native_bin_skipped_quads: u64,
     pub draw_calls: u64,
     pub no_voxel_shadow_clusters: usize,
+    pub coarse_batch_groups: usize,
+    pub coarse_batch_candidates: usize,
     pub current_local_certified_clusters: usize,
     pub current_affine_bound_clusters: usize,
     pub current_global_bound_clusters: usize,
@@ -317,6 +321,9 @@ macro_rules! encode_cluster_draws {
                 None
             };
             let c = &renderer.clusters[&item.key];
+            if renderer.coarse_batch.is_some() && coarse_batch::Batch::accepts(c) {
+                continue;
+            }
             if $shell && (c.exact || !c.cover) {
                 continue;
             }
@@ -520,6 +527,7 @@ pub struct AdaptiveGpu {
     format: wgpu::TextureFormat,
     sample_count: u32,
     bundle: Option<wgpu::RenderBundle>,
+    coarse_batch: Option<coarse_batch::Batch>,
     bundle_signature: Vec<DrawItem>,
     bundle_stable_frames: u8,
     bundle_builds: u64,
@@ -630,6 +638,18 @@ impl AdaptiveGpu {
             ],
             push_constant_ranges: &[],
         });
+        let batch_layout = coarse_batch::supported(device).then(|| coarse_batch::layout(device));
+        let batch_pipeline_layout = batch_layout.as_ref().map(|layout| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("coarse voxel batch pipeline"),
+                bind_group_layouts: &[
+                    layout,
+                    &shadows_layout,
+                    &adaptive_shadow::near_sampling_layout(device),
+                ],
+                push_constant_ranges: &[],
+            })
+        });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3];
         let profile_attributes = wgpu::vertex_attr_array![3=>Uint32];
         let native_attributes =
@@ -659,7 +679,8 @@ impl AdaptiveGpu {
             } else {
                 &naadf_constants
             };
-            let native = kind == 1;
+            let batched = kind == 5;
+            let native = kind == 1 || batched;
             let proxy = kind == 2;
             let indexed_proxy = kind == 3;
             let derived_proxy = kind == 4;
@@ -705,12 +726,16 @@ impl AdaptiveGpu {
                 label: Some("adaptive clusters"),
                 layout: Some(if shadow {
                     &shadow_pipeline_layout
+                } else if batched {
+                    batch_pipeline_layout.as_ref().unwrap()
                 } else {
                     &pipeline_layout
                 }),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some(if native {
+                    entry_point: Some(if batched {
+                        "vs_native_batch"
+                    } else if native {
                         "vs_native"
                     } else if derived_proxy {
                         "vs_proxy_derived"
@@ -742,7 +767,11 @@ impl AdaptiveGpu {
                 } else {
                     Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(if batched {
+                            "fs_native_batch"
+                        } else {
+                            "fs_main"
+                        }),
                         compilation_options: wgpu::PipelineCompilationOptions {
                             constants,
                             ..Default::default()
@@ -814,6 +843,12 @@ impl AdaptiveGpu {
             make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false, false),
             make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false, false),
         ];
+        let batch_pipeline = batch_pipeline_layout
+            .as_ref()
+            .map(|_| make_pipeline(wgpu::VertexStepMode::Instance, 5, false, false, false));
+        let coarse_batch = batch_layout
+            .zip(batch_pipeline)
+            .map(|(layout, raster)| coarse_batch::Batch::new(device, layout, raster));
         let shadows = ShadowResources::new(device, &shadows_layout, shadow_pipelines);
         let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
             Ok("1") => 1,
@@ -861,6 +896,7 @@ impl AdaptiveGpu {
             format,
             sample_count,
             bundle: None,
+            coarse_batch,
             bundle_signature: vec![],
             bundle_stable_frames: 0,
             bundle_builds: 0,
@@ -919,6 +955,9 @@ impl AdaptiveGpu {
         self.pipeline = fresh.pipeline;
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
+        if let (Some(current), Some(updated)) = (&mut self.coarse_batch, fresh.coarse_batch) {
+            current.raster = updated.raster;
+        }
         self.proxy_pipeline = fresh.proxy_pipeline;
         self.indexed_proxy_pipeline = fresh.indexed_proxy_pipeline;
         self.derived_proxy_pipeline = fresh.derived_proxy_pipeline;
@@ -1025,6 +1064,10 @@ impl AdaptiveGpu {
     fn allocated_bytes(&self) -> u64 {
         (self.shadows.allocated_bytes() + CAMERA_UNIFORM_BYTES)
             + self
+                .coarse_batch
+                .as_ref()
+                .map_or(0, |_| coarse_batch::Batch::bytes())
+            + self
                 .gpu_profiles
                 .as_ref()
                 .map_or(0, |builder| builder.resident_bytes())
@@ -1110,8 +1153,8 @@ impl AdaptiveGpu {
             return Err("deferred GPU profiles require enabled proxy consumer".into());
         }
         if !tile.native_quads.is_empty() {
-            if !tile.exact || !tile.mesh.indices.is_empty() || !tile.proxy_triangles.is_empty() {
-                return Err("native quad tile must have exclusive exact ownership".into());
+            if !tile.mesh.indices.is_empty() || !tile.proxy_triangles.is_empty() {
+                return Err("quad tile must have exclusive primitive storage".into());
             }
             return self.upload_native(device, queue, tile);
         }
@@ -1578,7 +1621,7 @@ impl AdaptiveGpu {
                 );
             }
             let (bin_mask, native_count) =
-                if c.native_quads && self.native_bins_enabled && !c.bins.is_empty() {
+                if c.native_quads && c.exact && self.native_bins_enabled && !c.bins.is_empty() {
                     let eye = (camera.position - c.origin).to_array();
                     let mut mask = 0u8;
                     let mut count = 0u32;
@@ -1690,6 +1733,7 @@ impl AdaptiveGpu {
         if !self.camera_upload.is_empty() {
             queue.write_buffer(&self.uniform, 0, &self.camera_upload);
         }
+        coarse_batch::Batch::prepare(self, queue);
         stats.prepare_upload_ms = upload_started.elapsed().as_secs_f64() * 1000.;
         let bundle_started = std::time::Instant::now();
         self.prepare_bundle(device);
@@ -1717,6 +1761,9 @@ impl AdaptiveGpu {
         stats.indexed_proxy_pack_accepted = self.indexed_proxy_pack_accepted;
         stats.indexed_proxy_peak_staging_estimate_bytes =
             self.indexed_proxy_peak_staging_estimate_bytes;
+        if let Some(batch) = &self.coarse_batch {
+            (stats.coarse_batch_groups, stats.coarse_batch_candidates) = batch.stats();
+        }
         stats.bundle_enabled = self.bundles_enabled;
         stats.vertex_pages_coalescing_enabled = self.coalesce_vertex_pages;
         stats.bundle_active = self.bundle.is_some();
@@ -1726,13 +1773,21 @@ impl AdaptiveGpu {
         stats.prepared_view_hits = self.prepared_view_hits;
         stats.prepared_view_misses = self.prepared_view_misses;
     }
+    pub(crate) fn encode_coarse_cull(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(batch) = &self.coarse_batch {
+            batch.encode_cull(encoder);
+        }
+    }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(1, &self.shadows.sampling_bind, &[]);
         pass.set_bind_group(2, &self.shadows.near.bind, &[]);
         if let Some(bundle) = &self.bundle {
             pass.execute_bundles(std::iter::once(bundle));
         } else {
-            encode_cluster_draws!(self, pass);
+            encode_cluster_draws!(self, &mut *pass);
+        }
+        if let Some(batch) = &self.coarse_batch {
+            batch.draw(self, pass);
         }
     }
     fn invalidate_bundle(&mut self) {
@@ -1814,9 +1869,17 @@ impl AdaptiveGpu {
                 &self.profile_tables[page].buffer,
             ));
         }
+        let slot = self.slots.last().copied().unwrap();
+        if let Some(batch) = &mut self.coarse_batch {
+            while batch.profile_binds.len() < self.profile_tables.len() {
+                let page = batch.profile_binds.len();
+                batch.add_profile_page(device, &self.profile_tables[page].buffer);
+            }
+        }
         let mut quads = tile.native_quads.clone();
         for quad in &mut quads {
             quad.profile_index += (table.range.start / 80) as u32;
+            quad.axis_sign |= slot << 3;
         }
         queue.write_buffer(
             &self.vertices[vertices.page].buffer,
@@ -1853,7 +1916,7 @@ impl AdaptiveGpu {
                 position_bytes: 0,
                 position_reserved_bytes: 0,
                 bins: validated_bins(&tile.native_bins, tile.native_quads.len() as u32),
-                exact: true,
+                exact: tile.exact,
                 profile: Some(ProfileAllocation {
                     indices: None,
                     table,
@@ -2316,7 +2379,7 @@ mod tests {
         assert!(super::resource_capacity_error(super::POOL_CAPACITY_ERROR));
         for message in [
             "proxy triangle profile index outside table",
-            "native quad tile must have exclusive exact ownership",
+            "quad tile must have exclusive primitive storage",
             "adaptive GPU pool budget exhausted: invalid record",
             "cancelled",
             "",

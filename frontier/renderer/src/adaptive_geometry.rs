@@ -1,6 +1,7 @@
 //! Spatial, source-revision keyed terrain clusters. Camera demand never enters a key.
 //!
-//! Coarse interiors are triangles, never enlarged voxels. Matching canonical
+//! Coarse interiors use a height proxy or the experimental distant voxel path.
+//! Matching canonical
 //! boundary strides close neighboring clusters; native joins retain full column
 //! stair profiles and canonical exposed faces without a skirt or crop cap.
 //! Edited 3D content remains under the separate explicit volume owner.
@@ -30,6 +31,9 @@ pub(crate) mod voxel_handoff;
 
 #[path = "deferred_cover.rs"]
 pub(crate) mod deferred_cover;
+
+#[path = "distant_voxels.rs"]
+pub(crate) mod distant_voxels;
 
 /// Integer source addresses, independent of camera/view epoch. A cache belongs to
 /// one immutable source snapshot; revision is checked before construction.
@@ -230,7 +234,7 @@ fn build_cached(
     mut cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
 ) -> Result<GeometryTile, String> {
-    if deferred_cover::enabled() {
+    if deferred_cover::enabled() && !distant_voxels::enabled() {
         let mut input = None;
         let mut tile = build_cached_staged(world, key, &mut cancelled, samples, Some(&mut input))?;
         tile.cover_input = input;
@@ -270,7 +274,8 @@ fn build_cached_staged(
     samples.begin_job();
     samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
-        let mut tile = build_surface(world, key, &mut cancelled, samples)?;
+        let coarse = distant_voxels::enabled() && key.step_cells > 1;
+        let mut tile = build_surface_with_geometry(world, key, &mut cancelled, samples, coarse)?;
         if let Some(deferred) = deferred {
             if crate::ground_cover::eligible(world, &tile) {
                 *deferred = Some(deferred_cover::Input::from_tile(&tile));
@@ -281,6 +286,8 @@ fn build_cached_staged(
         let finalize_started = std::time::Instant::now();
         if tile.exact {
             pack_exact_native(&mut tile, &mut cancelled)?;
+        } else if coarse {
+            distant_voxels::pack(&mut tile)?;
         } else {
             compact_vertices(&mut tile);
         }
@@ -423,7 +430,7 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
             terrain.seeded_water_feature_debt(min, max, tile.key.step_cells as f64 * VOXEL_SIZE);
     }
     let envelope = frontier_world::summary::fbm_height_envelope(terrain);
-    tile.global_error_m = if tile.exact {
+    tile.global_error_m = if tile.exact || !tile.native_quads.is_empty() {
         None
     } else {
         frontier_world::summary::conservative_grid_error_at(
@@ -943,8 +950,18 @@ fn remove_volume_boundary_faces(tile: &mut GeometryTile) {
 fn build_surface(
     world: &World,
     key: TileKey,
+    cancelled: impl FnMut() -> bool,
+    samples: &mut SourceSamples,
+) -> Result<GeometryTile, String> {
+    build_surface_with_geometry(world, key, cancelled, samples, false)
+}
+
+fn build_surface_with_geometry(
+    world: &World,
+    key: TileKey,
     mut cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
+    coarse: bool,
 ) -> Result<GeometryTile, String> {
     if world.fbm_terrain().is_none()
         || world.topology_base_cells().is_some()
@@ -1043,12 +1060,14 @@ fn build_surface(
         tile.appearance = appearance;
         return Ok(tile);
     }
-    let defer_profiles = world.fbm_terrain().is_none_or(|t| {
-        !matches!(
-            t.params().recipe,
-            frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
-        )
-    }) && samples.gpu_profiles.enabled
+    let defer_profiles = !coarse
+        && world.fbm_terrain().is_none_or(|t| {
+            !matches!(
+                t.params().recipe,
+                frontier_world::FbmRecipe::SeededWorld | frontier_world::FbmRecipe::Desert
+            )
+        })
+        && samples.gpu_profiles.enabled
         && !near_profile_shared()
         && samples.gpu_job_allowed
         && appearance_mode(world).probe_cells == 1
@@ -1091,42 +1110,50 @@ fn build_surface(
     };
     let width = key.width_cells as i64;
     let step = key.step_cells as i64;
-    // A quad has a canonical central anchor and four edges. Shared interior
-    // edges use identical anchors. Exterior edges use the full native staircase.
-    for z in (0..width).step_by(step as usize) {
-        if cancelled() {
-            return Err("adaptive geometry cancelled".into());
-        }
-        for x in (0..width).step_by(step as usize) {
-            generator.patch(x, z, step)?;
-        }
-    }
-    let proxy_triangles = generator.mesh.indices.len() / 3;
-    // Only the solid side owns a boundary face. This is identical to native
-    // extraction and connects the different column heights on either side.
-    for axis in [0, 2] {
-        for positive in [false, true] {
-            let edge = match (axis, positive) {
-                (0, false) => 0,
-                (2, true) => 1,
-                (0, true) => 2,
-                _ => 3,
-            };
-            if key.edge_steps[edge] != 1 {
-                continue;
+    let proxy_triangles = if coarse {
+        generator.coarse_surface(&mut cancelled)?;
+        0
+    } else {
+        // A quad has a canonical central anchor and four edges. Shared interior
+        // edges use identical anchors. Exterior edges use the full native staircase.
+        for z in (0..width).step_by(step as usize) {
+            if cancelled() {
+                return Err("adaptive geometry cancelled".into());
             }
-            for t in 0..width {
-                if t % 64 == 0 && cancelled() {
-                    return Err("adaptive geometry cancelled".into());
+            for x in (0..width).step_by(step as usize) {
+                generator.patch(x, z, step)?;
+            }
+        }
+        let proxy_triangles = generator.mesh.indices.len() / 3;
+        // Only the solid side owns a boundary face. This is identical to native
+        // extraction and connects the different column heights on either side.
+        for axis in [0, 2] {
+            for positive in [false, true] {
+                let edge = match (axis, positive) {
+                    (0, false) => 0,
+                    (2, true) => 1,
+                    (0, true) => 2,
+                    _ => 3,
+                };
+                if key.edge_steps[edge] != 1 {
+                    continue;
                 }
-                generator.boundary_face(axis, positive, t)?;
+                for t in 0..width {
+                    if t % 64 == 0 && cancelled() {
+                        return Err("adaptive geometry cancelled".into());
+                    }
+                    generator.boundary_face(axis, positive, t)?;
+                }
             }
         }
-    }
-    generator
-        .face_profile_indices
-        .resize(generator.mesh.vertices.len(), 0);
-    let certificate = if key.width_cells <= MAX_CERTIFICATE_WIDTH {
+        generator
+            .face_profile_indices
+            .resize(generator.mesh.vertices.len(), 0);
+        proxy_triangles
+    };
+    let certificate = if coarse && key.width_cells <= MAX_CERTIFICATE_WIDTH {
+        generator.affine_complete.then_some(generator.affine_error)
+    } else if key.width_cells <= MAX_CERTIFICATE_WIDTH {
         let started = std::time::Instant::now();
         generator.samples.source_stage = SourceStage::Certificate;
         let result = certify(&mut generator, proxy_triangles, &mut cancelled)?;
@@ -2291,6 +2318,13 @@ impl Generator<'_> {
             }
         }
         self.record_affine(x, z, s, start_index);
+        let index = self.patch_appearance(x, z, s)?;
+        self.face_profile_indices
+            .resize(self.mesh.vertices.len(), index);
+        self.face_profile_indices[start_vertex..].fill(index);
+        Ok(())
+    }
+    fn patch_appearance(&mut self, x: i64, z: i64, s: i64) -> Result<u32, String> {
         let started = std::time::Instant::now();
         self.samples.source_stage = SourceStage::Appearance;
         let seeded = self.world.fbm_terrain().is_some_and(|t| {
@@ -2347,10 +2381,7 @@ impl Generator<'_> {
         };
         self.samples.source_stage = SourceStage::Proxy;
         self.samples.stages.appearance_ms += started.elapsed().as_secs_f64() * 1000.;
-        self.face_profile_indices
-            .resize(self.mesh.vertices.len(), index);
-        self.face_profile_indices[start_vertex..].fill(index);
-        Ok(())
+        Ok(index)
     }
     /// Raw exact native integrals, shared by all patches inside a canonical
     /// 16-cell block. Scale metadata by patch coverage, never the stored sums.

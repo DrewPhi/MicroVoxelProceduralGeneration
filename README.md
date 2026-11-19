@@ -15,6 +15,13 @@ adds four selectable pockets, visible held items, charged handful pickup/drop,
 a black seed, physical burial, recursive branching growth, sunlight, energy budgets
 and local root water uptake.
 
+## Start a game on Frontier
+
+Use [`frontier-voxel-engine`](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/frontier-voxel-engine)
+for shared engine development. Start a new game from a tagged engine checkpoint
+and merge newer engine checkpoints as needed. The
+[developer guide](guide_for_devs.md#engine-and-game-branches) describes the workflow.
+
 ## Build and play
 
 Rust 1.99.1 is pinned in `frontier/rust-toolchain.toml`. Linux requires X11/XWayland,
@@ -28,15 +35,18 @@ cargo build --release --locked
 
 `run.sh` launches the existing release binary; rebuild after source changes.
 The default adaptive scene combines exact NAADF voxels within a growing 64 m cube
-radius with distant adaptive raster terrain. Startup publishes an 8 m region and
-expands in 4 m shells while you move. Regional terrain, voxel appearance filtering,
-single-sample rendering and scatter uploads are enabled by default.
+radius with distant coarse voxel meshes and compact seed-sampled appearance.
+Startup publishes an 8 m region and expands in 4 m shells while you move.
+Regional terrain, voxel appearance filtering, single-sample rendering and scatter
+uploads are enabled by default.
 
 - `--preset alpine`: grounded walking, seeded vegetation and a mountain backdrop.
 - `--preset seeded-world --seed 19`: streamed climate biomes and static waterways,
   without vegetation. Use `--seed random` to explore another reproducible world.
 - `--terrain-recipe legacy`: the original spiky terrain used by the primary visual check.
-- `--naadf off`: the raster comparison path; `--msaa 4` explicitly enables MSAA.
+- `--naadf off`: raster-only comparison. Use `--msaa 4` to enable MSAA.
+- `FRONTIER_DISTANT_TERRAIN=surface`: heightfield comparison.
+  `FRONTIER_DISTANT_TERRAIN=voxy` selects the detailed-map voxel comparison.
 
 Press **Esc** for lighting, atmosphere, quality and loading settings. **F** toggles
 flight in walking presets. See the [developer guide](guide_for_devs.md) and

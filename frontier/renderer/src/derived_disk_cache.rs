@@ -515,6 +515,12 @@ fn source_identity_with_mode(
 fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
+    use crate::adaptive_geometry::distant_voxels::Mode;
+    match Mode::current() {
+        Mode::Surface => {}
+        Mode::Voxy => put(&mut b, 0x564f5859),
+        Mode::Seed => put(&mut b, 0x534545440001),
+    }
     put(
         &mut b,
         u64::from(w.vegetation_enabled() && crate::ground_cover::enabled()),
@@ -988,7 +994,8 @@ fn validate(t: &GeometryTile) -> bool {
         && t.native_quads.iter().all(|q| {
             q.axis_sign & !7 == 0
                 && q.axis_sign & 3 < 3
-                && q.material <= 4
+                && (q.material as usize)
+                    < crate::adaptive_geometry::distant_voxels::TERRAIN_PALETTE.len()
                 && renderable_profile(q.profile_index)
                 && q.extent.iter().all(|v| *v >= 0.)
         })
