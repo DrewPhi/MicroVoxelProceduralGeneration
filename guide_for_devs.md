@@ -3,13 +3,41 @@
 See the [documentation map](frontier/DOCUMENTATION.md) for feature guides, plans
 and historical measurements. Checkpoint-specific defaults are not launch defaults.
 
+## Engine and game branches
+
+| Branch or tag | Role |
+| --- | --- |
+| `frontier-voxel-engine` | Shared engine crates, sample scenes and reproducible benchmarks |
+| `frontier-v0.1.0` | First versioned engine checkpoint with the compact coarse voxel renderer |
+| `cellular-automata-game` | Desert restoration game built on Frontier |
+| `main` | Historical engine line |
+
+Create a new game branch from a checkpoint, or reference the same engine tag
+from an external game's Cargo dependencies.
+
+```sh
+git fetch origin --tags
+git switch -c my-game frontier-v0.1.0
+```
+
+Put reusable engine fixes on `frontier-voxel-engine` and merge them downstream
+into game branches. Keep gameplay and saves on the game branches. Use
+`git worktree` to work on the engine and a game side by side. Tag tested engine
+commits as developer previews, and record any breaking API, save, or world
+generation changes when tagging a new checkpoint. Engine tags pin source while
+the crate APIs are still evolving.
+
 ## Current checkpoint
 
 The opt-in [seeded world checkpoint](frontier/SEEDED_WORLD.md) adds globally addressed FBM geography, cached climate, bounded local drainage and canonical water/bed material runs. Launch `./run.sh --preset seeded-world --seed 19` from `frontier/`. The [live-water modes](frontier/LIVE_WATER.md) include binary native-cell pressure/momentum transport, a moving connected solver, persistent dormant tiles, counted river supply and separate NAADF water publication. The [integration evidence](frontier/research/nov16/water-integration/README.md) records tests and laptop walking/reload measurements; broader streaming/quality gates are tracked in [#87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87).
 
 The default preview uses exact NAADF voxels inside a growing 64 m cube
-radius and adaptive raster terrain beyond it, with Regional terrain. Press **Esc** for live sun, atmosphere and exposure controls; image
-quality and loading settings use **Apply quality & loading**. See the
+radius and coarse voxel meshes with compact seed-sampled appearance beyond it.
+Set `FRONTIER_DISTANT_TERRAIN=surface` for the heightfield comparison or
+`FRONTIER_DISTANT_TERRAIN=voxy` for the detailed-map voxel comparison.
+`FRONTIER_VOXY_GPU_BATCH=1` enables experimental GPU direction culling and indirect draws
+on supported adapters. Press **Esc** for live sun, atmosphere and exposure
+controls. Image quality and loading settings use **Apply quality & loading**. See the
 [interactive visual preview](frontier/VISUAL_PREVIEW.md) for the current controls,
 material-painting scope and outstanding integrated validation.
 

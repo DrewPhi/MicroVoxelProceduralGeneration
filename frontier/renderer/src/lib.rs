@@ -330,6 +330,11 @@ impl Gpu {
         } else {
             output_format
         };
+        let indirect_features = if adaptive_gpu::coarse_batch::requested() {
+            adaptive_gpu::coarse_batch::features()
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -337,7 +342,8 @@ impl Gpu {
                     required_features: adapter.features()
                         & (wgpu::Features::TIMESTAMP_QUERY
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+                            | indirect_features),
                     required_limits: wgpu::Limits {
                         max_buffer_size: adapter.limits().max_buffer_size,
                         max_storage_buffer_binding_size: adapter
@@ -787,6 +793,7 @@ impl Gpu {
             plants.encode_culling(encoder, &self.bind_group);
         }
         if let Some(adaptive) = &self.adaptive {
+            adaptive.encode_coarse_cull(encoder);
             adaptive.draw_shadows(encoder);
             if adaptive.shadow_cascades_active() {
                 if let Some(plants) = &self.vegetation {
@@ -2967,6 +2974,7 @@ fn capture_pose(
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
     appearance_method::initialize_application();
+    adaptive_geometry::distant_voxels::Mode::initialize_application();
     let Some(options::Options {
         live_water: live_water_enabled,
         discrete_water,
@@ -3608,7 +3616,15 @@ pub fn run() -> Result<()> {
         }
         if let Some(view) = &adaptive_view {
             metadata.pop();
-            metadata.push_str(&format!(",\"adaptive\":{}}}", view.json()));
+            let distant_geometry = if world.topology_base_cells().is_some() {
+                "surface"
+            } else {
+                adaptive_geometry::distant_voxels::Mode::current().label()
+            };
+            metadata.push_str(&format!(
+                ",\"distant_geometry\":{distant_geometry:?},\"adaptive\":{}}}",
+                view.json()
+            ));
         }
         std::fs::write(metadata_path, &metadata)?;
         if std::env::var("FRONTIER_CAPTURE_DIAGNOSTICS").as_deref() == Ok("1") {
@@ -3877,8 +3893,13 @@ pub fn run() -> Result<()> {
         if let Some(view) = &viewer.adaptive_view {
             json.pop();
             json.push_str(&format!(
-                ",\"adaptive\":{},\"adaptive_wait_quality\":{},\"adaptive_route_quality\":{},\"adaptive_preparation_policy\":\"{}\",\"benchmark_input_lock\":{}}}",
+                ",\"adaptive\":{},\"distant_geometry\":{:?},\"adaptive_wait_quality\":{},\"adaptive_route_quality\":{},\"adaptive_preparation_policy\":\"{}\",\"benchmark_input_lock\":{}}}",
                 view.json(),
+                if viewer.world.topology_base_cells().is_some() {
+                    "surface"
+                } else {
+                    adaptive_geometry::distant_voxels::Mode::current().label()
+                },
                 viewer.adaptive_wait_quality,
                 viewer.adaptive_route_quality.json(),
                 if viewer.benchmark_input_lock && viewer.visual_settings.naadf_enabled {"wait_for_naadf_snapshot_and_requested_raster_quality"} else if viewer.adaptive_wait_quality {"clear1Hz_poll20Hz_until_refinement_reserve"} else {"normal_interactive_rendering"},

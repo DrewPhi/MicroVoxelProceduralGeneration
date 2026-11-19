@@ -60,7 +60,10 @@ fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
     let hue=(paint_hash(cell^vec3<u32>(761u,157u,1103u))-0.5)*camera.paint.z*0.15*grain;
     return original+vec3<f32>(brightness-old_grain+hue,brightness-old_grain,brightness-old_grain-hue);
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<uniform> draw_camera: Camera;
+struct CameraSlot { value: Camera, padding: array<vec4<f32>, 3> };
+@group(0) @binding(3) var<storage, read> batch_cameras: array<CameraSlot>;
+var<private> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
@@ -331,9 +334,11 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     @location(2) local:vec3<f32>,
     @location(3) @interpolate(flat) profile_index:u32,
+    @location(4) @interpolate(flat) camera_slot:u32,
 };
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) color: vec3<f32>, @location(2) normal: vec3<f32>,
     @location(3) profile_index:u32) -> VertexOut {
+    camera=draw_camera;
     return vertex_out(position,color,normal,profile_index);
 }
 fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:u32)->VertexOut {
@@ -345,13 +350,14 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     }
     out.position=camera.view_projection*vec4<f32>(p,1.);
     out.color=color;out.normal=normal;out.local=p;
-    out.profile_index=profile_index;
+    out.profile_index=profile_index;out.camera_slot=0u;
     return out;
 }
 // Lossless triangle records retain the original indexed vertex sequence.
 @vertex fn vs_proxy(@builtin(vertex_index) vertex:u32,
     @location(0) p0:vec3<f32>,@location(1) p1:vec3<f32>,@location(2) p2:vec3<f32>,
     @location(3) normal:vec3<f32>,@location(4) color:vec3<f32>,@location(5) profile_index:u32)->VertexOut {
+    camera=draw_camera;
     let positions=array<vec3<f32>,3>(p0,p1,p2);
     return vertex_out(positions[vertex],color,normal,profile_index);
 }
@@ -361,6 +367,7 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
 @vertex fn vs_proxy_indexed(@builtin(vertex_index) vertex:u32,
     @location(0) addresses:vec3<u32>, @location(1) normal:vec3<f32>,
     @location(2) color:vec3<f32>, @location(3) profile_index:u32)->VertexOut {
+    camera=draw_camera;
     let address=addresses[vertex];
     let position=vec3<f32>(proxy_positions[address],proxy_positions[address+1u],proxy_positions[address+2u]);
     return vertex_out(position,color,normal,profile_index);
@@ -373,6 +380,7 @@ fn proxy_position(address:u32)->vec3<f32> {
 @vertex fn vs_proxy_derived(@builtin(vertex_index) vertex:u32,
     @location(0) addresses:vec3<u32>, @location(1) material:u32,
     @location(2) profile_index:u32)->VertexOut {
+    camera=draw_camera;
     let a=proxy_position(addresses.x); let b=proxy_position(addresses.y); let c=proxy_position(addresses.z);
     let positions=array<vec3<f32>,3>(a,b,c);
     return vertex_out(positions[vertex],MATERIAL_COLORS[material],normalize(cross(b-a,c-a)),profile_index);
@@ -385,6 +393,20 @@ const MATERIAL_COLORS:array<vec3<f32>,10> = array<vec3<f32>,10>(
 @vertex fn vs_native(@builtin(vertex_index) vertex:u32,
     @location(0) anchor:vec3<f32>,@location(1) extent:vec2<f32>,
     @location(2) axis_sign:u32,@location(3) material:u32,@location(4) profile_index:u32)->VertexOut {
+    camera=draw_camera;
+    return native_face(vertex,anchor,extent,axis_sign,material,profile_index);
+}
+@vertex fn vs_native_batch(@builtin(vertex_index) vertex:u32,
+    @location(0) anchor:vec3<f32>,@location(1) extent:vec2<f32>,
+    @location(2) axis_sign:u32,@location(3) material:u32,@location(4) profile_index:u32)->VertexOut {
+    let slot=axis_sign>>3u;
+    camera=batch_cameras[slot].value;
+    var out=native_face(vertex,anchor,extent,axis_sign,material,profile_index);
+    out.camera_slot=slot;
+    return out;
+}
+fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
+    axis_sign:u32,material:u32,profile_index:u32)->VertexOut {
     let axis=axis_sign&3u;let negative=(axis_sign&4u)!=0u;
     var corner=vertex;
     if negative && (corner==1u || corner==3u) {corner=4u-corner;}
@@ -395,6 +417,14 @@ const MATERIAL_COLORS:array<vec3<f32>,10> = array<vec3<f32>,10>(
     return vertex_out(position,MATERIAL_COLORS[min(material,9u)],normal,profile_index);
 }
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    camera=draw_camera;
+    return shade(in);
+}
+@fragment fn fs_native_batch(in: VertexOut) -> @location(0) vec4<f32> {
+    camera=batch_cameras[in.camera_slot].value;
+    return shade(in);
+}
+fn shade(in: VertexOut) -> vec4<f32> {
     // Ownership follows the occupied native cell, including faces on box edges.
     if near_shadow.naadf_hi.w>0.5 {
         let point=(floor(in.local*16.-in.normal*0.01)+0.5)/16.-camera.eye.xyz;

@@ -902,6 +902,13 @@ impl AdaptiveStream {
         self.predicted_footprint = predicted_footprint;
         self.retain_predictions(camera, p, predicted_footprint);
         let mut nodes = vec![];
+        let coarse_voxels = crate::adaptive_geometry::distant_voxels::enabled()
+            && self.world.topology_base_cells().is_none();
+        let finest_cells = self.finest_cells();
+        let should_split = |key: TileKey| {
+            key.width_cells > finest_cells
+                && (!coarse_voxels || key.width_cells / key.step_cells >= 16)
+        };
         if same {
             for tile in self.committed.clone() {
                 if !self.tile_visible(&tile, camera, p) && !self.prediction_protects(tile.key) {
@@ -933,7 +940,7 @@ impl AdaptiveStream {
                         width: k.width_cells,
                         step: k.step_cells,
                     });
-                } else if k.width_cells > self.finest_cells() {
+                } else if should_split(k) {
                     split(
                         Node {
                             min: k.min,
@@ -1027,7 +1034,7 @@ impl AdaptiveStream {
                     };
                     if coarse.is_some() || self.accepts(&t, camera, p) || !refine.contains(&t.key) {
                         nodes.push(old)
-                    } else if n.width > self.finest_cells() {
+                    } else if should_split(t.key) {
                         split(old, &mut nodes)
                     } else {
                         nodes.push(Node {
