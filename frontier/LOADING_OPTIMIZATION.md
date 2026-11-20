@@ -627,3 +627,50 @@ diagnostics ignored. The interior regression compares the reused packed
 payload, shader profiles, bounds and certificate for a changed seam against
 the full edge-sweep control and verifies that clearing the cache removes reuse.
 The seam and water-face tests also pass with the divisor set to 4 and 8.
+
+## Native box-splat comparison
+
+The `box-splat` renderer projects canonical surface cells from the same
+immutable brick snapshot used by the brick ray tracer. Each candidate draws a
+screen rectangle. The fragment shader tests the actual cell and writes the
+entry depth and exposed-face shading. The CPU builds the bounded cell list
+without extracting a greedy mesh. The experiment is available on `fixture`.
+
+The Radeon 760M run uses Mesa RADV 25.2.8, a Ryzen 5 7640U, 1920×1080,
+MSAA1, 6.25 cm voxels, and the fixed 16×14×16 m fixture. Each timing row
+uses a four-second uncapped run with 60 warmup frames. The GPU measurement
+covers the opaque scene pass.
+
+| View | Renderer | GPU p50 / p95 / p99, ms | Frame p50 / p95 / p99, ms |
+| --- | --- | ---: | ---: |
+| Overview | Greedy mesh | 0.787 / 0.848 / 0.952 | 1.514 / 2.628 / 3.604 |
+| Overview | Brick rays | 3.218 / 3.279 / 3.310 | 3.999 / 5.591 / 6.393 |
+| Overview | Box splats | 0.650 / 0.682 / 0.703 | 1.383 / 2.308 / 3.145 |
+| Cave | Greedy mesh | 1.004 / 1.049 / 1.074 | 1.654 / 2.657 / 3.736 |
+| Cave | Brick rays | 4.968 / 5.056 / 5.108 | 5.744 / 8.141 / 8.808 |
+| Cave | Box splats | 1.185 / 1.244 / 1.286 | 1.877 / 2.850 / 3.626 |
+| Bridge | Greedy mesh | 0.779 / 0.830 / 0.864 | 1.445 / 2.437 / 3.363 |
+| Bridge | Brick rays | 3.618 / 3.659 / 3.695 | 4.308 / 5.949 / 7.276 |
+| Bridge | Box splats | 1.053 / 1.095 / 1.142 | 1.725 / 2.688 / 3.627 |
+
+The first shader used full-screen rectangles for cells crossing the near
+plane. The cave pass reached 35.42 ms GPU p95. Conservative clip-space
+bounds for those cells, camera-facing exposure rejection, and a four-vertex
+strip brought it down to 1.24 ms. The completed data set has 116,711 submitted
+surface cells and uses about 1.78 MiB of splat GPU buffers.
+
+The cave and bridge float32 captures match brick rays in color and depth.
+All three views have identical hit coverage to brick rays. One overview
+pixel chooses a different face normal at a shared edge, with depth one
+float32 step apart. All three backends completed the add-and-restore transaction
+in a separate 17-second run. Box-splat publication took 1.33 s for the addition
+and 1.52 s for the restoration, including the full fixture snapshot rebuild.
+Terrain streaming, GPU cell generation and LOD handoffs require separate
+comparisons.
+
+```sh
+python3 tools/phasea_volume_check.py --output output/box-splat-visual \
+  --backends mesh brick box-splat --views overview cave bridge --capture-only
+python3 tools/phasea_volume_check.py --output output/box-splat-timing \
+  --backends mesh brick box-splat --views overview cave bridge --edits --edit-seconds 17
+```

@@ -117,6 +117,44 @@ fn wgsl_parses_and_validates() {
     .validate(&module)
     .unwrap();
 }
+
+#[test]
+fn splat_cells_preserve_mesh_face_count_and_open_crop() {
+    let min = Cell {
+        x: -12,
+        y: -4,
+        z: -7,
+    };
+    let size = [17, 14, 9];
+    let sample = |p: Cell| {
+        if p.y <= min.y + 8 && !(p.x == min.x + 16 && p.z > min.z + 5) {
+            Material::Stone
+        } else {
+            Material::Air
+        }
+    };
+    let mesh = crate::mesh::extract(sample, min, size);
+    let snapshot = BrickSnapshot::build(sample, min, size);
+    let cells = snapshot.collect_surface_cells();
+    assert!(!cells.is_empty());
+    assert_eq!(
+        cells
+            .iter()
+            .map(|c| (c[3] & EXPOSED_FACE_MASK).count_ones() as usize)
+            .sum::<usize>(),
+        mesh.exposed_native_faces
+    );
+    for [x, y, z, word] in cells {
+        let local = [x as usize, y as usize, z as usize];
+        assert!(local.iter().zip(size).all(|(&v, extent)| v < extent));
+        assert_eq!(word, snapshot.word(local));
+        assert_ne!(word & EXPOSED_FACE_MASK, 0);
+    }
+    assert!(BrickSnapshot::build(|_| Material::Stone, min, size)
+        .collect_surface_cells()
+        .is_empty());
+}
+
 #[test]
 fn packed_cells_exactly_preserve_material_and_halo_faces() {
     let min = Cell {

@@ -8,6 +8,7 @@ mod appearance_map;
 mod appearance_method;
 mod appearance_visibility;
 mod atmosphere;
+mod box_splat;
 pub mod brick_ray;
 mod build_memory;
 mod cold_source_cache;
@@ -279,6 +280,7 @@ struct Gpu {
     summary_contention_dispatches: std::cell::Cell<u64>,
     volume_owner: bool,
     brick: Option<brick_ray::BrickRayGpu>,
+    box_splat: Option<box_splat::BoxSplatGpu>,
     brick_skip_mode: u32,
     brick_cache_metrics: BrickCacheMetrics,
     surface_probe: Option<surface_compare::SurfaceCompareGpu>,
@@ -541,6 +543,7 @@ impl Gpu {
             summary_contention_dispatches: std::cell::Cell::new(0),
             volume_owner: false,
             brick: None,
+            box_splat: None,
             brick_skip_mode: 0,
             brick_cache_metrics: Default::default(),
             surface_probe: None,
@@ -566,29 +569,40 @@ impl Gpu {
             adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
-    fn install_bricks(
+    fn install_fixture_volume(
         &mut self,
         snapshot: &brick_ray::BrickSnapshot,
-        skip_mode: u32,
+        renderer: &str,
     ) -> Result<()> {
-        self.brick = Some(brick_ray::BrickRayGpu::new(
-            &self.device,
-            snapshot,
-            self.scene_format,
-            self.sample_count,
-        )?);
-        self.brick_skip_mode = skip_mode;
-        let metrics = &mut self.brick_cache_metrics;
-        metrics.latest_build_ms = snapshot.directional_build_ms;
-        metrics.latest_gpu_bytes = snapshot.directional_bytes();
-        metrics.latest_scratch_bytes = snapshot.directional_scratch_bytes;
-        metrics.peak_scratch_bytes = metrics
-            .peak_scratch_bytes
-            .max(snapshot.directional_scratch_bytes);
-        if !snapshot.directional_bounds.is_empty() {
-            metrics.builds += 1;
-            metrics.total_build_ms += snapshot.directional_build_ms;
-            metrics.uploaded_bytes += snapshot.directional_bytes() as u64;
+        if renderer == "box-splat" {
+            self.box_splat = Some(box_splat::BoxSplatGpu::new(
+                &self.device,
+                snapshot,
+                self.scene_format,
+                self.sample_count,
+            )?);
+            self.brick = None;
+        } else {
+            self.brick = Some(brick_ray::BrickRayGpu::new(
+                &self.device,
+                snapshot,
+                self.scene_format,
+                self.sample_count,
+            )?);
+            self.box_splat = None;
+            self.brick_skip_mode = brick_skip_mode(renderer);
+            let metrics = &mut self.brick_cache_metrics;
+            metrics.latest_build_ms = snapshot.directional_build_ms;
+            metrics.latest_gpu_bytes = snapshot.directional_bytes();
+            metrics.latest_scratch_bytes = snapshot.directional_scratch_bytes;
+            metrics.peak_scratch_bytes = metrics
+                .peak_scratch_bytes
+                .max(snapshot.directional_scratch_bytes);
+            if !snapshot.directional_bounds.is_empty() {
+                metrics.builds += 1;
+                metrics.total_build_ms += snapshot.directional_build_ms;
+                metrics.uploaded_bytes += snapshot.directional_bytes() as u64;
+            }
         }
         self.origin = DVec3::new(
             snapshot.origin.x as f64,
@@ -780,6 +794,14 @@ impl Gpu {
                 self.brick_skip_mode,
             );
         }
+        if let Some(splats) = &self.box_splat {
+            splats.update_camera(
+                &self.queue,
+                camera.matrix(self.origin, width as f32 / height as f32),
+                (camera.position - self.origin).as_vec3(),
+                [width, height],
+            );
+        }
         if let Some(probe) = &self.summary_contention {
             probe
                 .encode_resident(encoder)
@@ -951,6 +973,10 @@ impl Gpu {
         }
         if let Some(brick) = &self.brick {
             brick.draw(&mut pass);
+            return;
+        }
+        if let Some(splats) = &self.box_splat {
+            splats.draw(&mut pass);
             return;
         }
         if let Some(probe) = &self.surface_probe {
@@ -1348,6 +1374,10 @@ impl Gpu {
             ",\"naadf_gpu_stages\":{}}}",
             naadf::gpu_stages::json(self.naadf_gpu_stages.as_deref(), &self.device)
         ));
+        if let Some(splats) = &self.box_splat {
+            metadata.pop();
+            metadata.push_str(&format!(",\"box_splat\":{}}}", splats.json()));
+        }
         if let Some(n) = &self.naadf {
             metadata.pop();
             metadata.push_str(&format!(",\"naadf\":{}}}", n.json()));
@@ -1377,6 +1407,15 @@ const ARENA_MIN: Cell = Cell {
 const ARENA_SIZE: [usize; 3] = [256, 224, 256];
 fn fixture_mesh(world: &World) -> mesh::Mesh {
     mesh::extract(|p| world.material(p), ARENA_MIN, ARENA_SIZE)
+}
+// The viewer's generic GPU setup takes a mesh even for direct voxel modes.
+fn fixture_mesh_placeholder(origin: Cell) -> mesh::Mesh {
+    mesh::Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        origin,
+        exposed_native_faces: 0,
+    }
 }
 fn inside_arena(cell: Cell) -> bool {
     (ARENA_MIN.x..ARENA_MIN.x + ARENA_SIZE[0] as i64).contains(&cell.x)
@@ -1475,7 +1514,6 @@ impl PendingEdit {
         let started = Instant::now();
         let staged_world = Some(snapshot.clone());
         std::thread::spawn(move || {
-            let mesh = mesh::extract(|p| snapshot.material(p), min, size);
             let bricks = ray.then(|| {
                 let mut bricks =
                     brick_ray::BrickSnapshot::build(|p| snapshot.material(p), min, size);
@@ -1484,6 +1522,11 @@ impl PendingEdit {
                 }
                 bricks
             });
+            let mesh = if bricks.is_some() {
+                fixture_mesh_placeholder(min)
+            } else {
+                mesh::extract(|p| snapshot.material(p), min, size)
+            };
             let _ = sender.send((mesh, revision, started.elapsed(), bricks));
         });
         Self {
@@ -2019,7 +2062,7 @@ impl Viewer {
                     if let Some(gpu) = &mut self.gpu {
                         if let Some(bricks) = &bricks {
                             if let Err(error) =
-                                gpu.install_bricks(bricks, brick_skip_mode(&self.renderer))
+                                gpu.install_fixture_volume(bricks, &self.renderer)
                             {
                                 self.error = Some(error.to_string());
                                 return;
@@ -2756,7 +2799,7 @@ impl ApplicationHandler for Viewer {
             ))?;
             gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
-                gpu.install_bricks(&snapshot, brick_skip_mode(&self.renderer))?;
+                gpu.install_fixture_volume(&snapshot, &self.renderer)?;
             }
             gpu.configure_visuals(&self.world, &self.visual_settings);
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
@@ -3489,6 +3532,8 @@ pub fn run() -> Result<()> {
             pitch: direction.y.asin() as f32,
         };
         mesh
+    } else if renderer != "mesh" {
+        fixture_mesh_placeholder(ARENA_MIN)
     } else {
         let started = Instant::now();
         let mesh = fixture_mesh(&world);
@@ -3521,16 +3566,6 @@ pub fn run() -> Result<()> {
         }
         snapshot
     });
-    let mesh = if brick_initial.is_some() {
-        mesh::Mesh {
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            origin: ARENA_MIN,
-            exposed_native_faces: 0,
-        }
-    } else {
-        mesh
-    };
     camera.far = (terrain::half_extent(view_levels) * 3.).max(20000.) as f32;
     camera.fov_y = fov_y;
     if let Some(far) = capture_far {
@@ -3597,7 +3632,7 @@ pub fn run() -> Result<()> {
         gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();
         if let Some(snapshot) = &brick_initial {
-            gpu.install_bricks(snapshot, brick_skip_mode(&renderer))?;
+            gpu.install_fixture_volume(snapshot, &renderer)?;
         }
         if let Some(data) = &terrain_data {
             if surface_layout == "quadtree" {
@@ -3993,7 +4028,7 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer=="box-splat" {"exact_native_box_splats"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or_else(||g.box_splat.as_ref().map_or(g.index_count/3,|s|s.triangle_count()),|t|t.index_count/3),|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
             json.pop();
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));
@@ -4142,6 +4177,10 @@ pub fn run() -> Result<()> {
             viewer.frame_trace.json(),
             viewer.visual_settings.step_smoothing
         ));
+        if let Some(splats) = viewer.gpu.as_ref().and_then(|gpu| gpu.box_splat.as_ref()) {
+            json.pop();
+            json.push_str(&format!(",\"box_splat\":{}}}", splats.json()));
+        }
         let full = viewer
             .gpu_probe
             .as_ref()

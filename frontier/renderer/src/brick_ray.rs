@@ -16,6 +16,7 @@ mod directional;
 
 const BRICK: usize = 8;
 const DENSE: u32 = 1 << 31;
+const EXPOSED_FACE_MASK: u32 = 0x3f00;
 pub const SHADER: &str = include_str!("brick_ray.wgsl");
 
 #[derive(Clone, Debug)]
@@ -179,6 +180,40 @@ impl BrickSnapshot {
     pub fn gpu_bytes(&self) -> usize {
         (self.headers.len() + self.dense.len().max(1) + self.directional_bounds.len().max(1)) * 4
     }
+    /// Local integer coordinates and the exact material/exposure word. Empty
+    /// and solid interior bricks have no surface and need no per-cell work.
+    pub(crate) fn collect_surface_cells(&self) -> Vec<[u32; 4]> {
+        let mut surface = Vec::new();
+        for bz in 0..self.brick_size[2] {
+            for by in 0..self.brick_size[1] {
+                for bx in 0..self.brick_size[0] {
+                    let brick = (bz * self.brick_size[1] + by) * self.brick_size[0] + bx;
+                    let header = self.headers[brick * 2];
+                    let dense = header & DENSE != 0;
+                    if !dense && header & EXPOSED_FACE_MASK == 0 {
+                        continue;
+                    }
+                    for i in 0..BRICK.pow(3) {
+                        let word = if dense {
+                            let packed = self.dense[(header & !DENSE) as usize + i / 2];
+                            (packed >> ((i % 2) * 16)) & 0xffff
+                        } else {
+                            header
+                        };
+                        if word & EXPOSED_FACE_MASK != 0 {
+                            surface.push([
+                                (bx * BRICK + i % BRICK) as u32,
+                                (by * BRICK + (i / BRICK) % BRICK) as u32,
+                                (bz * BRICK + i / (BRICK * BRICK)) as u32,
+                                word,
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+        surface
+    }
     #[cfg(test)]
     fn word(&self, p: [usize; 3]) -> u32 {
         let b = p.map(|v| v / 8);
@@ -193,13 +228,32 @@ impl BrickSnapshot {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct RayCamera {
+pub(crate) struct RayCamera {
     matrix: [[f32; 4]; 4],
     inverse: [[f32; 4]; 4],
     eye: [f32; 4],
     extent: [u32; 4],
     bricks: [u32; 4],
     viewport: [f32; 4],
+}
+impl RayCamera {
+    pub(crate) fn new(
+        matrix: Mat4,
+        eye_local: Vec3,
+        [width, height]: [u32; 2],
+        size: [usize; 3],
+        bricks: [usize; 3],
+        mode: u32,
+    ) -> Self {
+        Self {
+            matrix: matrix.to_cols_array_2d(),
+            inverse: matrix.inverse().to_cols_array_2d(),
+            eye: eye_local.extend(1.).to_array(),
+            extent: [size[0] as u32, size[1] as u32, size[2] as u32, mode],
+            bricks: [bricks[0] as u32, bricks[1] as u32, bricks[2] as u32, 0],
+            viewport: [width as f32, height as f32, 0., 0.],
+        }
+    }
 }
 pub struct BrickRayGpu {
     pipeline: wgpu::RenderPipeline,
@@ -389,24 +443,7 @@ impl BrickRayGpu {
         } else {
             skip_mode.min(2)
         };
-        let data = RayCamera {
-            matrix: matrix.to_cols_array_2d(),
-            inverse: matrix.inverse().to_cols_array_2d(),
-            eye: eye_local.extend(1.).to_array(),
-            extent: [
-                self.size[0] as u32,
-                self.size[1] as u32,
-                self.size[2] as u32,
-                mode,
-            ],
-            bricks: [
-                self.bricks[0] as u32,
-                self.bricks[1] as u32,
-                self.bricks[2] as u32,
-                0,
-            ],
-            viewport: [width as f32, height as f32, 0., 0.],
-        };
+        let data = RayCamera::new(matrix, eye_local, [width, height], self.size, self.bricks, mode);
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&data));
     }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
