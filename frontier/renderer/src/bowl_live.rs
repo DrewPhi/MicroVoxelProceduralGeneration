@@ -437,8 +437,9 @@ impl BowlLive {
         let mut out=format!("{{\"units\":{},\"capacity\":{},\"litres\":{},\"scooped_units\":{},\"emitted_units\":{},\"spilled_units\":{},\"airborne\":{},\"absorbed_units\":{},\"damp_cells\":{},\"deposited_units\":{},\"conserved\":{},\"simulation_debt\":{},\"save_count\":{}}}",self.state.units,CAPACITY,self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.state.scooped,self.state.emitted,self.state.spilled,self.state.drops.len(),self.state.moisture.values().sum::<u32>(),self.state.damp.len(),self.state.deposited.len(),self.state.conserved(),self.debt,self.saves);
         out.pop();
         out.push_str(&format!(
-            ",\"growth_controls\":{{\"infinite_energy\":{},\"speed_step\":{}}}}}",
-            self.growth_controls.infinite_energy, self.growth_controls.speed_step
+            ",\"growth_controls\":{{\"infinite_energy\":{infinite},\"infinite_water\":{infinite},\"speed_step\":{}}}}}",
+            self.growth_controls.speed_step,
+            infinite = self.growth_controls.infinite_resources
         ));
         out.pop();
         out.push_str(&format!(",\"plant_transferred\":{},\"garden\":{{\"seeds\":{},\"holes\":{},\"plants\":{},\"germinated\":{},\"tissue_cells\":{},\"leaves\":{},\"water_stored\":{},\"transpired\":{},\"tick\":{},\"water_ledger_matches\":{}}}}}",self.state.plant_transferred,self.garden.seeds,self.garden.holes.len(),self.garden.plants.len(),self.garden.plants.iter().filter(|p|p.germination==4).count(),self.garden.cells(),self.garden.plants.iter().flat_map(|p|p.tissue.values()).filter(|&&t|t==Tissue::Leaf).count(),self.garden.plants.iter().map(|p|p.water).sum::<u32>(),self.garden.plants.iter().map(|p|p.transpired).sum::<u64>(),self.garden.tick,self.garden.water_accounted()==self.state.plant_transferred));
@@ -482,10 +483,11 @@ impl BowlLive {
             ));
         }
         if let Some(p) = self.garden.plants.first() {
+            let infinite = self.growth_controls.infinite_resources;
             let stage = if p.germination < 4 {
                 if !self.garden.holes[p.hole].covered {
                     "Seed needs covering"
-                } else if p.water == 0 {
+                } else if !infinite && p.water == 0 {
                     "Buried seed — waiting for water"
                 } else {
                     "Seed germinating"
@@ -494,20 +496,20 @@ impl BowlLive {
                 "Plant reached the current engine safety limit"
             } else if !p.has_growth() {
                 "Plant tips blocked — no open growth directions"
-            } else if p.water == 0 && p.hydration == 0 {
+            } else if !infinite && p.water == 0 && p.hydration == 0 {
                 "Plant thirsty — water near its base"
-            } else if p.energy < 0.85 && !self.growth_controls.infinite_energy {
+            } else if !infinite && p.energy < 0.85 {
                 "Plant low on energy — needs sunlight"
             } else {
                 "Recursive plant growing"
             };
-            let energy = if self.growth_controls.infinite_energy {
-                "∞".into()
+            let resources = if infinite {
+                "energy ∞ • water ∞".into()
             } else {
-                format!("{:.1}", p.energy)
+                format!("energy {:.1}", p.energy)
             };
             out.text.push_str(&format!(
-                "\n{stage} • {} cells • energy {energy} • {} lit leaves • {} growing tips",
+                "\n{stage} • {} cells • {resources} • {} lit leaves • {} growing tips",
                 p.tissue.len(),
                 p.lit_leaves,
                 p.active_tips()

@@ -273,7 +273,7 @@ impl SettingsUi {
                         .show(ui, |ui| {
                             if let Some(growth) = plant_growth.as_deref_mut() {
                                 ui.heading("Plant growth");
-                                ui.checkbox(&mut growth.infinite_energy, "Infinite plant energy");
+                                ui.checkbox(&mut growth.infinite_resources, "Infinite plant energy and water");
                                 ui.add(
                                     egui::Slider::new(&mut growth.speed_step, 0..=GROWTH_SPEEDS.len())
                                         .text("Growth speed")
@@ -284,7 +284,7 @@ impl SettingsUi {
                                             )
                                         }),
                                 );
-                                ui.small("Instant fast-forwards growth. Seeds still need covering and water.");
+                                ui.small("Instant fast-forwards growth. Seeds still need covering.");
                                 ui.separator();
                             }
                             ui.heading("Image quality");

@@ -45,12 +45,12 @@ pockets, seed, tissue, bowl and wet patches survive clean exit/restart. Camera
 position still resets to the shore. `--bowl-save PATH` selects another save slot.
 
 Press **Esc** and open the **Plant growth** controls to turn on **Infinite
-plant energy** or move **Growth speed** from **1×** to **Instant**. Infinite
-energy lets plants grow through darkness without spending stored energy.
-Growth speed advances the plant simulation while water in the bowl and in
-flight runs at the usual rate. Seeds still need covering and water. Instant
-works in short batches for large plants. These controls start at the normal
-settings each time you launch.
+plant energy and water** or move **Growth speed** from **1×** to **Instant**.
+The toggle lets covered seeds germinate in dry soil and grow through darkness.
+It leaves stored plant resources and the bowl's water ledger intact. Growth
+speed advances the plant simulation while water in the bowl and in flight
+runs at the usual rate. Instant works in short batches for large plants.
+These controls start at the normal settings each time you launch.
 
 ## What grows
 

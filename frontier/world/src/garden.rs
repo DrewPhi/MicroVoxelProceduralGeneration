@@ -10,7 +10,7 @@ pub const GROWTH_SPEEDS: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GrowthControls {
-    pub infinite_energy: bool,
+    pub infinite_resources: bool,
     /// Index into GROWTH_SPEEDS, with the final slider position selecting Instant.
     pub speed_step: usize,
 }
@@ -495,7 +495,8 @@ impl Garden {
         controls: GrowthControls,
     ) -> bool {
         self.tick += 1;
-        let instant_energy = controls.is_instant() && controls.infinite_energy;
+        let infinite = controls.infinite_resources;
+        let instant_growth = controls.is_instant() && infinite;
         let mut progressing = false;
         for p in &mut self.plants {
             if controls.is_instant() && p.at_capacity() {
@@ -510,31 +511,36 @@ impl Garden {
                     p.germination = 0;
                     continue;
                 }
-                Self::uptake(p, h.seed, bowl);
-                if p.water == 0 {
-                    p.germination = 0;
-                    continue;
+                if !infinite {
+                    Self::uptake(p, h.seed, bowl);
+                    if p.water == 0 {
+                        p.germination = 0;
+                        continue;
+                    }
                 }
                 p.germination += 1;
                 progressing = true;
-                if p.germination == 4 && !controls.infinite_energy {
+                if p.germination == 4 && !infinite {
                     p.energy -= 1.2;
                 }
                 continue;
             }
             let previous_energy = p.energy;
             let previous_cursor = p.cursor;
-            Self::uptake(p, h.seed, bowl);
-            if p.age % 20 == 0 {
-                if p.water > 0 {
-                    p.water -= 1;
-                    p.transpired += 1;
-                } else {
-                    p.hydration = 0;
+            if !infinite {
+                Self::uptake(p, h.seed, bowl);
+                if p.age % 20 == 0 {
+                    if p.water > 0 {
+                        p.water -= 1;
+                        p.transpired += 1;
+                    } else {
+                        p.hydration = 0;
+                    }
                 }
             }
+            let hydrated = infinite || p.water > 0 || p.hydration > 0;
             p.lit_leaves = 0;
-            if !instant_energy && sun[1] > 0. && (p.water > 0 || p.hydration > 0) {
+            if !instant_growth && sun[1] > 0. && hydrated {
                 let leaves = p
                     .tissue
                     .iter()
@@ -572,12 +578,12 @@ impl Garden {
                 } else {
                     (lit * leaves.len() / sampled) as u32
                 };
-                if !controls.infinite_energy {
+                if !infinite {
                     p.energy =
                         (p.energy + p.lit_leaves as f64 * 0.55 * sun[1]).min(p.energy_capacity());
                 }
             }
-            if !controls.infinite_energy {
+            if !infinite {
                 p.energy =
                     (p.energy - p.tissue.values().map(|t| t.maintenance()).sum::<f64>()).max(0.);
             }
@@ -585,8 +591,8 @@ impl Garden {
             if self.seed_program.is_some()
                 && p.age % 12 == 0
                 && p.cursor == p.program.len()
-                && (controls.infinite_energy || p.energy >= Tissue::Reinforcement.cost())
-                && (p.water > 0 || p.hydration > 0)
+                && (infinite || p.energy >= Tissue::Reinforcement.cost())
+                && hydrated
             {
                 let remaining = MAX_STEPS.saturating_sub(p.program.len());
                 p.program.extend(
@@ -595,7 +601,7 @@ impl Garden {
                         .take(remaining),
                 );
             }
-            let budget = if instant_energy {
+            let budget = if instant_growth {
                 8
             } else {
                 (1 + p.lit_leaves / 8).min(8)
@@ -620,20 +626,19 @@ impl Garden {
                     p.cursor += 1;
                     continue;
                 }
-                if (!controls.infinite_energy && p.energy < next.tissue.cost())
-                    || (p.hydration == 0 && p.water == 0)
-                {
-                    break;
-                }
-                if p.hydration == 0 {
-                    p.water -= 1;
-                    p.transpired += 1;
-                    p.hydration = 4;
-                }
-                if !controls.infinite_energy {
+                // The override satisfies demand without touching stored resources.
+                if !infinite {
+                    if p.energy < next.tissue.cost() || (p.hydration == 0 && p.water == 0) {
+                        break;
+                    }
+                    if p.hydration == 0 {
+                        p.water -= 1;
+                        p.transpired += 1;
+                        p.hydration = 4;
+                    }
                     p.energy -= next.tissue.cost();
+                    p.hydration -= 1;
                 }
-                p.hydration -= 1;
                 p.cursor += 1;
                 p.tissue.insert(next.cell, next.tissue);
                 world.set(next.cell, next.tissue.material());
@@ -1142,31 +1147,30 @@ mod tests {
     }
 
     #[test]
-    fn instant_infinite_energy_preserves_cover_water_and_stored_energy() {
+    fn infinite_resources_grow_dry_seeds_without_changing_water_ledgers() {
         let (mut world, mut garden, mut bowl, top) = scene();
         garden.dig(&mut world, top).unwrap();
         garden.plant(&mut world, 0).unwrap();
         garden.plants[0].energy = 0.;
         let controls = GrowthControls {
-            infinite_energy: true,
+            infinite_resources: true,
             speed_step: GROWTH_SPEEDS.len(),
         };
         let dark = [0., -1., 0.];
         garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
         assert_eq!(garden.plants[0].germination, 0);
         garden.cover(&mut world, 0).unwrap();
-        garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
-        assert_eq!(garden.plants[0].germination, 0);
-        supply(&mut bowl, top, 12);
         // The wall-time limit can spread the batch across frames on slower machines.
         for _ in 0..8 {
             garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
         }
         let grown = garden.cells();
+        assert_eq!(garden.plants[0].germination, 4);
         assert!(grown > 10);
         assert_eq!(garden.plants[0].energy, 0.);
-        assert!(garden.water_accounted() <= 12);
-        assert_eq!(garden.water_accounted(), bowl.plant_transferred);
+        assert_eq!(garden.plants[0].hydration, 0);
+        assert_eq!(garden.water_accounted(), 0);
+        assert_eq!(bowl.plant_transferred, 0);
         assert!(bowl.conserved());
         for (&cell, &tissue) in &garden.plants[0].tissue {
             assert_eq!(world.material(cell), tissue.material());
@@ -1175,14 +1179,23 @@ mod tests {
             Garden::restore(&garden.snapshot(), 19).unwrap().snapshot(),
             garden.snapshot()
         );
-        bowl.moisture.insert(offset(top, [1, 0, 0]), 1);
-        bowl.removed.insert(offset(top, [200, 0, 0]));
-        bowl.scooped += 1;
+        // With the toggle off, enough energy alone cannot support a dry plant.
+        garden.plants[0].energy = 10.;
         for _ in 0..4 {
             garden.advance(&mut world, &mut bowl, 0.25, dark);
         }
         assert_eq!(garden.cells(), grown);
-        assert_eq!(garden.plants[0].energy, 0.);
+
+        supply(&mut bowl, top, 12);
+        let water_before = bowl.snapshot(19);
+        garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
+        assert_eq!(bowl.snapshot(19), water_before);
+        assert_eq!(garden.water_accounted(), 0);
+        for _ in 0..4 {
+            garden.advance(&mut world, &mut bowl, 0.25, dark);
+        }
+        assert!(bowl.plant_transferred > 0);
+        assert!(bowl.conserved());
     }
 
     #[test]
