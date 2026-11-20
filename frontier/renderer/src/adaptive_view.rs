@@ -99,6 +99,8 @@ pub struct AdaptiveView {
     pub max_upload_frame_bytes: u64,
     pub published_epoch: u64,
     pub pixel_error: f64,
+    coarse_y_pitch_divisor: u32,
+    visible_vertical_bound: bool,
     topology_supported: bool,
     native_bins: bool,
     worker_count: usize,
@@ -382,6 +384,11 @@ impl AdaptiveView {
             ..Default::default()
         };
         let topology_supported = world.topology_base_cells().is_some();
+        let coarse_y_pitch_divisor =
+            crate::adaptive_geometry::distant_voxels::vertical_pitch_divisor(&world);
+        let visible_vertical_bound = crate::adaptive_stream::visible_vertical_bound_for_alpine(
+            crate::adaptive_stream::is_alpine(&world),
+        );
         let revision = world.revision();
         let cover = if deferred_cover::enabled() {
             Some(CoverState {
@@ -456,6 +463,8 @@ impl AdaptiveView {
             max_upload_frame_bytes: 0,
             published_epoch: 0,
             pixel_error,
+            coarse_y_pitch_divisor,
+            visible_vertical_bound,
             topology_supported,
             native_bins,
             worker_count,
@@ -1063,7 +1072,7 @@ impl AdaptiveView {
             ",\"coarse_interior_cache\":{{\"hits\":{},\"reserved_bytes\":{}}},\"coarse_y_pitch_divisor\":{}}}",
             self.latest_cache.coarse_interior_hits,
             self.latest_cache.coarse_interior_cache_bytes,
-            crate::adaptive_geometry::distant_voxels::vertical_pitch_divisor()
+            self.coarse_y_pitch_divisor
         ));
         json.pop();
         json.push_str(&format!(
@@ -1113,8 +1122,7 @@ impl AdaptiveView {
         json.pop();
         json.push_str(&format!(
             ",\"direct_native_urgent\":{},\"visible_vertical_error_bound\":{}}}",
-            self.direct_native_urgent,
-            crate::adaptive_stream::visible_vertical_bound_enabled()
+            self.direct_native_urgent, self.visible_vertical_bound
         ));
         json.pop();
         json.push_str(&format!(

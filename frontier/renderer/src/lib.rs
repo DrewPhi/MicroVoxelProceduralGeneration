@@ -2657,6 +2657,13 @@ impl Viewer {
             },
             terrain_pending: self.adaptive_view.as_ref().map_or(0, |v| v.pending_count),
             terrain_ready: self.adaptive_view.as_ref().is_none_or(|v| v.quality_ready),
+            terrain_coverage: self.adaptive_view.as_ref().is_none_or(|v| v.coverage_ready),
+            terrain_error_px: self.adaptive_view.as_ref()
+                .filter(|v| v.coverage_ready)
+                .and_then(|v| v.stats.current_max_error_px),
+            terrain_unresolved: self.adaptive_view.as_ref()
+                .map_or(0, |v| v.stats.current_unresolved_clusters),
+            terrain_epoch: self.adaptive_view.as_ref().map_or(0, |v| v.published_epoch),
             native_clusters: self.adaptive_view.as_ref().map_or(0, |v| v.native_clusters),
             terrain_owner: self
                 .adaptive_view

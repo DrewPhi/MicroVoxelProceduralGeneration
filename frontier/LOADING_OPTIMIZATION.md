@@ -542,7 +542,7 @@ multiply made the same probe slower, about 98 ms, and was discarded.
 `FRONTIER_COARSE_Y_PITCH_DIVISOR=2|4|8` tests finer Y rounding for dry stair
 roofs. The same quantization is applied to both sides of a shared edge.
 Voxel-pitch and water samples retain their native heights. Derived cache
-identity includes the alternative divisor. The default divisor is 1.
+identity includes the alternative divisor. The original control used divisor 1.
 
 ### Radeon 760M measurements
 
@@ -627,3 +627,111 @@ diagnostics ignored. The interior regression compares the reused packed
 payload, shader profiles, bounds and certificate for a changed seam against
 the full edge-sweep control and verifies that clearing the cache removes reuse.
 The seam and water-face tests also pass with the divisor set to 4 and 8.
+
+## Alpine LOD startup and turn pass
+
+The packed-quad renderer now uses quarter-pitch vertical rounding for Alpine
+dry roofs. The geometry cache keys distinguish the resulting representation.
+The Alpine source skips ridge terms where their envelope is identically zero.
+The same source code handles scalar samples, appearance derivatives and affine
+certificates. The test compares the scalar result bit for bit with the full
+evaluation around the support boundary. Native cell size remains 6.25 cm.
+
+When a requested Alpine refinement splits a parent at least 256 m across,
+its children can start at their finer pitch in one coherent publication. The
+normal seam closure and conservative source certificate still apply. Smaller
+parents use the regular split to keep single batches short. Alpine planning,
+delivery checks and GPU publication also use the same clip-matrix-based visible
+vertical error bound. The bound describes projected geometry. Raster aliasing,
+material variation and shadow changes need visual checks in motion.
+
+Alpine starts views with a far clip of 3 km or more with 16 coarse patches per
+axis per root. The earlier eight-patch roots showed wider stair steps in the
+first visible skyline. The 16-patch case still fits the 256-patch local source
+certificate. The 32-patch experiment produced the same settled image and a
+later first frame in the real walk. All three start with visible stair steps
+when streaming haze is off. The shorter far clips use eight patches per axis.
+
+The A/B overrides are `FRONTIER_COARSE_Y_PITCH_DIVISOR=1|2|4|8`,
+`FRONTIER_LOD_DIRECT_SPLIT=0|1` and `FRONTIER_VISIBLE_ERROR_BOUND=0|1`.
+For direct split, `0` restores the original split and `1` tests finer children
+at all sizes. Seeded World and Legacy use their original defaults. The final
+Legacy spiky capture matched the control's PNG, float color, depth and coverage
+byte for byte. Its linear RMSE against the independent 256-spp reference was
+0.02267 in both runs. The experimental skyline-priority/turn-retention policy
+was removed after it delayed stationary horizon readiness. All-size direct
+splits also increased the moving-view upload volume compared with the pitch-only
+candidate, so the default applies the faster split to large parents only.
+
+### Matched 1080p results on Radeon 760M
+
+Control `a92f42d`, seed 7, Ryzen 5 7640U, Radeon 760M via RADV Mesa 25.2.8,
+1920×1080, MSAA1. The stationary scene uses the 6 km horizon command above, a
+64 m NAADF radius and 7.5 px requested error. `First sample` includes exact
+snapshot residency, the current owner handoff and the 6 px refinement reserve.
+The raster figures time the most recent ownership preparation cycle. A cover
+retained from an earlier cycle can already satisfy the target. In the warm run
+the raster cache recorded 3,144 hits and zero misses. The first measured frame
+still waited for the complete 64 m NAADF snapshot. To reproduce the warm run,
+replace `--no-adaptive-disk-cache` with `--adaptive-disk-cache PATH` and repeat
+the benchmark with the same path. GPU span samples exclude CPU work,
+presentation and earlier uploads.
+
+| 6 km fixed view | First sample, s | Raster target / reserve, s | Frame p50 / p95 / p99, ms | GPU span p95, ms | Uploaded terrain, MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Control, disk cache disabled | 24.29 | 14.63 / 20.23 | 20.22 / 22.63 / 23.11 | 19.18 | 168 |
+| Updated, disk cache disabled | 10.75 | 4.80 / 7.10 | 21.42 / 23.72 / 24.48 | 20.23 | 100 |
+| Updated, repeat from populated cache | 5.38 | 0.053 / 0.053 | 19.29 / 22.29 / 23.78 | 18.90 | 69 |
+
+The matched cold pair settled at 3,736 → 2,740 resident clusters, 2.15 →
+2.49 million exposed terrain triangles, 297 → 204 MiB of CPU terrain cache,
+and 74 → 89 MiB of resident terrain GPU payload. Pending selection payload
+was zero after both runs. Peak builder reservation was 274 MiB in each. The
+finer vertical pitch trades more exposed faces for lower shape error earlier
+in the hierarchy. The updated cold run's settled GPU span was about 1 ms
+higher at p95. Both cold runs kept the stationary view inside the same error
+target throughout measurement.
+
+Use the walk-and-turn command near the start of this document for the 950 m
+motion comparison. Change only `--capture-far 950` to `--capture-far 6000`
+for the long-range motion run. The disk cache was disabled in all motion
+timing runs. These runs use vegetation, 32 m NAADF and a 3 px target.
+
+| Walk and turn | Frame p50 / p95 / p99, ms | Coverage | Unbounded error frames | End error, px | Terrain uploads, MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 950 m control | 23.46 / 37.84 / 45.30 | 606/606 | 39 | 22.26 | 132 |
+| 950 m updated | 23.92 / 35.10 / 45.37 | 601/601 | 0 | 8.71 | 107 |
+| 950 m updated repeat | 23.84 / 35.29 / 44.67 | 602/602 | 0 | 9.76 | 106 |
+| 6 km control | 22.25 / 36.33 / 46.39 | 639/639 | 75 | 27.22 | 144 |
+| 6 km updated, fine starter grid trial | 23.48 / 29.60 / 37.22 | 619/619 | 41 | 15.67 | 94 |
+| 6 km updated, release defaults | 23.23 / 31.48 / 43.04 | 618/618 | 47 | 15.67 | 93 |
+
+None of the measured motion frames met the 3 px target. The updated 6 km
+run's p95 GPU span was 24.00 ms, above the 16.67 ms whole-frame budget for
+60 FPS. The faster CPU preparation and lower upload volume help convergence
+and frame tails. They leave native traversal, lighting and presentation costs
+in place.
+
+Before the finer starter grid, priority preemption on the 6 km route ended at
+13.93 px with a 33.97 ms frame p95, versus 15.74 px and 31.80 ms. An 85%
+internal render scale reached 18.08 / 24.40 / 29.33 ms at 1920×1080 output.
+That run shades fewer samples and uses a lower internal projection height for
+LOD decisions. The full-resolution comparison uses scale 1 throughout.
+
+The cold-start X11 recordings used real keyboard and mouse input at 1080p
+without streaming haze. The fine-grid recording turned 73°. Its opening ridge
+steps are still visible as far detail arrives.
+Its game report logs coverage, current projected error and the published epoch
+per frame. Video runs include recording load, so the table uses independent
+benchmarks. Reproduce with the same binary and a new output directory.
+
+```sh
+python3 tools/record_walk.py --width 1920 --height 1080 \
+  --output output/lod-polish/walk -- --seed 7 --msaa 1 \
+  --capture-far 6000 --naadf-radius 32 --pixel-error 5 \
+  --no-adaptive-disk-cache --streaming-haze 0 --sun-elevation 25 --cloud-speed 0
+```
+
+Verification passed 197 world, 35 runtime, 566 renderer and 13 report tests.
+The final release was checked with the exact Legacy capture and retimed with
+the chosen Alpine startup grid.

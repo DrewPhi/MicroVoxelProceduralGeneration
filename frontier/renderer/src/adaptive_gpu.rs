@@ -535,6 +535,7 @@ pub struct AdaptiveGpu {
     gpu_profile_stats: GpuProfileStats,
     lighting: [f32; 12],
     near_detail: bool,
+    visible_vertical_bound: bool,
     near_beauty: bool,
     shadows: ShadowResources,
     prepared_view: Option<PreparedView>,
@@ -905,6 +906,9 @@ impl AdaptiveGpu {
             lighting: [0.; 12],
             near_beauty: false,
             near_detail: false,
+            visible_vertical_bound: crate::adaptive_stream::visible_vertical_bound_for_alpine(
+                false,
+            ),
             shadows,
             prepared_view: None,
             resident_stats: None,
@@ -1012,11 +1016,18 @@ impl AdaptiveGpu {
         // With no plant pass there is no depth-map clear/draw. Do not sample
         // a previous frame's plant shadows after vegetation is switched off.
         let near_beauty = settings.beauty && settings.vegetation;
-        if self.near_beauty != near_beauty {
+        let near_detail = crate::adaptive_stream::near_detail_for_alpine(alpine);
+        let visible_vertical_bound =
+            crate::adaptive_stream::visible_vertical_bound_for_alpine(alpine);
+        if self.near_beauty != near_beauty
+            || self.near_detail != near_detail
+            || self.visible_vertical_bound != visible_vertical_bound
+        {
             self.prepared_view = None;
         }
         self.near_beauty = near_beauty;
-        self.near_detail = crate::adaptive_stream::near_detail_for_alpine(alpine);
+        self.near_detail = near_detail;
+        self.visible_vertical_bound = visible_vertical_bound;
         let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
         let value = [
             sun.x,
@@ -1545,7 +1556,12 @@ impl AdaptiveGpu {
         );
         let direction = camera.direction();
         let view_transform = LocalViewTransform::new(direction);
-        let queries = crate::adaptive_stream::CameraQueries::new(camera, width, height);
+        let queries = crate::adaptive_stream::CameraQueries::new(
+            camera,
+            width,
+            height,
+            self.visible_vertical_bound,
+        );
         let resident_started = std::time::Instant::now();
         if self.resident_stats.is_none() || !self.prepare_reuse_enabled {
             let mut stats = DrawStats {

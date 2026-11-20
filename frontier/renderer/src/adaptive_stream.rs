@@ -21,11 +21,12 @@ pub(crate) const REFINEMENT_RESERVE: f64 = 0.8;
 
 /// Alpine spends extra error budget near the camera; other recipes retain their policy.
 pub(crate) fn near_detail_setting(world: &World) -> bool {
-    near_detail_for_alpine(
-        world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine),
-    )
+    near_detail_for_alpine(is_alpine(world))
+}
+pub(crate) fn is_alpine(world: &World) -> bool {
+    world
+        .fbm_terrain()
+        .is_some_and(|terrain| terrain.params().recipe == frontier_world::FbmRecipe::Alpine)
 }
 pub(crate) fn near_detail_for_alpine(alpine: bool) -> bool {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
@@ -398,6 +399,7 @@ fn obsolete_refinement_demand(
     height: u32,
     pixel_error: f64,
     near_detail: bool,
+    visible_vertical_bound: bool,
 ) -> bool {
     let Some(first) = committed.first() else {
         return false;
@@ -458,11 +460,18 @@ fn obsolete_refinement_demand(
             })
             && tile.best_certified_vertical_error_m.map_or(true, |error| {
                 let projected = weighted_near_detail_error(
-                    vertical_pixel_bound(error, tile.bounds, tile_origin(tile), camera, projection)
-                        .max(projection.projected_error_px(
-                            tile.water_feature_error_m,
-                            world_bounds_to_view(tile.bounds, camera),
-                        )),
+                    vertical_pixel_bound(
+                        error,
+                        tile.bounds,
+                        tile_origin(tile),
+                        camera,
+                        projection,
+                        visible_vertical_bound,
+                    )
+                    .max(projection.projected_error_px(
+                        tile.water_feature_error_m,
+                        world_bounds_to_view(tile.bounds, camera),
+                    )),
                     tile.conservative_surface_bounds,
                     camera.position,
                     near_detail,
@@ -504,6 +513,8 @@ pub struct AdaptiveStream {
     turn_pose: Option<(Camera, Projection)>,
     recent_turn_poses: VecDeque<(std::time::Instant, Camera, Projection)>,
     last_side_prefetch: Option<std::time::Instant>,
+    min_direct_split_width: Option<u32>,
+    visible_vertical_bound: bool,
     occlusion: Option<(Camera, OcclusionSet)>,
     prediction_occlusion: Option<(Camera, OcclusionSet)>,
     /// Measured-latency extrapolation; never changes current-view quality.
@@ -544,6 +555,21 @@ impl AdaptiveStream {
         settings.validate()?;
         let world_has_distant_voxels = world.topology_base_cells().is_none()
             && crate::adaptive_geometry::distant_voxels::enabled();
+        let alpine = is_alpine(&world);
+        let min_direct_split_width = if world_has_distant_voxels {
+            match std::env::var("FRONTIER_LOD_DIRECT_SPLIT").as_deref() {
+                Ok("0") => None,
+                Ok("1") => Some(0),
+                _ if alpine => {
+                    // Limit the extra work to macro tiles (256 m at 6.25 cm).
+                    // Small foreground splits need to publish in shorter batches.
+                    Some(4096)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         Ok(Self {
             cache: GeometryCache::new(world.clone(), settings.cpu_cache_bytes),
             world,
@@ -574,6 +600,8 @@ impl AdaptiveStream {
             turn_pose: None,
             recent_turn_poses: VecDeque::new(),
             last_side_prefetch: None,
+            min_direct_split_width,
+            visible_vertical_bound: visible_vertical_bound_for_alpine(alpine),
             occlusion: None,
             prediction_occlusion: None,
             prediction: None,
@@ -750,6 +778,7 @@ impl AdaptiveStream {
                 height,
                 self.settings.pixel_error,
                 near_detail_setting(&self.world),
+                self.visible_vertical_bound,
             )
         {
             // Drop demand only. Immutable completed products remain reusable;
@@ -907,10 +936,7 @@ impl AdaptiveStream {
             self.settings.pixel_error,
             self.settings.refinements_per_transaction,
         );
-        let alpine = self
-            .world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Alpine);
+        let alpine = is_alpine(&self.world);
         let side_slot = near.is_empty()
             && self
                 .last_side_prefetch
@@ -994,12 +1020,13 @@ impl AdaptiveStream {
                         step: k.step_cells,
                     });
                 } else if should_split(k) {
-                    split(
+                    split_refinement(
                         Node {
                             min: k.min,
                             width: k.width_cells,
                             step: k.step_cells,
                         },
+                        self.min_direct_split_width,
                         &mut nodes,
                     );
                 } else {
@@ -1037,6 +1064,14 @@ impl AdaptiveStream {
                 self.finish_build_memory(&mut frame);
                 return frame;
             }
+            // A kilometre-scale starter tile needs more than eight samples
+            // across to show the Alpine skyline before fine tiles are ready.
+            // A 16-by-16 grid still fits the affine certificate budget.
+            let root_segments = if coarse_voxels && alpine && camera.far >= 3000. {
+                16
+            } else {
+                8
+            };
             let mut x = start[0];
             while x <= cell[0] + far[0] {
                 let mut z = start[1];
@@ -1044,7 +1079,7 @@ impl AdaptiveStream {
                     nodes.push(Node {
                         min: [x, z],
                         width: root as u32,
-                        step: (root as u32 / 8).max(1),
+                        step: (root as u32 / root_segments).max(1),
                     });
                     z += root;
                 }
@@ -1094,7 +1129,7 @@ impl AdaptiveStream {
                     {
                         nodes.push(old)
                     } else if should_split(t.key) {
-                        split(old, &mut nodes)
+                        split_refinement(old, self.min_direct_split_width, &mut nodes)
                     } else {
                         nodes.push(Node {
                             step: refined_leaf_step(t.key, direct_native),
@@ -1608,6 +1643,7 @@ impl AdaptiveStream {
                         rejected.origin,
                         camera,
                         p,
+                        self.visible_vertical_bound,
                     ),
                     rejected.surface_bounds,
                     camera.position,
@@ -1927,7 +1963,16 @@ impl AdaptiveStream {
     fn projected_error(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> f64 {
         let e = tile.best_certified_vertical_error_m;
         let bound = e
-            .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
+            .map(|e| {
+                vertical_pixel_bound(
+                    e,
+                    tile.bounds,
+                    tile_origin(tile),
+                    camera,
+                    p,
+                    self.visible_vertical_bound,
+                )
+            })
             .unwrap_or(f64::INFINITY)
             .max(p.projected_error_px(
                 tile.water_feature_error_m,
@@ -2200,9 +2245,15 @@ pub(crate) struct CameraQueries {
     axes: [DVec3; 3],
     tx: f64,
     ty: f64,
+    visible_vertical_bound: bool,
 }
 impl CameraQueries {
-    pub(crate) fn new(camera: &Camera, width: u32, height: u32) -> Self {
+    pub(crate) fn new(
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        visible_vertical_bound: bool,
+    ) -> Self {
         let projection = camera_projection(camera, width, height);
         let forward = camera.direction().as_dvec3().normalize();
         let right = forward.cross(DVec3::Y).normalize();
@@ -2215,6 +2266,7 @@ impl CameraQueries {
             axes: [right, up, forward],
             tx: ty * width as f64 / height.max(1) as f64,
             ty,
+            visible_vertical_bound,
         }
     }
     fn bounds(&self, bounds: [[f64; 3]; 2]) -> ViewBounds {
@@ -2258,8 +2310,8 @@ impl CameraQueries {
         let Some(p) = self.projection else {
             return f64::INFINITY;
         };
-        if visible_vertical_bound_enabled() {
-            return vertical_pixel_bound(error, bounds, origin, &self.camera, p);
+        if self.visible_vertical_bound {
+            return vertical_pixel_bound(error, bounds, origin, &self.camera, p, true);
         }
         p.projected_vertical_error_px(error, self.bounds(bounds), self.axes.map(|v| v.y))
     }
@@ -2289,12 +2341,29 @@ pub(crate) fn projected_cached_vertical_error(
     height: u32,
 ) -> f64 {
     camera_projection(camera, width, height)
-        .map(|p| vertical_pixel_bound(error_m, bounds, origin, camera, p))
+        .map(|p| {
+            vertical_pixel_bound(
+                error_m,
+                bounds,
+                origin,
+                camera,
+                p,
+                visible_vertical_bound_for_alpine(false),
+            )
+        })
         .unwrap_or(f64::INFINITY)
 }
-pub(crate) fn visible_vertical_bound_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("FRONTIER_VISIBLE_ERROR_BOUND").as_deref() == Ok("1"))
+pub(crate) fn visible_vertical_bound_for_alpine(alpine: bool) -> bool {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(
+            || match std::env::var("FRONTIER_VISIBLE_ERROR_BOUND").as_deref() {
+                Ok("1") => Some(true),
+                Ok("0") => Some(false),
+                _ => None,
+            },
+        )
+        .unwrap_or(alpine)
 }
 fn tile_origin(tile: &GeometryTile) -> DVec3 {
     DVec3::new(
@@ -2309,8 +2378,9 @@ fn vertical_pixel_bound(
     origin: DVec3,
     camera: &Camera,
     p: Projection,
+    visible: bool,
 ) -> f64 {
-    if visible_vertical_bound_enabled() {
+    if visible {
         // Preserve the exact per-cluster origin used for GPU camera uniforms.
         // One adjacent f64 value encloses rounding in world-to-local subtraction.
         let origin = origin.to_array();
@@ -2445,6 +2515,18 @@ fn split(n: Node, out: &mut Vec<Node>) {
                 width: half,
                 step: (half / 8).max(1),
             });
+        }
+    }
+}
+fn split_refinement(node: Node, min_direct_width: Option<u32>, out: &mut Vec<Node>) {
+    let start = out.len();
+    split(node, out);
+    if min_direct_width.is_some_and(|width| node.width >= width) {
+        for child in &mut out[start..] {
+            // Start each requested child at up to 16 rows and columns. This
+            // stays within the large-tile affine certificate's 256-patch
+            // limit and avoids building a same-pitch intermediate partition.
+            child.step = (child.width / 16).max(1);
         }
     }
 }
@@ -2631,7 +2713,8 @@ mod tests {
                 c.yaw = yaw;
                 c.pitch = pitch;
                 c.far = 6000.;
-                let q = CameraQueries::new(&c, 1920, 1080);
+                let q =
+                    CameraQueries::new(&c, 1920, 1080, visible_vertical_bound_for_alpine(false));
                 for x in -8..8 {
                     for z in -8..8 {
                         let low = [-5000. + x as f64 * 173., -100., 7000. + z as f64 * 143.];
@@ -2751,7 +2834,15 @@ mod tests {
         camera.pitch = -std::f32::consts::FRAC_PI_2;
         camera.far = 1.;
         let p = camera_projection(&camera, 160, 90).unwrap();
-        let raw = vertical_pixel_bound(0.01, tile.bounds, tile_origin(&tile), &camera, p);
+        let visible_vertical_bound = visible_vertical_bound_for_alpine(is_alpine(&world));
+        let raw = vertical_pixel_bound(
+            0.01,
+            tile.bounds,
+            tile_origin(&tile),
+            &camera,
+            p,
+            visible_vertical_bound,
+        );
         assert!(raw.is_finite() && raw > 0.);
         let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
         let mut frame = stream.plan(&camera, 160, 90);
@@ -2761,6 +2852,7 @@ mod tests {
             volume_owner: false,
             pixel_error: raw * 2.,
             near_detail,
+            visible_vertical_bound,
         };
         assert!(policy(false).revalidate(&mut frame, &camera, 160, 90));
         assert!(frame.quality_ready);
@@ -2817,7 +2909,17 @@ mod tests {
                         current: &[Arc<GeometryTile>],
                         pose: &Camera,
                         forecast: Option<&Camera>| {
-            obsolete_refinement_demand(parents, current, pose, forecast, 320, 180, 5.0, false)
+            obsolete_refinement_demand(
+                parents,
+                current,
+                pose,
+                forecast,
+                320,
+                180,
+                5.0,
+                false,
+                visible_vertical_bound_for_alpine(false),
+            )
         };
         assert!(obsolete(&[front.clone()], &committed, &reverse, None));
         assert!(
@@ -2931,6 +3033,27 @@ mod tests {
             "planning cannot fabricate native geometry"
         );
     }
+    #[test]
+    fn selected_split_refines_in_one_step_and_keeps_the_certificate_budget() {
+        let mut children = vec![];
+        let parent = Node {
+            min: [-128, 256],
+            width: 256,
+            step: 16,
+        };
+        split_refinement(parent, Some(256), &mut children);
+        assert_eq!(children.len(), 4);
+        assert_eq!(
+            children[3],
+            Node {
+                min: [0, 384],
+                width: 128,
+                step: 8
+            }
+        );
+        assert!(children.iter().all(|child| child.width / child.step == 16));
+    }
+
     #[test]
     fn bounded_priority_advances_near_and_far_requested_errors_before_reserve() {
         fn candidate(x: i64, distance: f64, error: f64) -> RefinementCandidate {
@@ -3745,6 +3868,7 @@ struct DeliveryPolicy {
     volume_owner: bool,
     pixel_error: f64,
     near_detail: bool,
+    visible_vertical_bound: bool,
 }
 impl DeliveryPolicy {
     /// Metadata only: no world/source-column generation on the render thread.
@@ -3781,7 +3905,16 @@ impl DeliveryPolicy {
             }
             let error_m = tile.best_certified_vertical_error_m;
             let error = error_m
-                .map(|e| vertical_pixel_bound(e, tile.bounds, tile_origin(tile), camera, p))
+                .map(|e| {
+                    vertical_pixel_bound(
+                        e,
+                        tile.bounds,
+                        tile_origin(tile),
+                        camera,
+                        p,
+                        self.visible_vertical_bound,
+                    )
+                })
                 .unwrap_or(f64::INFINITY)
                 .max(p.projected_error_px(
                     tile.water_feature_error_m,
@@ -3949,6 +4082,7 @@ impl Worker {
             volume_owner: world.topology_base_cells().is_some(),
             pixel_error: settings.pixel_error,
             near_detail: near_detail_setting(&world),
+            visible_vertical_bound: visible_vertical_bound_for_alpine(is_alpine(&world)),
         };
         let mut stream = AdaptiveStream::new(world, settings)?;
         if let Some(disk) = disk {
@@ -4082,6 +4216,7 @@ impl Worker {
                 };
                 let pixel_error = stream.settings.pixel_error;
                 let near_detail = near_detail_setting(&stream.world);
+                let visible_vertical_bound = stream.visible_vertical_bound;
                 let checked_epoch = std::sync::atomic::AtomicU64::new(epoch);
                 let obsolete = std::sync::atomic::AtomicBool::new(false);
                 let cancel = || {
@@ -4117,6 +4252,7 @@ impl Worker {
                                         *height,
                                         pixel_error,
                                         near_detail,
+                                        visible_vertical_bound,
                                     ))
                             {
                                 obsolete.store(true, Ordering::Relaxed);

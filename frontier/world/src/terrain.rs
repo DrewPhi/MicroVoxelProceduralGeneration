@@ -621,6 +621,12 @@ impl crate::alpine::Value for Field {
     fn clamp01(self) -> Self {
         self.unit_clamp()
     }
+    fn outside(self, lo: f64, hi: f64) -> bool {
+        self.v < lo || self.v > hi
+    }
+    fn is_zero(self) -> bool {
+        self.v == 0. && self.dx == 0. && self.dz == 0.
+    }
 }
 
 // A bounded spatial cover signal changes only the rock transition zone;

@@ -14,6 +14,10 @@ pub(crate) trait Value: Copy {
     fn scale(self, k: f64) -> Self;
     fn mul(self, b: Self) -> Self;
     fn clamp01(self) -> Self;
+    /// Prove that every represented value misses a closed support interval.
+    fn outside(self, lo: f64, hi: f64) -> bool;
+    /// A constant zero with zero derivatives or remainder.
+    fn is_zero(self) -> bool;
 }
 impl Value for f64 {
     fn point(v: f64) -> Self {
@@ -30,6 +34,12 @@ impl Value for f64 {
     }
     fn clamp01(self) -> Self {
         self.clamp(0.0, 1.0)
+    }
+    fn outside(self, lo: f64, hi: f64) -> bool {
+        self < lo || self > hi
+    }
+    fn is_zero(self) -> bool {
+        self == 0.
     }
 }
 fn bump<V: Value>(d: V) -> V {
@@ -59,23 +69,35 @@ pub(crate) fn elevation<V: Value>(
     let meadow = n(x, z, 750.0, 0xa101, &mut noise)
         .scale(42.0)
         .add(n(x, z, 240.0, 0xa102, &mut noise).scale(12.0));
-    let center = n(x, V::point(0.0), 1800.0, 0xa103, &mut noise)
-        .scale(340.0)
-        .add(V::point(3300.0));
-    let d = z.add(center.scale(-1.0)).scale(1.0 / 1900.0);
-    let envelope = bump(d);
-    // Lower connected shoulders, four distinct broad peaks and a wide saddle
-    // between the central two peaks. These anchors shape one continuous range.
-    let peaks = bump(x.add(V::point(1800.0)).scale(1.0 / 1100.0))
-        .scale(650.0)
-        .add(bump(x.add(V::point(650.0)).scale(1.0 / 850.0)).scale(470.0))
-        .add(bump(x.add(V::point(-1100.0)).scale(1.0 / 1000.0)).scale(800.0))
-        .add(bump(x.add(V::point(-2600.0)).scale(1.0 / 1000.0)).scale(600.0));
-    let crest = n(x, z, 850.0, 0xa104, &mut noise)
-        .scale(100.0)
-        .add(V::point(500.0))
-        .add(peaks);
-    let ribs = n(x, z, 180.0, 0xa105, &mut noise).scale(55.0);
+    // The clamped center noise is in [-1, 1]. The ridge's support in
+    // authored metres is therefore contained in [1060, 5540]. The extra
+    // centimetre covers rounding of the support arithmetic at either edge.
+    let envelope = if z.outside(1059.99, 5540.01) {
+        V::point(0.0)
+    } else {
+        let center = n(x, V::point(0.0), 1800.0, 0xa103, &mut noise)
+            .scale(340.0)
+            .add(V::point(3300.0));
+        bump(z.add(center.scale(-1.0)).scale(1.0 / 1900.0))
+    };
+    let ridge = if envelope.is_zero() {
+        V::point(0.0)
+    } else {
+        // Lower connected shoulders, four distinct broad peaks and a wide saddle
+        // between the central two peaks. These anchors shape one continuous range.
+        let peaks = bump(x.add(V::point(1800.0)).scale(1.0 / 1100.0))
+            .scale(650.0)
+            .add(bump(x.add(V::point(650.0)).scale(1.0 / 850.0)).scale(470.0))
+            .add(bump(x.add(V::point(-1100.0)).scale(1.0 / 1000.0)).scale(800.0))
+            .add(bump(x.add(V::point(-2600.0)).scale(1.0 / 1000.0)).scale(600.0));
+        let crest = n(x, z, 850.0, 0xa104, &mut noise)
+            .scale(100.0)
+            .add(V::point(500.0))
+            .add(peaks);
+        let ribs = n(x, z, 180.0, 0xa105, &mut noise).scale(55.0);
+        let shoulder = n(x, z, 480.0, 0xa106, &mut noise).scale(25.0);
+        envelope.mul(crest.add(ribs).add(shoulder))
+    };
     // Two broad lower hills overlap the range's feet at different depths. Their
     // compact support leaves the central foreground meadow open and walkable.
     let hill = |cx: f64, cz: f64, rx: f64, rz: f64| {
@@ -92,12 +114,7 @@ pub(crate) fn elevation<V: Value>(
     let foothills = hill(-900.0, 1500.0, 1500.0, 900.0)
         .scale(190.0)
         .add(hill(1550.0, 2000.0, 1400.0, 1100.0).scale(290.0));
-    // This sixth broad band adds continuous shoulder variation without making
-    // another layer of disconnected mountains.
-    let shoulder = n(x, z, 480.0, 0xa106, &mut noise).scale(25.0);
-    let mut h = meadow
-        .add(envelope.mul(crest.add(ribs).add(shoulder)))
-        .add(foothills);
+    let mut h = meadow.add(ridge).add(foothills);
     if detail {
         let (mut sum, mut norm, mut weight, mut wavelength) = (V::point(0.0), 0.0, 1.0, 45.0);
         for octave in 0..p.octaves {
@@ -133,6 +150,62 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn compact_support_skips_only_zero_ridge_terms() {
+        #[derive(Clone, Copy)]
+        struct AlwaysEvaluate(f64);
+        impl Value for AlwaysEvaluate {
+            fn point(v: f64) -> Self {
+                Self(v)
+            }
+            fn add(self, b: Self) -> Self {
+                Self(self.0 + b.0)
+            }
+            fn scale(self, k: f64) -> Self {
+                Self(self.0 * k)
+            }
+            fn mul(self, b: Self) -> Self {
+                Self(self.0 * b.0)
+            }
+            fn clamp01(self) -> Self {
+                Self(self.0.clamp(0., 1.))
+            }
+            fn outside(self, _: f64, _: f64) -> bool {
+                false
+            }
+            fn is_zero(self) -> bool {
+                false
+            }
+        }
+        for seed in [0, 7, 91] {
+            let p = terrain(seed).params();
+            for x in (-4000..=4000).step_by(191) {
+                for z in [
+                    -9000., -290., 0., 1059.99, 1060., 1200., 3300., 5200., 5540., 5540.01, 6500.,
+                ] {
+                    let x = x as f64 / p.horizontal_scale;
+                    let z = z / p.horizontal_scale;
+                    let mut calls = 0;
+                    let height = elevation(x, z, p, true, |x, z, salt| {
+                        calls += 1;
+                        crate::terrain::noise(x, z, seed ^ salt)
+                    });
+                    let full = elevation(
+                        AlwaysEvaluate(x),
+                        AlwaysEvaluate(z),
+                        p,
+                        true,
+                        |x, z, salt| AlwaysEvaluate(crate::terrain::noise(x.0, z.0, seed ^ salt)),
+                    );
+                    assert_eq!(height.to_bits(), full.0.to_bits());
+                    if z < 0. {
+                        assert_eq!(calls, p.octaves + 4);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

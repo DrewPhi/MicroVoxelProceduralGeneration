@@ -867,6 +867,13 @@ impl crate::alpine::Value for Aa {
     fn clamp01(self) -> Self {
         self.clamp(0.0, 1.0)
     }
+    fn outside(self, lo: f64, hi: f64) -> bool {
+        let range = self.range();
+        range.hi < lo || range.lo > hi
+    }
+    fn is_zero(self) -> bool {
+        self.c == 0. && self.a == [0.; 2] && self.r == 0.
+    }
 }
 /// Exact extrema structure for an independently interval-bounded positive
 /// weighted mean. Material/profile intervals are monotone inputs, so their

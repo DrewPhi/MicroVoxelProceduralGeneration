@@ -9,7 +9,7 @@ use super::{
 use crate::spatial_appearance::Profile;
 use frontier_world::{
     affine_bounds::{BoundBudget, ColumnBox},
-    Material, VOXEL_SIZE,
+    FbmRecipe, Material, World, VOXEL_SIZE,
 };
 use std::{
     collections::BTreeMap,
@@ -230,16 +230,24 @@ fn rect_edges(
 
 /// Keep the horizontal stair grid while changing how coarsely dry roofs round
 /// in Y. Shared seams still derive their height from the same sample and pitch.
-pub(crate) fn vertical_pitch_divisor() -> u32 {
-    static DIVISOR: OnceLock<u32> = OnceLock::new();
-    *DIVISOR.get_or_init(
-        || match std::env::var("FRONTIER_COARSE_Y_PITCH_DIVISOR").as_deref() {
-            Ok("2") => 2,
-            Ok("4") => 4,
-            Ok("8") => 8,
-            _ => 1,
-        },
-    )
+pub(crate) fn vertical_pitch_divisor(world: &World) -> u32 {
+    static DIVISOR: OnceLock<Option<u32>> = OnceLock::new();
+    DIVISOR
+        .get_or_init(
+            || match std::env::var("FRONTIER_COARSE_Y_PITCH_DIVISOR").as_deref() {
+                Ok("1") => Some(1),
+                Ok("2") => Some(2),
+                Ok("4") => Some(4),
+                Ok("8") => Some(8),
+                _ => None,
+            },
+        )
+        .unwrap_or_else(
+            || match world.fbm_terrain().map(|terrain| terrain.params().recipe) {
+                Some(FbmRecipe::Alpine) => 4,
+                _ => 1,
+            },
+        )
 }
 
 fn round_to_pitch(height: i64, pitch: i64) -> i64 {
@@ -341,7 +349,7 @@ impl Generator<'_> {
         let ground = if wet {
             column.ground_height
         } else {
-            let vertical_pitch = (pitch / i64::from(vertical_pitch_divisor())).max(1);
+            let vertical_pitch = (pitch / i64::from(vertical_pitch_divisor(self.world))).max(1);
             round_to_pitch(column.ground_height, vertical_pitch)
         };
         Ok((
