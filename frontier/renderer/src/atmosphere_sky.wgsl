@@ -23,20 +23,31 @@ fn noise3(p:vec3<f32>)->f32 {
     let b=mix(mix(hash3(i+vec3(0.,0.,1.)),hash3(i+vec3(1.,0.,1.)),u.x),mix(hash3(i+vec3(0.,1.,1.)),hash3(i+vec3(1.,1.,1.)),u.x),u.y);
     return mix(a,b,u.z);
 }
-fn density(p:vec3<f32>)->f32 {
-    let height=(p.y-1720.)/680.;
-    let wind=vec3(1.,0.,.32)*atmosphere.weather.w*atmosphere.weather.y;
-    // Broad cloud streets leave connected blue lanes between cumulus banks.
-    let q=p*vec3(.00083,.00145,.00105)+wind;
-    // Genuine 3D density removes the six isolated projected noise sheets.
-    // A broad vertical dome cuts rounded tops; a shallow base fades smoothly.
-    let broad=noise3(q);
-    let detail=noise3(q*3.13+vec3(17.,3.,11.));
-    let shape=broad*.73+detail*.27;
-    let dome=pow(abs((height-.42)/.58),2.);
-    let threshold=mix(.78,.32,atmosphere.weather.x);
-    let envelope=smoothstep(0.,.10,height)*(1.-smoothstep(.82,1.,height));
-    return smoothstep(threshold,threshold+.16,shape-dome*.19)*envelope;
+// Wind-aligned weather cells organize kilometre-scale cloud banks. A
+// separate 3D field cuts lobes and wisps into the margins of each bank.
+fn weather_noise(p:vec2<f32>)->f32 {
+    let i=floor(p); let f=fract(p); let u=f*f*(3.-2.*f);
+    return mix(mix(hash3(vec3(i,7.)),hash3(vec3(i+vec2(1.,0.),7.)),u.x),
+               mix(hash3(vec3(i+vec2(0.,1.),7.)),hash3(vec3(i+vec2(1.,1.),7.)),u.x),u.y);
+}
+fn bank_coverage(p:vec2<f32>)->f32 {
+    let wind_axis=vec2(.94,.342);
+    let uv=vec2(dot(p,wind_axis),dot(p,vec2(-wind_axis.y,wind_axis.x)));
+    let regional=weather_noise(uv*vec2(.00013,.00023));
+    let bank=weather_noise(uv*vec2(.00042,.00070)+vec2(7.4,19.1));
+    return regional*.56+bank*.44;
+}
+fn cloud_body(p:vec3<f32>, bank:f32)->f32 {
+    let h=(p.y-1720.)/680.;
+    let cover=atmosphere.weather.x;
+    let lo=.10+.06*(1.-bank);
+    let hi=.32+.68*smoothstep(.24,.79,bank+(.5-cover)*-.35);
+    let vertical=smoothstep(lo-.09,lo+.07,h)*(1.-smoothstep(hi-.28,hi+.03,h));
+    if vertical<=0. {return 0.;}
+    let shape=noise3(p*vec3(.00115,.00200,.00132));
+    let erosion=noise3(p*.0046+vec3(6.1,14.4,-9.2));
+    let field=bank*.48+shape*.38+erosion*.14;
+    return smoothstep(mix(.77,.27,cover),mix(.77,.27,cover)+.14,field)*vertical;
 }
 @fragment fn fs_main(i:VertexOutput)->@location(0) vec4<f32> {
     let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,1.,1.);
@@ -49,17 +60,23 @@ fn density(p:vec3<f32>)->f32 {
     var transmittance=1.;var light=vec3(0.);
     let warm=1.-smoothstep(.04,.45,atmosphere.sun.y);
     let sun_color=mix(vec3(1.12,1.08,1.00),vec3(1.15,.85,.58),warm*.7);
+    let drift=vec2(1.,.32)*atmosphere.weather.w*atmosphere.weather.y*1000.;
+    let weather_offset=vec2(atmosphere.relative_eye.w,atmosphere.sun.w)+drift;
+    let forward=pow(max(0.,dot(ray,atmosphere.sun.xyz)),8.);
     for(var k=0u;k<count;k+=1u) {
         let position=atmosphere.world_eye.xyz+ray*(start+(f32(k)+.5)*step);
-        let rho=density(position);
+        let q=position+vec3(weather_offset.x,0.,weather_offset.y);
+        let bank=bank_coverage(q.xz);
+        let rho=cloud_body(q,bank);
         if rho>.001 {
-            let sun_density=density(position+atmosphere.sun.xyz*110.)+density(position+atmosphere.sun.xyz*280.);
-            let direct=exp(-sun_density*.90)*(1.-atmosphere.weather.z*.65);
+            let near_sun=cloud_body(q+atmosphere.sun.xyz*95.,bank);
+            let far_sun=cloud_body(q+atmosphere.sun.xyz*310.,bank);
+            let direct=exp(-near_sun*.80-far_sun*1.25)*(1.-atmosphere.weather.z*.65);
             let h=clamp((position.y-1720.)/680.,0.,1.);
-            let ambient=mix(vec3(.60,.66,.75),vec3(.84,.89,.96),h);
+            let ambient=mix(vec3(.39,.48,.61),vec3(.84,.89,.96),h);
             // Approximate the low-order multiple-scattering fill that keeps a
             // sunlit cumulus body pale rather than a dark pillow with a rim.
-            let source=ambient*.72+sun_color*direct*.68;
+            let source=ambient*.72+sun_color*(.10+direct*(.69+.28*forward));
             let alpha=1.-exp(-rho*step*.0045);
             light+=transmittance*alpha*source;transmittance*=1.-alpha;
             if transmittance<.015 {break;}

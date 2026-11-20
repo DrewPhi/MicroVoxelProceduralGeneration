@@ -82,6 +82,18 @@ and 449 ms respectively. On seed 40961 the two p95 measurements were 7.73
 and 8.60 ms. Both routes still had pending refinements at capture. Set
 `FRONTIER_HIGHLANDS_PATCH_ROWS=16` for the coarser control.
 
+Cloud banks use the world seed and wind. Terrain beneath a cloud deck and
+mountains that rise through it share the same atmospheric pass. A later
+1080p flyover measured **7.10 / 8.78 / 9.98 ms** on seed 19 and
+**4.63 / 6.25 / 7.78 ms** on seed 40961. Both captures include ongoing
+refinement. Proven flat ocean surfaces now report zero vertical error.
+
+Flying above an edited world releases the native volume's terrain ownership
+once it contains only unmodified air. A regional flyover 160 m above a saved
+excavation and deck measured **4.79 / 6.05 / 6.52 ms**. The same route with
+an empty save measured **4.67 / 6.02 / 6.35 ms**. Both ended with 16,712
+visible triangles and no native terrain ownership at altitude.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.

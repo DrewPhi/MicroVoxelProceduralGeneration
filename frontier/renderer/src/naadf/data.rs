@@ -49,6 +49,7 @@ pub struct Snapshot {
     pub build_ms: f64,
     pub cpu_profile: Option<Metrics>,
     pub source_revision: u64,
+    pub region_has_edits: bool,
     pub mixed_chunks: usize,
     pub unique_blocks: usize,
     pub sampled_columns: usize,
@@ -541,6 +542,7 @@ fn build_region_options(
         build_ms: 0.,
         cpu_profile: None,
         source_revision: world.revision(),
+        region_has_edits: false,
         mixed_chunks: 0,
         unique_blocks: 0,
         sampled_columns: 0,
@@ -699,6 +701,7 @@ fn build_region_options(
             }
         }
     }
+    out.region_has_edits = !edits.is_empty();
     let edited_columns: HashSet<_> = edit_extrema.keys().copied().collect();
     let edit_workspace_bytes = local_edits
         .capacity()

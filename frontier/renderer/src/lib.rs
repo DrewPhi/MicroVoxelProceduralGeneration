@@ -1150,6 +1150,7 @@ impl Gpu {
                     .inverse(),
                 Vec3::ZERO,
                 camera.position,
+                world.seed(),
                 settings,
                 0.,
             );
@@ -2704,6 +2705,7 @@ impl Viewer {
                     .inverse(),
                 Vec3::ZERO,
                 self.camera.position,
+                self.world.seed(),
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
             );

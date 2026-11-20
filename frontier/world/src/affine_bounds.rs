@@ -72,22 +72,25 @@ impl HeightBound {
             if !v.iter().all(|v| v.is_finite()) {
                 return None;
             }
-            let mut coordinate = [I::point(0.0); 2];
-            for a in 0..2 {
-                let position = v[if a == 0 { 0 } else { 2 }];
-                if position < self.center_xz[a] - self.half_extent_m[a]
-                    || position > self.center_xz[a] + self.half_extent_m[a]
-                {
-                    return None;
-                }
-                let q = I::point(position)
+            let xz = [v[0], v[2]];
+            if (0..2).any(|a| {
+                xz[a] < self.center_xz[a] - self.half_extent_m[a]
+                    || xz[a] > self.center_xz[a] + self.half_extent_m[a]
+            }) {
+                return None;
+            }
+            if self.height_range == [v[1]; 2] {
+                continue;
+            }
+            let coordinate: [I; 2] = std::array::from_fn(|a| {
+                let q = I::point(xz[a])
                     .sub(I::point(self.center_xz[a]))
                     .div(I::point(self.half_extent_m[a]));
-                coordinate[a] = I {
+                I {
                     lo: q.lo.max(-1.0),
                     hi: q.hi.min(1.0),
-                };
-            }
+                }
+            });
             let value = I::point(self.center_height_m)
                 .add(I::point(self.coefficients[0]).mul(coordinate[0]))
                 .add(I::point(self.coefficients[1]).mul(coordinate[1]))
@@ -152,7 +155,13 @@ pub fn bound_native_height(
             r: voxel_size() * 0.5,
         })
     };
-    let range = height.range();
+    // Interval arithmetic deliberately rounds outward. A proven point
+    // needs no arithmetic to express its bounds (including exact sea level).
+    let range = if height.r == 0. && height.a == [0.; 2] {
+        I::point(height.c)
+    } else {
+        height.range()
+    };
     if ![
         height.c,
         height.a[0],
@@ -1801,6 +1810,29 @@ mod tests {
         }
         worst
     }
+    #[test]
+    fn proven_flat_ocean_retains_exact_zero_projectable_error() {
+        let terrain = FbmTerrain::new(
+            40961,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let region = ColumnBox {
+            min: [-19968, -4096],
+            size_cells: [64; 2],
+        };
+        let bound = bound_native_height(&terrain, region, BoundBudget::default()).unwrap();
+        assert_eq!(bound.height_range, [0.; 2]);
+        let [x, z] = region.min.map(|a| a as f64 * voxel_size());
+        let w = region.size_cells[0] as f64 * voxel_size();
+        let vertices = [[x, 0., z], [x + w, 0., z], [x, 0., z + w]];
+        assert_eq!(bound.triangle_error(vertices), Some(0.));
+        assert_eq!(bound.triangle_error([[x - w, 0., z]; 3]), None);
+    }
+
     #[test]
     fn both_recipes_enclose_exhaustive_native_columns() {
         for recipe in [

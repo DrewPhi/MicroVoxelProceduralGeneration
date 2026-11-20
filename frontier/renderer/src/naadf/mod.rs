@@ -257,6 +257,7 @@ struct Uniform {
 }
 struct Volume {
     occupied: Option<stream::Region>,
+    may_have_local_edits: bool,
     resources: Bindings,
     dynamic_water_key: Option<(frontier_world::Cell, [u32; 3], u64)>,
     dynamic_water_binding: u64,
@@ -613,6 +614,7 @@ impl Pending {
         });
         let volume = Volume {
             occupied,
+            may_have_local_edits: snapshot.region_has_edits,
             resources,
             dynamic_water_key: None,
             dynamic_water_binding: 0,
@@ -1550,7 +1552,7 @@ impl Experiment {
     /// plants. Publishing a new air window must not cancel far refinement.
     pub(crate) fn empty_unedited_volume(&self) -> bool {
         self.active.as_ref().is_some_and(|a| {
-            a.occupied.is_none() && a.revision == 0 && a.dynamic_water_key.is_none()
+            a.occupied.is_none() && !a.may_have_local_edits && a.dynamic_water_key.is_none()
         })
     }
     pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {

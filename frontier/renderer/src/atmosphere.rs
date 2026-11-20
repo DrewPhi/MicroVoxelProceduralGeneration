@@ -83,6 +83,7 @@ struct CloudView {
     coverage: f32,
     overcast: f32,
     wind: f32,
+    weather_origin: [f32; 2],
 }
 
 pub(crate) struct Atmosphere {
@@ -749,6 +750,7 @@ impl Atmosphere {
         inverse_view_projection: Mat4,
         relative_eye: Vec3,
         world_eye: DVec3,
+        seed: u64,
         settings: &VisualSettings,
         time_seconds: f32,
     ) {
@@ -786,14 +788,21 @@ impl Atmosphere {
             self.peak_haze_regions
                 .set(self.peak_haze_regions.get().max(context.region_count));
         }
+        // World-space offsets in metres. Hash all seed bits before selecting
+        // two coordinates so adjacent terrain seeds see different weather.
+        let mut key = seed ^ (seed >> 30);
+        key = key.wrapping_mul(0xbf58476d1ce4e5b9);
+        key = (key ^ (key >> 27)).wrapping_mul(0x94d049bb133111eb);
+        key ^= key >> 31;
+        let weather_origin = [(key & 65535) as f32, (key >> 32 & 65535) as f32];
         let uniform = Uniform {
             inverse_view_projection: inverse_view_projection.to_cols_array_2d(),
-            relative_eye: relative_eye.extend(0.0).to_array(),
+            relative_eye: relative_eye.extend(weather_origin[0]).to_array(),
             world_eye: world_eye
                 .as_vec3()
                 .extend(self.medium_ground_height.get())
                 .to_array(),
-            sun: sun.extend(0.0).to_array(),
+            sun: sun.extend(weather_origin[1]).to_array(),
             fog: [
                 settings.fog_density.max(0.0),
                 settings.fog_height_falloff.max(0.0),
@@ -834,6 +843,7 @@ impl Atmosphere {
             coverage: uniform.weather[0],
             overcast: uniform.weather[2],
             wind: time_seconds * uniform.weather[1],
+            weather_origin,
         }));
     }
     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {

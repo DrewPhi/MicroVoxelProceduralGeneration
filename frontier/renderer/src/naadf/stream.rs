@@ -203,6 +203,7 @@ pub struct Roots {
 }
 pub struct Change {
     pub(super) incoming_occupied: Option<Region>,
+    pub(super) may_have_local_edits: bool,
     pub region: Region,
     pub ring: [u32; 3],
     pub roots: Vec<Roots>,
@@ -711,8 +712,16 @@ impl State {
                 .iter()
                 .filter_map(|r| occupied_bounds(r.region, &r.nodes))
                 .reduce(Region::enclosing);
+            // Only an all-air publication needs a local edit proof. A dig can
+            // leave a whole window empty while its native owner still matters.
+            let may_have_local_edits = world.revision() != 0
+                && (incoming_occupied.is_some()
+                    || !world
+                        .edit_cells_in_bounds(cell(next.lo), cell(next.hi))
+                        .is_empty());
             Ok(Change {
                 incoming_occupied,
+                may_have_local_edits,
                 region: next,
                 ring,
                 roots,
@@ -867,6 +876,40 @@ mod tests {
         );
     }
     use super::*;
+    #[test]
+    fn empty_window_releases_edit_ownership_only_after_leaving_the_edit() {
+        let mut world = World::fbm(19, frontier_world::FbmParams::default()).unwrap();
+        let y = world.column(0, 0).height_cells().div_euclid(16) * 16 + 4096;
+        let c = Cell { x: -1, y, z: -1 };
+        world.set(c, frontier_world::Material::Stone);
+        world.set(c, frontier_world::Material::Air);
+        let first = data::build_region(
+            &world,
+            Cell { x: -16, y, z: -16 },
+            [2; 3],
+            8 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+        )
+        .unwrap();
+        assert!(first.region_has_edits);
+        let origin = first.region();
+        assert!(occupied_bounds(origin, &first.chunks).is_none());
+        let mut state = State::new_with_encoding(first, [1048576; 3], Encoding::Wide32);
+        for (dy, has_edit) in [(-1, true), (1, false), (0, true)] {
+            let mut next = origin;
+            next.lo[1] += dy;
+            next.hi[1] += dy;
+            let change = state
+                .prepare(&world, next, 32 * 1048576, &|| false)
+                .unwrap();
+            assert!(change.incoming_occupied.is_none());
+            assert_eq!(change.may_have_local_edits, has_edit);
+            state.finish(change, true);
+        }
+    }
     #[test]
     fn difference_is_disjoint_and_toroidal_window_follows_negative_coordinates() {
         let a = Region {
