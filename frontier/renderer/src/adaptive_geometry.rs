@@ -2370,33 +2370,62 @@ impl Generator<'_> {
         self.mesh.indices.extend([base, base + 1, base + 2]);
         Ok(())
     }
-    /// Cut the material boundary on the existing proxy triangle. Shared edges
-    /// interpolate from the wet end in both tiles, including stitched fans.
+    fn bank_crossing(
+        &mut self,
+        wet: [f32; 3],
+        wc: NativeColumn,
+        dry: [f32; 3],
+        dc: NativeColumn,
+    ) -> Result<[f32; 3], String> {
+        if wc.height == 0 && dc.ground_height >= 0 {
+            return Ok(coastline_crossing(
+                wet,
+                wc.ground_height,
+                dry,
+                dc.ground_height,
+            ));
+        }
+        // River levels vary along a reach. Locate a canonical wet/dry change
+        // on the edge rather than treating the entire patch as one water level.
+        // Always search from wet to dry, including the opposite tile's traversal.
+        let point =
+            |t: f64| std::array::from_fn(|i| wet[i] as f64 + (dry[i] as f64 - wet[i] as f64) * t);
+        let (mut lo, mut hi) = (0., 1.);
+        for _ in 0..6 {
+            let mid = 0.5 * (lo + hi);
+            let p: [f64; 3] = point(mid);
+            let c = self.column([p[0], p[2]].map(|v| (v / voxel_size()).round() as i64))?;
+            if c.height > c.ground_height {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(point((lo + hi) * 0.5).map(|v| v as f32))
+    }
+
+    /// Split the sampled material boundary on the existing proxy triangle.
     fn landscape_triangle(
         &mut self,
         points: [[f32; 3]; 3],
         material: Material,
-        coast: bool,
+        landscape: bool,
     ) -> Result<(), String> {
         let [a, b, c] = points;
-        if !coast || points.iter().all(|p| p[1] != 0.) {
+        if !landscape {
             return self.triangle(a, b, c, material);
         }
-        let mut bed = [0; 3];
+        let mut columns = [NativeColumn::default(); 3];
         let mut land = material;
         for (i, p) in points.iter().enumerate() {
-            let x = (p[0] as f64 / voxel_size()).round() as i64;
-            let z = (p[2] as f64 / voxel_size()).round() as i64;
-            let col = self.column([x, z])?;
-            if col.height != 0 && col.height != col.ground_height {
-                return self.triangle(a, b, c, material); // inland water at a different stage
+            let sample =
+                self.column([p[0], p[2]].map(|v| (v as f64 / voxel_size()).round() as i64))?;
+            if sample.height == sample.ground_height {
+                land = sample.bands[0];
             }
-            bed[i] = col.ground_height;
-            if bed[i] >= 0 {
-                land = col.bands[0];
-            }
+            columns[i] = sample;
         }
-        let wet = bed.map(|depth| depth < 0);
+        let wet = columns.map(|col| col.height > col.ground_height);
         let count = wet.iter().filter(|v| **v).count();
         match count {
             0 => self.triangle(a, b, c, land),
@@ -2406,8 +2435,12 @@ impl Generator<'_> {
                 let i = wet.iter().position(|v| *v == lone_is_wet).unwrap();
                 let j = (i + 1) % 3;
                 let k = (i + 2) % 3;
-                let ab = coastline_crossing(points[i], bed[i], points[j], bed[j]);
-                let ac = coastline_crossing(points[i], bed[i], points[k], bed[k]);
+                let mut crossing = |other: usize| {
+                    let (w, d) = if lone_is_wet { (i, other) } else { (other, i) };
+                    self.bank_crossing(points[w], columns[w], points[d], columns[d])
+                };
+                let ab = crossing(j)?;
+                let ac = crossing(k)?;
                 let (lone, pair) = if lone_is_wet {
                     (Material::Water, land)
                 } else {
@@ -4637,6 +4670,77 @@ mod tests {
             })
             .count();
         assert!(cuts >= 8, "expected shared subcell coastline, found {cuts}");
+    }
+
+    #[test]
+    fn inland_river_banks_split_coarse_highland_fans_above_sea_level() {
+        let world = World::fbm(
+            19,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let terrain = world.fbm_terrain().unwrap();
+        // Search on the flight sampling lattice, then build around a known
+        // above-sea-level bank so the test follows the actual seeded source.
+        let step = 256_i64;
+        let mut bank = None;
+        'search: for z in 370..450 {
+            for x in 370..450 {
+                let p = [x * step, z * step];
+                let a = terrain.column_cells(p[0], p[1]);
+                let b = terrain.column_cells(p[0] + step, p[1]);
+                if a.visible_top > 16
+                    && a.visible_top > a.ground_top
+                    && b.visible_top == b.ground_top
+                {
+                    bank = Some(p);
+                    break 'search;
+                }
+            }
+        }
+        let wet = bank.expect("seeded mountain pass contains a riverbank");
+        let width = step * 4;
+        let tile = build(
+            &world,
+            TileKey {
+                min: [wet[0] - step, wet[1] - step],
+                width_cells: width as u32,
+                step_cells: step as u32,
+                edge_steps: [step as u32; 4],
+                source_revision: 0,
+            },
+            || false,
+        )
+        .unwrap();
+        let mut water = HashSet::new();
+        let mut land = HashSet::new();
+        for tri in tile.mesh.indices.chunks_exact(3) {
+            let vertices: [Vertex; 3] =
+                std::array::from_fn(|i| tile.mesh.vertices[tri[i] as usize]);
+            let set = if vertices[0].color == Material::Water.color() {
+                &mut water
+            } else {
+                &mut land
+            };
+            for v in vertices {
+                set.insert(v.position.map(f32::to_bits));
+            }
+        }
+        // On this known edge the two faces must meet between its samples.
+        let s = step as f64 * voxel_size();
+        let crossing = water
+            .intersection(&land)
+            .map(|v| v.map(f32::from_bits))
+            .find(|p| p[2] as f64 == s && (p[0] as f64) > s && (p[0] as f64) < 2. * s && p[1] > 0.)
+            .expect("interior riverbank on the sampled edge");
+        let cx = tile.key.min[0] + (crossing[0] as f64 / voxel_size()).round() as i64;
+        let delta = step / 64 + 1;
+        let left = terrain.column_cells(cx - delta, wet[1]);
+        let right = terrain.column_cells(cx + delta, wet[1]);
+        assert!(left.visible_top > left.ground_top && right.visible_top == right.ground_top);
     }
 
     #[test]

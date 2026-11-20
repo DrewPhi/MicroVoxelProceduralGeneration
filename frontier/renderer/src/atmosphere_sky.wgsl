@@ -55,8 +55,12 @@ fn cloud_body(p:vec3<f32>, bank:f32)->f32 {
     let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
     if segment.y <= segment.x || atmosphere.weather.x <= .001 { return vec4(0.,0.,0.,1.); }
     let start = segment.x;
-    let count = u32(clamp(ceil((segment.y - start)/175.), 16., 48.));
-    let step = (segment.y - start) / f32(count);
+    let length_m = segment.y - start;
+    // Keep interior sample locations continuous when another interval enters
+    // at the far end of the ray. Redistributing every midpoint at that
+    // boundary produced horizontal rings when flying inside the cloud layer.
+    let spacing = clamp(175., length_m / 48., length_m / 16.);
+    let count = min(u32(ceil(length_m / spacing)), 48u);
     var transmittance=1.;var light=vec3(0.);
     let warm=1.-smoothstep(.04,.45,atmosphere.sun.y);
     let sun_color=mix(vec3(1.12,1.08,1.00),vec3(1.15,.85,.58),warm*.7);
@@ -64,7 +68,9 @@ fn cloud_body(p:vec3<f32>, bank:f32)->f32 {
     let weather_offset=vec2(atmosphere.relative_eye.w,atmosphere.sun.w)+drift;
     let forward=pow(max(0.,dot(ray,atmosphere.sun.xyz)),8.);
     for(var k=0u;k<count;k+=1u) {
-        let position=atmosphere.world_eye.xyz+ray*(start+(f32(k)+.5)*step);
+        let offset = f32(k)*spacing;
+        let step = min(spacing, length_m-offset);
+        let position=atmosphere.world_eye.xyz+ray*(start+offset+.5*step);
         let q=position+vec3(weather_offset.x,0.,weather_offset.y);
         let bank=bank_coverage(q.xz);
         let rho=cloud_body(q,bank);

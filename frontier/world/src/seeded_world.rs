@@ -889,6 +889,24 @@ pub(super) fn landscape(
             };
             mix(meadow, [0.086, 0.145, 0.077], canopy)
         }
+        Material::Stone if p.recipe == FbmRecipe::Highlands => {
+            // Folded bedding follows elevation across a mountainside. Its
+            // direction changes slowly between valleys, independently of LOD.
+            let province = noise(nx / 1750., nz / 1750., seed ^ 0xa76d);
+            let fold = stone();
+            let relief = f.ground_height_m / (p.amplitude / 1000.).max(0.01);
+            let bedding = (relief + nx * 0.14 - nz * 0.09 + 74. * fold + 145. * province) / 76.;
+            let layers = (bedding * std::f64::consts::TAU).cos();
+            let seams = smooth((layers - 0.39) * 1.85);
+            let strata = smooth(0.62 + province * 0.9);
+            let country = mix([0.26, 0.292, 0.33], [0.47, 0.385, 0.30], 0.48 + fold * 0.82);
+            let outcrop = mix(
+                country,
+                [0.50, 0.47, 0.41],
+                strata * smooth(0.5 + 0.8 * layers) * 0.43,
+            );
+            mix(outcrop, [0.17, 0.19, 0.20], seams * strata * 0.58)
+        }
         Material::Stone => mix(
             [0.32, 0.345, 0.37],
             [0.46, 0.38, 0.295],
