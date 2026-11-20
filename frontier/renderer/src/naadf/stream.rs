@@ -203,6 +203,7 @@ pub struct Roots {
 }
 pub struct Change {
     pub(super) incoming_occupied: Option<Region>,
+    pub(super) incoming_water: Option<Region>,
     pub(super) may_have_local_edits: bool,
     pub region: Region,
     pub ring: [u32; 3],
@@ -224,11 +225,15 @@ pub struct Change {
     columns: HashMap<(i64, i64), ColumnSummary>,
 }
 impl Change {
-    pub(super) fn occupied_after_publish(&self, old: Option<Region>) -> Option<Region> {
+    pub(super) fn retained_bounds(
+        &self,
+        old: Option<Region>,
+        incoming: Option<Region>,
+    ) -> Option<Region> {
         let retained = old
             .map(|r| r.intersection(self.region))
             .filter(|r| (0..3).all(|a| r.lo[a] < r.hi[a]));
-        match (retained, self.incoming_occupied) {
+        match (retained, incoming) {
             (Some(a), Some(b)) => Some(a.enclosing(b)),
             (a, b) => a.or(b),
         }
@@ -507,6 +512,11 @@ impl State {
         }
         // Occupancy is transaction-local: a cancelled upload must never make
         // unpublished incoming roots available as proof support to later work.
+        let incoming_water = snapshots
+            .iter()
+            .filter(|s| s.contains_water)
+            .map(|s| s.region())
+            .reduce(Region::enclosing);
         let proof_start = Instant::now();
         let mut occupancy = self.occupancy.clone();
         let mut root_proofs_refreshed = 0;
@@ -721,6 +731,7 @@ impl State {
                         .is_empty());
             Ok(Change {
                 incoming_occupied,
+                incoming_water,
                 may_have_local_edits,
                 region: next,
                 ring,
@@ -895,6 +906,7 @@ mod tests {
         )
         .unwrap();
         assert!(first.region_has_edits);
+        assert!(!first.contains_water);
         let origin = first.region();
         assert!(occupied_bounds(origin, &first.chunks).is_none());
         let mut state = State::new_with_encoding(first, [1048576; 3], Encoding::Wide32);
@@ -910,6 +922,50 @@ mod tests {
             state.finish(change, true);
         }
     }
+    #[test]
+    fn a_placed_water_voxel_switches_the_published_region_out_of_dry_mode() {
+        let mut world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let min = Cell {
+            x: -16,
+            y: 8192,
+            z: -16,
+        };
+        let first = data::build_region(
+            &world,
+            min,
+            [2; 3],
+            8 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+        )
+        .unwrap();
+        assert!(!first.contains_water);
+        let region = first.region();
+        let mut state = State::new_with_encoding(first, [1048576; 3], Encoding::Wide32);
+        let wet = Cell {
+            x: -1,
+            y: min.y + 4,
+            z: -1,
+        };
+        world.set(wet, frontier_world::Material::Water);
+        let update = state
+            .prepare_refresh(&world, &[wet], 32 * 1048576, &|| false)
+            .unwrap();
+        let water = update.retained_bounds(None, update.incoming_water);
+        assert!(water.is_some());
+        state.finish(update, true);
+        let moved = Region {
+            lo: [region.lo[0] + 2, region.lo[1], region.lo[2]],
+            hi: [region.hi[0] + 2, region.hi[1], region.hi[2]],
+        };
+        let shift = state
+            .prepare(&world, moved, 32 * 1048576, &|| false)
+            .unwrap();
+        assert_eq!(shift.retained_bounds(water, shift.incoming_water), None);
+    }
+
     #[test]
     fn difference_is_disjoint_and_toroidal_window_follows_negative_coordinates() {
         let a = Region {

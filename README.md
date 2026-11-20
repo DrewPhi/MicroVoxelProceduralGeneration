@@ -109,6 +109,13 @@ with complete coarse coverage in all 10,587 measured frames. It measured
 frame met the five-pixel refinement target. A concurrent build makes the
 long route's tail timings less comparable to the isolated 10-second passes.
 
+The native renderer uses a shorter shader when the published volume is proven
+dry and the camera is above water. On a flat, dry regional walking route at
+1080p, it measured **6.36 / 8.66 / 9.07 ms**. Two runs with
+`FRONTIER_NAADF_DRY_PIPELINE=0` measured **8.12 / 10.07 / 10.52 ms** and
+**8.24 / 10.40 / 10.82 ms**. Watershed seed 997 contained water in the exact
+volume and used the general shader, with walking p95 between 20 and 22 ms.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.

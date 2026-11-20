@@ -517,7 +517,12 @@ impl PendingShift {
         }
         v.retarget_dynamic_water(gpu, &mut encoder, self.change.region.bounds()[0]);
         gpu.queue.submit(Some(encoder.finish()));
-        v.occupied = self.change.occupied_after_publish(v.occupied);
+        v.occupied = self
+            .change
+            .retained_bounds(v.occupied, self.change.incoming_occupied);
+        v.water_bounds = self
+            .change
+            .retained_bounds(v.water_bounds, self.change.incoming_water);
         v.may_have_local_edits = self.change.may_have_local_edits;
         v.region = self.change.region;
         v.bounds = v.region.bounds();

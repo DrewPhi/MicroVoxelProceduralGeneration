@@ -257,12 +257,14 @@ struct Uniform {
 }
 struct Volume {
     occupied: Option<stream::Region>,
+    water_bounds: Option<stream::Region>,
     may_have_local_edits: bool,
     resources: Bindings,
     dynamic_water_key: Option<(frontier_world::Cell, [u32; 3], u64)>,
     dynamic_water_binding: u64,
     ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
+    dry_pipeline: Option<wgpu::RenderPipeline>,
     height: Option<traversal::Height>,
     diagnostics: diagnostics::Diagnostics,
     beam: traversal::Beam,
@@ -321,6 +323,19 @@ impl Volume {
             | (u32::from(self.edited_root_proofs) << 3)
     }
 
+    fn has_dynamic_water(&self) -> bool {
+        self.dynamic_water_key
+            .is_some_and(|(_, size, _)| !size.contains(&0))
+    }
+
+    fn pipeline_for_view(&self, submerged: bool) -> &wgpu::RenderPipeline {
+        if !submerged && self.water_bounds.is_none() && !self.has_dynamic_water() {
+            if let Some(dry) = &self.dry_pipeline {
+                return dry;
+            }
+        }
+        &self.pipeline
+    }
     fn encode_traversal(
         &self,
         gpu: &Gpu,
@@ -342,7 +357,7 @@ impl Volume {
         }
         if primary
             && (self.occupied.is_some()
-                || self.dynamic_water_key.is_some()
+                || self.has_dynamic_water()
                 || gpu.camera_submerged.get()
                 || self.diagnostics.enabled
                 || capture_layer() != CaptureLayer::Scene)
@@ -577,7 +592,7 @@ impl Pending {
             (None, traversal::empty_height(&gpu.device))
         };
         let beam = traversal::Beam::new(&gpu.device, options);
-        let pipeline = make_pipeline(
+        let (pipeline, dry_pipeline) = make_pipelines(
             gpu,
             &layout,
             beam.layout(),
@@ -615,11 +630,13 @@ impl Pending {
         let volume = Volume {
             occupied,
             may_have_local_edits: snapshot.region_has_edits,
+            water_bounds: snapshot.contains_water.then(|| snapshot.region()),
             resources,
             dynamic_water_key: None,
             dynamic_water_binding: 0,
             ownership: snapshot.ownership.clone(),
             pipeline,
+            dry_pipeline,
             height,
             diagnostics,
             beam,
@@ -926,7 +943,7 @@ impl Experiment {
             .chain(self.pending.iter_mut().map(|p| &mut p.volume))
         {
             if volume.samples != gpu.sample_count {
-                volume.pipeline = make_pipeline(
+                (volume.pipeline, volume.dry_pipeline) = make_pipelines(
                     gpu,
                     &volume.pipeline.get_bind_group_layout(0),
                     volume.beam.layout(),
@@ -1552,7 +1569,7 @@ impl Experiment {
     /// plants. Publishing a new air window must not cancel far refinement.
     pub(crate) fn empty_unedited_volume(&self) -> bool {
         self.active.as_ref().is_some_and(|a| {
-            a.occupied.is_none() && !a.may_have_local_edits && a.dynamic_water_key.is_none()
+            a.occupied.is_none() && !a.may_have_local_edits && !a.has_dynamic_water()
         })
     }
     pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {
@@ -1591,7 +1608,7 @@ impl Experiment {
         submerged: bool,
     ) {
         if let Some(a) = &self.active {
-            let bounds = if a.dynamic_water_key.is_none()
+            let bounds = if !a.has_dynamic_water()
                 && !submerged
                 && !a.diagnostics.enabled
                 && capture_layer() == CaptureLayer::Scene
@@ -1605,7 +1622,7 @@ impl Experiment {
                 return;
             };
             pass.set_scissor_rect(x, y, w, h);
-            pass.set_pipeline(&a.pipeline);
+            pass.set_pipeline(a.pipeline_for_view(submerged));
             pass.set_bind_group(0, &a.bind, &[]);
             pass.set_bind_group(1, far, &[]);
             a.beam.bind(pass);
@@ -1768,6 +1785,13 @@ impl Experiment {
             self.request.map_or(0, |r| r.radius_voxels),
             a.map_or(0, |v| v.region.dims()[0] as u32 / 2
                 * stream::ROOT_EDGE_VOXELS)
+        )
+        .unwrap();
+        write!(
+            json,
+            ",\"static_water_possible\":{},\"dry_pipeline_available\":{}",
+            a.is_some_and(|v| v.water_bounds.is_some()),
+            a.is_some_and(|v| v.dry_pipeline.is_some())
         )
         .unwrap();
         write!(json, ",\"published_world_revision\":{},\"content_update_pending\":{},\"edited_root_proofs_invalidated\":{}", a.map_or(0,|v|v.revision),self.refresh_world.is_some(),a.is_some_and(|v|v.edited_root_proofs)).unwrap();
@@ -2048,13 +2072,13 @@ pub(crate) fn mesh_traversal_constants() -> std::collections::HashMap<String, f6
     traversal::options().mesh_constants()
 }
 
-fn make_pipeline(
+fn make_pipelines(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,
     beam_layout: &wgpu::BindGroupLayout,
     options: traversal::Options,
     format: [u32; 3],
-) -> wgpu::RenderPipeline {
+) -> (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>) {
     let shader = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2083,44 +2107,52 @@ fn make_pipeline(
         u8::from(capture_layer() == CaptureLayer::Steps).into(),
     );
     constants.insert("traversal_beam".into(), u8::from(options.beam).into());
-    gpu.device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("NAADF exact native voxel pass"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &constants,
+    let mut make = |dry: bool| {
+        constants.insert("traversal_dry".into(), u8::from(dry).into());
+        gpu.device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("NAADF exact native voxel pass"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.scene_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: gpu.sample_count,
                     ..Default::default()
                 },
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.scene_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: gpu.sample_count,
-                ..Default::default()
-            },
-            multiview: None,
-            cache: None,
-        })
+                multiview: None,
+                cache: None,
+            })
+    };
+    let full = make(false);
+    let dry = std::env::var_os("FRONTIER_NAADF_DRY_PIPELINE")
+        .is_none_or(|v| v != "0")
+        .then(|| make(true));
+    (full, dry)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -539,7 +539,7 @@ fn gpu_matches_canonical_rays_for_source(
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    pass.set_pipeline(&volume.pipeline);
+                    pass.set_pipeline(volume.pipeline_for_view(false));
                     pass.set_bind_group(0, &volume.bind, &[]);
                     volume.beam.bind(&mut pass);
                     pass.set_bind_group(1, shadow_source.far_shadow_bind(), &[]);

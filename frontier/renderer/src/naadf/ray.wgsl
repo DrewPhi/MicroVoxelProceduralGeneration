@@ -209,7 +209,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     let d=normalize(naadf.forward.xyz+ndc.x*naadf.right.xyz*naadf.right.w+ndc.y*naadf.up.xyz*naadf.up.w);
     let cosine=dot(d,naadf.forward.xyz);
     let minimum=naadf.projection.x/cosine*VOXELS_PER_METER;
-    if naadf.eye.w>0.5 && naadf.viewport.w<0.5 && naadf.sky.w<0.5 && !traversal_diagnostic {
+    if !traversal_dry && naadf.eye.w>0.5 && naadf.viewport.w<0.5 && naadf.sky.w<0.5 && !traversal_diagnostic {
         return shade_submerged(o,d,cosine);
     }
     var prefix=minimum;
@@ -245,7 +245,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     }
     if naadf.viewport.w>0.5{return Fragment(vec4(f32(pigment.material)/255.,0.,0.,1.),depth);}
     if naadf.sky.w>0.5{return Fragment(vec4(vec3(0.8)*(0.3+0.7*max(dot(h.normal,normalize(vec3(-0.5,0.8,-0.3))),0.)),1.),depth);}
-    if pigment.material==7u {
+    if !traversal_dry && pigment.material==7u {
         return Fragment(vec4(shade_water(hit,h.normal,d,h.t*NATIVE_VOXEL_METERS),1.),depth);
     }
     return Fragment(vec4(shade_voxel(hit,h),1.),depth);

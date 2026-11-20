@@ -50,6 +50,7 @@ pub struct Snapshot {
     pub cpu_profile: Option<Metrics>,
     pub source_revision: u64,
     pub region_has_edits: bool,
+    pub contains_water: bool,
     pub mixed_chunks: usize,
     pub unique_blocks: usize,
     pub sampled_columns: usize,
@@ -543,6 +544,7 @@ fn build_region_options(
         cpu_profile: None,
         source_revision: world.revision(),
         region_has_edits: false,
+        contains_water: false,
         mixed_chunks: 0,
         unique_blocks: 0,
         sampled_columns: 0,
@@ -1088,6 +1090,17 @@ fn build_region_options(
             &safe_columns,
         ));
     }
+    // Inspect canonical, unpacked nodes before 16-bit leaf packing, sparse
+    // encoding or remapping to arena addresses. Include uniform roots/blocks.
+    out.contains_water = out
+        .chunks
+        .iter()
+        .chain(&out.blocks)
+        .chain(&out.voxels)
+        .any(|&word| {
+            word & (FULL | CHILD) == FULL
+                && out.palette[(word & !(FULL | CHILD)) as usize].material == id(Material::Water)
+        });
     profile.end(Stage::Ownership, phase);
     if let Some(m) = &mut profile.metrics {
         m.region_worker_wall_ms = start.elapsed().as_secs_f64() * 1000.;
@@ -1665,6 +1678,7 @@ fn deep_ocean_uniform_chunks_preserve_bed_air_and_edits() {
         .unwrap()
     };
     let baseline = build(&world);
+    assert!(baseline.contains_water);
     let water_only = build_region_options(
         &world,
         Cell { x, y: -64, z },

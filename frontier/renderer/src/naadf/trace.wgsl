@@ -12,6 +12,7 @@ struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE+7u) var<storage,read_write> trace_metrics:array<atomic<u32>>;
 struct DynamicWater {origin:vec4<i32>,size:vec4<u32>,states:array<u32>};
 @group(NAADF_GROUP) @binding(NAADF_BASE+8u) var<storage,read> dynamic_water:DynamicWater;
+override traversal_dry:bool=false;
 fn water_state(cell:vec3<i32>)->u32 {
     let p=cell-dynamic_water.origin.xyz;
     if any(p<vec3(0)) || any(p>=vec3<i32>(dynamic_water.size.xyz)) {return 0u;}
@@ -19,7 +20,7 @@ fn water_state(cell:vec3<i32>)->u32 {
     return dynamic_water.states[c.x+dynamic_water.size.x*(c.y+dynamic_water.size.y*c.z)];
 }
 fn water_node(node:u32)->bool {
-    return (node&0x40000000u)!=0u && palette[node&0x3fffffffu].material==7u;
+    return !traversal_dry && (node&0x40000000u)!=0u && palette[node&0x3fffffffu].material==7u;
 }
 fn water_overlaps(lo:vec3<i32>,hi:vec3<i32>)->bool {
     return all(dynamic_water.size.xyz>vec3(0u)) && all(hi>dynamic_water.origin.xyz) && all(lo<dynamic_water.origin.xyz+vec3<i32>(dynamic_water.size.xyz));
@@ -544,7 +545,7 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             // A homogeneous water cube is empty to the optical ray. Retain
             // its size, but never decode its old pigment as a skip proof.
             node=0u;
-        } else if all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
+        } else if !traversal_dry && all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
             scale=1u;
             if water_state(cell)==1u {node=0u;}
         }
@@ -697,7 +698,7 @@ fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusio
 // proofs never skip a newly wet cell. This bound crosses every possible plane.
 fn trace_water(o:vec3<f32>,d:vec3<f32>,minimum:f32,maximum:f32,occlusion:bool)->VoxelHit {
     var miss=VoxelHit(false,0.,vec3(0.),7u,vec3(0u),0u);
-    if dynamic_water.origin.w==0 || any(dynamic_water.size.xyz==vec3(0u)) {return miss;}
+    if traversal_dry || dynamic_water.origin.w==0 || any(dynamic_water.size.xyz==vec3(0u)) {return miss;}
     let lo=dynamic_water.origin.xyz;
     let hi=lo+vec3<i32>(dynamic_water.size.xyz);
     let native_interval=voxel_interval(o,d);
