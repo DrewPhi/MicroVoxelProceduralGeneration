@@ -64,6 +64,11 @@ impl Gpu {
     ) -> Result<()> {
         if let Some(adaptive) = &mut self.adaptive {
             adaptive.update_edit_surface(&self.device, &self.queue, world, camera);
+            let landscape = self
+                .visual_settings
+                .as_ref()
+                .is_some_and(|s| s.flight_horizon && s.beauty);
+            adaptive.update_landscape_detail(&self.device, &self.queue, world, camera, landscape);
         }
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
@@ -189,7 +194,7 @@ impl Gpu {
             if self
                 .adaptive
                 .as_ref()
-                .is_none_or(|a| !a.edit_surface_pending())
+                .is_none_or(|a| !a.edit_surface_pending() && !a.landscape_detail_pending())
                 && self.vegetation_stats.pending_jobs == 0
                 && self.vegetation_stats.shadow_transition_pairs == 0
                 && self.vegetation_stats.shadow_fading_casters == 0

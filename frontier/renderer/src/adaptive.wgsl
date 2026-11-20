@@ -71,6 +71,8 @@ struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
+@group(2) @binding(14) var flight_detail: texture_2d_array<f32>;
+@group(2) @binding(15) var flight_sampler: sampler;
 @group(2) @binding(13) var edited_columns: texture_2d<u32>;
 fn edit_owns_column(cell: vec2<u32>) -> bool {
     let dims = textureDimensions(edited_columns);
@@ -461,7 +463,8 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     camera=batch_cameras[in.camera_slot].value;
     return shade(in);
 }
-fn shade(in: VertexOut) -> vec4<f32> {
+fn shade(input: VertexOut) -> vec4<f32> {
+    var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
     if near_shadow.parameters.y > 0.5 && (camera.paint_origin.w & 16u)==0u && edit_owns_column(bitcast<vec2<u32>>(local_cell.xz)+camera.paint_origin.xz) { discard; }
     // Ownership follows the occupied native cell, including faces on box edges.
@@ -475,6 +478,24 @@ fn shade(in: VertexOut) -> vec4<f32> {
     }
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
+    // The flight field is aligned to canonical 8 m samples. Fine meshes and
+    // native stairs retain their own material and face response.
+    if near_shadow.parameters.z > -1e10 && (camera.paint_origin.w & 26u) == 0u
+        && in.normal.y > 0. && any(in.color != MATERIAL_COLORS[7]) {
+        let spacing = f32(1u << (u32(camera.paint.w) & 31u)) * NATIVE_VOXEL_METERS;
+        let cell = (in.local.xz - camera.eye.xz + near_shadow.parameters.zw) / 8.;
+        let side = vec2<f32>(textureDimensions(flight_detail));
+        let edge = min(cell,side-1.-cell);
+        let weight = smoothstep(1.,15.,min(edge.x,edge.y)) * smoothstep(2.,12.,spacing);
+        if weight > 0. {
+            let uv = (cell + 0.5)/side;
+            let slope = textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
+            let paint = textureSampleLevel(flight_detail,flight_sampler,uv,1,0.);
+            let w = weight * slope.w;
+            in.normal = normalize(mix(in.normal,2.*slope.xyz-1.,w));
+            in.color = mix(in.color,paint.rgb,w);
+        }
+    }
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
     var visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));

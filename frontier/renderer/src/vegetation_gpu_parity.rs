@@ -206,6 +206,7 @@ fn frozen_native_gpu_parity() {
             &crate::naadf::Bindings::empty(&device),
             &crate::adaptive_gpu::edit_landscape::mask_texture(&device, [1, 1])
                 .create_view(&Default::default()),
+            &crate::adaptive_gpu::landscape_detail::Texture::new(&device, 1),
         );
         let color = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
         let depth = texture(&device, wgpu::TextureFormat::Depth32Float);

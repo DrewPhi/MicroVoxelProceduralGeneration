@@ -266,7 +266,9 @@ impl AdaptiveGpu {
         eye: [f64; 3],
         comparison: bool,
     ) {
-        let mut values = [0f32; 8];
+        let mut params = [0f32; 10];
+        params[..2].copy_from_slice(&self.landscape_offset(eye));
+        let values = &mut params[2..];
         if let Some(b) = bounds {
             for axis in 0..3 {
                 values[axis] = (b[0][axis] - eye[axis]) as f32;
@@ -277,8 +279,8 @@ impl AdaptiveGpu {
         values[3] = if comparison { 1. } else { 0. };
         queue.write_buffer(
             &self.shadows.near.uniform,
-            80,
-            bytemuck::cast_slice(&values),
+            72,
+            bytemuck::cast_slice(&params),
         );
     }
     pub(super) fn prepare_shadows(
@@ -571,6 +573,24 @@ pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
                 },
                 count: None,
             });
+            entries.extend([
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ]);
             entries
         },
     })
@@ -580,6 +600,7 @@ pub(super) struct NearShadowResources {
     naadf_empty: crate::naadf::Bindings,
     naadf_active: Option<crate::naadf::Bindings>,
     edit_mask: wgpu::TextureView,
+    pub(super) detail: super::landscape_detail::Texture,
     sampler: wgpu::Sampler,
     _texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -622,7 +643,16 @@ impl NearShadowResources {
         let naadf_empty = crate::naadf::Bindings::empty(device);
         let edit_mask =
             super::edit_landscape::mask_texture(device, [1, 1]).create_view(&Default::default());
-        let bind = near_sampling_bind(device, &view, &sampler, &uniform, &naadf_empty, &edit_mask);
+        let detail = super::landscape_detail::Texture::new(device, 1);
+        let bind = near_sampling_bind(
+            device,
+            &view,
+            &sampler,
+            &uniform,
+            &naadf_empty,
+            &edit_mask,
+            &detail,
+        );
         let depth_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("plant shadow depth uniform"),
             layout: &near_depth_layout(device),
@@ -634,6 +664,7 @@ impl NearShadowResources {
         Self {
             naadf_id: 0,
             naadf_active: None,
+            detail,
             edit_mask,
             naadf_empty,
             sampler,
@@ -677,6 +708,7 @@ pub(crate) fn near_sampling_bind(
     uniform: &wgpu::Buffer,
     naadf: &crate::naadf::Bindings,
     edit_mask: &wgpu::TextureView,
+    detail: &super::landscape_detail::Texture,
 ) -> wgpu::BindGroup {
     let mut entries = vec![
         wgpu::BindGroupEntry {
@@ -697,6 +729,16 @@ pub(crate) fn near_sampling_bind(
         binding: 13,
         resource: wgpu::BindingResource::TextureView(edit_mask),
     });
+    entries.extend([
+        wgpu::BindGroupEntry {
+            binding: 14,
+            resource: wgpu::BindingResource::TextureView(&detail.view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 15,
+            resource: wgpu::BindingResource::Sampler(&detail.sampler),
+        },
+    ]);
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shared voxel and near-shadow visibility"),
         layout: &near_sampling_layout(device),
@@ -736,7 +778,7 @@ impl AdaptiveGpu {
         self.resident_stats = None;
         self.refresh_visibility_bind(device);
     }
-    fn refresh_visibility_bind(&mut self, device: &wgpu::Device) {
+    pub(super) fn refresh_visibility_bind(&mut self, device: &wgpu::Device) {
         let near = &mut self.shadows.near;
         let bindings = near.naadf_active.as_ref().unwrap_or(&near.naadf_empty);
         near.bind = near_sampling_bind(
@@ -746,6 +788,7 @@ impl AdaptiveGpu {
             &near.uniform,
             bindings,
             &near.edit_mask,
+            &near.detail,
         );
         // A render bundle retains the bind groups used while recording it.
         self.invalidate_bundle();

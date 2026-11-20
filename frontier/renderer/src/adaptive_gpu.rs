@@ -27,6 +27,8 @@ pub(crate) mod adaptive_shadow;
 pub(crate) mod coarse_batch;
 #[path = "edit_landscape.rs"]
 pub(crate) mod edit_landscape;
+#[path = "landscape_detail.rs"]
+pub(crate) mod landscape_detail;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
 use adaptive_shadow::ShadowResources;
@@ -533,6 +535,7 @@ impl PreparedView {
 }
 pub struct AdaptiveGpu {
     edits: edit_landscape::Surface,
+    landscape_detail: landscape_detail::Detail,
     resource_budget_bytes: u64,
     gpu_profiles: Option<GpuOrderedProfiles>,
     gpu_profile_stats: GpuProfileStats,
@@ -902,6 +905,7 @@ impl AdaptiveGpu {
         Self {
             resource_budget_bytes: MAX_BYTES,
             edits: edit_landscape::Surface::default(),
+            landscape_detail: landscape_detail::Detail::default(),
             gpu_profiles: None,
             gpu_profile_stats: GpuProfileStats {
                 enabled: std::env::var("FRONTIER_GPU_PROFILES").as_deref() == Ok("1"),
@@ -1120,7 +1124,10 @@ impl AdaptiveGpu {
         self.clusters.contains_key(key)
     }
     fn allocated_bytes(&self) -> u64 {
-        (self.shadows.allocated_bytes() + CAMERA_UNIFORM_BYTES + self.edit_bytes())
+        (self.shadows.allocated_bytes()
+            + CAMERA_UNIFORM_BYTES
+            + self.edit_bytes()
+            + self.shadows.near.detail.bytes())
             + self
                 .coarse_batch
                 .as_ref()

@@ -68,6 +68,13 @@ p50/p95/p99 measured **7.44 / 9.90 / 11.61 ms**. Seed 40961 measured
 **6.17 / 8.35 / 9.10 ms** on its surveyed approach. Close ridgeline silhouettes
 still show coarse geometry during refinement.
 
+An 8 m shading grid adds terrain normals and color to the nearest 2 km square
+of the flight view. Shared samples stay fixed as the aircraft crosses grid
+boundaries. The GPU texture uses 516 KiB. On the same seed 19 route, two
+passes with this field measured **8.05 / 10.42 / 11.90 ms** and
+**8.79 / 11.27 / 12.65 ms**. The control (`FRONTIER_FLIGHT_DETAIL=0`)
+measured **8.33 / 10.86 / 12.51 ms**.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.
