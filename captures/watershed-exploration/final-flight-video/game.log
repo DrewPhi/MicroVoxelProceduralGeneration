@@ -1,0 +1,8 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+adaptive route starts after coarse coverage publication
+NAADF residency: 8/32 m (0.13s)
+NAADF residency: 32/32 m (0.89s)
+NAADF residency: 32/32 m (1.11s)
+NAADF residency: 32/32 m (0.76s)
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 1784, accepted_frames: 1784, missed_budget_frames: 861, rejected_inputs: 0, p50_ms: Some(16.625238), p95_ms: Some(23.584775999999998), p99_ms: Some(29.678693) }
+benchmark JSON: /home/drew/Projects/voxels/frontier-lod/frontier/output/watershed-exploration/final-flight-video/game.json

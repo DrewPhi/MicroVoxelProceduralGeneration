@@ -1,0 +1,6 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+adaptive route starts after coarse coverage publication
+NAADF residency: 8/32 m (0.16s)
+NAADF residency: 32/32 m (1.56s)
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 1226, accepted_frames: 1226, missed_budget_frames: 899, rejected_inputs: 0, p50_ms: Some(20.65442), p95_ms: Some(45.305330999999995), p99_ms: Some(58.948246000000005) }
+benchmark JSON: /home/drew/Projects/voxels/frontier-lod/frontier/output/lod-polish/final-walk-1080/game.json

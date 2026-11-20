@@ -1,0 +1,77 @@
+{
+  "command": [
+    "/home/drew/Projects/voxels/frontier-lod/frontier/output/lod-polish/control-frontier",
+    "--preset",
+    "alpine",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--seconds",
+    "28.0",
+    "--report",
+    "/home/drew/Projects/voxels/frontier-lod/frontier/output/lod-polish/control-walk-1080/game.json",
+    "--seed",
+    "7",
+    "--msaa",
+    "1",
+    "--capture-far",
+    "6000",
+    "--naadf-radius",
+    "32",
+    "--pixel-error",
+    "5",
+    "--no-adaptive-disk-cache",
+    "--streaming-haze",
+    "0",
+    "--sun-elevation",
+    "25",
+    "--cloud-speed",
+    "0"
+  ],
+  "binary_sha256": "06754a1d56b552b2241903bf0887b460c06ad23e8d5a784f78cdc5409f2c9df1",
+  "settle_seconds": 0.0,
+  "movement": {
+    "max_displacement_m": 22.392974453101225,
+    "yaw_range_radians": 1.279999727,
+    "walk_verified": true,
+    "turn_verified": true
+  },
+  "turn_only": false,
+  "failure": null,
+  "events": [
+    {
+      "seconds_from_launch": 0.7323,
+      "action": "record_start"
+    },
+    {
+      "seconds_from_launch": 1.8207,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 4.937,
+      "action": "hold_None"
+    },
+    {
+      "seconds_from_launch": 7.0269,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 10.1502,
+      "action": "mouse_turn"
+    },
+    {
+      "seconds_from_launch": 11.8886,
+      "action": "walk_after_turn"
+    },
+    {
+      "seconds_from_launch": 14.8887,
+      "action": "stop_after_turn"
+    },
+    {
+      "seconds_from_launch": 21.0677,
+      "action": "record_end"
+    }
+  ],
+  "scope": "Actual X11 walking or stationary full yaw/pitch inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+}

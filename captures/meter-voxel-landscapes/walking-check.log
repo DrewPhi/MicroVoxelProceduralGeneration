@@ -1,0 +1,11 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+adaptive route starts after coarse coverage publication
+NAADF residency: 128.00/512.00 m (0.14s)
+NAADF residency: 192.00/512.00 m (0.24s)
+NAADF residency: 256.00/512.00 m (0.37s)
+NAADF residency: 320.00/512.00 m (0.54s)
+NAADF residency: 384.00/512.00 m (0.72s)
+NAADF residency: 448.00/512.00 m (0.94s)
+NAADF residency: 512.00/512.00 m (1.17s)
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 815, accepted_frames: 815, missed_budget_frames: 809, rejected_inputs: 0, p50_ms: Some(18.942687), p95_ms: Some(21.745742), p99_ms: Some(23.812453) }
+benchmark JSON: output/meter-voxel-landscapes/walking-check.report.json

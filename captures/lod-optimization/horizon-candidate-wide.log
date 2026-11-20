@@ -1,0 +1,12 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+NAADF residency: 8/64 m (0.22s)
+NAADF residency: 32/64 m (2.63s)
+NAADF residency: 64/64 m (5.67s)
+adaptive route starts after settled quality with refinement reserve publication
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 189, accepted_frames: 189, missed_budget_frames: 189, rejected_inputs: 0, p50_ms: Some(18.890309000000002), p95_ms: Some(22.031081), p99_ms: Some(22.952913) }
+benchmark JSON: /home/drew/Projects/voxels/frontier-lod/frontier/output/lod-optimization/horizon-candidate-wide.json
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+NAADF residency: 8/64 m (0.06s)
+NAADF residency: 32/64 m (0.49s)
+NAADF residency: 64/64 m (2.54s)
+captured /home/drew/Projects/voxels/frontier-lod/frontier/output/lod-optimization/horizon-candidate-wide.png (1920x1080)

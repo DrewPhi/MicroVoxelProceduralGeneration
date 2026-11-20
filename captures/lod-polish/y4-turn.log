@@ -1,0 +1,6 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+NAADF residency: 8/32 m (0.24s)
+NAADF residency: 32/32 m (2.15s)
+adaptive route starts after coarse coverage publication
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 600, accepted_frames: 600, missed_budget_frames: 581, rejected_inputs: 0, p50_ms: Some(24.10274), p95_ms: Some(32.983270000000005), p99_ms: Some(41.91789) }
+benchmark JSON: /home/drew/Projects/voxels/frontier-lod/frontier/output/lod-optimization/turn-polish-y4.json

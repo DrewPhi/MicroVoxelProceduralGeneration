@@ -1,0 +1,2 @@
+file,seed,source_version,appearance_version,span_m,resolution,ground_min_m,ground_max_m,visible_min_m,visible_max_m,water_fraction,temperature_min,temperature_max,moisture_min,moisture_max,eval_ms,eval_ns_per_sample
+seeded_world_19_4600m,19,1,1,4600,385,75.8125,1169.4375,75.8125,1169.4375,0.0009107775341541575,0.2902913931036,0.5686265496739897,0.0543695463700262,0.3116942032263313,189.924,1281.3

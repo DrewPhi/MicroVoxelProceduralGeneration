@@ -1,0 +1,11 @@
+
+running 6 tests
+test adaptive_geometry::distant_voxels::tests::application_default_and_comparison_overrides_are_distinct ... ok
+test adaptive_geometry::distant_voxels::tests::quantization_is_world_aligned_through_zero ... ok
+test adaptive_geometry::distant_voxels::tests::seed_appearance_tracks_visible_water_and_directional_ground ... ok
+test adaptive_geometry::distant_voxels::tests::exact_neighbor_receives_native_height_and_face_ownership ... ok
+test adaptive_geometry::distant_voxels::tests::coarse_and_fine_tiles_share_a_closed_boundary_with_unique_side_ownership ... ok
+test adaptive_geometry::distant_voxels::tests::neighboring_pitch_change_reuses_interior_with_fresh_seams_and_profiles ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 598 filtered out; finished in 0.03s
+

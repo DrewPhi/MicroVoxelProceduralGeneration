@@ -1,0 +1,6 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+NAADF residency: 8.00/32.00 m (0.06s)
+NAADF residency: 32.00/32.00 m (0.47s)
+adaptive settling: coverage=true pending=23 resident=1771 elapsed=10.0s
+adaptive settling: coverage=true pending=32 resident=2566 elapsed=20.0s
+captured /home/drew/Projects/voxels/frontier-lod/frontier/output/lod-optimization/spiky-radius-voxels.png (1920x1080)

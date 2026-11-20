@@ -1,0 +1,1006 @@
+   Compiling frontier-reference v0.1.0 (/home/drew/Projects/voxels/frontier-lod/frontier/reference)
+   Compiling frontier-renderer v0.1.0 (/home/drew/Projects/voxels/frontier-lod/frontier/renderer)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> renderer/src/deferred_cover.rs:344:14
+    |
+344 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+344 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+344 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+    |
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> renderer/src/settings_ui.rs:153:96
+    |
+153 |                     painter.line_segment([project(line[0]),project(line[1])],egui::Stroke::new(1.5,egui::Color32::YELLOW));
+    |                                                                                                ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+    = note: `#[warn(float_literal_f32_fallback)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> renderer/src/settings_ui.rs:155:74
+    |
+155 |                 painter.circle_stroke(rect.center(),3.,egui::Stroke::new(1.,egui::Color32::WHITE));
+    |                                                                          ^^ help: explicitly specify the type as `f32`: `1_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: unused variable: `shadow_layout`
+   --> renderer/src/vegetation_gpu_parity.rs:200:13
+    |
+200 |         let shadow_layout = crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(&device);
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shadow_layout`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `visual_build_mib`, `visual_disk_cache`, and `visual_disk_mib` are never read
+    --> renderer/src/lib.rs:1553:5
+     |
+1538 | struct Viewer {
+     |        ------ fields in this struct
+...
+1553 |     visual_build_mib: usize,
+     |     ^^^^^^^^^^^^^^^^
+1554 |     visual_disk_cache: Option<PathBuf>,
+     |     ^^^^^^^^^^^^^^^^^
+1555 |     visual_disk_mib: usize,
+     |     ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `len` is never used
+    --> renderer/src/adaptive_geometry.rs:3440:12
+     |
+3361 | impl GeometryCache {
+     | ------------------ method in this implementation
+...
+3440 |     pub fn len(&self) -> usize {
+     |            ^^^
+
+warning: field `0` is never read
+   --> renderer/src/deferred_cover.rs:188:11
+    |
+188 |     Patch(Patch),
+    |     ----- ^^^^^
+    |     |
+    |     field in this variant
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+188 -     Patch(Patch),
+188 +     Patch(()),
+    |
+
+warning: associated items `new` and `encode` are never used
+   --> renderer/src/atmosphere.rs:243:19
+    |
+242 | impl Atmosphere {
+    | --------------- associated items in this implementation
+243 |     pub(crate) fn new(
+    |                   ^^^
+...
+739 |     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
+    |                   ^^^^^^
+
+warning: field `reference` is never read
+  --> renderer/src/vegetation.rs:91:9
+   |
+70 | pub struct VegetationStats {
+   |            --------------- field in this struct
+...
+91 |     pub reference: bool,
+   |         ^^^^^^^^^
+   |
+   = note: `VegetationStats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `origin` is never read
+   --> renderer/src/vegetation.rs:204:9
+    |
+203 | pub struct VegetationFrame {
+    |            --------------- field in this struct
+204 |     pub origin: [i64; 3],
+    |         ^^^^^^
+    |
+    = note: `VegetationFrame` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `advance` is never used
+  --> renderer/src/walking.rs:70:12
+   |
+21 | impl WalkingCamera {
+   | ------------------ method in this implementation
+...
+70 |     pub fn advance(
+   |            ^^^^^^^
+
+   Compiling frontier-runtime v0.1.0 (/home/drew/Projects/voxels/frontier-lod/frontier/runtime)
+   Compiling frontier-world v0.1.0 (/home/drew/Projects/voxels/frontier-lod/frontier/world)
+warning: `frontier-renderer` (lib test) generated 11 warnings (run `cargo fix --lib -p frontier-renderer --tests` to apply 4 suggestions)
+    Finished `release` profile [optimized] target(s) in 3m 30s
+     Running unittests src/lib.rs (/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/deps/frontier_reference-8170d2830fe02079)
+
+running 18 tests
+test tests::crop_never_creates_surface ... ok
+test landscape::tests::crop_does_not_invent_walls_and_vertical_top_is_exact ... ok
+test tests::inclusive_near_and_partial_blocks ... ok
+test tests::srgb_transfer ... ok
+test landscape::tests::sampled_cache_rejects_other_stride ... ok
+test landscape::tests::sampled_grid_matches_native_height_and_world_footprint ... ok
+test landscape::tests::disk_cache_rejects_other_seed ... ok
+test tests::ties_negative_planes_and_signed_zero ... ok
+test tests::cave_camera_near_tie_rays_match_independent_boxes ... ok
+test tests::near_ties_do_not_advance_non_crossing_axes ... ok
+test landscape::tests::tied_top_and_horizontal_planes_match_dense ... ok
+test landscape::tests::hybrid_ownership_excludes_coarse_occluder_inside_native_square ... ok
+test landscape::tests::sampled_oblique_rays_match_independent_column_boxes ... ok
+test landscape::tests::alpine_reference_subsurface_material_matches_native_world ... ok
+test vegetation::tests::instance_bvh_matches_brute_force_and_canonical_materials ... ok
+test tests::independent_boxes_and_acceleration ... ok
+test landscape::tests::exact_columns_match_dense_native_snapshot ... ok
+test vegetation::tests::native_plant_rays_match_independent_dense_oracle ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/deps/frontier_renderer-a4c69c09a835946c)
+
+running 604 tests
+test adaptive_geometry::distant_voxels::tests::application_default_and_comparison_overrides_are_distinct ... ok
+test adaptive_geometry::distant_voxels::tests::exact_neighbor_receives_native_height_and_face_ownership ... ok
+test adaptive_geometry::distant_voxels::tests::quantization_is_world_aligned_through_zero ... ok
+test adaptive_geometry::distant_voxels::tests::seed_appearance_tracks_visible_water_and_directional_ground ... ok
+test adaptive_geometry::native_conforming::tests::cancellation_does_not_mutate_canonical_input ... ok
+test adaptive_geometry::native_conforming::tests::every_original_unit_face_has_matching_triangle_coverage_and_profile ... ok
+test adaptive_geometry::native_conforming::tests::compact_cliff_is_exact_conforming_for_all_orientations ... ok
+test adaptive_geometry::source_column_codec_retains_water_depth_and_new_ground_materials ... ok
+test adaptive_geometry::native_conforming::tests::tiny_faces_keep_the_smaller_unit_record_path ... ok
+test adaptive_geometry::native_conforming::tests::malformed_and_overflowing_native_rectangles_fail_without_panic ... ok
+test adaptive_geometry::deferred_cover::tests::worker_retains_bounded_completions_and_reports_payload_refusal ... ok
+test adaptive_geometry::tests::alpine_appearance_defaults_are_scoped_and_explicit_overrides_remain_available ... ok
+test adaptive_geometry::native_conforming::tests::independent_tile_boundaries_keep_identical_unit_segments ... ok
+test adaptive_geometry::tests::cache_budget_resize_preserves_content_and_evicts_only_residency ... ok
+test adaptive_geometry::distant_voxels::tests::coarse_and_fine_tiles_share_a_closed_boundary_with_unique_side_ownership ... ok
+test adaptive_geometry::tests::cache_reuses_source_content_cancels_and_enforces_budget ... ok
+test adaptive_geometry::tests::appearance_center_column_reuse_preserves_float_bits_extrema_and_sample_addresses ... ok
+test adaptive_geometry::tests::compare_small_tile_affine_first_primary ... ignored, bounded CPU experiment; run only while hardware measurement is idle
+test adaptive_geometry::tests::affine_source_cache_reuses_edge_variants_and_preserves_exact_bounds ... ok
+test adaptive_geometry::tests::continuous_boundary_certificate_includes_lower_outside_wall_endpoint ... ok
+test adaptive_geometry::tests::coarse_edge_matches_two_half_width_neighbors_without_t_junction_gap ... ok
+test adaptive_geometry::deferred_cover::tests::patch_rejects_cancelled_or_changed_generation_without_partial_mutation ... ok
+test adaptive_geometry::deferred_cover::tests::geometry_first_settles_to_synchronous_profiles_and_exact_geometry ... ok
+test adaptive_geometry::deferred_cover::tests::patch_can_promote_already_packed_geometry_without_changing_positions ... ok
+test adaptive_geometry::tests::dense_local_workspace_preserves_sparse_values_halos_and_replacements ... ok
+test adaptive_geometry::tests::geometry_builder_rejects_coarse_edges_at_each_explicit_volume_boundary ... ok
+test adaptive_geometry::terrain_bound_pages::tests::overlapping_footprints_reuse_exact_bounds_across_page_edges ... ok
+test adaptive_geometry::tests::eager_bound_storage_is_reported_before_first_build_and_after_clear ... ok
+test adaptive_geometry::tests::every_proxy_triangle_has_one_profile_id_after_edge_stitching_and_compaction ... ok
+test adaptive_geometry::tests::canonical_profiles_preserve_directional_radiance_sums_and_normalization ... ok
+test adaptive_geometry::tests::conforming_native_records_preserve_exact_faces_materials_and_profiles ... ok
+test adaptive_geometry::tests::linked_lru_matches_reference_order_and_charges_metadata ... ok
+test adaptive_geometry::tests::integrated_gpu_profiles_keep_ineligible_ownership_on_cpu ... ok
+test adaptive_geometry::tests::full_source_reservation_bounds_combined_cache_peak_during_later_growth ... ok
+test adaptive_geometry::tests::microprobe_applies_native_strata_after_dividing_the_probe_span ... ok
+test adaptive_geometry::tests::microprobe_planar_quantization_phases_preserve_fractional_side_density ... ok
+test adaptive_geometry::tests::kilometer_cluster_has_bounded_source_work_and_shared_coarse_anchors ... ok
+test adaptive_geometry::tests::native_boundary_profile_is_independent_of_coarse_step ... ok
+test adaptive_geometry::tests::live_payload_tracks_evicted_arcs_until_last_external_owner_drops ... ok
+test adaptive_geometry::tests::integrated_gpu_profile_relief_falls_back_to_cpu ... ok
+test adaptive_geometry::tests::native_and_proxy_bounds_and_profile_match_canonical_faces ... ok
+test adaptive_geometry::tests::native_direction_bins_preserve_order_and_prove_only_whole_bin_backfaces ... ok
+test adaptive_geometry::distant_voxels::tests::neighboring_pitch_change_reuses_interior_with_fresh_seams_and_profiles ... ok
+test adaptive_geometry::tests::native_summary_reuse_never_admits_clipped_blocks ... ok
+test adaptive_geometry::tests::integrated_gpu_profiles_preserve_geometry_and_skip_cpu_painter ... ok
+test adaptive_geometry::tests::neighboring_two_to_one_tiles_share_continuous_edge_segments ... ok
+test adaptive_geometry::tests::native_extraction_reuses_proxy_columns_without_changing_quad_records ... ok
+test adaptive_geometry::tests::map_node_memo_preserves_bits_and_height_extrema_across_jobs ... ok
+test adaptive_geometry::tests::oversized_native_tessellation_is_rejected_before_packed_allocation ... ok
+test adaptive_geometry::tests::optional_source_profile_preserves_bits_and_partitions_worker_cost ... ok
+test adaptive_geometry::tests::incomplete_affine_budget_is_discarded_in_favor_of_full_global_certificate ... ok
+test adaptive_geometry::tests::native_proxy_and_stair_two_to_one_wall_depths_have_no_missing_or_duplicate_owner ... ok
+test adaptive_geometry::tests::profile_bounded_native_certification ... ignored, manual CPU profile, no timing pass threshold
+test adaptive_geometry::tests::profile_native_top_material_reuse ... ignored, bounded same-binary CPU comparison; no timing pass threshold
+test adaptive_geometry::tests::profile_primary_cold_stages ... ignored, bounded manual CPU stage profile; no timing pass threshold
+test adaptive_geometry::tests::proxy_packing_preserves_signed_zero_and_keeps_nonflat_or_shared_fallbacks ... ok
+test adaptive_geometry::tests::native_summary_reuse_matches_proxy_bits_extrema_and_both_cache_directions ... ok
+test adaptive_geometry::tests::packed_cache_product_reloads_without_source_build_or_writeback ... ok
+test adaptive_geometry::tests::source_budget_override_is_bounded_and_preserves_total_reservation ... ok
+test adaptive_geometry::tests::one_meter_native_profile_splits_preserve_exact_unit_face_identity_and_materials ... ok
+test adaptive_geometry::tests::spatial_profiles_share_equal_resolution_corner_integrals_across_patches_and_tiles ... ok
+test adaptive_geometry::tests::source_samples_reuse_across_steps_and_certificates_have_no_artificial_floor ... ok
+test adaptive_geometry::tests::topology_owner_excludes_caps_and_owns_boundary_faces_after_edits ... ok
+test adaptive_geometry::tests::appearance_cache_preserves_tile_bits_across_edges_widths_and_clear ... ok
+test adaptive_geometry::tests::occluder_boxes_are_canonical_solid_and_unknown_candidates_use_global_bounds ... ok
+test adaptive_geometry::voxel_handoff::tests::export_voxel_handoff_reference_comparison ... ignored, offline #83 OBJ/PPM reference export; deliberately not live LOD integration
+test adaptive_geometry::voxel_handoff::tests::native_edges_and_vertical_bound_survive_negative_coordinates_and_two_to_one_steps ... ok
+test adaptive_geometry::tests::volume_boundary_profiles_use_canonical_face_fallback_instead_of_base_halo ... ok
+test adaptive_geometry::voxel_handoff::tests::prototype_rejects_topology_edits_water_and_excessive_relief ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::atmosphere_and_cluster_shadow_coordinates_agree ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::cached_depth_requires_same_world_light_and_ownership_revisions ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::near_depth_reuse_requires_exact_shader_inputs_and_caster_bytes ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::near_light_projection_is_stable_in_world_texels ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::near_shadow_depth_decreases_toward_the_sun ... ok
+test adaptive_gpu::adaptive_shadow::near_tests::near_light_projection_keeps_large_world_origins_out_of_gpu_math ... ok
+test adaptive_gpu::coarse_batch::tests::indirect_and_camera_layout_match_the_compute_shader ... ok
+test adaptive_gpu::proxy_indexed::tests::derived_attributes_keep_palette_exact_and_reject_custom_normals_or_colors ... ok
+test adaptive_gpu::proxy_indexed::tests::indexed_source_decodes_every_ordered_float_bit_and_profile ... ok
+test adaptive_gpu::proxy_indexed::tests::unshared_and_tiny_payloads_keep_existing_layout ... ok
+test adaptive_gpu::shadow_specialization_tests::sweep_retains_possible_hits_and_rejects_only_separated_rays ... ok
+test adaptive_gpu::tests::canonical_lighting_and_tint_match_native_source ... ok
+test adaptive_geometry::tests::thirty_two_meter_cluster_uses_analytic_first_without_native_scan ... ok
+test adaptive_gpu::proxy_indexed::tests::canonical_fans_staircases_and_walls_decode_after_gpu_page_relocation ... ok
+test adaptive_gpu::tests::experimental_vertex_padding_preserves_default_and_releases_full_reservations ... ok
+test adaptive_gpu::tests::fixed_cluster_uniform_slots_stay_in_bounds_without_changing_arena_budget ... ok
+test adaptive_gpu::tests::front_to_back_sort_uses_conservative_depth_not_center_distance ... ok
+test adaptive_gpu::tests::frustum_culling_keeps_near_plane_intersections ... ok
+test adaptive_gpu::tests::in_place_sort_matches_control_through_ties_and_nonfinite_diagnostics ... ok
+test adaptive_gpu::tests::incremental_order_matches_fresh_sort_through_motion_turn_and_teleport ... ok
+test adaptive_gpu::tests::incremental_order_requires_exact_owner_and_residency_identity ... ok
+test adaptive_gpu::tests::indexed_proxy_alignment_reuses_prefix_and_releases_complete_reservation ... ok
+test adaptive_geometry::tests::shared_near_profiles_match_native_cache_and_preserve_proxy_geometry ... ok
+test adaptive_gpu::tests::invalid_bin_ranges_fall_back_to_the_complete_native_draw ... ok
+test adaptive_geometry::tests::native_profile_top_reuse_matches_direct_paint_bits_and_quads ... ok
+test adaptive_gpu::tests::offender_diagnostics_are_bounded_deterministic_and_prioritize_unbounded ... ok
+test adaptive_gpu::tests::only_explicit_capacity_refusals_allow_coherent_cover_fallback ... ok
+test adaptive_gpu::tests::owner_filter_before_sort_preserves_current_draw_and_occluder_order ... ok
+test adaptive_gpu::tests::packed_page_addressing_falls_back_on_misalignment_bounds_or_integer_overflow ... ok
+test adaptive_gpu::tests::packed_page_instance_addresses_match_slices_and_native_bin_ranges ... ok
+test adaptive_geometry::tests::appearance_cache_parallel_products_and_source_scopes_match_uncached ... ok
+test adaptive_gpu::tests::canonical_shader_validates ... ok
+test adaptive_gpu::tests::derived_proxy_instance_attributes_match_shader_entry ... ok
+test adaptive_gpu::tests::prepared_view_requires_identical_projection_pose_and_ownership ... ok
+test adaptive_gpu::tests::retiring_clusters_coalesces_both_neighbors_and_reuses_the_same_page ... ok
+test adaptive_gpu::tests::reusable_local_view_transform_matches_per_cluster_matrix_bits ... ok
+test adaptive_stream::tests::bounded_priority_advances_near_and_far_requested_errors_before_reserve ... ok
+test adaptive_stream::tests::cached_partition_guard_matches_original_scans_during_camera_changes ... ok
+test adaptive_stream::tests::camera_crossing_box_is_not_rejected ... ok
+test adaptive_gpu::tests::indexed_proxy_instance_attributes_match_shader_entry ... ok
+test adaptive_geometry::tests::vertex_compaction_preserves_every_triangle_attribute_and_profile ... ok
+test adaptive_gpu::tests::proxy_instance_layout_and_shader_inputs_match_exact_fields ... ok
+test adaptive_gpu::tests::packed_native_material_palette_matches_canonical_world_exactly ... ok
+test adaptive_stream::tests::coverage_uses_actual_f32_gpu_far_plane ... ok
+test adaptive_geometry::tests::packed_proxy_layout_and_ordered_primitive_bits_match_expanded_oracle ... ok
+test adaptive_stream::tests::diagnose_turn_return_stationary_tail ... ignored
+test adaptive_stream::tests::diagnostic_frustum_box_encloses_clip_interior_and_rejects_behind_heading ... ok
+test adaptive_stream::tests::direct_native_experiment_selects_only_one_nearest_requested_native_leaf ... ok
+test adaptive_stream::tests::depth_clip_far_corners_fit_root_coverage_support ... ok
+test adaptive_stream::tests::coarse_guard_contains_all_headings_and_reserve_is_separate ... ok
+test adaptive_stream::tests::accepted_cached_proxy_coarsens_native_geometry_with_hysteresis ... ok
+test adaptive_stream::tests::interval_adjacency_finds_split_coarse_edge ... ok
+test adaptive_stream::tests::actual_neighbor_edge_certificate_gates_coarsening_publication ... ok
+test adaptive_stream::tests::near_detail_delivery_revalidates_the_stricter_quality_threshold ... ok
+test adaptive_stream::tests::near_detail_distance_uses_the_nearest_global_surface_bound ... ok
+test adaptive_stream::tests::near_detail_weights_are_bounded_monotonic_and_preserve_far_quality ... ok
+test adaptive_stream::tests::direct_native_planning_keeps_old_certificate_until_native_is_built ... ok
+test adaptive_stream::tests::obsolete_priority_requires_all_parents_outside_both_views_and_current_failure ... ok
+test adaptive_stream::tests::offscreen_coarsening_has_a_bounded_transaction_budget ... ok
+test adaptive_stream::tests::protected_near_transactions_do_not_wait_on_far_refinement ... ok
+test adaptive_geometry::tests::river_spacing_debt_is_separate_from_vertical_certificates ... ok
+test adaptive_stream::tests::coarse_roots_publish_before_quality_refinement ... ok
+test adaptive_stream::tests::view_constants_match_scalar_visibility_and_error_queries ... ok
+test adaptive_stream::worker_tests::bounded_top_k_preserves_priority_order_for_small_and_large_batches ... ok
+test adaptive_stream::tests::committed_arcs_survive_cache_eviction_without_duplicate_preparation ... ok
+test adaptive_stream::worker_tests::background_pause_resume_preserves_request_epoch_and_source_reservation ... ok
+test adaptive_stream::worker_tests::debt_forecast_is_opt_in_and_reports_measured_latency_separately ... ok
+test adaptive_stream::worker_tests::cancelled_preparation_preserves_pending_canonical_keys ... ok
+test adaptive_stream::worker_tests::endpoint_prediction_skips_hidden_work_and_selects_a_newly_revealed_owner ... ok
+test adaptive_stream::worker_tests::forecast_debt_counts_chain_and_owner_backlog_with_a_fixed_work_cap ... ok
+test adaptive_stream::tests::metadata_only_cover_deficit_is_reported_without_rebuilding ... ok
+test adaptive_stream::worker_tests::forecast_occlusion_keeps_unknown_solids_and_near_plane_features_visible ... ok
+test adaptive_stream::worker_tests::measured_horizon_uses_exact_nearest_rank_percentile ... ok
+test adaptive_geometry::tests::affine_fan_certificate_encloses_exhaustive_children_without_parent_native_scan ... ok
+test adaptive_stream::tests::obsolete_oversized_transactions_replan_teleports_and_smaller_far_demand ... ok
+test adaptive_stream::tests::coherent_mesh_budget_reserves_source_cache_and_stops_thrashing ... ok
+test adaptive_stream::worker_tests::native_radius_protects_backside_and_coarsening_but_zero_preserves_baseline ... ok
+test adaptive_stream::worker_tests::prediction_gets_one_deadline_slot_while_current_backlog_keeps_three ... ok
+test adaptive_stream::worker_tests::prediction_protection_is_limited_to_the_selected_spatial_footprint ... ok
+test adaptive_stream::worker_tests::prediction_uses_measured_velocity_turn_and_latency_then_resets_on_jump ... ok
+test adaptive_stream::tests::naadf_handoff_preserves_closed_edges_and_rebuilds_only_retired_tiles ... ok
+test adaptive_stream::tests::moving_camera_reuses_native_spatial_leaf ... ok
+test adaptive_stream::worker_tests::predicted_retention_count_is_bounded_during_a_long_approach ... ok
+test adaptive_stream::worker_tests::prepared_size_updates_are_idempotent_inside_a_retained_transaction ... ok
+test adaptive_stream::worker_tests::repeated_stationary_requests_clear_velocity_without_new_camera_epochs ... ok
+test adaptive_stream::worker_tests::reconfigure_retains_committed_and_cached_identity ... ok
+test adaptive_stream::worker_tests::refinement_count_defaults_and_validation_are_independent_of_batch_size ... ok
+test adaptive_stream::worker_tests::single_job_memory_refusal_keeps_coarse_state_and_reports_limit ... ok
+test adaptive_stream::worker_tests::side_preload_tracks_recent_headings_and_releases_them_after_a_jump ... ok
+test adaptive_stream::worker_tests::transaction_publication_is_sampled_once_independent_of_quality_and_epochs ... ok
+test adaptive_stream::worker_tests::preparation_latency_survives_camera_epochs_and_is_sampled_once ... ok
+test adaptive_stream::worker_tests::worker_reconfiguration_reissues_same_pose_only_for_quality_epoch ... ok
+test adaptive_view::appearance_capacity_refusal_releases_completion_and_retries_after_resource_changes ... ok
+test adaptive_view::upload_tests::moving_epochs_finish_multi_frame_upload_before_new_detail ... ok
+test appearance_hierarchy::tests::directional_area_and_depth_bands_match_a_native_plane ... ok
+test appearance_hierarchy::tests::restriction_conserves_every_direction_and_color_on_supported_levels ... ok
+test appearance_hierarchy::tests::work_and_inputs_are_bounded ... ok
+test appearance_map::tests::anisotropic_reconstruction_is_continuous_across_shared_map_edges ... ok
+test adaptive_stream::worker_tests::latest_state_worker_rejects_superseded_publication_and_deduplicates ... ok
+test appearance_map::tests::density_configuration_is_strict_and_defaults_to_two ... ok
+test appearance_hierarchy::tests::sliding_footprint_integrates_a_step_continuously_across_zero ... ok
+test adaptive_stream::worker_tests::predicted_retention_releases_on_turn_stop_and_payload_pressure ... ok
+test appearance_map::tests::footprint_cache_keys_and_query_budget_include_actual_spacing ... ok
+test appearance_map::tests::footprint_shared_nodes_and_flat_integrals_are_stable ... ok
+test appearance_map::tests::global_tile_edges_have_identical_canonical_profiles ... ok
+test appearance_map::tests::invalid_ranges_and_source_failures_are_reported ... ok
+test appearance_map::tests::material_and_cliff_changes_are_confined_to_bounded_native_support ... ok
+test appearance_map::tests::constant_native_slope_preserves_directional_strata_integrals ... ok
+test adaptive_stream::worker_tests::moving_demand_keeps_canonical_work_and_return_cache ... ok
+test appearance_map::tests::meadow_policy_filters_full_staircase_phase_with_bounded_work_and_overrides ... ok
+test appearance_map::tests::native_side_profiles_preserve_material_strata_and_direction ... ok
+test appearance_map::tests::negative_unaligned_origins_floor_and_cover_patch ... ok
+test appearance_map::tests::prefilter_configuration_is_opt_in_and_radius_is_native_bounded ... ok
+test appearance_map::tests::narrow_canonical_material_stripe_survives_interior_map_nodes ... ok
+test appearance_map::tests::water_and_bed_runs_match_exhaustive_native_faces ... ok
+test appearance_map::tests::work_is_bounded_at_all_supported_densities_and_reuses_native_halo ... ok
+test appearance_method::tests::application_preference_preserves_explicit_method_overrides ... ok
+test appearance_map::tests::quantized_plane_phase_variation_is_reduced_without_inventing_side_direction ... ok
+test appearance_method::tests::meadow_sampling_policy_preserves_explicit_overrides_and_fixture_defaults ... ok
+test appearance_visibility::tests::diagonal_bin_interpolation_preserves_unobstructed_wall_density ... ok
+test appearance_visibility::tests::flat_negative_patch_has_identical_top_integrals_at_all_views ... ok
+test appearance_visibility::tests::grid_configuration_defaults_to_six_and_explicit_builder_is_bounded ... ok
+test appearance_visibility::tests::foreground_step_hides_distant_colored_top_and_wall ... ok
+test appearance_visibility::tests::low_grazing_bin_retains_foreground_occlusion_missing_at_fourteen_degrees ... ok
+test appearance_visibility::tests::native_wall_bands_are_not_stretched_by_macrogrid_spacing ... ok
+test appearance_visibility::tests::sample_budget_does_not_scale_with_footprint_and_tiny_patch_is_exact ... ok
+test appearance_visibility::tests::six_grid_preserves_flat_integrals_native_bands_and_work_bound ... ok
+test appearance_visibility::tests::slope_is_directional_and_grazing_view_loses_hidden_top ... ok
+test atmosphere::tests::atmosphere_debug_modes_parse_without_environment_mutation ... ok
+test atmosphere::tests::atmosphere_uniform_contract ... ok
+test brick_ray::directional::tests::adding_and_removing_on_brick_and_crop_boundaries_rebuilds_bounds ... ok
+test brick_ray::directional::tests::empty_scene_boxes_cover_each_complete_forward_octant ... ok
+test atmosphere::tests::atmosphere_shaders_validate ... ok
+test brick_ray::tests::all_backends_share_linear_rgb_lighting ... ok
+test brick_ray::tests::boundaries_negative_world_origins_axis_zero_and_corner_ties ... ok
+test brick_ray::tests::empty_distance_cubes_are_proven_empty_including_partial_bricks ... ok
+test brick_ray::directional::tests::random_occupancy_octant_boxes_are_empty_including_partial_boundaries ... ok
+test brick_ray::tests::halo_uniform_solid_never_invents_crop_caps ... ok
+test appearance_map::tests::filtered_negative_shared_nodes_match_and_source_work_stays_bounded ... ok
+test brick_ray::tests::packed_cells_exactly_preserve_material_and_halo_faces ... ok
+test appearance_map::tests::footprint_softens_quantized_relief_over_several_native_periods ... ok
+test brick_ray::tests::tied_entry_keeps_exposed_face_when_lowest_axis_face_is_hidden ... ok
+test build_memory::tests::giant_invalid_work_is_rejected_without_allocation ... ok
+test build_memory::tests::native_admission_is_bounded_and_default_budget_allows_one_full_job ... ok
+test brick_ray::tests::wgsl_parses_and_validates ... ok
+test build_memory::tests::native_edges_and_dense_proxy_work_increase_reservation ... ok
+test appearance_map::tests::surface_policy_keeps_excluded_stone_point_profiles_and_filters_grass_phase ... ok
+test cold_source_cache::tests::failed_decode_does_not_reuse_overwritten_scratch ... ok
+test column_mesh::static_water_retains_independent_bed_and_material_run_boundaries ... ok
+test adaptive_stream::worker_tests::retained_drain_skips_cover_scans_and_publishes_the_same_coherent_partition ... ok
+test column_mesh::tests::exact_sampled_cache_and_uncached_meshes_are_bitwise_identical ... ok
+test column_mesh::tests::flat_crop_has_one_top_quad_without_bottom_or_crop_caps ... ok
+test cold_source_cache::tests::exact_revisit_clear_and_pressure ... ok
+test column_mesh::tests::measure_64m_native_crop ... ignored, release 64m column extraction measurement
+test adaptive_geometry::tests::shared_parallel_builds_match_serial_and_reuse_overlapping_source ... ok
+test column_mesh::tests::sampled_extraction_keeps_validation_before_sampler_work ... ok
+test column_mesh::tests::rejects_unsupported_sources_edits_overflow_and_memory_requests ... ok
+test derived_disk_cache::tests::appearance_modes_have_distinct_cache_identities ... ok
+test derived_disk_cache::tests::alpine_spatial_headers_and_relative_references_survive_disk_restart ... ok
+test derived_disk_cache::tests::cold_warm_restart_exact_and_proxy_parity ... ok
+test derived_disk_cache::tests::bounded_disk_lru_startup_and_temp_cleanup ... ok
+test derived_disk_cache::tests::dependency_identity_covers_full_halo_material_and_all_vertical_edits ... ok
+test derived_disk_cache::tests::corruption_oversize_truncation_schema_are_misses_and_regenerate ... ok
+test build_memory::tests::proxy_payload_capacity_fits_reservation_with_native_join_edges ... ok
+test derived_disk_cache::tests::exclusive_directory_lock_released_on_drop ... ok
+test derived_disk_cache::tests::identity_covers_recipe_seed_params_topology_and_edit_content ... ok
+test derived_disk_cache::tests::invalid_floats_ranges_and_profile_addresses_fail_validation ... ok
+test derived_disk_cache::tests::detailed_map_restart_preserves_negative_alignment_relative_refs_and_filter_products ... ok
+test derived_disk_cache::tests::key_reservation_rejects_large_record_before_reading ... ok
+test derived_disk_cache::tests::keyer_names_preserve_format_and_report_index_deltas ... ok
+test derived_disk_cache::tests::malformed_lengths_and_indices_are_rejected_without_allocation_explosion ... ok
+test derived_disk_cache::tests::map_corrupt_packs_targets_and_render_entrypoints_are_rejected ... ok
+test derived_disk_cache::tests::map_halo_covers_alignment_filter_strata_neighbor_and_all_vertical_edits ... ok
+test derived_disk_cache::tests::map_identity_invalidates_every_semantic_configuration_without_environment_mutation ... ok
+test derived_disk_cache::tests::local_edit_restart_reuses_distant_tiles_and_rebinds_current_revision ... ok
+test derived_disk_cache::tests::revision_normalization_never_accepts_unsupported_edit_ownership ... ok
+test derived_disk_writeback::tests::absent_index_is_fast_and_shutdown_drains_admitted_writeback ... ok
+test derived_disk_cache::tests::packed_proxy_restart_preserves_every_instance_field_and_rejects_bad_profiles ... ok
+test derived_disk_writeback::tests::flush_releases_queued_arc_and_write_errors_do_not_poison_worker ... ok
+test derived_disk_writeback::tests::optional_oversized_write_is_skipped_without_retaining_payload ... ok
+test derived_disk_writeback::tests::restart_after_local_edit_keeps_async_index_and_rejects_obsolete_revision ... ok
+test development_resources::tests::combined_budgets_respect_headroom_even_under_pressure ... ok
+test development_resources::tests::linux_available_is_not_free_and_fallback_is_explicit ... ok
+test development_resources::tests::pacing_has_hysteresis_and_bounds ... ok
+test discrete_water_live::tests::checkpoint_restores_inventory_source_and_next_simulation_exactly ... ok
+test discrete_water_live::tests::disk_save_finishes_pending_worker_and_reload_is_identical ... ok
+test discrete_water_live::tests::quick_hold_place_and_wet_rejection_preserve_inventory_and_mass ... ok
+test discrete_water_live::tests::worker_receives_accepted_solid_edits_and_inflight_edits_do_not_mutate ... ok
+test gpu_ordered_profiles::tests::cache_reads_each_column_once_and_flat_sides_stay_zero ... ok
+test gpu_ordered_profiles::tests::cached_only_input_rejects_misses_ownership_and_bad_descriptors ... ok
+test gpu_ordered_profiles::tests::count_oracle_preserves_exact_areas_and_bounds_ordered_roundoff ... ok
+test gpu_ordered_profiles::tests::measure_gpu_ordered_profiles ... ignored, manual GPU experiment; coordinate hardware authorization
+test derived_disk_cache::tests::disk_cache_cpu_measurement ... ok
+test gpu_ordered_profiles::tests::packed_columns_roundtrip_all_accepted_heights_and_materials ... ok
+test gpu_ordered_profiles::tests::resident_source_reuse_requires_exact_snapshot_and_payload ... ok
+test gpu_ordered_profiles::tests::shader_and_draw_profile_abi_validate ... ok
+test column_mesh::tests::exact_faces_materials_and_normals_match_dense_world_queries ... ok
+test gpu_summary_probe::tests::measure_gpu_summary_batches ... ignored, manual GPU experiment; coordinate hardware authorization
+test gpu_summary_probe::tests::rejects_noncanonical_volumes_and_bounds ... ok
+test gpu_summary_probe::tests::resident_dispatch_rejects_empty_batches_and_bounds_clear_to_loaded_pages ... ok
+test gpu_summary_probe::tests::shader_validates ... ok
+test adaptive_geometry::tests::exact_volume_and_proxy_join_preserves_edited_edge_depth_and_opening ... ok
+test ground_cover::cache_parity_tests::recursive_builder_error_releases_parent_reservation ... ok
+test ground_cover::shared_cache::tests::cancellation_abandonment_and_panics_allow_retry ... ok
+test ground_cover::shared_cache::tests::directional_payload_and_evicted_waiter_values_are_accounted ... ok
+test ground_cover::shared_cache::tests::independent_keys_build_concurrently ... ok
+test ground_cover::shared_cache::tests::retained_bytes_and_inflight_metadata_are_bounded ... ok
+test build_memory::tests::native_count_bound_covers_steep_profiles_and_unaligned_blocks ... ok
+test ground_cover::tests::directional_lobes_preserve_probe_opacity_without_changing_the_fast_product ... ok
+test adaptive_stream::worker_tests::turn_route_prefetches_unseen_detail_with_current_quality_backlog ... ok
+test ground_cover::tests::native_summaries_are_finite_bounded_and_restrict_consistently ... ok
+test ground_cover::tests::source_identity_separates_seed_params_and_world_kinds ... ok
+test ground_cover::shared_cache::tests::same_key_has_one_producer_and_exact_results ... ok
+test ground_cover::tests::stratified_probes_are_bounded_nested_and_world_aligned ... ok
+test ground_cover::tests::local_edit_changes_only_dependent_cached_field_nodes ... ok
+test ground_cover::cache_parity_tests::cached_recursive_summaries_match_uncached_float_bits_with_edits ... ok
+test gpu_ordered_profiles::tests::ordered_profiles_match_direct_material_span_oracle_and_recipe_data ... ok
+test derived_disk_writeback::tests::indexed_read_preempts_write_backlog_and_inflight_write_counts_toward_limit ... ok
+test adaptive_stream::tests::retained_transactions_commit_distinct_geometry_during_continuous_demand ... ok
+test column_mesh::tests::interior_rays_match_canonical_dda_depth_normal_and_material ... ok
+test ground_cover::tests::stratified_cover_compares_population_to_dense_native_leaf_oracle ... ok
+test hybrid_gpu::tests::only_complete_latest_cover_can_replace_previous_ownership ... ok
+test hybrid_gpu::tests::steep_chunk_uploads_are_aligned_and_strictly_bounded_across_frames ... ok
+test live_water::tests::atomic_checkpoint_replays_terrain_fluid_and_dry_tombstones ... ok
+test adaptive_stream::worker_tests::independent_refinement_count_changes_closed_surface_replacement_not_builder_limit ... ok
+test live_water::tests::player_pickup_inventory_sequence_and_world_share_checkpoint_and_legacy_migrates ... ok
+test hybrid_gpu::tests::cold_warm_changed_teleport_waits_for_complete_gpu_publication ... ok
+test live_water::tests::wet_player_placement_rejects_without_mutating_inventory_terrain_or_water ... ok
+test mesh::tests::halo_does_not_cap_a_solid_crop ... ok
+test mesh::tests::holes_and_material_seams_preserve_face_coverage ... ok
+test mesh::tests::solid_block_has_six_greedy_quads_and_exact_native_area ... ok
+test moving_water_live::tests::generated_moving_window_uses_native_terrain_and_reuses_identical_publication ... ok
+test live_water::tests::demo_dam_opens_and_real_conserved_mass_crosses_into_empty_chamber ... ok
+test live_water::tests::smaller_restart_window_preserves_dormant_mass_and_dry_tombstones ... ok
+test naadf::column_cache::distant_edit_preserves_unedited_cache_identity_and_payload ... ok
+test naadf::column_cache::tests::keys_include_every_source_parameter_and_negative_coordinates ... ok
+test brick_ray::tests::fixture_cave_bridge_edits_match_canonical_rays ... ok
+test naadf::data::column_extrema_rejection_matches_full_height_and_band_scans ... ok
+test hybrid_gpu::tests::nearby_motion_finishes_accepted_target_and_far_turn_supersedes_it ... ok
+test naadf::data::cpu_tests::coordinate_spans_match_original_jacobi_for_rectangular_layouts ... ok
+test naadf::data::cpu_tests::dirty_root_proof_5bit_cuboids_match_naive_point_intersection ... ok
+test naadf::data::cpu_tests::edits_at_different_heights_keep_unaffected_chunks_in_the_same_column_fast ... ok
+test naadf::data::cpu_tests::compact_overlay_preserves_exact_snapshots_with_plants_negative_edges_and_edits ... ok
+test naadf::data::cpu_tests::nonaligned_topology_columns_match_canonical_at_ownership_and_feature_boundaries ... ok
+test naadf::data::cpu_tests::profile_root_coordinate_spans ... ignored, CPU-only reversed-order bounds microbenchmark
+test naadf::data::cpu_tests::source_column_cache_reuses_distant_edits_and_bypasses_only_affected_tile ... ignored, run separately with FRONTIER_NAADF_COLUMN_CACHE=0 and =1; verifies local edit cache gates
+test naadf::data::cpu_tests::nonaligned_negative_column_edits_cannot_take_air_or_solid_summary_shortcuts ... ok
+test naadf::data::deep_ocean_uniform_chunks_preserve_bed_air_and_edits ... ok
+test naadf::data::overlay::tests::benchmark_chunk_local_sort ... ignored, explicit synthetic overlay sorting timing; not a moving-window benchmark
+test adaptive_stream::worker_tests::continuous_sixty_hz_motion_publishes_current_geometry ... ok
+test naadf::data::overlay::tests::chunk_local_sort_cancels_before_and_during_partition ... ok
+test naadf::data::overlay::tests::narrow_payload_halves_staging_and_cancellation_and_error_propagate ... ok
+test naadf::data::overlay::tests::narrow_and_promoted_layouts_match_frozen_wide_order_and_overlaps ... ok
+test naadf::data::profile_region_preparation_stages ... ignored, bounded CPU preparation fixture; run only with GPU timings idle
+test naadf::data::seeded_static_water_snapshot_matches_canonical_bed_water_and_air ... ok
+test naadf::data::stack_block_proofs_match_heap_jacobi_words_exactly ... ok
+test naadf::data::tests::compact_leaf_index_resolves_collisions_exactly ... ok
+test naadf::data::tests::empty_cuboids_never_cross_occupied_cells ... ok
+test naadf::data::preparation_profiling_and_stack_scratch_preserve_exact_snapshot ... ok
+test naadf::data::tests::oversized_request_is_rejected_before_allocation ... ok
+test naadf::data::tests::rgb10_pigments_and_leaf_words_survive_more_than_32767_colors ... ok
+test naadf::data::tests::snapshot_matches_canonical_fixture_with_edit ... ok
+test naadf::data::tests::y_fast_top_bounds_are_sound ... ok
+test naadf::dynamic_water::tests::retained_snapshot_origin_rebases_without_changing_global_cells ... ok
+test naadf::dynamic_water_test::dynamic_water_primary_and_shadow_gpu_parity ... ignored, explicit GPU parity: native water additions, coarse source-water tombstones, shadows and negative origins
+test naadf::dynamic_water_test::dynamic_water_shader_validates ... ok
+test naadf::gpu_stages::gpu_stage_timestamps_use_base_feature_without_repeating_work ... ignored, explicit GPU timestamps: TIMESTAMP_QUERY only, async stage pool, original dispatch count
+test naadf::gpu_stages::tests::pool_is_bounded_and_deferred_encoders_are_not_mapped_by_other_submissions ... ok
+test naadf::gpu_stages::tests::schema_stage_names_are_unique_and_scopes_exclude_uploads ... ok
+test naadf::leaf::tests::compact_leaves_preserve_all_faces_and_15_bit_pigments ... ok
+test naadf::local_exit_test::local_exit_fixture_shader_validates ... ok
+test naadf::local_exit_test::local_exit_matches_native_events_and_hit_material_shadow ... ignored, explicit GPU parity: locally repaired coarse exits match independent native-plane events and guarded native fallback
+test naadf::ownership::tests::delegated_terrain_builds_no_mesh_and_can_restore_the_normal_cache ... ok
+test naadf::ownership::tests::retirement_only_blocks_objects_touching_outgoing_voxels ... ok
+test naadf::ownership::tests::unsafe_columns_apron_and_negative_world_coordinates_are_conservative ... ok
+test naadf::prepare_profile::tests::disabled_profile_does_not_start_clocks_or_materialize_metrics ... ok
+test naadf::prepare_profile::tests::merged_profiles_keep_parallel_wall_distinct_from_worker_totals ... ok
+test naadf::data::tests::fbm_and_seeded_plants_match_canonical_materials ... ok
+test naadf::root_distance::direct_tests::direct_corner_shader_validates ... ok
+test naadf::root_distance::direct_tests::directly_published_roots_match_native_corner_primary_and_shadow ... ignored, explicit GPU parity: directly published proofs preserve native corner and near-corner primary/shadow hits
+test naadf::data::cpu_tests::sparse_edits_preserve_canonical_cells_and_untouched_column_pigments ... ok
+test naadf::root_distance::occupancy::benchmarks::frozen_shell_refresh_microbenchmark ... ignored, synthetic bounded CPU benchmark; run optimized with --ignored --nocapture
+test naadf::root_distance::direct_tests::seeded_local_repair_grows_strip_proofs_without_changing_geometry ... ok
+test naadf::root_distance::occupancy::tests::cross_shell_proofs_are_monotone_and_never_cover_an_occupied_root ... ok
+test naadf::root_distance::occupancy::tests::cube_selection_crosses_shells_clips_domain_and_preserves_solids ... ok
+test naadf::root_distance::occupancy::tests::occupancy_memory_is_small_relative_to_root_words ... ok
+test naadf::root_distance::tests::centered_rank_matches_traversal_shader_inverse ... ok
+test naadf::root_distance::tests::compute_shader_validates ... ok
+test naadf::root_distance::tests::direct_gpu_root_proofs_survive_wrap_and_pending_shift_publication ... ignored, explicit hardware GPU oracle: direct root proofs, occupied pointers, movement and queued shift races
+test naadf::root_distance::occupancy::tests::hierarchy_queries_match_dense_after_wrap_updates ... ok
+test naadf::root_distance::tests::measured_demand_can_change_rank_and_never_requeues_ready_tiles ... ok
+test naadf::root_distance::tests::retained_gpu_tiles_remain_conservative_across_wraps ... ignored, explicit hardware GPU oracle: retained root proofs across physical tile and root ring wrap
+test naadf::root_distance::tests::retarget_keeps_only_identical_support_and_rejects_reused_slots ... ok
+test naadf::scatter::scatter_gpu_preserves_holes_and_reuses_staging_in_queue_order ... ignored, explicit GPU parity: exact scatter holes, all arenas, partial ranges, and staging reuse
+test naadf::root_distance::tests::shader_uniform_mapping_selects_correct_world_tile_and_texel ... ok
+test naadf::scatter::tests::scatter_packet_counts_descriptor_bytes_and_preserves_all_arena_holes ... ok
+test naadf::scatter::tests::scatter_shader_validates ... ok
+test naadf::scheduler::tests::content_priority_preserves_growth_and_publication_gates ... ok
+test naadf::scheduler::tests::endless_source_changes_and_movement_share_idle_turns ... ok
+test naadf::scissor_covers_visible_box_and_uses_full_view_when_inside ... ok
+test naadf::sparse_roots::alpine_sparse_root_corpus ... ignored, explicit CPU corpus: measures two-level sparse root storage for matched Alpine data
+test naadf::sparse_roots::atlas_offsets_decode_original_chunks_and_fall_back_if_not_smaller ... ok
+test naadf::sparse_roots::page_skips_cross_empty_pages_but_never_enter_a_mixed_page ... ok
+test naadf::sparse_roots::sparse_root_pages_preserve_occupancy_pigment_child_and_partial_edges ... ok
+test naadf::startup::reservation_tests::density_reservation_is_bounded_and_leaves_palette_unscaled ... ok
+test naadf::startup::tests::growth_is_bounded_and_preserves_stationary_interior ... ok
+test naadf::startup::tests::moving_growth_uses_integer_world_bounds_and_never_exceeds_target ... ok
+test naadf::scheduler::tests::consecutive_follow_shifts_give_pending_edit_the_next_idle_turn ... ok
+test naadf::stream::leading_window_starts_earlier_only_in_the_direction_of_motion ... ok
+test naadf::stream::profile_stream_preparation_stages ... ignored, bounded CPU strip preparation fixture; run with FRONTIER_NAADF_CPU_PROFILE=1
+test naadf::root_distance::direct_tests::canonical_root_formats_reserve_both_flags_for_direct_provenance ... ok
+test naadf::stream::tests::arena_reclaims_and_coalesces ... ok
+test naadf::stream::tests::content_refresh_replaces_roots_and_abort_preserves_old_allocations ... ok
+test naadf::stream::tests::difference_is_disjoint_and_toroidal_window_follows_negative_coordinates ... ok
+test naadf::stream::tests::out_of_height_edits_refresh_column_ownership_before_advancing_source ... ok
+test naadf::data::column_extrema_preserves_snapshot_words_and_canonical_materials_across_sources ... ok
+test moving_water_live::tests::reload_restores_dry_dormant_history_outside_current_dynamic_bounds ... ok
+test naadf::tests::camera_basis_matches_raster_projection_without_world_origin_cancellation ... ok
+test naadf::tests::manual_estimate_ceiling_respects_available_ram ... ok
+test naadf::tests::naadf_exact_fastpaths_match_canonical_rays ... ignored, explicit GPU parity: exact integer decode, mixed-root cache and combined variants
+test naadf::tests::naadf_gpu_distance_matches_canonical_rays ... ignored, explicit hardware GPU parity: cold and warm GPU root cache, before and after ring shift
+test naadf::tests::naadf_gpu_matches_canonical_rays ... ignored, explicit hardware GPU parity: NAADF first-hit cells versus independent canonical DDA
+test naadf::tests::naadf_gpu_stage_timing_hooks_match_canonical_rays ... ignored, explicit stage timestamp hooks with FRONTIER_NAADF_GPU_STAGES=1; optionally SCATTER_UPLOAD=1 and feedback schedule
+test naadf::tests::naadf_reserved_growth_gpu_matches_canonical_rays ... ignored, explicit GPU parity: partial residency, shell growth, arena copies, and wrapped following
+test naadf::tests::naadf_seeded_world_water_bed_air_matches_canonical_rays ... ignored, explicit hardware GPU parity: SeededWorld opaque water, untouched bed, air and material IDs, compact and wide leaves
+test naadf::tests::naadf_sparse_roots_match_canonical_rays ... ignored, explicit hardware GPU parity: sparse roots and whole uniform pages
+test naadf::tests::naadf_traversal_variants_match_canonical_rays ... ignored, explicit hardware GPU parity: node cache, max height bounds, and beam with mixed roots
+test naadf::tests::naadf_wide_gpu_matches_canonical_rays ... ignored, explicit hardware GPU parity: NAADF 32-bit leaf fallback
+test naadf::tests::shader_is_valid ... ok
+test naadf::traversal::shader_variants_validate ... ok
+test naadf::traversal_boundary_test::accelerated_primary_replays_ambiguous_corner_face ... ignored, explicit GPU parity: height and prefix shortcuts preserve exact corner faces
+test naadf::upload::schedule_tests::batching_and_baseline_transfer_identical_words_under_the_same_limits ... ok
+test naadf::upload::schedule_tests::legacy_root_phase_and_cap_deferrals_are_distinguished ... ok
+test naadf::upload::schedule_tests::scatter_scheduler_counts_queue_calls_instead_of_disjoint_ranges ... ok
+test naadf::upload::schedule_tests::scatter_scheduler_obeys_total_transfer_and_descriptor_caps_across_frames ... ok
+test naadf::upload::wrapped_texture_copy_covers_each_slot_once ... ok
+test native_fbm::tests::comparator_rejects_wrong_source_and_excessive_relief ... ok
+test naadf::stream::tests::shifted_wide_window_matches_fresh_voxels_and_pigments_across_wraps ... ok
+test native_fbm::tests::flat_native_crop_has_only_canonical_top_no_boundary_caps ... ok
+test gpu_summary_probe::tests::canonical_pages_match_independent_faces ... ok
+test native_stream::tests::byte_budget_rejects_oversize_and_preserves_protected_content ... ok
+test naadf::stream::tests::shifted_window_matches_fresh_voxels_and_pigments_across_wraps ... ok
+test native_stream::tests::resident_bytes_report_actual_compacted_mesh_capacity ... ok
+test moving_water_live::tests::moving_job_clean_save_restores_exact_state_inventory_actual_pose_and_rate ... ok
+test options::tests::adaptive_defaults_to_hybrid_with_explicit_overrides ... ok
+test options::tests::alpine_preset_and_visual_overrides_are_reproducible ... ok
+test options::tests::finite_locked_benchmarks_accept_the_reference_pose_and_far ... ok
+test options::tests::live_water_requires_supported_native_publication_and_is_opt_in ... ok
+test options::tests::ordinary_terrain_launches_keep_camera_guards_and_linear_requires_float_target ... ok
+test options::tests::resource_profiles_preserve_finite_comparisons_and_manual_overrides ... ok
+test hybrid::tests::proxy_outer_edges_share_exact_parent_anchor_heights ... ok
+test hybrid::tests::native_interior_depth_matches_canonical_dda_at_negative_and_positive_edges ... ok
+test page_terrain::tests::canonical_negative_columns_and_filter_parity ... ok
+test options::tests::seeded_preset_uses_dry_ground_and_respects_later_overrides ... ok
+test page_terrain::tests::cancellation_cannot_publish_partial_cover_and_cache_has_hard_page_limit ... ok
+test page_terrain::tests::page_shader_validates ... ok
+test page_terrain::tests::native_camera_epochs_reuse_cpu_pages_and_gpu_slots_but_source_revisions_invalidate ... ok
+test page_terrain::tests::moving_and_returned_pages_reuse_content_but_revisions_and_sources_invalidate ... ok
+test physical_pressure_gpu::tests::gpu_manufactured_pressure_matches_dense_f64_oracle ... ignored, explicit actual-GPU manufactured pressure parity; no physical-fluid promotion or performance claim
+test physical_pressure_gpu::tests::gpu_pressure_128k_component_microbenchmark ... ignored, optional quiet-machine128K pressure microbenchmark; not physical-fluid or game performance
+test physical_pressure_gpu::tests::manufactured_matrices_have_known_solutions_and_explicit_gauges ... ok
+test physical_pressure_gpu::tests::rejects_singular_asymmetric_nonfinite_and_over_budget_inputs ... ok
+test page_terrain::tests::source_refresh_publishes_with_current_native_owner_without_a_new_camera_epoch ... ok
+test physical_pressure_gpu::tests::shader_and_host_layouts_validate ... ok
+test playability::shadow_trace_tests::event_ring_is_bounded ... ok
+test native_stream::tests::neighboring_chunk_halos_have_exact_single_face_ownership ... ok
+test playability::shadow_trace_tests::records_changes_and_actual_admission_without_per_frame_duplicates ... ok
+test player_edit::tests::placement_rejects_player_body_and_reach_uses_native_negative_coordinates ... ok
+test procedural_water_live::tests::failed_worker_transaction_retains_exact_owned_state_and_saveability ... ok
+test source_cache_probe::tests::codec_probe ... ignored, manual codec latency probe; serialize with other timing runs
+test source_page_cache::tests::cold_tier_preserves_evicted_values_and_revision_clear ... ok
+test source_page_cache::tests::dense_promotion_keeps_missing_cells_invalid ... ok
+test procedural_water_live::tests::generated_patch_has_no_fixture_or_implicit_sources_and_restart_is_exact ... ok
+test source_page_cache::tests::exact_values_and_negative_page_boundaries ... ok
+test procedural_water_live::tests::clean_save_waits_for_worker_and_restores_inventory_without_water_regeneration ... ok
+test source_page_cache::tests::lru_is_touched_once_per_job_and_clear_invalidates_source_revision ... ok
+test source_page_cache::tests::promotion_reserves_old_and_new_storage_before_allocating ... ok
+test source_page_cache::tests::same_budget_unique_source_history_capacity ... ok
+test source_page_cache::tests::sparse_coarse_queries_and_halos_never_allocate_dense_pages ... ok
+test source_page_cache::tests::tombstones_do_not_reduce_the_allocation_ledger ... ok
+test source_page_cache::tests::zero_and_tiny_budgets_reject_cache_admission_without_fabricating_data ... ok
+test spatial_appearance::tests::forward_references_and_zero_weight_nodes_are_valid ... ok
+test spatial_appearance::tests::ground_cover_map_pair_references_and_wrappers_are_validated ... ok
+test spatial_appearance::tests::invalid_edges_nonfinite_values_and_negative_raw_values_are_rejected ... ok
+test spatial_appearance::tests::invalid_references_and_nested_headers_are_rejected ... ok
+test spatial_appearance::tests::malformed_packs_nested_targets_and_visibility_ranges_are_rejected ... ok
+test spatial_appearance::tests::map_packs_and_visibility_survive_relocation ... ok
+test spatial_appearance::tests::negative_positions_and_backward_offsets_are_valid ... ok
+test spatial_appearance::tests::spatial_visibility_headers_preserve_relative_references_when_rebased ... ok
+test spatial_appearance::tests::spatial_visibility_requires_exactly_one_conditional_descriptor_level ... ok
+test streaming_haze::tests::only_published_errors_fade_in_and_clear_with_refinement ... ok
+test native_fbm::tests::native_surface_faces_match_independent_column_difference_oracle ... ok
+test surface_compare::tests::shader_validates ... ok
+test source_page_cache::tests::mixed_pressure_keeps_values_lru_and_allocation_accounting_consistent ... ok
+test hybrid::tests::moving_collar_uses_actual_filtered_gpu_endpoints_and_cached_columns ... ok
+test terrain::moving_tests::hybrid_appearance_shader_validates_with_derivative_footprints ... ok
+test naadf::stream::streamed_and_fresh_root_skip_diagnostic ... ok
+test terrain::streaming::tests::cancellation_interrupts_generation_at_row_boundaries ... ok
+test source_page_cache::tests::deterministic_primary_like_trace_reuses_dense_native_columns ... ok
+test native_stream::tests::coalesces_obsolete_demand_without_publishing_it ... ok
+test terrain::streaming::tests::nearby_motion_keeps_accepted_epoch_until_ready_but_jump_supersedes ... ok
+test hybrid::tests::collar_and_proxy_cutout_have_one_top_owner_including_grid_breaks_and_corners ... ok
+test native_stream::tests::stop_wait_resume_edges_and_turn_away_return_reuse_content ... ok
+test page_terrain::tests::shared_page_edges_and_existing_collar_anchors_are_identical ... ok
+test terrain::tests::native_and_proxy_share_one_projected_face_transfer ... ok
+test terrain::moving_tests::view_distance_is_bounded_and_only_adds_coarser_levels ... ok
+test terrain::tests::shader_valid ... ok
+test terrain::tests::temporal_morph_retains_publication_anchor_and_preserves_all_joins ... ok
+test tests::asynchronous_edit_snapshot_preserves_revision_and_changes_geometry ... ok
+test tests::directional_edit_worker_rebuilds_cache_for_immutable_added_and_removed_revisions ... ok
+test tests::edit_bounds_are_half_open_and_do_not_place_outside_mesh ... ok
+test tests::edits_pick_native_cell_and_adjacent_air_and_reject_pending ... ok
+test tests::live_edit_picks_negative_nonorigin_terrain_only_with_native_residency ... ok
+test tests::local_camera_is_stable_at_large_origins ... ok
+test tests::measured_encode_excludes_warmup_missing_draws_and_reset_history ... ok
+test tests::measured_encode_invalid_intervals_do_not_desynchronize_paired_samples ... ok
+test tests::measured_encode_keeps_presented_value_when_capture_overwrites_gpu_timer ... ok
+test tests::renderer_appearance_metadata_reports_resolved_world_modes ... ok
+test surface_compare::tests::shared_joins_match_positions_and_parent_heights_from_same_pages ... ok
+test tests::wgsl_is_valid ... ok
+test surface_compare::tests::selection_covers_same_square_without_overlaps_and_balances ... ok
+test tests::scripted_cube_snapshot_restores_original_materials_including_existing_edits ... ok
+test vegetation::distant_vegetation::tests::projected_contour_policy_inserts_intermediate_lod_and_scales_with_resolution ... ok
+test vegetation::edit_tests::aba_edit_undo_redo_reuses_matching_content_and_rejects_obsolete_completion ... ok
+test vegetation::edit_tests::aba_old_worker_guard_cannot_remove_replacement_cancellation_token ... ok
+test vegetation::edit_tests::cancellation_tokens_are_released_on_every_worker_exit ... ok
+test vegetation::edit_tests::indexed_edit_ids_match_flat_sets_at_negative_boundaries ... ok
+test vegetation::edit_tests::local_edit_id_ignores_distant_edits_revision_and_tracks_negative_tile_edges ... ok
+test vegetation::edit_tests::local_edit_snapshot_retains_placement_templates_jobs_and_hysteresis ... ok
+test vegetation::edit_tests::queued_local_edit_results_reject_changed_keys_and_reuse_unaffected_content ... ok
+test vegetation::flower_turn_tests::configured_near_tree_color_residency_survives_a_full_turn ... ok
+test vegetation::flower_turn_tests::cpu_cache_admission_settles_without_selected_flower_eviction_or_regeneration ... ok
+test vegetation::flower_turn_tests::exact_flowers_keep_native_residency_through_full_in_place_rotation ... ok
+test vegetation::flower_turn_tests::flower_capacity_keeps_cheap_coverage_before_native_refinement ... ok
+test vegetation::flower_turn_tests::high_altitude_camera_does_not_request_native_ground_below_its_xz_position ... ok
+test vegetation::flower_turn_tests::turning_toward_cached_tree_cannot_spend_retained_native_flower_reservations ... ok
+test vegetation::flower_turn_tests::unaffordable_missing_far_baseline_does_not_freeze_near_refinement ... ok
+test vegetation::ground_assembly_cache_tests::cached_native_assembly_equals_source_and_applies_edits ... ok
+test vegetation::ground_assembly_cache_tests::native_assembly_reuse_has_exact_identity_and_a_hard_cache_budget ... ok
+test vegetation::shadow_lifecycle::tests::entry_exit_and_reversal_preserve_continuous_bounded_coverage ... ok
+test vegetation::shadow_lifecycle::tests::exiting_owners_reserve_budget_before_new_entries_and_edits_clear_every_owner ... ok
+test vegetation::shadow_lifecycle::tests::local_edit_during_shadow_transition_drops_both_stale_sides_without_resetting_far_progress ... ok
+test vegetation::shadow_lifecycle::tests::local_edit_invalidates_only_overlapping_shadow_residents ... ok
+test vegetation::shadow_lifecycle::tests::overlap_cannot_exceed_budget_and_revision_reset_releases_geometry ... ok
+test vegetation::shadow_lifecycle::tests::replacement_keeps_both_then_converges_and_releases_old ... ok
+test vegetation::streaming_stability_tests::budget_boundary_has_separate_refine_and_retain_thresholds ... ok
+test vegetation::streaming_stability_tests::coarsening_waits_for_replacement_without_a_baseline_flash ... ok
+test vegetation::streaming_stability_tests::heading_preserves_more_than_eight_forty_meter_casters ... ok
+test vegetation::streaming_stability_tests::heading_transfer_keeps_tree_mesh_and_shadow_identity ... ok
+test vegetation::distant_vegetation::tests::distant_recipes_are_bounded_repeatable_and_keep_rooted_wood ... ok
+test vegetation::streaming_stability_tests::newly_visible_far_detail_cannot_reserve_away_the_nearest_color_tree ... ok
+test vegetation::streaming_stability_tests::nearby_refinement_preserves_another_resident_tree_across_reorders ... ok
+test vegetation::streaming_stability_tests::prediction_tracks_measured_latency_velocity_turns_and_stops ... ok
+test vegetation::streaming_stability_tests::pool_completes_each_bounded_job_once_and_discards_obsolete_generation ... ok
+test vegetation::streaming_stability_tests::shadow_baselines_keep_nearest_coverage_without_a_fixed_overlap_reservation ... ok
+test vegetation::streaming_stability_tests::source_change_rejects_old_content_but_camera_result_preserves_new_pending ... ok
+test vegetation::tests::cancellation_emits_no_partial_mesh ... ok
+test vegetation::tests::coarse_ground_keeps_low_native_carpet_height ... ok
+test vegetation::tests::coarse_negative_grid_and_thin_coverage ... ok
+test vegetation::tests::coarse_palette_keeps_mean_coverage ... ok
+test vegetation::tests::coarse_tree_keeps_separate_wood_and_native_crown_floor ... ok
+test vegetation::tests::cuboid_merges_to_six_exposed_quads ... ok
+test vegetation::tests::delegated_instance_cannot_evict_a_shared_outside_tree_template ... ok
+test vegetation::streaming_stability_tests::static_cache_pressure_keeps_current_coverage_without_regeneration ... ok
+test vegetation::tests::distance_hysteresis_preserves_detail_until_outside_exit_band ... ok
+test vegetation::tests::deterministic_eviction_is_bounded ... ok
+test vegetation::tests::face_winding_is_outward ... ok
+test vegetation::tests::frustum_conservatively_retains_bounds_crossing_planes ... ok
+test vegetation::tests::frustum_rejects_behind_and_side_spheres_but_keeps_front ... ok
+test vegetation::tests::ground_tiles_preserve_seeded_rotated_native_cells_and_edits ... ok
+test vegetation::tests::distant_tree_uses_cached_proxy_beyond_old_horizon_and_invalidates_for_edits ... ok
+test vegetation::tests::missing_neighbor_coverage_does_not_demote_resident_ground_detail ... ok
+test vegetation::tests::offline_reference_is_opt_in_native_budget_without_species_caps ... ok
+test vegetation::tests::owner_change_cancels_placement_and_mesh_demand_but_keeps_source_records ... ok
+test vegetation::tests::palette_boundaries_do_not_merge ... ok
+test vegetation::tests::rowans_reserve_ground_budget_and_ground_borrows_unused_tree_budget ... ok
+test vegetation::tests::matched_tree_transition_retains_current_until_intermediate_is_resident ... ok
+test vegetation::tests::static_frame_key_uses_exact_pose_projection_and_config_bits ... ok
+test vegetation::tests::static_visibility_shades_crevices_without_changing_pigment ... ok
+test vegetation::tests::stream_settles_with_bounded_tiles_and_rejects_stale_revision ... ok
+test vegetation::distant_vegetation::tests::intermediate_recipe_is_repeatable_rooted_and_bounded_without_native_leaves ... ok
+test vegetation::tests::tree_reservation_keeps_far_coverage_while_refining_near_trees ... ok
+test vegetation::tests::settled_static_frames_reuse_mesh_arcs_and_invalidate_on_inputs ... ok
+test vegetation_generation_lab::tests::bounded_recipe_shader_validates ... ok
+test vegetation_gpu::arena::tests::aligned_reservations_and_coalesced_reuse ... ok
+test vegetation_gpu::parity::frozen_native_gpu_parity ... ignored, requires an explicitly selected hardware GPU; renders a frozen native plant frame
+test vegetation_gpu::tests::active_shadow_exit_retains_radius_and_does_not_change_color_fade ... ok
+test vegetation_gpu::tests::caster_admission_hysteresis_survives_lod_membership_and_near_ties ... ok
+test vegetation_gpu::tests::color_and_shadow_share_identical_native_decoder ... ok
+test vegetation_gpu::tests::cull_bounds_enclose_rotated_native_corners_and_rebased_roots ... ok
+test vegetation_gpu::tests::cull_shader_and_indirect_storage_layout_validate ... ok
+test vegetation_gpu::tests::explicit_shadow_lod_wins_without_drawing_duplicate_canonical_roots ... ok
+test vegetation_gpu::tests::extreme_integer_root_subtraction_does_not_overflow ... ok
+test vegetation_gpu::tests::ground_shadow_reserve_is_local_and_cannot_starve_trees ... ok
+test vegetation_gpu::tests::ground_shadow_support_keeps_intersecting_tiles_and_flags_only_ground ... ok
+test vegetation_gpu::tests::indexed_quad_stream_addresses_all_faces_without_crossing_material_records ... ok
+test vegetation_gpu::tests::instance_upload_cache_tracks_rebase_fade_rotation_membership_and_count ... ok
+test vegetation_gpu::tests::integer_roots_rebase_before_float_conversion ... ok
+test vegetation_gpu::tests::lifecycle_gpu_selection_obeys_cpu_ownership_on_steep_terrain ... ok
+test vegetation_gpu::tests::offscreen_tree_casts_without_color_membership_and_shares_budget ... ok
+test vegetation_gpu::tests::packed_quad_preserves_every_face_corner_and_float_material ... ok
+test vegetation_gpu::tests::packed_quad_rejects_non_native_nonrectangular_or_varying_material_meshes ... ok
+test vegetation_gpu::tests::shadow_budget_prioritizes_nearest_tree_across_templates ... ok
+test vegetation_gpu::tests::shadow_transition_admits_complete_pair_and_packs_complementary_roles ... ok
+test vegetation_gpu::tests::turning_changes_color_membership_without_changing_caster_identity ... ok
+test vegetation_gpu::tests::vegetation_material_vertex_layout_matches_shader ... ok
+test vegetation_gpu::tests::vegetation_shader_validates ... ok
+test vegetation_lab::tests::native_lab_gpu_parity ... ignored, requires explicitly selected hardware GPU; executes finite warmed raster/ray lab
+test vegetation_lab::tests::parity_excludes_only_measured_native_edges ... ok
+test vegetation_gpu::flower_bounds_tests::actual_rotated_flower_voxels_never_false_cull_during_full_turn ... ok
+test vegetation_lab::tests::shader_valid ... ok
+test vegetation_mesher::tests::cancellation_discards_partial_work_at_each_phase ... ok
+test vegetation_lab::tests::ranked_bricks_preserve_every_native_color_and_empty_address ... ok
+test vegetation_mesher::tests::sparse_negative_coordinates_palettes_duplicates_and_holes_match ... ok
+test vegetation_mesher::tests::vegetation_meshing_microbenchmark ... ignored, CPU-only release microbenchmark; run with --release --ignored --nocapture
+test terrain::streaming::tests::translated_negative_centers_reuse_canonical_cache_and_join ... ok
+test vegetation_mesher::tests::generated_species_match_reference_exactly ... ok
+test walking::tests::gravity_lands_and_jump_requires_release ... ok
+test walking::tests::leaves_and_flowers_do_not_block_the_body ... ok
+test walking::tests::presentation_easing_is_bounded_and_does_not_delay_falls_or_teleports ... ok
+test walking::tests::resting_frame_samples_support_only_and_reuses_substep_queries ... ok
+test walking::tests::eased_camera_uses_exact_physical_path_and_resets_on_external_motion ... ok
+test walking::tests::thin_wood_wall_stops_sprint_and_slides ... ok
+test walking::tests::upward_sweep_blocks_low_ceiling_and_negative_wall ... ok
+test walking::tests::three_cell_step_climbs_but_four_cell_step_blocks ... ok
+test vegetation::tests::structural_tree_template_costs_remain_bounded ... ok
+test terrain::streaming::tests::coalesced_teleport_demand_only_delivers_destination_coverage ... ok
+test terrain::tests::nested_boundaries_are_identical_and_triangles_cover_without_reversal ... ok
+test terrain::tests::historical_direct_clamp_publication_diagnostic_and_temporal_regression ... ok
+test terrain::tests::continuous_camera_morph_preserves_joins_and_collar_during_grid_snaps ... ok
+test hybrid::tests::native_collar_and_proxy_edges_close_at_actual_triangle_breaks ... ok
+test terrain::streaming::tests::incremental_samples_equal_cold_generation_across_collapsed_edges ... ok
+test naadf::stream::growth_tests::expanding_reserved_window_keeps_voxels_and_then_follows_player ... ok
+test terrain::moving_tests::all_four_offset_parities_have_complete_manifold_and_identical_seams ... ok
+test volume::tests::cave_bridge_edits_and_moving_rays_match_canonical_exact_mesh ... ok
+
+test result: ok. 565 passed; 0 failed; 39 ignored; 0 measured; 0 filtered out; finished in 5.90s
+
+     Running unittests src/lib.rs (/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/deps/frontier_runtime-ada1ffbd3a10e1b6)
+
+running 35 tests
+test benchmark::tests::invalid_optional_float_is_serialized_as_null ... ok
+test benchmark::tests::json_escapes_text_and_emits_unavailable_measurements_as_null ... ok
+test occlusion::tests::camera_inside_near_clipping_and_tangent_cases_stay_visible ... ok
+test occlusion::tests::bounded_retention_invalid_inputs_and_solid_front_surface_are_not_culled ... ok
+test occlusion::tests::camera_motion_and_turn_recompute_visibility_without_hidden_history ... ok
+test occlusion::tests::camera_relative_large_world_and_rotated_near_plane_are_conservative ... ok
+test occlusion::tests::one_box_shadows_entire_candidate_verified_by_dense_independent_oracle ... ok
+test occlusion::tests::visible_sliver_and_mixed_box_corner_coverage_never_reject ... ok
+test representation::tests::f32_vertical_bound_rejects_bad_or_overflowing_transforms ... ok
+test representation::tests::perspective_bound_contains_displaced_points ... ok
+test occlusion::tests::equal_priority_retention_is_independent_of_insertion_order ... ok
+test representation::tests::unknown_topology_and_near_crossing_never_certify_proxy ... ok
+test representation::tests::vertical_certificate_projects_tightly_and_handles_pitch ... ok
+test representation::tests::resolution_fov_distance_drive_decision ... ok
+test routes::tests::stop_resume_has_stationary_interval_and_resumes_continuously ... ok
+test representation::tests::visible_vertical_bound_ignores_only_provably_offscreen_near_floor ... ok
+test representation::tests::f32_vertical_bound_covers_actual_shader_rounding_and_reconstruction ... ok
+test routes::tests::circuit_keeps_moving_and_closes_without_accumulating_drift ... ok
+test routes::tests::times_and_speeds_are_clamped_and_outputs_stay_finite ... ok
+test representation::tests::visible_vertical_bound_fails_closed_on_invalid_inputs ... ok
+test representation::tests::visible_vertical_bound_retains_counterpart_only_silhouettes ... ok
+test routes::tests::turn_return_goes_out_turns_and_returns ... ok
+test tests::cache_rejects_oversized_and_handles_usize_limits ... ok
+test tests::cache_reuses_content_across_view_epochs_and_evicts_lru ... ok
+test tests::revisions_invalidate_content_and_stale_epochs_cannot_publish ... ok
+test tests::edit_invalidation_blocks_old_revision_completion_without_view_change ... ok
+test tests::scheduler_caps_queue_and_running_jobs ... ok
+test routes::tests::routes_are_deterministic_and_frame_step_independent ... ok
+test tests::frame_stats_are_bounded_and_ignore_non_finite_values ... ok
+test tests::scheduler_deduplicates_and_prioritizes_priority_then_deadline ... ok
+test travel::tests::changed_destination_and_cold_cpu_ready_cannot_release_camera ... ok
+test travel::tests::lead_tracks_latency_speed_stops_and_turns_without_distance_cap ... ok
+test representation::tests::visible_vertical_bound_contains_adversarial_directed_segments ... ok
+test tests::stop_resume_and_turn_away_keep_cached_content_and_cancel_old_queue ... ok
+test occlusion::tests::angular_broad_phase_matches_original_convex_box_proof ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/deps/frontier_world-75757442c95887da)
+
+running 200 tests
+test affine_bounds::tests::profile_streamed_noise_bounds ... ignored, bounded same-binary CPU allocation A/B; no timing threshold
+test affine_bounds::tests::bounded_work_and_numeric_domain_are_explicit ... ok
+test affine_bounds::tests::positive_weighted_mean_extrema_enclose_all_adversarial_corners ... ok
+test affine_bounds::tests::crossed_noise_cells_keep_convergent_shared_coordinates ... ok
+test affine_bounds::tests::segment_distance_lipschitz_encloses_diagonal_and_endpoint_boxes ... ok
+test affine_bounds::tests::survey_32_to_256_meters ... ignored, streaming exhaustive 32/64/128/256m validation and cost survey
+test affine_bounds::tests::shared_symbols_and_independent_remainders_survive_products ... ok
+test affine_bounds::tests::streamed_noise_branch_counts_match_retained_oracle ... ok
+test discrete_water::boundary::exact_ghost_tests::exact_ghost_cannot_duplicate_or_overwrite_a_whole_cell_even_with_excess_quota ... ok
+test discrete_water::boundary::tests::export_pressure_port_reports_only_real_cells ... ok
+test discrete_water::coupled::tests::dry_first_port_cannot_starve_wet_port_when_substeps_share_port_count ... ok
+test discrete_water::coupled::tests::explicit_port_caps_and_ghost_occupancy_survive_restart ... ok
+test discrete_water::coupled::tests::failed_transfer_rolls_back_both_models ... ok
+test discrete_water::dormant_relax::tests::equal_depth_ties_prefer_high_donor_and_low_destination_deterministically ... ok
+test discrete_water::coupled::tests::export_returns_owned_units_to_finite_storage ... ok
+test discrete_water::coupled::tests::import_is_finite_conserved_and_restart_exact ... ok
+test discrete_water::boundary::tests::accepted_exchange_conserves_and_respects_finite_quotas ... ok
+test alpine::tests::quiet_meadow_connected_distant_range_and_native_path ... ok
+test discrete_water::boundary::tests::prescribed_head_lake_seam_stays_still ... ok
+test discrete_water::dormant_relax::tests::export_moves_destination_first_and_never_raises_potential ... ok
+test discrete_water::dormant_relax::tests::import_uses_known_surface_chain_without_creating_mass_or_kinetic_energy ... ok
+test discrete_water::dormant_relax::tests::query_work_is_shared_bounded_and_memoized ... ok
+test discrete_water::dormant_relax::tests::stale_or_invalid_events_reject_without_a_move ... ok
+test discrete_water::dormant_relax::tests::unknown_or_active_cells_are_not_surface_air_and_solids_are_not_crossed ... ok
+test discrete_water::dormant_relax::tests::submerged_component_cannot_invent_a_donor_bubble ... ok
+test discrete_water::environmental_flow::tests::lakes_remain_finite_and_feature_work_is_bounded ... ok
+test discrete_water::environmental_flow::tests::blocked_supply_does_not_bank_and_registration_inactivity_never_refill ... ok
+test discrete_water::environmental_flow::tests::settlements_reject_duplicate_stale_excess_and_tampered_budgets_atomically ... ok
+test discrete_water::native::tests::explicit_boundary_and_canonical_positive_face_state_roundtrip ... ok
+test discrete_water::environmental_flow::tests::phase_and_counters_are_independent_of_simulated_time_partition ... ok
+test discrete_water::environmental_flow::tests::pending_and_settled_restart_continuation_are_bit_exact ... ok
+test discrete_water::regional::batch_tests::explicit_external_flow_counts_both_directions_and_rejects_replay ... ok
+test discrete_water::regional::batch_tests::ordered_batch_is_atomic_replay_safe_and_conservative ... ok
+test discrete_water::regional::batch_tests::capacity_changes_never_discard_owned_water_or_overflow_totals ... ok
+test discrete_water::coupled::tests::scarce_quota_keeps_fractional_credit_across_small_step_port_rotation ... ok
+test discrete_water::environmental_flow::tests::sixteen_geometric_segments_have_one_channel_clock_and_budget ... ok
+test discrete_water::regional::tests::blocked_sources_suppress_without_mass_or_backlog ... ok
+test discrete_water::regional::tests::detailed_ownership_reserves_capacity_and_rejects_stale_tokens ... ok
+test discrete_water::regional::tests::duplicate_stale_and_failed_transfer_are_atomic ... ok
+test alpine::tests::centimeter_relief_is_bounded_coherent_and_changes_native_stairs ... ok
+test discrete_water::regional::tests::graph_and_external_ledger_conserve_exactly ... ok
+test discrete_water::tests::exhausted_tick_returns_time_without_mutation ... ok
+test discrete_water::tests::open_v3_save_migrates_boundary_fields_without_ghosts ... ok
+test discrete_water::tests::adaptive_budget_has_no_hidden_speed_limit ... ok
+test discrete_water::tests::freefall_accelerates_past_two_meters_per_second ... ok
+test discrete_water::tests::simultaneous_chains_cycles_blockage ... ok
+test discrete_water::tests::edits_are_exact_or_rejected ... ok
+test discrete_water::tests::restart_rejects_corruption ... ok
+test discrete_water::tests::closed_v2_save_migrates_without_changing_numerical_state ... ok
+test edit::tests::physical_handful_and_deterministic_connected_selection ... ok
+test edit::tests::stale_preview_and_unresident_placement_leave_everything_unchanged ... ok
+test edit::tests::transactions_are_atomic_finite_and_checkpoint_replay_safe ... ok
+test edit::tests::underwater_solid_ray_has_two_metre_reach_and_nearest_solid_occlusion ... ok
+test edit_index::tests::budget_exhaustion_disables_candidates_without_unbounded_growth ... ok
+test edit_index::tests::index_capacity_fallback_preserves_exact_snapshot_membership ... ok
+test edit_index::tests::million_override_local_query_matches_full_scan_with_bounded_candidate_work ... ignored, standalone synthetic million-override query count/timing diagnostic
+test edit_index::tests::negative_half_open_and_extreme_bounds_are_exact ... ok
+test discrete_water::tests::source_clock_is_partition_independent_and_never_banks_blockage ... ok
+test edit_index::tests::shared_branch_candidates_reverts_hidden_fluid_and_bulk_restore_match_full_scan ... ok
+test fluid::tests::bounds_and_malformed_checkpoint_reject_without_partial_activation ... ok
+test discrete_water::regional::tests::regional_restart_preserves_clocks_ownership_and_transfer_replay ... ok
+test discrete_water::native::tests::invalid_duplicate_or_missing_migration_coverage_rejects_atomically ... ok
+test fluid::tests::external_changes_are_published_even_when_no_flux_occurs ... ok
+test fluid::tests::negative_chunk_boundary_sealed_until_both_load_and_wake ... ok
+test fluid::tests::dry_tombstones_survive_unload_restart_without_source_refill ... ok
+test fluid::tests::replay_generation_order_and_restart_are_identical ... ok
+test fluid::tests::sealed_box_conserves_every_tick_and_capacity ... ok
+test fluid::tests::sleep_and_source_wake_preserve_explicit_ledger ... ok
+test discrete_water::tests::still_water ... ok
+test fluid::tests::solid_edit_displaces_without_losing_mass_and_releases_on_reopen ... ok
+test live_water_overlay_tests::empty_reversed_and_disjoint_fluid_bounds_do_not_change_snapshot_revision ... ok
+test live_water_overlay_tests::native_column_overlay_snapshots_diff_and_solidity_agree ... ok
+test live_water_overlay_tests::static_snapshot_retains_edits_without_mutating_live_water ... ok
+test affine_bounds::tests::streamed_noise_branches_match_retained_bounds_bit_for_bit ... ok
+test discrete_water::tests::waterfall_sources_outlets_and_restart ... ok
+test live_water_overlay_tests::bounded_static_snapshots_preserve_dormant_wet_cells_and_dry_tombstones ... ok
+test fluid::tests::aggregate_counters_match_scan_through_random_activation_edits_and_replay ... ok
+test discrete_water::native::tests::connected_window_a_b_a_preserves_exact_dormant_native_state ... ok
+test discrete_water::tests::inexact_pressure_and_atomic_transport_do_not_create_kinetic_energy ... ok
+test affine_bounds::tests::both_recipes_enclose_exhaustive_native_columns ... ok
+test fluid::tests::concurrent_faces_edits_and_checkpoint_keep_capacity_and_mass ... ok
+test moving_water::tests::moving_window_rejects_unaddressable_halo_before_materialization ... ok
+test moving_water::tests::air_window_exposes_all_6144_faces_instead_of_inventing_walls ... ok
+test moving_water::tests::connected_lake_has_open_native_seams_and_exact_finite_accounting ... ok
+test physical_fluid::tests::disconnected_enclosed_components_have_explicit_gauges ... ok
+test physical_fluid::tests::falling_liquid_accelerates_in_metres_per_second ... ok
+test physical_fluid::tests::ghost_outside_centre_liquid_is_retained_and_diagnosed ... ok
+test discrete_water::tests::sustained_waterfall_sixty_seconds_and_dam_remain_finite ... ok
+test physical_fluid::tests::hydrostatic_pressure_depth_and_no_motion ... ok
+test physical_fluid::tests::invalid_inputs_are_rejected ... ok
+test moving_water::tests::dormant_dry_dig_gets_real_surface_water_without_camera_migration ... ok
+test physical_fluid::tests::ghost_surface_has_correct_hydrostatic_distance_and_restart_mode ... ok
+test physical_fluid::tests::maccormack_ghost_checkpoint_preserves_candidate_and_mass ... ok
+test moving_water::tests::exhausted_history_rejects_migration_without_half_returning_water ... ok
+test physical_fluid::tests::manufactured_pressure_gradient_projects_to_zero_velocity ... ok
+test physical_fluid::tests::report_ghost_long_hydrostatic_gate ... ignored, offline ghost-fluid 60s hydrostatic acceptance reporter
+test physical_fluid::tests::report_long_hydrostatic_acceptance_gate ... ignored, offline 60s M1 motion gate; inspect reported motion and conservation separately
+test physical_fluid::tests::restart_is_exact_and_failed_steps_are_atomic ... ok
+test physical_fluid::tests::small_dam_has_front_motion_with_measured_volume ... ok
+test moving_water::tests::import_fringe_refills_by_real_downward_neighbor_move_and_cross_tile_ledger ... ok
+test physical_fluid::tests::trace_fraction_volume_survives_classification_and_restart ... ok
+test physical_fluid::tests::transport_translation_is_conservative_bounded_and_sharper_than_donor ... ok
+test physical_fluid::transport::geometry_tests::analytical_box_volumes_and_complements ... ok
+test physical_fluid::transport::geometry_tests::nearly_axis_aligned_slabs_partition_without_cancellation ... ok
+test procedural_water::tests::away_back_registration_and_restart_never_regenerate_exported_water_or_supply ... ok
+test procedural_water::tests::explicit_sources_and_tile_budget_are_bounded_and_persisted ... ok
+test procedural_water::tests::generated_lake_tiles_share_the_source_stage_without_whole_lake_allocation ... ok
+test procedural_water::tests::native_tile_addresses_are_global_and_overflow_checked ... ok
+test procedural_water::tests::public_reach_keys_and_geometry_are_stable_across_query_order ... ok
+test physical_fluid::tests::limited_maccormack_preserves_periodic_uniform_flow_and_steady_shear ... ok
+test procedural_water::tests::stage_volume_counts_exact_voxels_including_overhangs_and_dry_tombstones ... ok
+test physical_fluid::tests::small_dam_short_interval_timestep_refinement ... ok
+test seeded_bounds_tests::seeded_certificates_survive_extreme_parameters_and_budget_fallbacks ... ok
+test seeded_bounds_tests::seeded_distant_columns_and_negative_chunk_borders_reproduce_after_eviction ... ok
+test seeded_bounds_tests::seeded_flat_ocean_has_no_artificial_quantization_error ... ok
+test seeded_bounds_tests::seeded_huge_region_global_fallback_still_contains_sea_and_land ... ok
+test seeded_bounds_tests::normalized_channel_weights_keep_motion_offender_bounds_useful ... ok
+test affine_bounds::tests::held_out_fan_triangles_eight_to_thirty_two_meters ... ok
+test moving_water::tests::finite_reference_and_closed_lake_do_not_gain_environmental_water ... ok
+test seeded_bounds_tests::seeded_lake_certificate_excludes_hidden_bed_depth ... ok
+test summary::tests::analytic_bound_covers_native_neighbor_variation ... ok
+test summary::tests::procedural_certificate_rejects_unproved_numeric_domains ... ok
+test summary::tests::bounded_summary_merges_and_rejects_edits ... ok
+test terrain::alpine_derivative_tests::alpine_analytic_macro_and_full_slopes_match_centered_derivative ... ok
+test terrain::alpine_derivative_tests::alpine_cover_transition_keeps_meadow_and_exposed_cliffs_coherent ... ok
+test terrain::seeded_world::climate_tests::macro_barriers_dry_the_lee_and_climate_has_no_cell_seams ... ok
+test summary::tests::source_envelope_contains_all_recipes_without_native_generation ... ok
+test terrain::seeded_world::tests::deterministic_columns_survive_negative_boundaries_and_cache_eviction ... ok
+test seeded_bounds_tests::seeded_valley_support_lookup_and_half_node_halo_cache_corners_are_certified ... ok
+test seeded_bounds_tests::seeded_certificates_cover_river_cross_sections_lakes_and_negative_cache_corners ... ok
+test terrain::seeded_world::tests::horizontal_scale_preserves_physical_amplitude ... ok
+test terrain::seeded_world::tests::positive_river_reaches_sea_level_without_a_dry_coastal_gap ... ok
+test terrain::seeded_world::tests::meandering_edges_preserve_global_endpoints_stages_and_descriptor_identity ... ok
+test terrain::seeded_world::tests::seed19_river_valley_has_broad_shoulders_instead_of_a_narrow_wall ... ok
+test terrain::seeded_world::tests::sea_level_reach_caps_do_not_raise_seabed_rings_or_islands ... ok
+test terrain::seeded_world::tests::analytical_ranges_contain_survey_heights_including_channels ... ok
+test terrain::seeded_world::tests::wet_beds_are_sediment_and_ecotone_paint_is_native_coherent ... ok
+test terrain::tests::alpine_path_paint_is_native_and_scaled_with_the_scene ... ok
+test terrain::tests::cached_columns_keep_fixture_volume_and_edit_authority ... ok
+test terrain::tests::alpine_path_has_connected_variable_wear_and_coherent_shoulders ... ok
+test terrain::tests::gradient_noise_matches_finite_differences ... ok
+test terrain::tests::display_spacing_cannot_reinterpret_world_scale ... ok
+test terrain::tests::legacy_frozen_default_samples ... ok
+test terrain::tests::negative_columns_native_material_rays_and_edits_agree ... ok
+test terrain::tests::regional_columns_and_shared_anchors_are_canonical ... ok
+test terrain::tests::regional_cover_requires_landform_exposure ... ok
+test terrain::tests::regional_landform_gradient_matches_physical_slopes ... ok
+test terrain::tests::regional_parameters_change_source_without_hidden_clamps ... ok
+test terrain::seeded_world::tests::variable_width_reaches_share_node_widths_and_stay_in_search_halo ... ok
+test terrain::tests::rejects_invalid_parameters ... ok
+test terrain::tests::seeded_mountains_and_valleys_are_coherent ... ok
+test terrain::water_feature_spacing_tests::descriptor_core_spacing_is_bounded_and_does_not_need_fine_columns ... ok
+test terrain::water_feature_spacing_tests::water_debt_caps_coarse_spacing_and_clears_resolved_cores ... ok
+test tests::batch_edits_use_one_revision_and_last_write_wins ... ok
+test physical_fluid::tests::limited_maccormack_periodic_wave_has_less_error_without_energy_overshoot ... ok
+test tests::cave_through_ray_and_far_edit ... ok
+test tests::dda_matches_independent_box_oracle ... ok
+test terrain::tests::regional_paint_is_seeded_coherent_and_native_column_constant ... ok
+test tests::local_edit_diff_and_source_lineage_handle_divergence_and_reverts ... ok
+test tests::negative_grid_and_local_precision ... ok
+test tests::ray_boundary_ties_and_invalid_inputs ... ok
+test tests::source_edits_and_snapshot_revisions ... ok
+test tests::topology_footprint_is_canonical_and_independent_of_camera ... ok
+test terrain::tests::regional_reduces_local_slopes_on_held_out_seeds ... ok
+test terrain::seeded_world::tests::node_stages_are_shared_monotone_and_sink_lakes_are_level ... ok
+test vegetation::tests::coherent_meadow_and_colonies_cross_tile_borders ... ok
+test vegetation::region_probe_tests::bounded_ground_source_is_identical_to_filtered_canonical_pages ... ok
+test vegetation::tests::compact_wood_cache_enforces_entry_and_byte_bounds ... ok
+test vegetation::tests::compact_wood_collision_preserves_authoritative_edits ... ok
+test vegetation::plant_recipe::tests::recipe_matches_original_grass_for_120_seeds_all_variants ... ok
+test terrain::seeded_world::tests::climate_survey_contains_biomes_and_water_is_local_on_land ... ok
+test vegetation::tests::ecological_fields_produce_openings_and_localized_flower_colonies ... ok
+test vegetation::tests::compact_wood_survives_full_model_eviction_without_generation ... ok
+test tests::bounded_journal_matches_scan_across_branches_reverts_and_eviction ... ok
+test moving_water::tests::ghost_import_consumes_the_actual_external_cell_once_and_restarts ... ok
+test vegetation::tests::negative_tile_borders_and_request_order ... ok
+test vegetation::tests::occupancy_edits_and_disabled_terrain_regression ... ok
+test vegetation::tests::rooted_component_microbenchmark ... ignored, CPU-only release rooted-filter benchmark; --release --ignored --nocapture
+test vegetation::tests::rooted_component_preserves_sparse_disconnected_and_absent_roots ... ok
+test vegetation::tests::tree_clearance_crosses_negative_tile_borders ... ok
+test visual_source::tests::edits_topology_limits_and_revisions_never_silently_disappear ... ok
+test vegetation::tests::record_seed_drives_growth_and_cache_reuse_is_content_exact ... ok
+test visual_source::tests::shared_anchors_negative_coordinates_and_source_identity ... ok
+test volume_summary::tests::boundary_corner_edits_and_thin_tower_survive_octant_merge ... ok
+test volume_summary::tests::foliage_keeps_distinct_material_counts_and_prevents_heightfield_certificate ... ok
+test volume_summary::tests::merge_preserves_thin_bridge_cave_faces_and_bounds ... ok
+test volume_summary::tests::no_homogenization_or_false_crop_faces ... ok
+test volume_summary::tests::only_source_contract_certifies_heightfield_safety ... ok
+test volume_summary::tests::rejects_stale_incomplete_duplicate_and_unbounded_work ... ok
+test moving_water::tests::away_back_keeps_native_momentum_pressure_face_credits_and_dormant_mass ... ok
+test visual_source::tests::omitted_enclosure_and_exact_fallback_across_recipes_parameters_and_seeds ... ok
+test vegetation::tests::growth_cohorts_have_distinct_heights_full_crowns_and_native_grass ... ok
+test moving_water::tests::generated_exterior_environment_is_counted_restartable_and_migration_never_refills ... ok
+test vegetation::tests::native_models_are_connected_bounded_and_repeatable ... ok
+test physical_fluid::tests::dam_wall_impact_has_rebound_and_independent_correction_ledger ... ok
+test vegetation::tests::generated_models_check_original_component_filter_on_every_candidate ... ok
+test vegetation::tests::compact_wood_matches_seeded_rotated_canonical_models ... ok
+test physical_fluid::tests::communicating_vessels_reduce_level_difference_through_open_channel ... ok
+test physical_fluid::tests::rotating_square_transport_conserves_volume_and_reduces_diffusion ... ok
+test vegetation::plant_recipe::tests::rowan_recipe_matches_original_growth_for_120_seeds ... ok
+
+test result: ok. 194 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 5.96s
+

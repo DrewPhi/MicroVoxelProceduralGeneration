@@ -1,0 +1,5 @@
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+adaptive route starts after coarse coverage publication
+NAADF residency: 128.00/128.00 m (0.94s)
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 258, accepted_frames: 258, missed_budget_frames: 132, rejected_inputs: 0, p50_ms: Some(16.678637), p95_ms: Some(17.797003), p99_ms: Some(26.83718) }
+benchmark JSON: output/voxel-scale-comparison/small-gate.json

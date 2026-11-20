@@ -1,0 +1,8 @@
+Resolved random world seed: 3967194493096541190
+Seeded world seed=3967194493096541190, dry spawn=(0.0,0.0)m
+adapter: AdapterInfo { name: "AMD Radeon 760M Graphics (RADV PHOENIX)", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: "radv", driver_info: "Mesa 25.2.8-0ubuntu0.24.04.2", backend: Vulkan }
+adaptive route starts after coarse coverage publication
+NAADF residency: 8/64 m (0.12s)
+NAADF residency: 32/64 m (0.86s)
+frame intervals (includes presentation; not isolated GPU timing): FrameSummary { sample_count: 119, accepted_frames: 119, missed_budget_frames: 65, rejected_inputs: 0, p50_ms: Some(16.683314000000003), p95_ms: Some(17.56471), p99_ms: Some(23.674286) }
+benchmark JSON: output/watershed-exploration/random-launch.json

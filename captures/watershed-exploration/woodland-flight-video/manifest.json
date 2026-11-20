@@ -1,0 +1,87 @@
+{
+  "command": [
+    "/home/drew/Projects/voxels/frontier-lod/frontier/target/release/frontier",
+    "--preset",
+    "alpine",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--seconds",
+    "30.0",
+    "--report",
+    "/home/drew/Projects/voxels/frontier-lod/frontier/output/watershed-exploration/woodland-flight-video/game.json",
+    "--preset",
+    "watershed",
+    "--seed",
+    "40961",
+    "--start-xz",
+    "-2400,3000",
+    "--walk",
+    "off",
+    "--camera",
+    "aerial",
+    "--msaa",
+    "1",
+    "--capture-far",
+    "6000",
+    "--naadf-radius",
+    "32",
+    "--no-adaptive-disk-cache",
+    "--streaming-haze",
+    "0"
+  ],
+  "binary_sha256": "d299705aeec651c4e212f934af508b44563ea543d5d961ff3364c81f5ac91d72",
+  "settle_seconds": 2.0,
+  "movement": {
+    "max_displacement_m": 22.31205095227561,
+    "yaw_range_radians": 1.279992,
+    "walk_verified": true,
+    "turn_verified": true
+  },
+  "turn_only": false,
+  "failure": null,
+  "events": [
+    {
+      "seconds_from_launch": 0.7297,
+      "action": "settle_begin"
+    },
+    {
+      "seconds_from_launch": 2.7298,
+      "action": "settle_end"
+    },
+    {
+      "seconds_from_launch": 2.7298,
+      "action": "record_start"
+    },
+    {
+      "seconds_from_launch": 3.8108,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 6.8913,
+      "action": "hold_None"
+    },
+    {
+      "seconds_from_launch": 8.9778,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 12.0846,
+      "action": "mouse_turn"
+    },
+    {
+      "seconds_from_launch": 13.7744,
+      "action": "walk_after_turn"
+    },
+    {
+      "seconds_from_launch": 16.7746,
+      "action": "stop_after_turn"
+    },
+    {
+      "seconds_from_launch": 22.9529,
+      "action": "record_end"
+    }
+  ],
+  "scope": "Actual X11 walking or stationary full yaw/pitch inputs and 20 FPS child-window recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+}

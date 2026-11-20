@@ -1,0 +1,10 @@
+seeded_world_7_10000m: ground -108.3..101.0m, sampled water 65.05%, biomes {"Coast": 2614, "Desert": 11180, "Ocean": 23455}, CPU 64.3ms
+seeded_world_7_100000m: ground -210.8..1824.2m, sampled water 21.42%, biomes {"Coast": 1314, "Desert": 4317, "Mountains": 6268, "Ocean": 7309, "Plains": 3759, "Steppe": 5528, "Tundra": 3486, "Wetland": 475, "Woodland": 4793}, CPU 352.6ms
+seeded_world_19_10000m: ground -12.4..1163.2m, sampled water 1.42%, biomes {"Coast": 596, "Desert": 14253, "Mountains": 6468, "Ocean": 87, "Plains": 1073, "Steppe": 14714, "Wetland": 58}, CPU 70.0ms
+seeded_world_19_100000m: ground -172.6..1888.3m, sampled water 10.64%, biomes {"Coast": 1071, "Desert": 5763, "Mountains": 4491, "Ocean": 3332, "Plains": 6129, "Steppe": 5959, "Tundra": 3752, "Wetland": 719, "Woodland": 6033}, CPU 355.8ms
+seeded_world_83_10000m: ground -80.2..47.6m, sampled water 79.29%, biomes {"Coast": 5041, "Ocean": 27761, "Plains": 3857, "Steppe": 9, "Wetland": 21, "Woodland": 560}, CPU 62.6ms
+seeded_world_83_100000m: ground -143.8..1741.1m, sampled water 13.07%, biomes {"Coast": 1240, "Desert": 5405, "Mountains": 3963, "Ocean": 4127, "Plains": 6420, "Steppe": 6011, "Tundra": 3408, "Wetland": 733, "Woodland": 5942}, CPU 352.2ms
+seeded_world_40961_10000m: ground -95.9..328.2m, sampled water 73.06%, biomes {"Coast": 4014, "Desert": 3, "Ocean": 25697, "Plains": 886, "Steppe": 1504, "Wetland": 129, "Woodland": 5016}, CPU 64.6ms
+seeded_world_40961_100000m: ground -106.3..1861.3m, sampled water 8.32%, biomes {"Coast": 1035, "Desert": 5683, "Mountains": 3194, "Ocean": 2451, "Plains": 6114, "Steppe": 5651, "Tundra": 4508, "Wetland": 855, "Woodland": 7758}, CPU 357.6ms
+seeded_world_997_10000m: ground 73.9..1668.4m, sampled water 1.08%, biomes {"Desert": 20706, "Mountains": 6069, "Plains": 5110, "Steppe": 3353, "Tundra": 382, "Wetland": 860, "Woodland": 769}, CPU 74.0ms
+seeded_world_997_100000m: ground -153.2..1791.4m, sampled water 5.28%, biomes {"Coast": 688, "Desert": 6888, "Mountains": 4708, "Ocean": 1413, "Plains": 5160, "Steppe": 6273, "Tundra": 4439, "Wetland": 806, "Woodland": 6874}, CPU 357.3ms
