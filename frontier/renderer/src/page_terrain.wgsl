@@ -17,6 +17,6 @@ struct Out { @builtin(position) position:vec4<f32>, @location(0) normal:vec3<f32
     let view=normalize(camera.eye.xyz-i.world);
     let exact=i.color*terrain_lighting(i.normal);
     let appearance=voxel_appearance(i.color,i.normal,view,distance(camera.eye.xyz,i.world));
-    let cell=bitcast<vec3<u32>>(vec3<i32>(floor(i.world*16.)))+camera.paint_origin.xyz;
+    let cell=bitcast<vec3<u32>>(vec3<i32>(floor(i.world*VOXELS_PER_METER)))+camera.paint_origin.xyz;
     return vec4<f32>(terrain_tint(cell,0.)*mix(exact,appearance,camera.eye.w),1.);
 }

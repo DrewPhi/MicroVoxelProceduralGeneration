@@ -5,7 +5,7 @@ use super::prepare_profile::{self, Collector, Metrics, Stage};
 use bytemuck::{Pod, Zeroable};
 use frontier_world::{
     vegetation::{self, Species},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World,
 };
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
@@ -63,8 +63,14 @@ impl Snapshot {
             + self.palette.len() * 16
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
-        let lo = [self.origin.x, self.origin.y, self.origin.z].map(|v| v as f64 * VOXEL_SIZE);
-        [lo, std::array::from_fn(|a| lo[a] + self.dims[a] as f64)]
+        self.region().bounds()
+    }
+    pub fn region(&self) -> super::stream::Region {
+        let lo = [self.origin.x, self.origin.y, self.origin.z].map(|v| v.div_euclid(16));
+        super::stream::Region {
+            lo,
+            hi: std::array::from_fn(|axis| lo[axis] + self.dims[axis] as i64),
+        }
     }
     pub fn material(&self, p: [usize; 3]) -> u32 {
         let [nx, ny, _] = self.dims;
@@ -429,10 +435,10 @@ pub fn build_with_root_mode(
     if eye.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
         return Err("NAADF eye outside supported finite coordinate range".into());
     }
-    let n = radius.checked_mul(2).ok_or("NAADF radius overflow")? as usize;
-    if n == 0 || n > 512 {
-        return Err("NAADF radius must be 1..256 metres".into());
+    if !(1..=super::stream::MAX_RADIUS_ROOTS).contains(&radius) {
+        return Err("NAADF root radius outside the supported range".into());
     }
+    let n = radius as usize * 2;
     let count = n.checked_pow(3).ok_or("NAADF chunk count overflow")?;
     if count
         .checked_mul(if gpu_distance { 8 } else { 12 })
@@ -445,8 +451,10 @@ pub fn build_with_root_mode(
                 .div_ceil(1048576)
         ));
     }
-    let centre = Cell::from_meters(eye);
-    let r = radius as i64 * 16;
+    let centre = frontier_world::voxel_grid()
+        .checked_cell(eye)
+        .ok_or("NAADF eye outside the native cell lattice")?;
+    let r = i64::from(radius * super::stream::ROOT_EDGE_VOXELS);
     let min = Cell {
         x: centre.x.div_euclid(16) * 16 - r,
         y: centre.y.div_euclid(16) * 16 - r,
@@ -794,9 +802,9 @@ fn build_region_options(
             } else {
                 columns.as_ref().map(|columns| {
                     let heights =
-                        std::array::from_fn(|i| (columns[i].height_m() / VOXEL_SIZE) as i64);
+                        std::array::from_fn(|i| columns[i].height_cells());
                     let ground_heights =
-                        std::array::from_fn(|i| (columns[i].ground_height_m() / VOXEL_SIZE) as i64);
+                        std::array::from_fn(|i| columns[i].ground_height_cells());
                     let bands = std::array::from_fn(|i| {
                         let h = ground_heights[i];
                         [

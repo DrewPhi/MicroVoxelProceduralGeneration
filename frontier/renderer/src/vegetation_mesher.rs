@@ -5,7 +5,7 @@
 //! Input-order sums, material-order reduction, face order, and greedy rectangle
 //! order deliberately match the reference, including its floating-point math.
 use crate::vegetation::{VegetationMesh, VegetationVertex};
-use frontier_world::{Cell, Material, VOXEL_SIZE};
+use frontier_world::{Cell, Material, voxel_size};
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
@@ -377,9 +377,9 @@ pub(crate) fn mesh_cells_scaled(
             normal[d] = sign as f32;
             for [a, b] in [[0, 0], [w, 0], [w, h], [0, h]] {
                 let mut p = [0.; 3];
-                p[d] = (plane * steps[d]) as f32 * VOXEL_SIZE as f32;
-                p[u] = ((start[0] + a) * steps[u]) as f32 * VOXEL_SIZE as f32;
-                p[v] = ((start[1] + b) * steps[v]) as f32 * VOXEL_SIZE as f32;
+                p[d] = (plane * steps[d]) as f32 * voxel_size() as f32;
+                p[u] = ((start[0] + a) * steps[u]) as f32 * voxel_size() as f32;
+                p[v] = ((start[1] + b) * steps[v]) as f32 * voxel_size() as f32;
                 mesh.vertices.push(VegetationVertex {
                     position: p,
                     normal,

@@ -45,7 +45,7 @@ fn visibility(p:vec3<f32>,distance:f32,forward:f32)->f32 {
     // covers the trees and close geometry that can give the sharpest shafts.
     let exact_weight=(1.-smoothstep(15.,26.,distance))*smoothstep(.72,.88,forward);
     if visible>0.01 && exact_weight>0.01 && naadf.extent.x>0u {
-        let origin=(p+naadf.eye.xyz)*16.;
+        let origin=(p+naadf.eye.xyz)*VOXELS_PER_METER;
         let extent=vec3<f32>(naadf.extent.xyz);
         if all(origin>=vec3(1.)) && all(origin<extent-vec3(1.)) {
             let ray=trace_impl_mode(origin,atmosphere.sun.xyz,0.,true,false,false,true,256.);

@@ -338,12 +338,19 @@ impl SettingsUi {
                             ui.heading("NAADF experiment");
                             ui.checkbox(&mut self.loading_draft.naadf_enabled, "Use exact voxel rays in test region");
                             ui.checkbox(&mut self.loading_draft.naadf_follow, "Follow player");
-                            ui.add(egui::Slider::new(&mut self.loading_draft.naadf_radius_m, 1..=256).text("NAADF radius (m)"));
+                            let max_voxels = crate::naadf::stream::MAX_RADIUS_VOXELS;
+                            ui.add(egui::Slider::new(
+                                &mut self.loading_draft.naadf_radius_voxels, 1..=max_voxels,
+                            ).text("NAADF radius (voxels)"));
                             ui.checkbox(&mut self.loading_draft.naadf_auto_memory,"Use available RAM for NAADF (leave system headroom)");
                             ui.checkbox(&mut self.settings.visibility_benchmark,"Diagnostic matched white lighting");
                             ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build estimate ceiling (MiB)"));
-                            let top = (self.loading_draft.naadf_radius_m as f64 * 2.).powi(3) * 4. / 1048576.;
-                            ui.small(format!("Top grid {top:.1} MiB GPU; at least {:.1} MiB with CPU/build copies, plus voxel payloads.",top*3.));
+                            if let Ok(roots) = crate::naadf::stream::radius_roots(self.loading_draft.naadf_radius_voxels) {
+                                let radius_m = f64::from(roots) * crate::naadf::stream::root_size_m();
+                                ui.small(format!("{radius_m:.2} m after rounding up to whole roots."));
+                                let top = (roots as f64 * 2.).powi(3) * 4. / 1048576.;
+                                ui.small(format!("Top grid {top:.1} MiB GPU, with at least {:.1} MiB for CPU and build copies plus voxel payloads.", top * 3.));
+                            }
                             ui.small("Radius is the cube half-extent. Follow mode builds incoming strips as you move. Distant terrain keeps its renderer.");
                             ui.label(format!("{} · {:.1} MiB NAADF GPU",stats.naadf_status,stats.naadf_gpu_mib));
                             if ui.button("Rebuild NAADF here").clicked() {
@@ -351,7 +358,7 @@ impl SettingsUi {
                                 self.settings.naadf_auto_memory=self.loading_draft.naadf_auto_memory;
                                 self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
                                 self.settings.naadf_follow=self.loading_draft.naadf_follow;
-                                self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
+                                self.settings.naadf_radius_voxels=self.loading_draft.naadf_radius_voxels;
                                 self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
                                 changes.loading_applied=true;
                             }
@@ -381,7 +388,7 @@ impl SettingsUi {
                             ui.add(egui::Slider::new(&mut self.loading_draft.workers, 1..=max_workers).text("Workers"));
                             ui.add(egui::Slider::new(&mut self.loading_draft.refinements, 1..=32).text("Refinements / batch"));
                             ui.add(egui::Slider::new(&mut self.loading_draft.native_radius_m, 0.0..=64.0).text("Minimum native radius (m)"));
-                            ui.small("Larger native radii are costly; native voxels remain 6.25 cm.");
+                            ui.small(format!("Native voxel edge: {} cm. Larger radii need more memory.", frontier_world::voxel_size() * 100.));
                             ui.add(egui::Slider::new(&mut self.loading_draft.vegetation_near_m, 0.0..=128.0).text("Near plant detail (m)"));
                             let max_mib = memory.working_mib().max(2048);
                             for (field, label) in [
@@ -401,7 +408,7 @@ impl SettingsUi {
                             }
                             let dirty = self.settings.naadf_auto_memory != self.loading_draft.naadf_auto_memory || self.settings.naadf_enabled != self.loading_draft.naadf_enabled
                                 || self.settings.naadf_follow != self.loading_draft.naadf_follow
-                                || self.settings.naadf_radius_m != self.loading_draft.naadf_radius_m
+                                || self.settings.naadf_radius_voxels != self.loading_draft.naadf_radius_voxels
                                 || self.settings.naadf_budget_mib != self.loading_draft.naadf_budget_mib
                                 || self.settings.pixel_error != self.loading_draft.pixel_error
                                 || self.settings.view_distance != self.loading_draft.view_distance
@@ -425,7 +432,7 @@ impl SettingsUi {
                                 self.settings.naadf_auto_memory=self.loading_draft.naadf_auto_memory;
                                 self.settings.naadf_enabled=self.loading_draft.naadf_enabled;
                                 self.settings.naadf_follow=self.loading_draft.naadf_follow;
-                                self.settings.naadf_radius_m=self.loading_draft.naadf_radius_m;
+                                self.settings.naadf_radius_voxels=self.loading_draft.naadf_radius_voxels;
                                 self.settings.naadf_budget_mib=self.loading_draft.naadf_budget_mib;
                                 self.settings.pixel_error = self.loading_draft.pixel_error;
                                 self.settings.view_distance = self.loading_draft.view_distance;
@@ -487,7 +494,7 @@ impl SettingsUi {
         visual_previous.naadf_auto_memory = self.settings.naadf_auto_memory;
         visual_previous.naadf_enabled = self.settings.naadf_enabled;
         visual_previous.naadf_follow = self.settings.naadf_follow;
-        visual_previous.naadf_radius_m = self.settings.naadf_radius_m;
+        visual_previous.naadf_radius_voxels = self.settings.naadf_radius_voxels;
         visual_previous.naadf_budget_mib = self.settings.naadf_budget_mib;
         visual_previous.native_radius_m = self.settings.native_radius_m;
         visual_previous.vegetation_near_m = self.settings.vegetation_near_m;

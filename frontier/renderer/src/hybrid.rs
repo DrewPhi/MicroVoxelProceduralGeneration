@@ -6,7 +6,7 @@ use crate::{
     column_mesh,
     mesh::{Mesh, Vertex},
 };
-use frontier_world::{Cell, FbmTerrain, World, VOXEL_SIZE};
+use frontier_world::{Cell, FbmTerrain, World, voxel_size};
 
 const INNER: f64 = 32.;
 const OUTER: f64 = 34.;
@@ -98,9 +98,9 @@ pub fn build(world: &World, levels: u32) -> Result<Mesh, String> {
         };
         let height = |t: f64| {
             let p = edge(INNER, t);
-            let x = (p[0] / VOXEL_SIZE).floor().clamp(-512., 511.) as i64;
-            let z = (p[1] / VOXEL_SIZE).floor().clamp(-512., 511.) as i64;
-            native.heights.height(x, z).unwrap() as f64 * VOXEL_SIZE
+            let x = (p[0] / voxel_size()).floor().clamp(-512., 511.) as i64;
+            let z = (p[1] / voxel_size()).floor().clamp(-512., 511.) as i64;
+            native.heights.height(x, z).unwrap() as f64 * voxel_size()
         };
         let outer = |t: f64| {
             let p = edge(OUTER, t);
@@ -158,9 +158,9 @@ pub(crate) fn build_collar(
         vertices: vec![],
         indices: vec![],
         origin: Cell {
-            x: (center[0] / VOXEL_SIZE) as i64,
+            x: (center[0] / voxel_size()) as i64,
             y: 0,
-            z: (center[1] / VOXEL_SIZE) as i64,
+            z: (center[1] / voxel_size()) as i64,
         },
         exposed_native_faces: 0,
     };
@@ -181,15 +181,15 @@ pub(crate) fn build_collar(
         };
         let native = |t: f64| -> Result<f64, String> {
             let p = edge(INNER, t);
-            let min = center.map(|c| ((c - INNER) / VOXEL_SIZE) as i64);
-            let x = (p[0] / VOXEL_SIZE)
+            let min = center.map(|c| ((c - INNER) / voxel_size()) as i64);
+            let x = (p[0] / voxel_size())
                 .floor()
                 .clamp(min[0] as f64, (min[0] + 1023) as f64) as i64;
-            let z = (p[1] / VOXEL_SIZE)
+            let z = (p[1] / voxel_size())
                 .floor()
                 .clamp(min[1] as f64, (min[1] + 1023) as f64) as i64;
             height(x, z)
-                .map(|h| h as f64 * VOXEL_SIZE)
+                .map(|h| h as f64 * voxel_size())
                 .ok_or_else(|| format!("missing cached native collar column ({x},{z})"))
         };
         let outer = |t: f64| -> Result<([f64; 3], [f32; 3], [f32; 3]), String> {
@@ -246,7 +246,7 @@ pub(crate) fn build_collar(
                         let top = source.surface_color(q[0], q[1], high);
                         let mut cuts = vec![h, next];
                         cuts.extend(
-                            [high - VOXEL_SIZE, high - 12. * VOXEL_SIZE]
+                            [high - voxel_size(), high - 12. * voxel_size()]
                                 .into_iter()
                                 .filter(|v| *v > h.min(next) && *v < high),
                         );
@@ -258,9 +258,9 @@ pub(crate) fn build_collar(
                             let depth = high - (segment[0] + segment[1]) * 0.5;
                             let color = if top == frontier_world::Material::Stone.color() {
                                 top
-                            } else if depth < VOXEL_SIZE {
+                            } else if depth < voxel_size() {
                                 top
-                            } else if depth < 12. * VOXEL_SIZE {
+                            } else if depth < 12. * voxel_size() {
                                 frontier_world::Material::Soil.color()
                             } else {
                                 frontier_world::Material::Stone.color()
@@ -292,9 +292,9 @@ fn collar_triangle(mesh: &mut Mesh, points: [([f64; 3], [f32; 3], [f32; 3]); 3])
     for (point, normal, color) in points {
         mesh.vertices.push(Vertex {
             position: [
-                (point[0] - mesh.origin.x as f64 * VOXEL_SIZE) as f32,
+                (point[0] - mesh.origin.x as f64 * voxel_size()) as f32,
                 point[1] as f32,
-                (point[2] - mesh.origin.z as f64 * VOXEL_SIZE) as f32,
+                (point[2] - mesh.origin.z as f64 * voxel_size()) as f32,
             ],
             normal,
             color,
@@ -316,9 +316,9 @@ fn triangle(mesh: &mut Mesh, source: &FbmTerrain, p: [[f64; 3]; 3]) {
     for point in p {
         mesh.vertices.push(Vertex {
             position: [
-                (point[0] - mesh.origin.x as f64 * VOXEL_SIZE) as f32,
-                (point[1] - mesh.origin.y as f64 * VOXEL_SIZE) as f32,
-                (point[2] - mesh.origin.z as f64 * VOXEL_SIZE) as f32,
+                (point[0] - mesh.origin.x as f64 * voxel_size()) as f32,
+                (point[1] - mesh.origin.y as f64 * voxel_size()) as f32,
+                (point[2] - mesh.origin.z as f64 * voxel_size()) as f32,
             ],
             normal,
             color: source.surface_color(point[0], point[2], point[1]),
@@ -344,7 +344,7 @@ mod tests {
             mesh.origin.x as f64,
             mesh.origin.y as f64,
             mesh.origin.z as f64,
-        ) * VOXEL_SIZE;
+        ) * voxel_size();
         let point =
             |i: u32| DVec3::from_array(mesh.vertices[i as usize].position.map(f64::from)) + offset;
         let mut result = Vec::new();
@@ -390,7 +390,7 @@ mod tests {
         for center in [[0., 0.], [8., 0.], [8., 8.], [-8., -16.], [65536., -65536.]] {
             let terrain = crate::terrain::TerrainData::at_center(source, center);
             let mesh = build_collar(source, center, &terrain, |x, z| {
-                Some((world.column(x, z).height_m() / VOXEL_SIZE) as i64)
+                Some(world.column(x, z).height_cells())
             })
             .unwrap();
             assert!(
@@ -420,20 +420,20 @@ mod tests {
                     && a.position[1] != b.position[1]
                     && c.position[0].abs().max(c.position[2].abs()) == 34.
                 {
-                    let min = center.map(|v| ((v - 32.) / VOXEL_SIZE) as i64);
+                    let min = center.map(|v| ((v - 32.) / voxel_size()) as i64);
                     let x = ((center[0] + a.position[0] as f64
-                        - a.normal[0] as f64 * VOXEL_SIZE * 0.25)
-                        / VOXEL_SIZE)
+                        - a.normal[0] as f64 * voxel_size() * 0.25)
+                        / voxel_size())
                         .floor()
                         .clamp(min[0] as f64, (min[0] + 1023) as f64)
                         as i64;
                     let z = ((center[1] + a.position[2] as f64
-                        - a.normal[2] as f64 * VOXEL_SIZE * 0.25)
-                        / VOXEL_SIZE)
+                        - a.normal[2] as f64 * voxel_size() * 0.25)
+                        / voxel_size())
                         .floor()
                         .clamp(min[1] as f64, (min[1] + 1023) as f64)
                         as i64;
-                    let y = (((a.position[1] + b.position[1]) as f64 * 0.5) / VOXEL_SIZE).floor()
+                    let y = (((a.position[1] + b.position[1]) as f64 * 0.5) / voxel_size()).floor()
                         as i64;
                     assert_eq!(
                         a.color,

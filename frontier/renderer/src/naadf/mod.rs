@@ -19,7 +19,7 @@ mod scatter;
 mod scheduler;
 mod sparse_roots;
 mod startup;
-mod stream;
+pub(super) mod stream;
 #[cfg(test)]
 mod tests;
 mod traversal;
@@ -29,7 +29,7 @@ mod upload;
 use super::{Camera, Gpu};
 use bytemuck::{Pod, Zeroable};
 use data::Snapshot;
-use frontier_world::{World, VOXEL_SIZE};
+use frontier_world::{World, voxel_size};
 use glam::DVec3;
 use std::{
     sync::{
@@ -49,7 +49,7 @@ const SHADER: &str = concat!(
 );
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Request {
-    radius: u32,
+    radius_voxels: u32,
     budget: usize,
     revision: u64,
     vegetation: bool,
@@ -59,6 +59,20 @@ struct Request {
     gpu_distance: bool,
     sparse_roots: bool,
     wide_leaves: bool,
+}
+
+impl Request {
+    fn radius_roots(self) -> u32 {
+        self.radius_voxels.div_ceil(stream::ROOT_EDGE_VOXELS)
+    }
+
+    fn radius_m(self) -> f64 {
+        f64::from(self.radius_voxels) * voxel_size()
+    }
+
+    fn rounded_radius_m(self) -> f64 {
+        f64::from(self.radius_roots()) * stream::root_size_m()
+    }
 }
 
 // The user ceiling can tighten the estimate, never bypass live RAM headroom.
@@ -117,7 +131,7 @@ impl Worker {
                             let result = data::build_with_root_mode(
                                 &w,
                                 eye,
-                                r.radius,
+                                r.radius_roots(),
                                 r.budget,
                                 &s,
                                 r.gpu_distance && !cpu_root_fallback,
@@ -262,6 +276,7 @@ struct Volume {
     voxels: wgpu::Buffer,
     palette: wgpu::Buffer,
     scatter: Option<scatter::Scatter>,
+    region: stream::Region,
     bounds: [[f64; 3]; 2],
     ring: [u32; 3],
     capacities: [usize; 3],
@@ -286,7 +301,7 @@ impl Volume {
                     std::array::from_fn(|a| {
                         if a < 3 {
                             b[k][a]
-                                .saturating_sub(self.bounds[0][a] as i64)
+                                .saturating_sub(self.region.lo[a])
                                 .clamp(i32::MIN as i64, i32::MAX as i64)
                                 as i32
                         } else {
@@ -536,9 +551,8 @@ impl Pending {
             && snapshot.gpu_distance
             && headroom.is_none_or(|bytes| upload_bytes + root_distance::bytes(n) <= bytes);
         let (root_distance, distance_view) = if build_distance {
-            let [lo, hi] = snapshot.bounds().map(|p| p.map(|v| v as i64));
             let (mut cache, view) =
-                root_distance::Cache::new(&gpu.device, n, stream::Region { lo, hi }, &view);
+                root_distance::Cache::new(&gpu.device, n, snapshot.region(), &view);
             cache.stages = gpu.naadf_gpu_stages.clone();
             (Some(cache), view)
         } else {
@@ -608,6 +622,7 @@ impl Pending {
             voxels,
             palette,
             scatter,
+            region: snapshot.region(),
             bounds: snapshot.bounds(),
             ring: [0; 3],
             capacities,
@@ -780,7 +795,7 @@ pub struct Experiment {
     incremental_startup: bool,
     growth_pending: bool,
     startup_started: Option<Instant>,
-    startup_publications: Vec<(u32, f64)>,
+    startup_publications: Vec<(f64, f64)>,
     startup_generated_roots: u64,
     wide_leaves: bool,
     effective_budget_mib: usize,
@@ -941,8 +956,16 @@ impl Experiment {
             self.error = Some(self.status.clone());
             return;
         }
+        let target_roots = match stream::radius_roots(s.naadf_radius_voxels) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.status = error.clone();
+                self.error = Some(error);
+                return;
+            }
+        };
         let mut r = Request {
-            radius: s.naadf_radius_m,
+            radius_voxels: s.naadf_radius_voxels,
             budget: if s.naadf_auto_memory {
                 usize::MAX
             } else {
@@ -1034,7 +1057,8 @@ impl Experiment {
             self.effective_budget_mib = effective_budget / 1048576;
             let mut job = r;
             job.budget = effective_budget;
-            job.radius = startup::first_radius(r.radius, self.incremental_startup);
+            let first_roots = startup::first_radius(target_roots, self.incremental_startup);
+            job.radius_voxels = first_roots * stream::ROOT_EDGE_VOXELS;
             self.worker
                 .send(Job::Build(self.epoch, job, world.clone(), build_center));
         }
@@ -1099,7 +1123,7 @@ impl Experiment {
             }
             match result {
                 Ok(Reply::Built(snapshot)) => match if self.incremental_startup {
-                    Pending::reserved(gpu, snapshot, r.radius * 2)
+                    Pending::reserved(gpu, snapshot, target_roots * 2)
                 } else {
                     Pending::new(gpu, snapshot)
                 } {
@@ -1169,11 +1193,11 @@ impl Experiment {
                 let resident = p.volume.resident_radius();
                 self.startup_generated_roots += p.snapshot.chunks.len() as u64;
                 self.expanding = false;
-                self.growth_pending = resident < r.radius;
+                self.growth_pending = p.volume.region.dims()[0] < target_roots as usize * 2;
                 if let Some(started) = self.startup_started {
                     let elapsed = started.elapsed().as_secs_f64();
                     self.startup_publications.push((resident, elapsed));
-                    startup::log_residency(resident, r.radius, elapsed);
+                    startup::log_residency(resident, r.rounded_radius_m(), elapsed);
                 }
                 if r.follow || self.growth_pending {
                     self.worker.send(Job::Install(
@@ -1195,7 +1219,7 @@ impl Experiment {
                     format!(
                         "{} m visible · expanding toward {} m",
                         self.active.as_ref().unwrap().resident_radius(),
-                        r.radius
+                        r.rounded_radius_m()
                     )
                 } else if r.follow {
                     "Ready · following player".into()
@@ -1212,8 +1236,8 @@ impl Experiment {
             && self.active.as_ref().is_some_and(|v| {
                 (0..3).any(|a| {
                     let x = camera.position[a];
-                    x < v.bounds[0][a] - r.radius as f64 * 0.5
-                        || x > v.bounds[1][a] + r.radius as f64 * 0.5
+                    x < v.bounds[0][a] - r.rounded_radius_m() * 0.5
+                        || x > v.bounds[1][a] + r.rounded_radius_m() * 0.5
                 })
             })
         {
@@ -1283,11 +1307,11 @@ impl Experiment {
                 if self.expanding {
                     let resident = v.resident_radius();
                     self.expanding = false;
-                    self.growth_pending = resident < r.radius;
+                    self.growth_pending = v.region.dims()[0] < target_roots as usize * 2;
                     if let Some(started) = self.startup_started {
                         let elapsed = started.elapsed().as_secs_f64();
                         self.startup_publications.push((resident, elapsed));
-                        startup::log_residency(resident, r.radius, elapsed);
+                        startup::log_residency(resident, r.rounded_radius_m(), elapsed);
                     }
                 }
                 if !r.follow && !self.growth_pending {
@@ -1299,7 +1323,7 @@ impl Experiment {
                     format!(
                         "{} m visible · expanding toward {} m",
                         v.resident_radius(),
-                        r.radius
+                        r.rounded_radius_m()
                     )
                 } else if r.follow {
                     "Ready · following player".into()
@@ -1313,15 +1337,7 @@ impl Experiment {
         // continuous travel each receive a bounded share of idle turns.
         let following_target = if r.follow && !self.growth_pending {
             self.active.as_ref().and_then(|v| {
-                stream::target(
-                    stream::Region {
-                        lo: v.bounds[0].map(|x| x as i64),
-                        hi: v.bounds[1].map(|x| x as i64),
-                    },
-                    camera.position.to_array(),
-                    self.eye_velocity.to_array(),
-                    stream_lead_seconds(),
-                )
+                stream::target(v.region, camera.position.to_array(), self.eye_velocity.to_array(), stream_lead_seconds())
             })
         } else {
             None
@@ -1363,16 +1379,13 @@ impl Experiment {
         if update == Some(scheduler::Update::Grow) {
             self.last_update_was_refresh = false;
             if let Some(v) = &self.active {
-                let region = stream::Region {
-                    lo: v.bounds[0].map(|x| x as i64),
-                    hi: v.bounds[1].map(|x| x as i64),
-                };
+                let region = v.region;
                 let center = if r.follow {
                     camera.position.to_array()
                 } else {
                     std::array::from_fn(|a| (v.bounds[0][a] + v.bounds[1][a]) * 0.5)
                 };
-                let next = startup::next_region(region, r.radius, center);
+                let next = startup::next_region(region, target_roots, center);
                 self.expanding = true;
                 self.growth_pending = false;
                 self.shifting = true;
@@ -1384,7 +1397,7 @@ impl Experiment {
                 self.status = format!(
                     "Expanding exact region: {} → {} m",
                     v.resident_radius(),
-                    next.dims()[0] / 2
+                    next.dims()[0] as f64 * stream::root_size_m() * 0.5
                 );
                 self.refresh_world = None;
                 self.worker.send(Job::Shift(
@@ -1413,7 +1426,7 @@ impl Experiment {
                         .map_or(self.camera_margin_m, |m| m.min(self.camera_margin_m)),
                 );
                 self.stream_active_frames += 1;
-                self.stream_outside_frames += u64::from(self.camera_margin_m < VOXEL_SIZE);
+                self.stream_outside_frames += u64::from(self.camera_margin_m < voxel_size());
             }
             if update == Some(scheduler::Update::Follow) {
                 if let Some(next) = following_target {
@@ -1464,9 +1477,9 @@ impl Experiment {
             && !self.expanding
             && !self.growth_pending
             && self.request.is_some_and(|r| {
-                self.active
-                    .as_ref()
-                    .is_some_and(|v| v.resident_radius() == r.radius)
+                self.active.as_ref().is_some_and(|volume| {
+                    volume.region.dims()[0] == r.radius_roots() as usize * 2
+                })
             })
             && (!root_distance::settle_capture()
                 || self
@@ -1501,10 +1514,10 @@ impl Experiment {
             return false;
         };
         let bounds = [
-            lo.map(|x| x as f64 * VOXEL_SIZE),
-            hi.map(|x| x as f64 * VOXEL_SIZE),
+            lo.map(|x| x as f64 * voxel_size()),
+            hi.map(|x| x as f64 * voxel_size()),
         ];
-        (0..3).all(|axis| bounds[1][axis] - bounds[0][axis] == VOXEL_SIZE)
+        (0..3).all(|axis| bounds[1][axis] > bounds[0][axis])
             && active.ownership.contains(bounds)
             && self
                 .shift
@@ -1518,8 +1531,8 @@ impl Experiment {
         let a = self.active.as_ref()?;
         let _ = camera;
         Some([
-            a.bounds[0].map(|v| v + VOXEL_SIZE),
-            a.bounds[1].map(|v| v - VOXEL_SIZE),
+            a.bounds[0].map(|v| v + voxel_size()),
+            a.bounds[1].map(|v| v - voxel_size()),
         ])
     }
     pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {
@@ -1615,9 +1628,9 @@ impl Experiment {
                     .extend(if gpu.camera_submerged.get() { 1. } else { 0. })
                     .to_array(),
                 extent: [
-                    ((a.bounds[1][0] - a.bounds[0][0]) * 16.) as u32,
-                    ((a.bounds[1][1] - a.bounds[0][1]) * 16.) as u32,
-                    ((a.bounds[1][2] - a.bounds[0][2]) * 16.) as u32,
+                    a.region.dims()[0] as u32 * 16,
+                    a.region.dims()[1] as u32 * 16,
+                    a.region.dims()[2] as u32 * 16,
                     a.n,
                 ],
                 viewport: [width as f32, height as f32, a.samples as f32, 0.],
@@ -1707,12 +1720,19 @@ impl Experiment {
             root_distance::Counters::default(),
             root_distance::Cache::counters,
         );
-        let mut json = format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":0.0625,\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
-            self.status,self.stage,self.request.map_or(0,|r|r.radius),a.map_or(0,Volume::resident_radius),region,
+        let native_voxel_m = voxel_size();
+        let mut json = format!("{{\"status\":{:?},\"stage\":{},\"requested_radius_m\":{},\"resident_radius_m\":{},\"world_bounds_m\":{},\"native_voxel_m\":{native_voxel_m},\"requested_build_budget_mib\":{},\"gpu_payload_bytes\":{},\"build_ms\":{},\"upload_cpu_ms\":{},\"mixed_chunks\":{},\"unique_blocks\":{},\"sampled_columns\":{},\"plant_cells\":{},\"palette_entries\":{},\"color_channel_bits\":10,\"refused\":{},\"fixed_snapshot\":{},\"stream_shifts\":{},\"stream_build_ms\":{},\"stream_sampled_columns\":{},\"stream_shared_leaves_last_shift\":{},\"camera_margin_m\":{},\"min_camera_margin_m\":{},\"stream_active_frames\":{},\"stream_outside_frames\":{},\"initial_snapshot_payload_bytes\":{},\"initial_snapshot_wide_leaf_payload_bytes\":{},\"initial_leaf_bytes\":{},\"gpu_leaf_bits\":{},\"lighting\":\"primary_visibility_lambert_without_GI\",\"includes_distant_and_boundary_raster_overhead\":true,\"interior_meshes_omitted\":true,\"supports_direct_voxel_shadows\":true,\"effective_build_budget_mib\":{},\"auto_memory\":{},\"gpu_root_distance_requested\":{},\"gpu_root_distance_tiles_ready\":{},\"gpu_root_distance_tiles_total\":{},\"sparse_roots_requested\":{},\"sparse_roots_active\":{},\"gpu_root_texture_bytes\":{}}}",
+            self.status,self.stage,self.request.map_or(0., Request::radius_m),a.map_or(0.,Volume::resident_radius),region,
             self.request.filter(|r|r.budget!=usize::MAX).map_or(0,|r|r.budget/1048576),self.gpu_bytes(),a.map_or(0.,|a|a.build_ms),self.upload_ms,
             a.map_or(0,|a|a.stats[0]),a.map_or(0,|a|a.stats[1]),a.map_or(0,|a|a.stats[2]),a.map_or(0,|a|a.stats[3]),a.map_or(0,|a|a.stats[4]),self.refused,!self.request.is_some_and(|r|r.follow),self.shifts,self.strip_ms,self.strip_columns,self.strip_shared_leaves,self.camera_margin_m,self.min_camera_margin_m.map_or("null".into(),|v|v.to_string()),self.stream_active_frames,self.stream_outside_frames,a.map_or(0,|a|a.bytes),a.map_or(0,|a|a.wide_bytes),a.map_or(0,|a|a.leaf_bytes),a.map_or(0,|a|a.leaf_encoding.bits()),self.effective_budget_mib,self.request.is_some_and(|r|r.budget==usize::MAX),self.request.is_some_and(|r|r.gpu_distance),distance_tiles_ready,distance_tiles_total,self.request.is_some_and(|r|r.sparse_roots),a.is_some_and(|a|a.sparse_roots),a.map_or(0,Volume::root_bytes));
         json.pop();
         use std::fmt::Write;
+        write!(
+            json,
+            ",\"requested_radius_voxels\":{},\"resident_radius_voxels\":{}",
+            self.request.map_or(0, |r| r.radius_voxels),
+            a.map_or(0, |v| v.region.dims()[0] as u32 / 2 * stream::ROOT_EDGE_VOXELS)
+        ).unwrap();
         write!(json, ",\"published_world_revision\":{},\"content_update_pending\":{},\"edited_root_proofs_invalidated\":{}", a.map_or(0,|v|v.revision),self.refresh_world.is_some(),a.is_some_and(|v|v.edited_root_proofs)).unwrap();
         write!(
             json,
@@ -1720,12 +1740,12 @@ impl Experiment {
             self.expanding || self.growth_pending,
             self.startup_publications
                 .iter()
-                .map(|&(r, t)| [r as f64, t])
+                .map(|&(r, t)| [r, t])
                 .collect::<Vec<_>>()
         )
         .unwrap();
         write!(json, ",\"incremental_startup\":{},\"storage_radius_m\":{},\"arena_resizes\":{},\"arena_copy_bytes\":{}",
-            self.incremental_startup, a.map_or(0, |v| v.n / 2), a.map_or(0, |v| v.arena_resizes), a.map_or(0, |v| v.arena_copy_bytes)).unwrap();
+            self.incremental_startup, a.map_or(0., |v| v.n as f64 * stream::root_size_m() * 0.5), a.map_or(0, |v| v.arena_resizes), a.map_or(0, |v| v.arena_copy_bytes)).unwrap();
         write!(
             json,
             ",\"startup_generated_roots\":{}",
@@ -2002,7 +2022,7 @@ fn make_pipeline(
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NAADF hierarchical exact rays"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
     let pl = gpu
         .device

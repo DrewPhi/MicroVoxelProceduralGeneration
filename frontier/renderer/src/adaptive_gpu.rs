@@ -651,7 +651,7 @@ impl AdaptiveGpu {
         let bind = profile_bind(device, &layout, &uniform, &zero_table);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("adaptive canonical shading"),
-            source: wgpu::ShaderSource::Wgsl(ADAPTIVE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(ADAPTIVE_SHADER)),
         });
         let shadows_layout = adaptive_shadow::sampling_layout(device);
         let shadow_pipeline_layout =
@@ -1333,7 +1333,7 @@ impl AdaptiveGpu {
                     mesh.origin.x as f64,
                     mesh.origin.y as f64,
                     mesh.origin.z as f64,
-                ) * frontier_world::VOXEL_SIZE,
+                ) * frontier_world::voxel_size(),
                 bounds,
                 canonical_bounds: Aabb {
                     min: tile.conservative_surface_bounds[0],
@@ -1615,7 +1615,7 @@ impl AdaptiveGpu {
             camera.position.to_array(),
             forward.to_array(),
             0.025,
-            frontier_world::VOXEL_SIZE * 2.,
+            frontier_world::voxel_size() * 2.,
         );
         let mut draw_order = if self.prepare_reuse_enabled {
             std::mem::take(&mut self.draw_order)
@@ -1744,7 +1744,7 @@ impl AdaptiveGpu {
                     let mut count = 0u32;
                     for (index, bin) in c.bins.iter().enumerate() {
                         stats.native_bin_tests += 1;
-                        if !bin.backfacing(eye, frontier_world::VOXEL_SIZE / 1024.) {
+                        if !bin.backfacing(eye, frontier_world::voxel_size() / 1024.) {
                             mask |= 1u8 << index;
                             count += bin.quad_count;
                         }
@@ -1768,9 +1768,9 @@ impl AdaptiveGpu {
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(&local_eye.extend(1.).to_array()));
             let paint = [
-                (c.origin.x * 16.) as i64 as u32,
-                (c.origin.y * 16.) as i64 as u32,
-                (c.origin.z * 16.) as i64 as u32,
+                (c.origin.x / frontier_world::voxel_size()).round() as i64 as u32,
+                (c.origin.y / frontier_world::voxel_size()).round() as i64 as u32,
+                (c.origin.z / frontier_world::voxel_size()).round() as i64 as u32,
                 (self.voxel_filter as u32)
                     | ((c.exact as u32) << 1)
                     | (((self.lighting[11] > 0.5) as u32) << 2)
@@ -2017,7 +2017,7 @@ impl AdaptiveGpu {
             tile.mesh.origin.x as f64,
             tile.mesh.origin.y as f64,
             tile.mesh.origin.z as f64,
-        ) * frontier_world::VOXEL_SIZE;
+        ) * frontier_world::voxel_size();
         let mut bounds = tile
             .bounds
             .map(|b| (DVec3::from_array(b) - origin).as_vec3());
@@ -2249,7 +2249,7 @@ impl AdaptiveGpu {
             tile.mesh.origin.x as f64,
             tile.mesh.origin.y as f64,
             tile.mesh.origin.z as f64,
-        ) * frontier_world::VOXEL_SIZE;
+        ) * frontier_world::voxel_size();
         let mut bounds = [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)];
         for triangle in &tile.proxy_triangles {
             for p in triangle.positions {
@@ -2517,7 +2517,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(ProxyTriangle, normal), 36);
         assert_eq!(std::mem::offset_of!(ProxyTriangle, color), 48);
         assert_eq!(std::mem::offset_of!(ProxyTriangle, profile_index), 60);
-        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(ADAPTIVE_SHADER)).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2608,7 +2608,7 @@ mod tests {
     #[test]
     fn packed_native_material_palette_matches_canonical_world_exactly() {
         use frontier_world::Material;
-        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(ADAPTIVE_SHADER)).unwrap();
         let (_, palette) = module
             .constants
             .iter()
@@ -2740,7 +2740,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Triangle, normal), 12);
         assert_eq!(std::mem::offset_of!(Triangle, color), 24);
         assert_eq!(std::mem::offset_of!(Triangle, profile_index), 36);
-        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(ADAPTIVE_SHADER)).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2774,7 +2774,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(DerivedTriangle, positions), 0);
         assert_eq!(std::mem::offset_of!(DerivedTriangle, material), 12);
         assert_eq!(std::mem::offset_of!(DerivedTriangle, profile_index), 16);
-        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(ADAPTIVE_SHADER)).unwrap();
         let entry = module
             .entry_points
             .iter()
@@ -2802,7 +2802,7 @@ mod tests {
     }
     #[test]
     fn canonical_shader_validates() {
-        let module = naga::front::wgsl::parse_str(ADAPTIVE_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(ADAPTIVE_SHADER)).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

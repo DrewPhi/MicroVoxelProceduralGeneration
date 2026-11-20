@@ -5,7 +5,7 @@
 //! unit lattice segments. Convex rectangle fans preserve every boundary segment;
 //! no Delaunay library or floating-point geometric predicate is needed.
 use super::{GeometryTile, ProxyTriangle, MAX_NATIVE_QUADS};
-use frontier_world::VOXEL_SIZE;
+use frontier_world::voxel_size;
 use std::collections::HashMap;
 
 type Point = [i64; 3];
@@ -16,11 +16,13 @@ fn line(a: Point, b: Point) -> (Line, usize) {
     fixed[axis] = 0;
     ((axis, fixed), axis)
 }
-fn point(p: [f32; 3]) -> Result<Point, String> {
+fn point(p: [f32; 3], voxel_m: f64) -> Result<Point, String> {
     let mut out = [0; 3];
     for i in 0..3 {
-        let n = p[i] as f64 / VOXEL_SIZE;
-        if !n.is_finite() || n.abs() > (1i64 << 40) as f64 || n != n.round() {
+        let n = (f64::from(p[i]) / voxel_m).round();
+        // The source mesh rounds each cell boundary to f32. Validate that
+        // representation before using the recovered integer address.
+        if !n.is_finite() || n.abs() > (1i64 << 40) as f64 || (n * voxel_m) as f32 != p[i] {
             return Err("native corner is outside exact lattice".into());
         }
         out[i] = n as i64;
@@ -39,15 +41,16 @@ pub(super) fn triangulate(
     let mut rectangles = Vec::with_capacity(tile.mesh.vertices.len() / 4);
     let mut lines: HashMap<Line, Vec<i64>> = HashMap::new();
     let mut unit_faces = 0usize;
+    let voxel_m = voxel_size();
     for (index, q) in tile.mesh.vertices.chunks_exact(4).enumerate() {
         if index % 128 == 0 && cancelled() {
             return Err("adaptive geometry cancelled".into());
         }
         let corners = [
-            point(q[0].position)?,
-            point(q[1].position)?,
-            point(q[2].position)?,
-            point(q[3].position)?,
+            point(q[0].position, voxel_m)?,
+            point(q[1].position, voxel_m)?,
+            point(q[2].position, voxel_m)?,
+            point(q[3].position, voxel_m)?,
         ];
         let axis = q[0]
             .normal
@@ -151,10 +154,10 @@ pub(super) fn triangulate(
             return Ok(None);
         }
         let center: [f32; 3] = std::array::from_fn(|d| {
-            ((corners[0][d] + corners[2][d]) as f64 * (VOXEL_SIZE * 0.5)) as f32
+            ((corners[0][d] + corners[2][d]) as f64 * (voxel_size() * 0.5)) as f32
         });
         if (0..3).any(|d| {
-            center[d] as f64 != (corners[0][d] + corners[2][d]) as f64 * (VOXEL_SIZE * 0.5)
+            center[d] as f64 != (corners[0][d] + corners[2][d]) as f64 * (voxel_size() * 0.5)
         }) {
             return Ok(None);
         }
@@ -171,7 +174,7 @@ pub(super) fn triangulate(
             if j % 256 == 0 && cancelled() {
                 return Err("adaptive geometry cancelled".into());
             }
-            let position = |p: Point| p.map(|n| (n as f64 * VOXEL_SIZE) as f32);
+            let position = |p: Point| p.map(|n| (n as f64 * voxel_size()) as f32);
             triangles.push(ProxyTriangle {
                 positions: [
                     center,
@@ -197,6 +200,17 @@ mod tests {
     use super::*;
     use crate::mesh::Vertex;
     use frontier_world::{FbmParams, Material, World};
+    #[test]
+    fn decimal_native_corners_roundtrip_through_gpu_precision() {
+        for voxel_m in [0.03, 0.15] {
+            let corners = [-233, 17, 121];
+            let mut position = corners.map(|cell| (cell as f64 * voxel_m) as f32);
+            assert_eq!(point(position, voxel_m).unwrap(), corners);
+            position[0] += (voxel_m / 4.) as f32;
+            assert!(point(position, voxel_m).is_err());
+        }
+    }
+
     fn tile() -> GeometryTile {
         let world = World::fbm(7, FbmParams::default()).unwrap();
         let key = TileKey {
@@ -230,7 +244,7 @@ mod tests {
             p[u] += du;
             p[v] += dv;
             tile.mesh.vertices.push(Vertex {
-                position: p.map(|n| (n as f64 * VOXEL_SIZE) as f32),
+                position: p.map(|n| (n as f64 * voxel_size()) as f32),
                 normal,
                 color: Material::Stone.color(),
             });
@@ -281,7 +295,7 @@ mod tests {
             assert!((1..=3).contains(&t.profile_index));
             area += cross.length() * 0.5;
         }
-        let expected = 2. * (80. * 800. + 80. * 80. + 800. * 80.) * VOXEL_SIZE * VOXEL_SIZE;
+        let expected = 2. * (80. * 800. + 80. * 80. + 800. * 80.) * voxel_size() * voxel_size();
         assert_eq!(area, expected);
         // A closed shell has every geometric segment twice, with opposite
         // orientation. This detects unmatched partitions and missing faces.
@@ -309,11 +323,11 @@ mod tests {
             let axis = q[0].normal.iter().position(|&n| n != 0.).unwrap();
             let u = (axis + 1) % 3;
             let v = (axis + 2) % 3;
-            let lo = point(q[0].position).unwrap();
-            let hi = point(q[2].position).unwrap();
+            let lo = point(q[0].position, voxel_size()).unwrap();
+            let hi = point(q[2].position, voxel_size()).unwrap();
             for a in lo[u]..hi[u] {
                 for b in lo[v]..hi[v] {
-                    let p = [(a as f64 + 0.5) * VOXEL_SIZE, (b as f64 + 0.5) * VOXEL_SIZE];
+                    let p = [(a as f64 + 0.5) * voxel_size(), (b as f64 + 0.5) * voxel_size()];
                     let mut covered = false;
                     for t in &triangles {
                         if t.normal != q[0].normal
@@ -382,7 +396,7 @@ mod tests {
                 let b = t.positions[2];
                 let changed = (0..3).find(|&d| a[d] != b[d]).unwrap();
                 assert!(changed == 1 || changed == other);
-                assert_eq!((a[changed] - b[changed]).abs(), VOXEL_SIZE as f32);
+                assert_eq!((a[changed] - b[changed]).abs(), voxel_size() as f32);
             }
         }
     }

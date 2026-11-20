@@ -14,7 +14,7 @@ use crate::{
 use frontier_runtime::occlusion::Aabb;
 use frontier_world::{
     affine_bounds::{bound_native_height, BoundBudget, ColumnBox, HeightBound},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -429,10 +429,10 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
     let proven_sea_plane =
         tile.affine_height_range_m == Some([0., 0.]) || tile.exact_height_range_m == Some([0., 0.]);
     if !tile.exact && !proven_sea_plane {
-        let min = tile.key.min.map(|v| v as f64 * VOXEL_SIZE);
-        let max = min.map(|v| v + tile.key.width_cells as f64 * VOXEL_SIZE);
+        let min = tile.key.min.map(|v| v as f64 * voxel_size());
+        let max = min.map(|v| v + tile.key.width_cells as f64 * voxel_size());
         tile.water_feature_error_m =
-            terrain.seeded_water_feature_debt(min, max, tile.key.step_cells as f64 * VOXEL_SIZE);
+            terrain.seeded_water_feature_debt(min, max, tile.key.step_cells as f64 * voxel_size());
     }
     let envelope = frontier_world::summary::fbm_height_envelope(terrain);
     tile.global_error_m = if tile.exact || !tile.native_quads.is_empty() {
@@ -487,10 +487,10 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
     {
         return;
     }
-    let min = tile.key.min.map(|v| v as f64 * VOXEL_SIZE);
+    let min = tile.key.min.map(|v| v as f64 * voxel_size());
     let max = [
-        (tile.key.min[0] + tile.key.width_cells as i64) as f64 * VOXEL_SIZE,
-        (tile.key.min[1] + tile.key.width_cells as i64) as f64 * VOXEL_SIZE,
+        (tile.key.min[0] + tile.key.width_cells as i64) as f64 * voxel_size(),
+        (tile.key.min[1] + tile.key.width_cells as i64) as f64 * voxel_size(),
     ];
     if world.topology_base_cells().is_some()
         && min[0] < 8.
@@ -514,7 +514,7 @@ fn configure_occlusion_bounds(world: &World, tile: &mut GeometryTile) {
     }
     top = top.min(tile.bounds[0][1]);
     let solid = Aabb {
-        min: [min[0], envelope[0] - VOXEL_SIZE, min[1]],
+        min: [min[0], envelope[0] - voxel_size(), min[1]],
         max: [max[0], top, max[1]],
     };
     if solid.valid() && (0..3).all(|a| solid.min[a] < solid.max[a]) {
@@ -710,7 +710,7 @@ fn pack_native_quads_cancelled(
                 .position(|&v| v != 0.)
                 .ok_or("native quad has no normal")?;
             let area = (0..3).filter(|&a| a != axis).try_fold(1usize, |area, a| {
-                let cells = ((q[2].position[a] - q[0].position[a]) as f64 / VOXEL_SIZE).round();
+                let cells = ((q[2].position[a] - q[0].position[a]) as f64 / voxel_size()).round();
                 if !cells.is_finite() || cells <= 0. || cells > MAX_NATIVE_QUADS as f64 {
                     return Err("invalid native quad extent");
                 }
@@ -747,8 +747,8 @@ fn pack_native_quads_cancelled(
         // only tessellates the same planar surfaces; materials and coverage in
         // world space remain canonical. Distant proxy geometry stays compact.
         let extent = [
-            ((q[2].position[u] - q[0].position[u]) as f64 / VOXEL_SIZE).round() as usize,
-            ((q[2].position[v] - q[0].position[v]) as f64 / VOXEL_SIZE).round() as usize,
+            ((q[2].position[u] - q[0].position[u]) as f64 / voxel_size()).round() as usize,
+            ((q[2].position[v] - q[0].position[v]) as f64 / voxel_size()).round() as usize,
         ];
         for dv in 0..extent[1] {
             if dv % 128 == 0 && cancelled() {
@@ -759,11 +759,11 @@ fn pack_native_quads_cancelled(
                     return Err("adaptive geometry cancelled".into());
                 }
                 let mut anchor = q[0].position;
-                anchor[u] += (du as f64 * VOXEL_SIZE) as f32;
-                anchor[v] += (dv as f64 * VOXEL_SIZE) as f32;
+                anchor[u] += (du as f64 * voxel_size()) as f32;
+                anchor[v] += (dv as f64 * voxel_size()) as f32;
                 quads.push(NativeQuad {
                     anchor,
-                    extent: [VOXEL_SIZE as f32; 2],
+                    extent: [voxel_size() as f32; 2],
                     axis_sign: axis as u32 | if q[0].normal[axis] < 0. { 4 } else { 0 },
                     material,
                     profile_index,
@@ -809,8 +809,8 @@ fn pack_native_quads_cancelled(
 fn disable_owner_boundary_profiles(tile: &mut GeometryTile) {
     let mut ids = HashSet::new();
     for (i, v) in tile.mesh.vertices.iter().enumerate() {
-        let x = v.position[0] as f64 / VOXEL_SIZE + tile.mesh.origin.x as f64;
-        let z = v.position[2] as f64 / VOXEL_SIZE + tile.mesh.origin.z as f64;
+        let x = v.position[0] as f64 / voxel_size() + tile.mesh.origin.x as f64;
+        let z = v.position[2] as f64 / voxel_size() + tile.mesh.origin.z as f64;
         if ((x == -128. || x == 128.) && z > -128. && z < 128.)
             || ((z == -128. || z == 128.) && x > -128. && x < 128.)
         {
@@ -835,13 +835,13 @@ fn remove_native_volume_boundary_faces(tile: &mut GeometryTile) {
     let mut face_count = 0usize;
     for (i, q) in tile.mesh.vertices.chunks_exact(4).enumerate() {
         let axis = q[0].normal.iter().position(|&v| v != 0.).unwrap();
-        let plane = q[0].position[axis] as f64 / VOXEL_SIZE + origin[axis] as f64;
+        let plane = q[0].position[axis] as f64 / voxel_size() + origin[axis] as f64;
         let remove = if axis != 1 && (plane == -128. || plane == 128.) {
             let tangent = if axis == 0 { 2 } else { 0 };
             // Native quads were split on global 16-cell profile blocks. Since
             // owner endpoints are multiples of 16, no quad straddles a cut.
             let center = (q[0].position[tangent] as f64 + q[2].position[tangent] as f64)
-                / (2. * VOXEL_SIZE)
+                / (2. * voxel_size())
                 + origin[tangent] as f64;
             (-128.0..128.0).contains(&center)
         } else {
@@ -855,7 +855,7 @@ fn remove_native_volume_boundary_faces(tile: &mut GeometryTile) {
         let v = (axis + 2) % 3;
         face_count += (((q[2].position[u] - q[0].position[u]) as f64
             * (q[2].position[v] - q[0].position[v]) as f64)
-            / (VOXEL_SIZE * VOXEL_SIZE))
+            / (voxel_size() * voxel_size()))
             .round() as usize;
         vertices.extend_from_slice(q);
         indices.extend(
@@ -887,7 +887,7 @@ fn remove_volume_boundary_faces(tile: &mut GeometryTile) {
         let v: [Vertex; 3] = std::array::from_fn(|i| tile.mesh.vertices[tri[i] as usize]);
         let mut owner_axis = None;
         for axis in [0, 2] {
-            let global = v[0].position[axis] as f64 / VOXEL_SIZE + origin[axis] as f64;
+            let global = v[0].position[axis] as f64 / voxel_size() + origin[axis] as f64;
             if (global == -128. || global == 128.)
                 && v.iter().all(|p| p.position[axis] == v[0].position[axis])
             {
@@ -899,7 +899,7 @@ fn remove_volume_boundary_faces(tile: &mut GeometryTile) {
             let tangent = if axis == 0 { 2 } else { 0 };
             let mut polys = vec![];
             for (plane, sign) in [(-128., -1.), (128., 1.)] {
-                let plane = ((plane - origin[tangent] as f64) * VOXEL_SIZE) as f32;
+                let plane = ((plane - origin[tangent] as f64) * voxel_size()) as f32;
                 let mut out = vec![];
                 let mut last = v[2];
                 let mut ld = (last.position[tangent] - plane) * sign;
@@ -1035,7 +1035,7 @@ fn build_surface_with_geometry(
         let mut height_range = [f64::INFINITY, f64::NEG_INFINITY];
         for z in key.min[1] - 1..=key.min[1] + key.width_cells as i64 {
             for x in key.min[0] - 1..=key.min[0] + key.width_cells as i64 {
-                let h = out.heights.height(x, z).unwrap() as f64 * VOXEL_SIZE;
+                let h = out.heights.height(x, z).unwrap() as f64 * voxel_size();
                 height_range[0] = height_range[0].min(h);
                 height_range[1] = height_range[1].max(h);
             }
@@ -1169,7 +1169,7 @@ fn build_surface_with_geometry(
     let exact_height_range = if certificate.is_some() {
         let mut r = [f64::INFINITY, f64::NEG_INFINITY];
         for c in generator.heights.values() {
-            let h = c.height as f64 * VOXEL_SIZE;
+            let h = c.height as f64 * voxel_size();
             r[0] = r[0].min(h);
             r[1] = r[1].max(h);
         }
@@ -1273,9 +1273,9 @@ fn build_surface_with_geometry(
     );
     if coarse {
         let origin = [
-            key.min[0] as f64 * VOXEL_SIZE,
+            key.min[0] as f64 * voxel_size(),
             0.,
-            key.min[1] as f64 * VOXEL_SIZE,
+            key.min[1] as f64 * voxel_size(),
         ];
         for quad in &generator.coarse_quads {
             let axis = (quad.axis_sign & 3) as usize;
@@ -1320,7 +1320,7 @@ fn finish(
     let origin = [mesh.origin.x, mesh.origin.y, mesh.origin.z];
     for v in &mesh.vertices {
         for a in 0..3 {
-            let p = origin[a] as f64 * VOXEL_SIZE + v.position[a] as f64;
+            let p = origin[a] as f64 * voxel_size() + v.position[a] as f64;
             bounds[0][a] = bounds[0][a].min(p);
             bounds[1][a] = bounds[1][a].max(p);
         }
@@ -1490,10 +1490,10 @@ fn native_profiles_with_summary_reuse(
         let v = (axis + 2) % 3;
         let p = quad[0]
             .position
-            .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+            .map(|n| (n as f64 / voxel_size()).round() as i64);
         let hi = quad[2]
             .position
-            .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+            .map(|n| (n as f64 / voxel_size()).round() as i64);
         let cuts = |a: usize| {
             let mut points = vec![p[a]];
             if a != 1 {
@@ -1532,7 +1532,7 @@ fn native_profiles_with_summary_reuse(
                     point[u] = du;
                     point[v] = dv;
                     let mut vertex = quad[0];
-                    vertex.position = point.map(|n| (n as f64 * VOXEL_SIZE) as f32);
+                    vertex.position = point.map(|n| (n as f64 * voxel_size()) as f32);
                     out.vertices.push(vertex);
                     addresses.push(id);
                 }
@@ -1597,9 +1597,9 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
                     .ok_or("missing native profile material")?
             } else {
                 terrain.surface_material(
-                    (x as f64 + 0.5) * VOXEL_SIZE,
-                    (z as f64 + 0.5) * VOXEL_SIZE,
-                    h as f64 * VOXEL_SIZE,
+                    (x as f64 + 0.5) * voxel_size(),
+                    (z as f64 + 0.5) * voxel_size(),
+                    h as f64 * voxel_size(),
                 )
             };
             let add = |profile: &mut [[f32; 4]; 5], a: usize, n: i64, m: Material| {
@@ -2281,9 +2281,9 @@ impl Generator<'_> {
     fn point(&mut self, x: i64, z: i64) -> Result<[f32; 3], String> {
         let h = self.height(x, z)?;
         Ok([
-            (x as f64 * VOXEL_SIZE) as f32,
-            (h as f64 * VOXEL_SIZE) as f32,
-            (z as f64 * VOXEL_SIZE) as f32,
+            (x as f64 * voxel_size()) as f32,
+            (h as f64 * voxel_size()) as f32,
+            (z as f64 * voxel_size()) as f32,
         ])
     }
     fn triangle(
@@ -2371,16 +2371,16 @@ impl Generator<'_> {
                     ),
                     _ => (x + s - n, z, x + s - n - 1, z, x + s - n - 1, z),
                 };
-                let height = self.height(cx, cz)? as f64 * VOXEL_SIZE;
+                let height = self.height(cx, cz)? as f64 * voxel_size();
                 let a = [
-                    (ax as f64 * VOXEL_SIZE) as f32,
+                    (ax as f64 * voxel_size()) as f32,
                     height as f32,
-                    (az as f64 * VOXEL_SIZE) as f32,
+                    (az as f64 * voxel_size()) as f32,
                 ];
                 let b = [
-                    (bx as f64 * VOXEL_SIZE) as f32,
+                    (bx as f64 * voxel_size()) as f32,
                     height as f32,
-                    (bz as f64 * VOXEL_SIZE) as f32,
+                    (bz as f64 * voxel_size()) as f32,
                 ];
                 if let Some(p) = previous {
                     self.triangle(center, p, a, material)?
@@ -2551,18 +2551,18 @@ impl Generator<'_> {
             }
         }
         for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
-            self.appearance.area_m2[a] += mean[p][3] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+            self.appearance.area_m2[a] += mean[p][3] as f64 * voxel_size() * voxel_size();
             for c in 0..3 {
-                self.appearance.color_area[a][c] += mean[p][c] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+                self.appearance.color_area[a][c] += mean[p][c] as f64 * voxel_size() * voxel_size();
             }
         }
         let id = self.face_profiles.len() as u32;
         self.face_profiles.push(crate::spatial_appearance::header(
             [
-                (x as f64 * VOXEL_SIZE) as f32,
-                (z as f64 * VOXEL_SIZE) as f32,
+                (x as f64 * voxel_size()) as f32,
+                (z as f64 * voxel_size()) as f32,
             ],
-            (s as f64 * VOXEL_SIZE) as f32,
+            (s as f64 * voxel_size()) as f32,
             nodes,
             id,
         ));
@@ -2602,10 +2602,10 @@ impl Generator<'_> {
         for value in values {
             for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
                 self.appearance.area_m2[a] +=
-                    value[p][3] as f64 * area_scale * VOXEL_SIZE * VOXEL_SIZE / values.len() as f64;
+                    value[p][3] as f64 * area_scale * voxel_size() * voxel_size() / values.len() as f64;
                 for c in 0..3 {
                     self.appearance.color_area[a][c] +=
-                        value[p][c] as f64 * area_scale * VOXEL_SIZE * VOXEL_SIZE
+                        value[p][c] as f64 * area_scale * voxel_size() * voxel_size()
                             / values.len() as f64;
                 }
             }
@@ -2624,9 +2624,9 @@ impl Generator<'_> {
         self.face_profiles
             .push(crate::spatial_appearance::visibility_header(
                 [
-                    (x + s / 2) as f32 * VOXEL_SIZE as f32,
-                    (z + s / 2) as f32 * VOXEL_SIZE as f32,
-                    height as f32 * VOXEL_SIZE as f32,
+                    (x + s / 2) as f32 * voxel_size() as f32,
+                    (z + s / 2) as f32 * voxel_size() as f32,
+                    height as f32 * voxel_size() as f32,
                 ],
                 base,
                 at,
@@ -2651,8 +2651,8 @@ impl Generator<'_> {
         let at = self.face_profiles.len() as u32;
         self.face_profiles
             .push(crate::spatial_appearance::visibility_spatial_header(
-                [x as f32 * VOXEL_SIZE as f32, z as f32 * VOXEL_SIZE as f32],
-                s as f32 * VOXEL_SIZE as f32,
+                [x as f32 * voxel_size() as f32, z as f32 * voxel_size() as f32],
+                s as f32 * voxel_size() as f32,
                 nodes,
                 at,
             ));
@@ -2792,10 +2792,10 @@ impl Generator<'_> {
         let at = self.face_profiles.len() as u32;
         let header = crate::spatial_appearance::map_header(
             [
-                (map.origin_cells[0] - self.key.min[0]) as f32 * VOXEL_SIZE as f32,
-                (map.origin_cells[1] - self.key.min[1]) as f32 * VOXEL_SIZE as f32,
+                (map.origin_cells[0] - self.key.min[0]) as f32 * voxel_size() as f32,
+                (map.origin_cells[1] - self.key.min[1]) as f32 * voxel_size() as f32,
             ],
-            map.spacing_cells as f32 * VOXEL_SIZE as f32,
+            map.spacing_cells as f32 * voxel_size() as f32,
             map.dimension,
             &refs,
             at,
@@ -2841,9 +2841,9 @@ impl Generator<'_> {
             let vertices = std::array::from_fn(|a| {
                 let p = self.mesh.vertices[tri[a] as usize].position;
                 [
-                    self.key.min[0] as f64 * VOXEL_SIZE + p[0] as f64,
+                    self.key.min[0] as f64 * voxel_size() + p[0] as f64,
                     p[1] as f64,
-                    self.key.min[1] as f64 * VOXEL_SIZE + p[2] as f64,
+                    self.key.min[1] as f64 * voxel_size() + p[2] as f64,
                 ]
             });
             if let Some(e) = bound
@@ -2901,10 +2901,10 @@ impl Generator<'_> {
         };
         for (profile_axis, appearance_axis) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
             self.appearance.area_m2[appearance_axis] +=
-                profile[profile_axis][3] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+                profile[profile_axis][3] as f64 * voxel_size() * voxel_size();
             for c in 0..3 {
                 self.appearance.color_area[appearance_axis][c] +=
-                    profile[profile_axis][c] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+                    profile[profile_axis][c] as f64 * voxel_size() * voxel_size();
             }
         }
         Ok(profile)
@@ -3075,7 +3075,7 @@ impl Generator<'_> {
                     [t, hi, plane],
                 ]
             }
-            .map(|p| p.map(|v| (v as f64 * VOXEL_SIZE) as f32));
+            .map(|p| p.map(|v| (v as f64 * voxel_size()) as f32));
             if !positive {
                 points.reverse()
             }
@@ -3106,7 +3106,7 @@ fn certify(
         let tri: [glam::DVec3; 3] = std::array::from_fn(|a| {
             glam::Vec3::from(g.mesh.vertices[g.mesh.indices[index * 3 + a] as usize].position)
                 .as_dvec3()
-                / VOXEL_SIZE
+                / voxel_size()
         });
         let lo = tri
             .iter()
@@ -3164,7 +3164,7 @@ fn certify(
                 if length > 0 {
                     let height = g.height(x, z)? as f64;
                     for p in &poly[..length] {
-                        max_error = max_error.max((p.y - height).abs() * VOXEL_SIZE)
+                        max_error = max_error.max((p.y - height).abs() * voxel_size())
                     }
                 }
             }
@@ -3493,14 +3493,14 @@ impl GeometryCache {
             tile.naadf_owned = true;
             tile.bounds = [
                 [
-                    key.min[0] as f64 * VOXEL_SIZE,
+                    key.min[0] as f64 * voxel_size(),
                     owner.bounds[0][1],
-                    key.min[1] as f64 * VOXEL_SIZE,
+                    key.min[1] as f64 * voxel_size(),
                 ],
                 [
-                    (key.min[0] + key.width_cells as i64) as f64 * VOXEL_SIZE,
+                    (key.min[0] + key.width_cells as i64) as f64 * voxel_size(),
                     owner.bounds[1][1],
-                    (key.min[1] + key.width_cells as i64) as f64 * VOXEL_SIZE,
+                    (key.min[1] + key.width_cells as i64) as f64 * voxel_size(),
                 ],
             ];
             tile.conservative_surface_bounds = tile.bounds;
@@ -4347,8 +4347,8 @@ mod tests {
         // Independent vertical ray/triangle hits at non-grid locations.
         for z in 0..32 {
             for x in 0..32 {
-                let px = (x as f64 + 0.19) * VOXEL_SIZE;
-                let pz = (z as f64 + 0.38) * VOXEL_SIZE;
+                let px = (x as f64 + 0.19) * voxel_size();
+                let pz = (z as f64 + 0.38) * voxel_size();
                 let native_h = world
                     .column(key(8).min[0] + x, key(8).min[1] + z)
                     .height_m();
@@ -4390,7 +4390,7 @@ mod tests {
         .unwrap();
         let intervals = |tile: &GeometryTile| {
             let mut out = std::collections::BTreeSet::new();
-            let plane = tile.key.width_cells as f32 * VOXEL_SIZE as f32;
+            let plane = tile.key.width_cells as f32 * voxel_size() as f32;
             for triangle in tile.mesh.indices.chunks_exact(3) {
                 let tri: [Vertex; 3] =
                     std::array::from_fn(|a| tile.mesh.vertices[triangle[a] as usize]);
@@ -4400,7 +4400,7 @@ mod tests {
                     if a[0] == plane
                         && b[0] == plane
                         && a[1] == b[1]
-                        && (a[2] - b[2]).abs() == VOXEL_SIZE as f32
+                        && (a[2] - b[2]).abs() == voxel_size() as f32
                     {
                         out.insert((a[1].to_bits(), a[2].min(b[2]).to_bits()));
                     }
@@ -4499,16 +4499,16 @@ mod tests {
                 for (a, b) in [(0, 1), (1, 2), (2, 0)] {
                     let a = tile.mesh.vertices[tri[a] as usize].position;
                     let b = tile.mesh.vertices[tri[b] as usize].position;
-                    let plane = -(tile.mesh.origin.x as f64 * VOXEL_SIZE) as f32;
+                    let plane = -(tile.mesh.origin.x as f64 * voxel_size()) as f32;
                     if a[0] == plane && b[0] == plane && a[2] != b[2] {
                         let mut pair = [
                             (
                                 a[1].to_bits(),
-                                ((tile.mesh.origin.z as f64 * VOXEL_SIZE) as f32 + a[2]).to_bits(),
+                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + a[2]).to_bits(),
                             ),
                             (
                                 b[1].to_bits(),
-                                ((tile.mesh.origin.z as f64 * VOXEL_SIZE) as f32 + b[2]).to_bits(),
+                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + b[2]).to_bits(),
                             ),
                         ];
                         pair.sort();
@@ -4592,9 +4592,9 @@ mod tests {
                     for (a, p) in profile.iter().enumerate() {
                         assert!(p.iter().all(|v| v.is_finite() && *v >= 0.));
                         let weight = axes[a].dot(view).max(0.);
-                        area += weight * p[3] as f64 * VOXEL_SIZE * VOXEL_SIZE;
+                        area += weight * p[3] as f64 * voxel_size() * voxel_size();
                         let rgb = glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
-                        sum += rgb * light(axes[a]) * weight * VOXEL_SIZE * VOXEL_SIZE;
+                        sum += rgb * light(axes[a]) * weight * voxel_size() * voxel_size();
                         if weight > 0. && p[3] > 0. {
                             let color = rgb / p[3] as f64 * light(axes[a]);
                             lower = lower.min(color);
@@ -4724,7 +4724,7 @@ mod tests {
             mesh.origin.x as f64,
             mesh.origin.y as f64,
             mesh.origin.z as f64,
-        ) * VOXEL_SIZE;
+        ) * voxel_size();
         let point =
             |i: u32| glam::Vec3::from(mesh.vertices[i as usize].position).as_dvec3() + shift;
         let mut best: Option<(f64, [f32; 3])> = None;
@@ -4791,8 +4791,8 @@ mod tests {
             )
             .unwrap();
             for z in -16..16 {
-                let hl = (world.column(-1, z).height_m() / VOXEL_SIZE) as i64;
-                let hr = (world.column(0, z).height_m() / VOXEL_SIZE) as i64;
+                let hl = world.column(-1, z).height_cells();
+                let hr = world.column(0, z).height_cells();
                 if hl == hr {
                     continue;
                 }
@@ -4800,8 +4800,8 @@ mod tests {
                     let sign = if hl > hr { -1. } else { 1. };
                     let o = glam::DVec3::new(
                         -sign * 0.00001,
-                        (y as f64 + 0.61) * VOXEL_SIZE,
-                        (z as f64 + 0.37) * VOXEL_SIZE,
+                        (y as f64 + 0.61) * voxel_size(),
+                        (z as f64 + 0.37) * voxel_size(),
                     );
                     let d = glam::DVec3::new(sign, 0., 0.);
                     let a = mesh_ray(left_native.as_ref().unwrap_or(&left.mesh), o, d);
@@ -4856,19 +4856,19 @@ mod tests {
             };
             for (o, d) in [
                 (
-                    glam::DVec3::new(127.5 * VOXEL_SIZE, -0.5 * VOXEL_SIZE, 0.37 * VOXEL_SIZE),
+                    glam::DVec3::new(127.5 * voxel_size(), -0.5 * voxel_size(), 0.37 * voxel_size()),
                     glam::DVec3::X,
                 ),
                 (
-                    glam::DVec3::new(127.5 * VOXEL_SIZE, 2., 0.37 * VOXEL_SIZE),
+                    glam::DVec3::new(127.5 * voxel_size(), 2., 0.37 * voxel_size()),
                     -glam::DVec3::Y,
                 ),
                 (
-                    glam::DVec3::new(128. * VOXEL_SIZE + 0.000001, 2., 0.37 * VOXEL_SIZE),
+                    glam::DVec3::new(128. * voxel_size() + 0.000001, 2., 0.37 * voxel_size()),
                     -glam::DVec3::Y,
                 ),
                 (
-                    glam::DVec3::new(128. * VOXEL_SIZE - 0.000001, 2., 0.37 * VOXEL_SIZE),
+                    glam::DVec3::new(128. * voxel_size() - 0.000001, 2., 0.37 * voxel_size()),
                     -glam::DVec3::Y,
                 ),
             ] {
@@ -5956,10 +5956,10 @@ mod tests {
                 let v = (axis + 2) % 3;
                 let p = q[0]
                     .position
-                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                    .map(|n| (n as f64 / voxel_size()).round() as i64);
                 let end = q[2]
                     .position
-                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                    .map(|n| (n as f64 / voxel_size()).round() as i64);
                 for a in p[u]..end[u] {
                     for b in p[v]..end[v] {
                         let mut c = p;
@@ -6012,12 +6012,12 @@ mod tests {
                     let offset = if a == 0 { k.min[0] } else { k.min[1] };
                     let lo = q
                         .iter()
-                        .map(|v| (v.position[a] as f64 / VOXEL_SIZE).round() as i64 + offset)
+                        .map(|v| (v.position[a] as f64 / voxel_size()).round() as i64 + offset)
                         .min()
                         .unwrap();
                     let hi = q
                         .iter()
-                        .map(|v| (v.position[a] as f64 / VOXEL_SIZE).round() as i64 + offset)
+                        .map(|v| (v.position[a] as f64 / voxel_size()).round() as i64 + offset)
                         .max()
                         .unwrap();
                     if lo != hi {
@@ -6054,10 +6054,10 @@ mod tests {
                 let v = (axis + 2) % 3;
                 let p = q[0]
                     .position
-                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                    .map(|n| (n as f64 / voxel_size()).round() as i64);
                 let hi = q[2]
                     .position
-                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64);
+                    .map(|n| (n as f64 / voxel_size()).round() as i64);
                 for vv in p[v]..hi[v] {
                     for uu in p[u]..hi[u] {
                         let mut cell = p;
@@ -6090,9 +6090,9 @@ mod tests {
             for q in &tile.native_quads {
                 // Every shared edge has exactly one canonical-cell segment:
                 // no edge can contain another unit face's vertex in its interior.
-                assert_eq!(q.extent, [VOXEL_SIZE as f32; 2]);
+                assert_eq!(q.extent, [voxel_size() as f32; 2]);
                 assert!(actual.insert((
-                    q.anchor.map(|n| (n as f64 / VOXEL_SIZE).round() as i64),
+                    q.anchor.map(|n| (n as f64 / voxel_size()).round() as i64),
                     q.axis_sign,
                     palette[q.material as usize].color().map(f32::to_bits),
                     q.profile_index
@@ -6221,9 +6221,9 @@ mod tests {
                     for y in [solid.min[1] + 0.00001, solid.max[1] - 0.00001] {
                         assert_ne!(
                             world.material(Cell::from_meters([
-                                (cx as f64 + 0.5) * VOXEL_SIZE,
+                                (cx as f64 + 0.5) * voxel_size(),
                                 y,
-                                (cz as f64 + 0.5) * VOXEL_SIZE
+                                (cz as f64 + 0.5) * voxel_size()
                             ])),
                             Material::Air
                         );
@@ -6432,7 +6432,7 @@ mod tests {
             } else {
                 assert_eq!(
                     error,
-                    10. * VOXEL_SIZE,
+                    10. * voxel_size(),
                     "outside endpoint must participate in per-tile wall certificate"
                 );
             }
@@ -6496,7 +6496,7 @@ mod tests {
             } else {
                 bin.min_plane as f64 - 1.
             };
-            assert!(bin.backfacing(eye, VOXEL_SIZE / 1024.));
+            assert!(bin.backfacing(eye, voxel_size() / 1024.));
             for q in quads {
                 let normal = if q.axis_sign & 4 != 0 { -1. } else { 1. };
                 assert!(normal * (eye[axis] - q.anchor[axis] as f64) < 0.);
@@ -6736,7 +6736,7 @@ mod tests {
             g.key.width_cells = width;
             assert_eq!(
                 g.appearance.area_m2[0],
-                entry.value[0][3] as f64 * VOXEL_SIZE * VOXEL_SIZE / 8.
+                entry.value[0][3] as f64 * voxel_size() * voxel_size() / 8.
             );
         }
         let baseline =
@@ -6830,7 +6830,7 @@ mod tests {
         let exact_range = if local.is_some() {
             let mut r = [f64::INFINITY, f64::NEG_INFINITY];
             for c in g.heights.values() {
-                let h = c.height as f64 * VOXEL_SIZE;
+                let h = c.height as f64 * voxel_size();
                 r[0] = r[0].min(h);
                 r[1] = r[1].max(h);
             }
@@ -6931,7 +6931,7 @@ mod tests {
                         exact.mesh.origin.x as f64,
                         exact.mesh.origin.y as f64,
                         exact.mesh.origin.z as f64,
-                    ) * VOXEL_SIZE,
+                    ) * voxel_size(),
                     &camera,
                     1920,
                     1080,
@@ -6950,7 +6950,7 @@ mod tests {
                             tile.mesh.origin.x as f64,
                             tile.mesh.origin.y as f64,
                             tile.mesh.origin.z as f64,
-                        ) * VOXEL_SIZE,
+                        ) * voxel_size(),
                         &camera,
                         1920,
                         1080,
@@ -6979,12 +6979,12 @@ mod tests {
                             (key.min[0] as f64
                                 + (patch % n) as f64 * step as f64
                                 + step as f64 / 2.)
-                                * VOXEL_SIZE,
+                                * voxel_size(),
                             (exact.bounds[0][1] + exact.bounds[1][1]) / 2.,
                             (key.min[1] as f64
                                 + (patch / n) as f64 * step as f64
                                 + step as f64 / 2.)
-                                * VOXEL_SIZE,
+                                * voxel_size(),
                         );
                         let view = (camera.position - center).normalize();
                         if let (Some(a), Some(b)) = (radiance(a, view), radiance(b, view)) {
@@ -7029,7 +7029,7 @@ mod tests {
         )
         .unwrap();
         assert!(tile.certified_error_m.is_none());
-        assert!(tile.affine_error_m.unwrap() <= VOXEL_SIZE + 1e-8);
+        assert!(tile.affine_error_m.unwrap() <= voxel_size() + 1e-8);
         assert_eq!(tile.affine_stats.quad_bounds, 64);
         assert_eq!(tile.affine_stats.unavailable_quads, 0);
         assert!(tile.sampled_columns < 10_000);

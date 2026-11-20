@@ -36,7 +36,7 @@ fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
 }
 #[test]
 fn shader_is_valid() {
-    let m = naga::front::wgsl::parse_str(SHADER).unwrap();
+    let m = naga::front::wgsl::parse_str(&crate::voxel_shader(SHADER)).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -291,8 +291,8 @@ fn gpu_matches_canonical_rays_for_source(
             for dz in -6..6 {
                 for dx in -6..6 {
                     let c = world.column(x + dx, z + dz);
-                    let ground = (c.ground_height_m() / VOXEL_SIZE) as i64;
-                    let top = (c.height_m() / VOXEL_SIZE) as i64;
+                    let ground = (c.ground_height_m() / voxel_size()) as i64;
+                    let top = (c.height_m() / voxel_size()) as i64;
                     for y in ground..top {
                         world.set(
                             Cell {
@@ -323,9 +323,9 @@ fn gpu_matches_canonical_rays_for_source(
             }
             inspection = Some([x, z]);
             DVec3::new(
-                x as f64 * VOXEL_SIZE,
-                column.visible_top as f64 * VOXEL_SIZE + 1.7,
-                z as f64 * VOXEL_SIZE,
+                x as f64 * voxel_size(),
+                column.visible_top as f64 * voxel_size() + 1.7,
+                z as f64 * voxel_size(),
             )
         } else {
             let height = world.height_m(0., 0.);
@@ -624,7 +624,7 @@ fn gpu_matches_canonical_rays_for_source(
                                     {
                                         let ground =
                                             (world.column(hit.cell.x, hit.cell.z).ground_height_m()
-                                                / VOXEL_SIZE)
+                                                / voxel_size())
                                                 as i64;
                                         seen_bed += usize::from(hit.cell.y == ground - 1);
                                     }
@@ -764,7 +764,7 @@ fn gpu_matches_canonical_rays_for_source(
                 check_rays(&volume);
             }
             assert!(volume.arena_resizes > 0 && volume.arena_copy_bytes > 0);
-            assert_eq!(volume.resident_radius(), 12);
+            assert_eq!(volume.resident_radius(), 12.);
         }
         if let Some(state) = state.as_mut().filter(|_| gpu_distance) {
             let warm = |volume: &mut Volume| {

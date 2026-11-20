@@ -2,7 +2,7 @@
 //! automatically derived display meshes never change gameplay voxel identity.
 use frontier_world::{
     vegetation::{self, PlantRecord, Species},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -14,6 +14,8 @@ use std::{
     thread,
     time::Instant,
 };
+#[path = "ground_detail.rs"]
+pub(crate) mod ground_detail;
 #[path = "distant_vegetation.rs"]
 mod distant_vegetation;
 #[path = "shadow_lifecycle.rs"]
@@ -261,7 +263,7 @@ fn ground_key(p: &PlantRecord, lod: u8, edit_id: u64) -> MeshKey {
     }
 }
 fn selected_stride(distance: f64, projection: f64, config: &VegetationConfig) -> u8 {
-    let pixel = VOXEL_SIZE * projection / distance.max(1.);
+    let pixel = voxel_size() * projection / distance.max(1.);
     let mut lod = 1;
     while !config.reference && lod < 8 && pixel * (lod * 2) as f64 <= config.pixel_error as f64 {
         lod *= 2;
@@ -578,9 +580,9 @@ impl CullView {
             p.root.x as f64,
             p.root.y as f64 + height * 0.5,
             p.root.z as f64,
-        ) * VOXEL_SIZE;
-        let bound = (2. * radius * radius + height * height * 0.25).sqrt() * VOXEL_SIZE;
-        self.intersects_sphere(center, bound + 7. * VOXEL_SIZE * 3f64.sqrt())
+        ) * voxel_size();
+        let bound = (2. * radius * radius + height * height * 0.25).sqrt() * voxel_size();
+        self.intersects_sphere(center, bound + 7. * voxel_size() * 3f64.sqrt())
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -762,7 +764,7 @@ pub struct GroundInspection {
 }
 pub struct VegetationStream {
     pub visibility_benchmark: bool,
-    benchmark_radius: u32,
+    benchmark_radius: f64,
     benchmark_cube: Option<[[f64; 3]; 2]>,
     benchmark_base_radii: [f64; 3],
     shadows_enabled: bool,
@@ -882,13 +884,14 @@ impl VegetationStream {
                             }
                             let done = match job {
                                 Job::Tile(t, w, _) => {
-                                    let min = [t.x * TILE_CELLS, t.z * TILE_CELLS];
-                                    let max = [min[0] + TILE_CELLS, min[1] + TILE_CELLS];
-                                    Done::Tile(
-                                        t,
-                                        w.revision(),
-                                        w.vegetation_records_species(min, max, species(t.species)),
-                                    )
+                                    let records = if t.species == ground_detail::TILE_SPECIES {
+                                        ground_detail::records(&w, t.x, t.z, &cancelled)
+                                    } else {
+                                        let min = [t.x * TILE_CELLS, t.z * TILE_CELLS];
+                                        let max = [min[0] + TILE_CELLS, min[1] + TILE_CELLS];
+                                        w.vegetation_records_species(min, max, species(t.species))
+                                    };
+                                    Done::Tile(t, w.revision(), records)
                                 }
                                 Job::Mesh(key, p, w, _)
                                     if (key.lod == 16 || (matched_tree_lods && key.lod == 8))
@@ -1042,7 +1045,7 @@ impl VegetationStream {
         let reference = config.reference;
         Self {
             visibility_benchmark: false,
-            benchmark_radius: 0,
+            benchmark_radius: 0.,
             benchmark_cube: None,
             benchmark_base_radii: [
                 config.grass_radius_m,
@@ -1130,7 +1133,7 @@ impl VegetationStream {
             self.stable_frame = None;
         }
     }
-    pub(crate) fn set_visibility_benchmark(&mut self, enabled: bool, radius: u32, eye: [f64; 3]) {
+    pub(crate) fn set_visibility_benchmark(&mut self, enabled: bool, radius: f64, eye: [f64; 3]) {
         if self.visibility_benchmark == enabled && self.benchmark_radius == radius {
             return;
         }
@@ -1139,14 +1142,15 @@ impl VegetationStream {
         self.config.grass_radius_m = self.benchmark_base_radii[0];
         self.config.flower_radius_m = self.benchmark_base_radii[1];
         self.benchmark_cube = enabled.then(|| {
-            let c = eye.map(f64::floor);
-            [c.map(|v| v - radius as f64), c.map(|v| v + radius as f64)]
+            let root_m = crate::naadf::stream::root_size_m();
+            let c = eye.map(|v| (v / root_m).floor() * root_m);
+            [c.map(|v| v - radius), c.map(|v| v + radius)]
         });
         if enabled {
             // Enumerate enough placement records for the whole comparison cube.
             // Outside it retain the ordinary species-specific draw distances.
-            self.config.grass_radius_m = self.config.grass_radius_m.max(radius as f64 * 2. + 8.);
-            self.config.flower_radius_m = self.config.flower_radius_m.max(radius as f64 * 2. + 8.);
+            self.config.grass_radius_m = self.config.grass_radius_m.max(radius * 2. + 8.);
+            self.config.flower_radius_m = self.config.flower_radius_m.max(radius * 2. + 8.);
         }
         self.stable_frame = None;
         self.grouped_ground = None;
@@ -1206,8 +1210,22 @@ impl VegetationStream {
             let changed = self.world.changed_edit_cells(&world);
             let next_edits = PlantEdits::from_world(&world);
             self.local_edit_updates += 1;
+            if vegetation::uses_decorative_ground_cover() {
+                // Ground details depend on the terrain and fluid in their own
+                // columns. Keep ready tiles that the edit did not touch.
+                let edge = ground_detail::tile_cells();
+                let dirty: BTreeSet<_> = changed.iter()
+                    .map(|cell| [cell.x.div_euclid(edge), cell.z.div_euclid(edge)])
+                    .collect();
+                self.tiles.retain(|tile, _| {
+                    tile.species != ground_detail::TILE_SPECIES || !dirty.contains(&[tile.x, tile.z])
+                });
+                // In-flight decorative tiles carry their source revision.
+                self.pending_tiles.retain(|tile| tile.species != ground_detail::TILE_SPECIES);
+                self.tile_started.retain(|tile, _| tile.species != ground_detail::TILE_SPECIES);
+            }
             self.local_edit_reused_tiles += self.tiles.len() as u64;
-            // Placement and ecological shade are defined by the immutable
+            // Canonical placement and ecological shade are defined by the immutable
             // source, independently of overrides. Their tiles/groups remain
             // valid, including unfinished placement jobs and camera history.
             self.shadow_lifecycle.invalidate_cells(&changed);
@@ -1342,8 +1360,11 @@ impl VegetationStream {
             drained = true;
             self.stable_frame = None;
             match done {
-                Done::Tile(t, _r, p) => {
-                    if t.species != 2 {
+                Done::Tile(t, revision, p) => {
+                    if t.species == ground_detail::TILE_SPECIES && revision != self.world.revision() {
+                        continue;
+                    }
+                    if t.species < 2 {
                         self.grouped_ground = None;
                     }
                     if current_generation {
@@ -1433,8 +1454,19 @@ impl VegetationStream {
             self.config.tree_radius_m,
         ];
         let mut demand = Vec::new();
-        for s in 0..3u8 {
-            let radius = radii[s as usize].clamp(0., 1024.);
+        let decorative = vegetation::uses_decorative_ground_cover();
+        let species_range = if decorative { 2..4u8 } else { 0..3u8 };
+        let native_tile_m = TILE_CELLS as f64 * voxel_size();
+        for s in species_range {
+            let (radius, span, tile_center) = if s == ground_detail::TILE_SPECIES {
+                let edge = ground_detail::tile_cells();
+                (radii[0].max(radii[1]).min(56.), edge as f64 * voxel_size(),
+                 [c.x.div_euclid(edge), c.z.div_euclid(edge)])
+            } else {
+                (radii[s as usize].clamp(0., 1024.), native_tile_m, center)
+            };
+            let padding = span * (23. / 32.);
+            let detail = s == ground_detail::TILE_SPECIES;
             // Predict placement only. Mesh generation still follows final
             // budget admission below, preventing speculative variant churn.
             // Bound enumeration by the existing tile budget even at aircraft speed.
@@ -1444,16 +1476,19 @@ impl VegetationStream {
                     (self.config.max_tiles as f64).sqrt() * 32.,
                 )
             });
-            let n = ((radius + bounded_lead[0].hypot(bounded_lead[1])) / 32.).ceil() as i64 + 1;
+            // Fine details only need the walk-sized window. Trees continue
+            // to use the existing movement prediction.
+            let bounded_lead = if detail { [0.; 2] } else { bounded_lead };
+            let n = ((radius + bounded_lead[0].hypot(bounded_lead[1])) / span).ceil() as i64 + 1;
             for dz in -n..=n {
                 for dx in -n..=n {
                     let t = Tile {
                         species: s,
-                        x: center[0] + dx,
-                        z: center[1] + dz,
+                        x: tile_center[0] + dx,
+                        z: tile_center[1] + dz,
                     };
-                    let x = (t.x as f64 + 0.5) * 32.;
-                    let z = (t.z as f64 + 0.5) * 32.;
+                    let x = (t.x as f64 + 0.5) * span;
+                    let z = (t.z as f64 + 0.5) * span;
                     let d = ((x - camera[0]).powi(2) + (z - camera[2]).powi(2)).sqrt();
                     let delta = [x - camera[0], z - camera[2]];
                     let lead2 = bounded_lead[0].powi(2) + bounded_lead[1].powi(2);
@@ -1465,12 +1500,12 @@ impl VegetationStream {
                     };
                     let swept = (delta[0] - bounded_lead[0] * along)
                         .hypot(delta[1] - bounded_lead[1] * along);
-                    if swept <= radius + 23. {
-                        let deadline = if d <= radius + 23. {
+                    if swept <= radius + padding {
+                        let deadline = if d <= radius + padding {
                             0.
                         } else {
                             self.prediction
-                                .time_to_need([x - camera[0], z - camera[2]], radius + 23.)
+                                .time_to_need([x - camera[0], z - camera[2]], radius + padding)
                         };
                         demand.push((deadline, d, t));
                     }
@@ -1499,7 +1534,7 @@ impl VegetationStream {
         let mut group_key: Vec<_> = demand
             .iter()
             .map(|(_, _, t)| *t)
-            .filter(|t| t.species != 2 && self.tiles.contains_key(t))
+            .filter(|t| t.species < 2 && self.tiles.contains_key(t))
             .collect();
         group_key.sort_unstable();
         let previous = self
@@ -1509,9 +1544,15 @@ impl VegetationStream {
         let ground_reused = previous.is_some();
         let mut ground = previous.map_or_else(BTreeMap::new, |(_, groups)| groups);
         let retirement = self.naadf_retirement;
+        let retiring_padding = 256. * voxel_size();
+        let mut details = Vec::new();
         for (deadline, _, t) in demand {
             if let Some((records, used)) = self.tiles.get_mut(&t) {
                 *used = self.tick;
+                if t.species == ground_detail::TILE_SPECIES {
+                    details.extend_from_slice(records);
+                    continue;
+                }
                 for p in records.iter() {
                     if p.species != Species::Rowan {
                         if ground_reused {
@@ -1550,14 +1591,14 @@ impl VegetationStream {
                         lod: 0,
                         edit_id: 0,
                     });
-                    let dx = (p.root.x - c.x) as f64 * VOXEL_SIZE;
-                    let dz = (p.root.z - c.z) as f64 * VOXEL_SIZE;
-                    let root_y = p.root.y as f64 * VOXEL_SIZE;
+                    let dx = (p.root.x - c.x) as f64 * voxel_size();
+                    let dz = (p.root.z - c.z) as f64 * voxel_size();
+                    let root_y = p.root.y as f64 * voxel_size();
                     let distance = distance_with_vertical_bounds(
                         dx.hypot(dz),
                         camera[1],
                         root_y,
-                        root_y + (vegetation::MAX_PLANT_HEIGHT_CELLS + 8) as f64 * VOXEL_SIZE,
+                        root_y + (vegetation::MAX_PLANT_HEIGHT_CELLS + 8) as f64 * voxel_size(),
                     );
                     if distance < radii[t.species as usize] {
                         if view.as_ref().is_none_or(|v| v.plant_visible(p))
@@ -1578,18 +1619,19 @@ impl VegetationStream {
                 // A not-yet-enumerated tile may contain outgoing objects.
                 // Ignore speculative tiles and conservatively cover the roots
                 // plus their maximum horizontal extent; height is unknown.
-                if deadline == 0.
+                if t.species != ground_detail::TILE_SPECIES
+                    && deadline == 0.
                     && retirement.is_some_and(|r| {
                         r.touches([
                             [
-                                t.x as f64 * 32. - 16.,
+                                t.x as f64 * native_tile_m - retiring_padding,
                                 f64::NEG_INFINITY,
-                                t.z as f64 * 32. - 16.,
+                                t.z as f64 * native_tile_m - retiring_padding,
                             ],
                             [
-                                (t.x + 1) as f64 * 32. + 16.,
+                                (t.x + 1) as f64 * native_tile_m + retiring_padding,
                                 f64::INFINITY,
-                                (t.z + 1) as f64 * 32. + 16.,
+                                (t.z + 1) as f64 * native_tile_m + retiring_padding,
                             ],
                         ])
                     })
@@ -1646,16 +1688,16 @@ impl VegetationStream {
             let distance = distance_with_vertical_bounds(
                 dx.hypot(dz),
                 camera[1],
-                low as f64 * VOXEL_SIZE,
-                (high + 14) as f64 * VOXEL_SIZE,
+                low as f64 * voxel_size(),
+                (high + 14) as f64 * voxel_size(),
             );
             let cube_overlap = self.benchmark_cube.is_some_and(|b| {
                 (x + 1) as f64 * 8. > b[0][0]
                     && x as f64 * 8. < b[1][0]
                     && (z + 1) as f64 * 8. > b[0][2]
                     && z as f64 * 8. < b[1][2]
-                    && (high + 14) as f64 * VOXEL_SIZE >= b[0][1]
-                    && low as f64 * VOXEL_SIZE <= b[1][1]
+                    && (high + 14) as f64 * voxel_size() >= b[0][1]
+                    && low as f64 * voxel_size() <= b[1][1]
             });
             let ordinary_radius = if self.visibility_benchmark {
                 self.benchmark_base_radii[s as usize]
@@ -2530,8 +2572,8 @@ impl VegetationStream {
             let deadline = |p: &PlantRecord| {
                 self.prediction.time_to_need(
                     [
-                        p.root.x as f64 * VOXEL_SIZE - camera[0],
-                        p.root.z as f64 * VOXEL_SIZE - camera[2],
+                        p.root.x as f64 * voxel_size() - camera[0],
+                        p.root.z as f64 * voxel_size() - camera[2],
                     ],
                     8.,
                 )
@@ -2574,6 +2616,15 @@ impl VegetationStream {
             self.mesh_started.insert(key, now);
             submitted += 1;
         }
+        ground_detail::admit(
+            &details,
+            camera,
+            view.as_ref(),
+            [radii[0].min(28.), radii[1].min(56.)],
+            [selection_config.max_instances, selection_config.max_triangles],
+            &mut batches,
+            &mut stats,
+        );
         evict(&mut self.tiles, self.config.max_tiles, |v| v.1);
         evict(&mut self.mesh_costs, 2048, |v| v.1);
         // Equal-age baseline/selected meshes used to evict in key order, which
@@ -2665,7 +2716,7 @@ impl VegetationStream {
         if vegetation_trace() {
             let mut ground_lods = [0usize; 4];
             for batch in &frame.batches {
-                if batch.key.species != 2 {
+                if batch.key.species != 2 && !ground_detail::is_detail(batch.key) {
                     ground_lods[batch.key.lod.ilog2() as usize] += 1;
                 }
             }
@@ -2682,7 +2733,7 @@ impl VegetationStream {
                 .batches
                 .iter()
                 .chain(&frame.shadow_batches)
-                .all(|b| self.meshes.contains_key(&b.key))
+                .all(|b| ground_detail::is_detail(b.key) || self.meshes.contains_key(&b.key))
         {
             self.stable_frame = Some((key, frame.clone()));
         }
@@ -3818,7 +3869,7 @@ fn mesh_plant_cells(
         return VegetationMesh::default();
     }
     if foliage_bottom != i64::MAX {
-        let floor = foliage_bottom as f32 * VOXEL_SIZE as f32;
+        let floor = foliage_bottom as f32 * voxel_size() as f32;
         for vertex in &mut crown.vertices {
             vertex.position[1] = vertex.position[1].max(floor);
         }
@@ -3970,9 +4021,9 @@ pub(crate) fn mesh_cells_scaled_reference(
             normal[d] = sign as f32;
             for [a, b] in [[0, 0], [w, 0], [w, h], [0, h]] {
                 let mut p = [0.; 3];
-                p[d] = (plane * steps[d]) as f32 * VOXEL_SIZE as f32;
-                p[u] = ((start[0] + a) * steps[u]) as f32 * VOXEL_SIZE as f32;
-                p[v] = ((start[1] + b) * steps[v]) as f32 * VOXEL_SIZE as f32;
+                p[d] = (plane * steps[d]) as f32 * voxel_size() as f32;
+                p[u] = ((start[0] + a) * steps[u]) as f32 * voxel_size() as f32;
+                p[v] = ((start[1] + b) * steps[v]) as f32 * voxel_size() as f32;
                 mesh.vertices.push(VegetationVertex {
                     position: p,
                     normal,
@@ -4683,8 +4734,8 @@ mod tests {
         assert!(mesh
             .vertices
             .iter()
-            .all(|v| v.position[1] >= 100. * VOXEL_SIZE as f32
-                && v.position[1] <= 104. * VOXEL_SIZE as f32));
+            .all(|v| v.position[1] >= 100. * voxel_size() as f32
+                && v.position[1] <= 104. * voxel_size() as f32));
         assert!(!mesh.indices.is_empty());
         assert!(mesh_ground_cells(cells.into_iter(), 8, || true)
             .indices

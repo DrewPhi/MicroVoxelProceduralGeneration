@@ -9,7 +9,7 @@ use frontier_runtime::{
     occlusion::{Aabb, OcclusionSet},
     representation::{Projection, ViewBounds},
 };
-use frontier_world::{World, VOXEL_SIZE};
+use frontier_world::{World, voxel_size};
 use glam::DVec3;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -443,7 +443,7 @@ fn obsolete_refinement_demand(
         camera.position.to_array(),
         camera.direction().as_dvec3().to_array(),
         0.025,
-        VOXEL_SIZE * 2.0,
+        voxel_size() * 2.0,
     ) else {
         return false;
     };
@@ -749,8 +749,8 @@ impl AdaptiveStream {
             || !camera.far.is_finite()
             || camera.far <= 0.0
             || !camera.position.is_finite()
-            || camera.position.abs().max_element() / VOXEL_SIZE > (1_u64 << 52) as f64
-            || camera.far as f64 / VOXEL_SIZE > (1_u64 << 29) as f64
+            || camera.position.abs().max_element() / voxel_size() > (1_u64 << 52) as f64
+            || camera.far as f64 / voxel_size() > (1_u64 << 29) as f64
         {
             frame.limit_reached = true;
             self.finish_build_memory(&mut frame);
@@ -1046,13 +1046,13 @@ impl AdaptiveStream {
             for extent in &mut extents {
                 *extent = extent.max(self.settings.native_radius_m);
             }
-            let far = extents.map(|v| (v / VOXEL_SIZE).ceil() as i64);
+            let far = extents.map(|v| (v / voxel_size()).ceil() as i64);
             let root = (far[0].max(far[1]).max(512) as u64)
                 .next_power_of_two()
                 .min(1 << 20) as i64;
             let cell = [
-                (camera.position.x / VOXEL_SIZE).floor() as i64,
-                (camera.position.z / VOXEL_SIZE).floor() as i64,
+                (camera.position.x / voxel_size()).floor() as i64,
+                (camera.position.z / voxel_size()).floor() as i64,
             ];
             let start = [
                 (cell[0] - far[0]).div_euclid(root) * root,
@@ -1679,10 +1679,10 @@ impl AdaptiveStream {
                     return Some(k);
                 }
             } else if self.coarsen_probes.len() < self.settings.jobs_per_update {
-                let cx = (min[0] as f64 + width as f64 * 0.5) * VOXEL_SIZE;
-                let cz = (min[1] as f64 + width as f64 * 0.5) * VOXEL_SIZE;
+                let cx = (min[0] as f64 + width as f64 * 0.5) * voxel_size();
+                let cz = (min[1] as f64 + width as f64 * 0.5) * voxel_size();
                 if (camera.position.x - cx).hypot(camera.position.z - cz)
-                    > width as f64 * VOXEL_SIZE * 8.0
+                    > width as f64 * voxel_size() * 8.0
                 {
                     self.coarsen_probes.push(k);
                 }
@@ -1751,7 +1751,7 @@ impl AdaptiveStream {
             camera.position.to_array(),
             camera.direction().as_dvec3().to_array(),
             0.025,
-            VOXEL_SIZE * 2.0,
+            voxel_size() * 2.0,
         ) else {
             self.occlusion = None;
             return;
@@ -1779,7 +1779,7 @@ impl AdaptiveStream {
             predicted.position.to_array(),
             predicted.direction().as_dvec3().to_array(),
             0.025,
-            VOXEL_SIZE * 2.0,
+            voxel_size() * 2.0,
         )
         .map(|mut set| {
             for tile in &self.committed {
@@ -2225,10 +2225,10 @@ impl PartitionGuard {
         let Some(extents) = frustum_horizontal_extents(camera, width, height) else {
             return false;
         };
-        let far = extents.map(|v| v / VOXEL_SIZE);
+        let far = extents.map(|v| v / voxel_size());
         let cell = [
-            camera.position.x / VOXEL_SIZE,
-            camera.position.z / VOXEL_SIZE,
+            camera.position.x / voxel_size(),
+            camera.position.z / voxel_size(),
         ];
         self.complete
             && (0..2).all(|a| {
@@ -2370,7 +2370,7 @@ fn tile_origin(tile: &GeometryTile) -> DVec3 {
         tile.mesh.origin.x as f64,
         tile.mesh.origin.y as f64,
         tile.mesh.origin.z as f64,
-    ) * VOXEL_SIZE
+    ) * voxel_size()
 }
 fn vertical_pixel_bound(
     error_m: f64,
@@ -2492,7 +2492,7 @@ fn frustum_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Optio
         [0, 2].map(|a| far * (f[a].abs() + tx * r[a].abs() + ty * u[a].abs()) * (1.0 + 1e-6));
     if extents
         .iter()
-        .any(|v| !v.is_finite() || *v < 0.0 || *v / VOXEL_SIZE > (1_u64 << 50) as f64)
+        .any(|v| !v.is_finite() || *v < 0.0 || *v / voxel_size() > (1_u64 << 50) as f64)
     {
         None
     } else {
@@ -2687,8 +2687,8 @@ mod tests {
                             * (max[1].min(128) - min[1].max(-128)).max(0) as i128;
                     }
                     let extents = frustum_horizontal_extents(&camera, 1280, 720).unwrap();
-                    let far = extents.map(|v| v / VOXEL_SIZE);
-                    let cell = [position.x / VOXEL_SIZE, position.z / VOXEL_SIZE];
+                    let far = extents.map(|v| v / voxel_size());
+                    let cell = [position.x / voxel_size(), position.z / voxel_size()];
                     let original = area == expected
                         && (0..2).all(|a| {
                             cell[a] - far[a] >= min[a] as f64 && cell[a] + far[a] <= max[a] as f64
@@ -2886,8 +2886,8 @@ mod tests {
             };
             let mut tile = crate::adaptive_geometry::build(&world, key, || false).unwrap();
             tile.bounds = [
-                [0.0, 0.0, z as f64 * VOXEL_SIZE],
-                [1.0, 1.0, (z + 16) as f64 * VOXEL_SIZE],
+                [0.0, 0.0, z as f64 * voxel_size()],
+                [1.0, 1.0, (z + 16) as f64 * voxel_size()],
             ];
             tile.conservative_surface_bounds = tile.bounds;
             tile.guaranteed_solid_box = None;
@@ -3692,8 +3692,8 @@ mod tests {
         let before = stream.plan(&camera, 320, 180);
         assert!(before.coverage_ready && before.tiles.len() > 1);
         let chosen = before.tiles[0].key;
-        let [x, z] = chosen.min.map(|cell| cell as f64 * VOXEL_SIZE);
-        let side = chosen.width_cells as f64 * VOXEL_SIZE;
+        let [x, z] = chosen.min.map(|cell| cell as f64 * voxel_size());
+        let side = chosen.width_cells as f64 * voxel_size();
         let n = side as usize + 2;
         let owner = Arc::new(Ownership::new(
             [[x - 1., -20., z - 1.], [x + side + 1., 20., z + side + 1.]],

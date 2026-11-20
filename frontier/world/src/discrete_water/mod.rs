@@ -13,7 +13,7 @@ pub mod regional;
 use boundary::BoundaryState;
 pub use boundary::{BoundaryGhost, BoundaryTransfer, OpenBoundary};
 
-use crate::{Cell, VOXEL_SIZE};
+use crate::{Cell, voxel_size};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_CELLS: usize = 2_000_000;
@@ -332,8 +332,8 @@ impl DiscreteWater {
                 .map(|b| b.pressure() as f64)
                 .fold(0f64, f64::max);
             let h = remaining.min(0.025).min(
-                0.65 / (vmax.max(exterior_speed) / VOXEL_SIZE
-                    + ((9.81 / VOXEL_SIZE + exterior_pressure) * 0.65).sqrt()),
+                0.65 / (vmax.max(exterior_speed) / voxel_size()
+                    + ((9.81 / voxel_size() + exterior_pressure) * 0.65).sqrt()),
             );
             self.endpoints(h, &mut stats);
             self.substep(h, &mut stats);
@@ -384,9 +384,9 @@ impl DiscreteWater {
             } else {
                 0.
             };
-            let mut v = b.sign() * (interior + exterior) / count / VOXEL_SIZE as f32;
+            let mut v = b.sign() * (interior + exterior) / count / voxel_size() as f32;
             if b.condition.axis == 1 {
-                v -= b.sign() * gravity / VOXEL_SIZE as f32 * h;
+                v -= b.sign() * gravity / voxel_size() as f32 * h;
             }
             // Prescribed exterior pressure is external forcing. The pressure
             // solve below uses zero exterior pressure for its unknown gradient.
@@ -438,9 +438,9 @@ impl DiscreteWater {
         self.active_faces = active_faces;
         for &(i, a, j) in &self.active_faces {
             let count = u8::from(self.flags[i] == 1) as f32 + u8::from(self.flags[j] == 1) as f32;
-            let mut v = (self.momentum[i][a] + self.momentum[j][a]) / count / VOXEL_SIZE as f32;
+            let mut v = (self.momentum[i][a] + self.momentum[j][a]) / count / voxel_size() as f32;
             if a == 1 {
-                v -= gravity / VOXEL_SIZE as f32 * h;
+                v -= gravity / voxel_size() as f32 * h;
             }
             self.velocity[i][a] = v;
             div[i] += v;
@@ -523,7 +523,7 @@ impl DiscreteWater {
                     // Each wet incidence contributes half the face weight.
                     dot += 0.5 * v * g;
                     norm += 0.5 * g * g;
-                    energy_before += 0.25 * (v * VOXEL_SIZE).powi(2);
+                    energy_before += 0.25 * (v * voxel_size()).powi(2);
                 }
             }
         }
@@ -537,7 +537,7 @@ impl DiscreteWater {
             let g = -(h * self.pressure[b.index]) as f64;
             dot += weight * v * g;
             norm += weight * g * g;
-            energy_before += 0.5 * weight * (v * VOXEL_SIZE).powi(2);
+            energy_before += 0.5 * weight * (v * voxel_size()).powi(2);
         }
         let pressure_scale = if norm > 0. {
             (dot / norm).clamp(0., 1.)
@@ -557,9 +557,9 @@ impl DiscreteWater {
                 as f32;
             let weight =
                 0.5 * (u8::from(self.flags[i] == 1) as f64 + u8::from(self.flags[j] == 1) as f64);
-            energy_after += 0.5 * weight * (v as f64 * VOXEL_SIZE).powi(2);
+            energy_after += 0.5 * weight * (v as f64 * voxel_size()).powi(2);
             self.velocity[i][a] = v;
-            stats.max_speed_mps = stats.max_speed_mps.max(v.abs() as f64 * VOXEL_SIZE);
+            stats.max_speed_mps = stats.max_speed_mps.max(v.abs() as f64 * voxel_size());
             div[i] += v;
             div[j] -= v;
             let c = &mut self.credit[i][a];
@@ -604,8 +604,8 @@ impl DiscreteWater {
             div[b.index] += v;
             let weight = 0.5
                 * (u8::from(self.flags[b.index] == 1) as f64 + u8::from(b.exterior_wet()) as f64);
-            energy_after += 0.5 * weight * (v as f64 * VOXEL_SIZE).powi(2);
-            stats.max_speed_mps = stats.max_speed_mps.max(v.abs() as f64 * VOXEL_SIZE);
+            energy_after += 0.5 * weight * (v as f64 * voxel_size()).powi(2);
+            stats.max_speed_mps = stats.max_speed_mps.max(v.abs() as f64 * voxel_size());
             b.credit += v * h;
             let (from, to, sign) =
                 if b.credit >= 1. && self.flags[b.index] == 1 && b.condition.export_quota > 0 {
@@ -651,7 +651,7 @@ impl DiscreteWater {
                 // Both normal faces always participate: a missing/solid face
                 // has zero velocity. Renormalizing over open faces doubles the
                 // reconstructed wall-normal speed and breaks the energy bound.
-                self.momentum[i][a] = 0.5 * sum * VOXEL_SIZE as f32;
+                self.momentum[i][a] = 0.5 * sum * voxel_size() as f32;
             }
         }
         let mut assignment_flags = self.flags.clone();
@@ -675,7 +675,7 @@ impl DiscreteWater {
                     {
                         let b = &self.boundaries[(m.from - n) / 2];
                         let mut v = b.external_velocity();
-                        v[b.condition.axis] = b.sign() * b.velocity * VOXEL_SIZE as f32;
+                        v[b.condition.axis] = b.sign() * b.velocity * voxel_size() as f32;
                         v
                     }
                 }

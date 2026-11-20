@@ -112,7 +112,7 @@ struct Out {
     if camera.cutout.w>0. && max(d.x,d.y)<camera.cutout.z { discard; }
     let view=normalize(vec3<f32>(camera.eye.x-i.ground.x,camera.eye.z-i.height,camera.eye.y-i.ground.y));
     let exact=i.color*terrain_lighting(i.normal);
-    let cell=bitcast<vec3<u32>>(vec3<i32>(floor(vec3<f32>(i.ground.x,i.height,i.ground.y)*16.)))+camera.paint_origin.xyz;
+    let cell=bitcast<vec3<u32>>(vec3<i32>(floor(vec3<f32>(i.ground.x,i.height,i.ground.y)*VOXELS_PER_METER)))+camera.paint_origin.xyz;
     let tint=terrain_tint(cell,0.);
     return vec4<f32>(tint*mix(exact,voxel_appearance(i.color,i.normal,view,length(vec3<f32>(camera.eye.x-i.ground.x,camera.eye.z-i.height,camera.eye.y-i.ground.y))),camera.eye.w),1.);
 }

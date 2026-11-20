@@ -1,6 +1,6 @@
 //! Native gameplay edits. Inventory and expected-cell validation precede the
 //! single canonical batch; renderer residency remains an explicit caller gate.
-use crate::{Cell, Material, World, VOXEL_SIZE};
+use crate::{Cell, Material, World, voxel_size};
 use std::collections::{BTreeSet, VecDeque};
 
 pub const MATERIALS: [Material; 10] = [
@@ -36,7 +36,7 @@ impl Default for HandSettings {
 }
 impl HandSettings {
     pub fn max_cells(self) -> usize {
-        ((self.volume_liters / (1000. * VOXEL_SIZE.powi(3))).floor() as usize)
+        ((self.volume_liters / (1000. * voxel_size().powi(3))).floor() as usize)
             .max(1)
             .min(64)
     }
@@ -172,7 +172,7 @@ pub fn select(
         let next_lo: [i64; 3] = std::array::from_fn(|a| lo[a].min(p[a]));
         let next_hi: [i64; 3] = std::array::from_fn(|a| hi[a].max(p[a]));
         if (0..3).any(|a| {
-            (next_hi[a] as i128 - next_lo[a] as i128 + 1) as f64 * VOXEL_SIZE
+            (next_hi[a] as i128 - next_lo[a] as i128 + 1) as f64 * voxel_size()
                 > settings.extent_m + 1e-10
         }) {
             continue;
@@ -319,9 +319,9 @@ mod tests {
         let water = Cell { x: a.x - 1, ..a };
         world.set(water, Material::Water);
         let origin = [
-            (a.x as f64 - 1.5) * VOXEL_SIZE,
-            (a.y as f64 + 0.5) * VOXEL_SIZE,
-            (a.z as f64 + 0.5) * VOXEL_SIZE,
+            (a.x as f64 - 1.5) * voxel_size(),
+            (a.y as f64 + 0.5) * voxel_size(),
+            (a.z as f64 + 0.5) * voxel_size(),
         ];
         assert_eq!(
             crate::raycast(&world, origin, [1., 0., 0.], 2.)

@@ -21,7 +21,7 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     let d=beam_slope(vec2(end.x,start.y));
     let min_slope=min(min(a,b),min(c,d));
     let max_slope=max(max(a,b),max(c,d));
-    let eye=naadf.eye.xyz*16.;
+    let eye=naadf.eye.xyz*VOXELS_PER_METER;
     let extent=vec3<f32>(naadf.extent.xyz);
     let span=f32(height_tile_roots*16u);
     let tile_side=height_tile_roots*16u;

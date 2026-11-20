@@ -2,7 +2,7 @@
 
 ## Watershed exploration preset
 
-Watershed is a separate world recipe. It pairs 6.25 cm canonical voxels and
+Watershed is a separate world recipe. It pairs a canonical voxel grid and
 static water with stepped distance LODs. To start
 above a new world, run the following from `frontier/`.
 
@@ -46,6 +46,33 @@ The drainage-first approach draws on
 [Génevaux et al., Terrain Generation Using Procedural Models Based on Hydrology](https://www.cs.purdue.edu/cgvlab/www/publications/Genevaux13ToG/).
 Frontier uses its own finite, globally addressed graph and its existing
 column, water, and affine-bound infrastructure.
+
+### Choose a voxel size
+
+`--voxel-size METERS` sets the edge length of a native cube for the whole
+launch. The default is 0.0625 m. The size can be a decimal and can be smaller
+or larger than the default.
+
+```sh
+./run.sh --preset watershed --seed 997 --voxel-size 0.03 --naadf-radius-voxels 800
+./run.sh --preset watershed --seed 997 --voxel-size 1 --naadf-radius-voxels 1024
+```
+
+World coordinates, fBm scales, camera dimensions and view distance are in
+meters. `--naadf-radius-voxels` sets the exact cube's half-extent in native
+voxels. NAADF rounds up to a whole 16-voxel root. The default 1,024-voxel
+radius spans 64 m at 6.25 cm and 1,024 m at 1 m. The address limit is 4,096
+voxels per side of the center, subject to the native build and GPU memory
+budgets. Existing commands can still use `--naadf-radius METERS`.
+
+Terrain is quantized on the selected grid. On grids of 25 cm and larger,
+grass and flowers are decorative 6.25 cm voxel meshes placed on exposed
+grass blocks. Six shared templates are batched and culled through the plant
+renderer, with distance limits of 28 m for grass and 56 m for flowers.
+The native grid still determines tree geometry. Use the same size when
+reopening a water save. Saves written before this setting use 0.0625 m.
+The derived terrain cache includes the grid size. The offline `landscape`
+reference accepts the same flag.
 
 ### Grass cover and stepped LODs
 

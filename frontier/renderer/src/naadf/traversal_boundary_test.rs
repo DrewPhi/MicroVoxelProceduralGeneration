@@ -116,7 +116,7 @@ fn accelerated_primary_replays_ambiguous_corner_face() {
         let readback = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NAADF exact corner oracle"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NAADF exact corner oracle"),

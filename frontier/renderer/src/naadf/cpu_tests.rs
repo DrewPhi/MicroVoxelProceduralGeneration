@@ -1,4 +1,5 @@
 use super::*;
+use frontier_world::VOXEL_SIZE;
 
 // Frozen pre-optimization Jacobi implementation: independent indexing oracle.
 fn reference_expand(

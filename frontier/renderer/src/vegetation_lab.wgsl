@@ -33,7 +33,7 @@ fn trace(ro:vec3<f32>,rd:vec3<f32>)->Pixel {
     let lo=min(a,b);let hi=max(a,b);let enter=max(max(lo.x,lo.y),lo.z);let exit=min(min(hi.x,hi.y),hi.z);
     var result:Pixel;result.color=vec4(background(),0.);result.info=vec4(1.,0.,0.5,0.);
     if exit<=max(enter,0.) {return result;}
-    let step=f32(p.image.w)*0.0625;
+    let step=f32(p.image.w)*NATIVE_VOXEL_METERS;
     var t=max(0.,enter);var normal=vec3(0.);
     // Track the integer DDA address explicitly. Reconstructing it from t+epsilon
     // can round back onto an exit face and terminate a shallow ray prematurely.
@@ -53,7 +53,7 @@ fn trace(ro:vec3<f32>,rd:vec3<f32>)->Pixel {
                 first=clip.z/clip.w;
                 // Physical native-cell edge clearance, excluding the face's
                 // normal axis (which is always on an integer grid plane).
-                let native_position=(ro+rd*t)*16.;
+                let native_position=(ro+rd*t)*VOXELS_PER_METER;
                 let clearance=abs(native_position-round(native_position));
                 for(var d=0u;d<3u;d++) {
                     if abs(normal[d])<0.5 {first_edge=min(first_edge,clearance[d]);}

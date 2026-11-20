@@ -1,7 +1,7 @@
 //! Bounded reduced affine arithmetic over the unchanged canonical FBM source.
 //! Two shared world-coordinate symbols survive; nonlinear/roundoff uncertainty
 //! is an independent radius. Multiple noise-cell polynomials share those symbols.
-use crate::{terrain::hash, FbmRecipe, FbmTerrain, VOXEL_SIZE};
+use crate::{terrain::hash, FbmRecipe, FbmTerrain, voxel_size};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ColumnBox {
@@ -117,17 +117,17 @@ pub fn bound_native_height(
         return None;
     }
     let center =
-        [0, 1].map(|a| (region.min[a] as f64 + region.size_cells[a] as f64 * 0.5) * VOXEL_SIZE);
-    let radius = region.size_cells.map(|v| v as f64 * VOXEL_SIZE * 0.5);
+        [0, 1].map(|a| (region.min[a] as f64 + region.size_cells[a] as f64 * 0.5) * voxel_size());
+    let radius = region.size_cells.map(|v| v as f64 * voxel_size() * 0.5);
     let x = Aa {
         c: center[0],
         a: [radius[0], 0.0],
-        r: VOXEL_SIZE * 0.5,
+        r: voxel_size() * 0.5,
     };
     let z = Aa {
         c: center[1],
         a: [0.0, radius[1]],
-        r: VOXEL_SIZE * 0.5,
+        r: voxel_size() * 0.5,
     };
     let mut context = Context {
         budget,
@@ -144,12 +144,12 @@ pub fn bound_native_height(
     let height = if height.r == 0. && height.a == [0.; 2] {
         // A proven constant (notably the sea plane) quantizes to one exact
         // height. Giving it an artificial one-voxel error refines flat oceans.
-        Aa::point((height.c / VOXEL_SIZE).floor() * VOXEL_SIZE)
+        Aa::point((height.c / voxel_size()).floor() * voxel_size())
     } else {
         height.add(Aa {
-            c: -VOXEL_SIZE * 0.5,
+            c: -voxel_size() * 0.5,
             a: [0.0; 2],
-            r: VOXEL_SIZE * 0.5,
+            r: voxel_size() * 0.5,
         })
     };
     let range = height.range();
@@ -1759,8 +1759,8 @@ mod tests {
         }
     }
     fn plane(t: &FbmTerrain, min: [i64; 2], cells: u32) -> ProxyPlane {
-        let lo = min.map(|v| v as f64 * VOXEL_SIZE);
-        let side = cells as f64 * VOXEL_SIZE;
+        let lo = min.map(|v| v as f64 * voxel_size());
+        let side = cells as f64 * voxel_size();
         let h = t.height_m(lo[0], lo[1]);
         let dx = (t.height_m(lo[0] + side, lo[1]) - h) / side;
         let dz = (t.height_m(lo[0], lo[1] + side) - h) / side;
@@ -1771,13 +1771,13 @@ mod tests {
         }
     }
     fn exhaustive(t: &FbmTerrain, min: [i64; 2], cells: u32, p: ProxyPlane) -> f64 {
-        let center = min.map(|v| (v as f64 + cells as f64 * 0.5) * VOXEL_SIZE);
+        let center = min.map(|v| (v as f64 + cells as f64 * 0.5) * voxel_size());
         let mut worst = 0.0_f64;
         for z in 0..cells {
             for x in 0..cells {
                 let q = [
-                    (min[0] as f64 + x as f64 + 0.5) * VOXEL_SIZE,
-                    (min[1] as f64 + z as f64 + 0.5) * VOXEL_SIZE,
+                    (min[0] as f64 + x as f64 + 0.5) * voxel_size(),
+                    (min[1] as f64 + z as f64 + 0.5) * voxel_size(),
                 ];
                 let actual = t.height_m(q[0], q[1]);
                 let proxy =
@@ -1906,7 +1906,7 @@ mod tests {
                 for side in [8, 16, 32] {
                     let cells = side * 16;
                     let min = [137, -293];
-                    let lo = min.map(|v| v as f64 * VOXEL_SIZE);
+                    let lo = min.map(|v| v as f64 * voxel_size());
                     let side_m = side as f64;
                     let vertex = |x: f64, z: f64| [x, t.height_m(x, z), z];
                     let center = vertex(lo[0] + side_m * 0.5, lo[1] + side_m * 0.5);
@@ -1947,14 +1947,14 @@ mod tests {
                     for z in 0..cells {
                         for x in 0..cells {
                             let h = t.height_m(
-                                lo[0] + (x as f64 + 0.5) * VOXEL_SIZE,
-                                lo[1] + (z as f64 + 0.5) * VOXEL_SIZE,
+                                lo[0] + (x as f64 + 0.5) * voxel_size(),
+                                lo[1] + (z as f64 + 0.5) * voxel_size(),
                             );
                             for dx in [0.0, 1.0] {
                                 for dz in [0.0, 1.0] {
                                     let p = [
-                                        lo[0] + (x as f64 + dx) * VOXEL_SIZE,
-                                        lo[1] + (z as f64 + dz) * VOXEL_SIZE,
+                                        lo[0] + (x as f64 + dx) * voxel_size(),
+                                        lo[1] + (z as f64 + dz) * voxel_size(),
                                     ];
                                     for tri in triangles {
                                         let a = [tri[1][0] - tri[0][0], tri[1][2] - tri[0][2]];

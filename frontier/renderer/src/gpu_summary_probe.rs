@@ -1,6 +1,6 @@
 //! Bounded #71 experiment. No production geometry/source path uses this probe.
 //! Input is an exact CPU canonical page; output is integer face counts only.
-use frontier_world::{Material, World, VOXEL_SIZE};
+use frontier_world::{Material, World};
 use std::{sync::mpsc, time::Instant};
 
 pub const WIDTH: usize = 128;
@@ -50,7 +50,7 @@ impl CanonicalPage {
         for z in -1..=WIDTH as i64 {
             for x in -1..=WIDTH as i64 {
                 let c = world.column(min[0] + x, min[1] + z);
-                let h = (c.height_m() / VOXEL_SIZE) as i64;
+                let h = c.height_cells();
                 heights.push(h);
                 materials.push([c.material(h - 13), c.material(h - 12), c.material(h - 1)]);
             }
@@ -131,12 +131,12 @@ impl CanonicalPage {
         for z in 0..WIDTH {
             for x in 0..WIDTH {
                 let c = world.column(self.min[0] + x as i64, self.min[1] + z as i64);
-                let h = (c.height_m() / VOXEL_SIZE) as i64;
+                let h = c.height_cells();
                 let counts = &mut patches[(z / patch_width) * side + x / patch_width];
                 counts[0][c.material(h - 1) as usize] += 1;
                 for (axis, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
                     let n = world.column(self.min[0] + x as i64 + dx, self.min[1] + z as i64 + dz);
-                    let lo = (n.height_m() / VOXEL_SIZE) as i64;
+                    let lo = n.height_cells();
                     let nfaces = h.saturating_sub(lo).max(0) as usize;
                     faces = faces.saturating_add(nfaces);
                     if faces > 8_000_000 {

@@ -26,14 +26,14 @@ fn triangle_corner(face:u32, vertex:u32)->u32 {
     return corner;
 }
 fn native_vertex(q:Quad, corner:u32)->NativeVertex {
-    let axis=q.face/2u;
+    let axis=(q.face&7u)/2u;
     let u=(axis+1u)%3u;
     let v=(axis+2u)%3u;
     var p=vec3<i32>(q.origin[0],q.origin[1],q.origin[2]);
     if corner==1u || corner==2u {p[u]+=bitcast<i32>(q.extent[0]);}
     if corner==2u || corner==3u {p[v]+=bitcast<i32>(q.extent[1]);}
     var out:NativeVertex;
-    out.position=vec3<f32>(p)*0.0625;
+    out.position=vec3<f32>(p)*select(NATIVE_VOXEL_METERS,GROUND_DETAIL_VOXEL_METERS,(q.face&8u)!=0u);
     out.normal=vec3<f32>(0.);
     out.normal[axis]=select(-1.,1.,(q.face&1u)!=0u);
     return out;
@@ -88,7 +88,7 @@ fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32,pro
     let role=i.role&3u;
     let entry_coverage=i.role>>2u;
     if role!=0u || entry_coverage<65536u {
-        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*16.-i.normal*0.01)))+camera.paint_origin.xyz;
+        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*VOXELS_PER_METER-i.normal*0.01)))+camera.paint_origin.xyz;
         var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u;
         h=(h^(h>>16u))*2246822519u;
         let threshold=f32(h&65535u)/65536.;
@@ -105,7 +105,7 @@ fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32,pro
         // introduce time noise. Trees retain their opaque depth unchanged.
         let distance=length(i.local.xz-camera.eye.xz);
         let coverage=1.-smoothstep(12.,18.,distance);
-        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*16.-i.normal*0.01)))+camera.paint_origin.xyz;
+        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*VOXELS_PER_METER-i.normal*0.01)))+camera.paint_origin.xyz;
         var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u;
         h=(h^(h>>16u))*2246822519u;
         if f32(h&65535u)/65536.>=coverage {discard;}

@@ -427,7 +427,7 @@ impl MovingWaterLive {
             .state
             .as_ref()
             .ok_or("in-flight moving water checkpoint")?;
-        let mut bytes = b"FVMWATR2".to_vec();
+        let mut bytes = crate::grid_checkpoint::header(b"FVMWATR2");
         let edits: Vec<_> = world.terrain_edits().collect();
         put(&mut bytes, edits.len() as u64);
         for (c, m) in edits {
@@ -470,6 +470,7 @@ impl MovingWaterLive {
         Ok(())
     }
     fn restore(&mut self, world: &mut World, b: &[u8]) -> Result<()> {
+        let b = crate::grid_checkpoint::payload(b)?;
         let legacy = b.get(..8) == Some(b"FVMWATR1");
         if !legacy && b.get(..8) != Some(b"FVMWATR2") {
             return Err("expected moving water save; other water models remain separate".into());

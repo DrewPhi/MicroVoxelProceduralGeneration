@@ -530,7 +530,7 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             }
             scale=4u;bits=2u;parent_lo=vec3<i32>(cp*16u);parent_hi=parent_lo+vec3(16);
             if (node&0x80000000u)!=0u {
-                if occlusion && traversal_shadow_coarse_after_m>0. && t>=traversal_shadow_coarse_after_m*16. {
+                if occlusion && traversal_shadow_coarse_after_m>0. && t>=traversal_shadow_coarse_after_m*VOXELS_PER_METER {
                     return VoxelHit(true,t,vec3(0.),0u,visits,flags);
                 }
                 if measure {visits.z+=1u;}
@@ -747,7 +747,7 @@ fn trace_voxels(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool)->VoxelHit {
 }
 fn naadf_sun_visibility(receiver_relative:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
     if naadf.shadow.x<0.5 || dot(normal,sun)<=0. {return 1.;}
-    let o=(naadf.eye.xyz+receiver_relative+normal*0.001)*16.;
+    let o=(naadf.eye.xyz+receiver_relative+normal*0.001)*VOXELS_PER_METER;
     return select(1.,0.,trace_voxels(o,sun,0.,true).found);
 }
 

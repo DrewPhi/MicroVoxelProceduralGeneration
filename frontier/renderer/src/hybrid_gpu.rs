@@ -362,7 +362,7 @@ impl DrawMesh {
                 mesh.origin.x as f64,
                 mesh.origin.y as f64,
                 mesh.origin.z as f64,
-            ) * frontier_world::VOXEL_SIZE,
+            ) * frontier_world::voxel_size(),
             count: mesh.indices.len() as u32,
             bytes: (mesh.vertices.len() * std::mem::size_of::<mesh::Vertex>()
                 + mesh.indices.len() * 4) as u64,
@@ -449,9 +449,9 @@ impl DrawMesh {
             ),
         );
         let paint_origin = [
-            (self.origin.x * 16.) as i64 as u32,
-            (self.origin.y * 16.) as i64 as u32,
-            (self.origin.z * 16.) as i64 as u32,
+            (self.origin.x / frontier_world::voxel_size()).round() as i64 as u32,
+            (self.origin.y / frontier_world::voxel_size()).round() as i64 as u32,
+            (self.origin.z / frontier_world::voxel_size()).round() as i64 as u32,
             0u32,
         ];
         queue.write_buffer(&self.uniform, 80, bytemuck::cast_slice(&paint_origin));

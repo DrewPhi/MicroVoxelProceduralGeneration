@@ -1,7 +1,7 @@
 //! Bounded prototype: exact volume stays resident at every distance. This is
 //! deliberately a finite smoke fixture, not scalable distant-volume streaming.
 use crate::mesh::{self, Mesh};
-use frontier_world::{Cell, World, VOXEL_SIZE};
+use frontier_world::{Cell, World, voxel_size};
 
 pub const HALF_CELLS: i64 = 128;
 pub fn bounds(world: &World) -> Result<(Cell, [usize; 3]), String> {
@@ -12,7 +12,7 @@ pub fn bounds(world: &World) -> Result<(Cell, [usize; 3]), String> {
     let mut hi = base + 24;
     for z in -HALF_CELLS - 1..=HALF_CELLS {
         for x in -HALF_CELLS - 1..=HALF_CELLS {
-            let h = (world.column(x, z).height_m() / VOXEL_SIZE) as i64;
+            let h = world.column(x, z).height_cells();
             lo = lo.min(h - 2);
             hi = hi.max(h + 2);
         }
@@ -58,8 +58,8 @@ pub fn build(world: &World) -> Result<Mesh, String> {
         origin: min,
         exposed_native_faces: 0,
     };
-    let lo = VOXEL_SIZE as f32;
-    let hi = 257. * VOXEL_SIZE as f32;
+    let lo = voxel_size() as f32;
+    let hi = 257. * voxel_size() as f32;
     for face in extracted.vertices.chunks_exact(4) {
         if [0, 2].into_iter().any(|axis| {
             face[0].normal[axis] != 0.
@@ -81,7 +81,7 @@ pub fn build(world: &World) -> Result<Mesh, String> {
             continue;
         }
         out.exposed_native_faces +=
-            (cross.length() / (VOXEL_SIZE * VOXEL_SIZE) as f32).round() as usize;
+            (cross.length() / (voxel_size() * voxel_size()) as f32).round() as usize;
         let base = out.vertices.len() as u32;
         let indices = if cross.dot(glam::Vec3::from(face[0].normal)) > 0. {
             [0, 1, 2, 0, 2, 3]
@@ -104,7 +104,7 @@ mod tests {
             mesh.origin.x as f64,
             mesh.origin.y as f64,
             mesh.origin.z as f64,
-        ) * VOXEL_SIZE;
+        ) * voxel_size();
         let point =
             |i: u32| DVec3::from(mesh.vertices[i as usize].position.map(f64::from)) + offset;
         let mut best: Option<(f64, [f32; 3])> = None;
@@ -144,7 +144,7 @@ mod tests {
             },
         )
         .unwrap();
-        let b = w.topology_base_cells().unwrap() as f64 * VOXEL_SIZE;
+        let b = w.topology_base_cells().unwrap() as f64 * voxel_size();
         let cave = [-3., b - 2., -5.8];
         assert_eq!(
             w.material(Cell::from_meters([-3., b - 2., 0.])),
@@ -180,7 +180,7 @@ mod tests {
             // retained even though its solid cell belongs to the outside owner.
             let edge = Cell {
                 x: 127,
-                y: (w.column(127, 0).height_m() / VOXEL_SIZE) as i64 - 1,
+                y: w.column(127, 0).height_cells() - 1,
                 z: 0,
             };
             w.set(edge, Material::Air);
@@ -192,9 +192,9 @@ mod tests {
                 w.revision()
             );
             let edge_o = [
-                127.5 * VOXEL_SIZE,
-                (edge.y as f64 + 0.5) * VOXEL_SIZE,
-                0.5 * VOXEL_SIZE,
+                127.5 * voxel_size(),
+                (edge.y as f64 + 0.5) * voxel_size(),
+                0.5 * voxel_size(),
             ];
             let edge_d = DVec3::X;
             if let Some(exact) = raycast(&w, edge_o, edge_d.to_array(), 1.) {
@@ -226,8 +226,8 @@ mod tests {
                     a + DVec3::from(v.position.map(f64::from))
                 }) / 4.
                     + DVec3::new(m.origin.x as f64, m.origin.y as f64, m.origin.z as f64)
-                        * VOXEL_SIZE;
-                let n = DVec3::from(quad[0].normal.map(f64::from)) * VOXEL_SIZE * 0.25;
+                        * voxel_size();
+                let n = DVec3::from(quad[0].normal.map(f64::from)) * voxel_size() * 0.25;
                 assert_ne!(
                     w.material(Cell::from_meters((center - n).to_array())),
                     Material::Air

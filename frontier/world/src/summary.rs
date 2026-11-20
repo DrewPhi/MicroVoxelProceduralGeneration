@@ -1,5 +1,5 @@
 //! Camera-independent certificates for canonical terrain. No sampled estimate is a proof.
-use crate::{FbmRecipe, FbmTerrain, Material, World, VOXEL_SIZE};
+use crate::{FbmRecipe, FbmTerrain, Material, World, voxel_size};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GeometryError {
@@ -73,23 +73,23 @@ pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     let p = terrain.params();
     match p.recipe {
         FbmRecipe::SeededWorld => [
-            (-402.0 * p.amplitude / 1000.0).next_down() - VOXEL_SIZE,
+            (-402.0 * p.amplitude / 1000.0).next_down() - voxel_size(),
             (1663.0 * p.amplitude / 1000.0).next_up(),
         ],
         FbmRecipe::Watershed => {
             let [lo, hi] = crate::terrain::seeded_world::global_height_range(p);
-            [lo.next_down() - VOXEL_SIZE, hi.next_up()]
+            [lo.next_down() - voxel_size(), hi.next_up()]
         }
-        FbmRecipe::Legacy => [-0.7325 * p.amplitude - VOXEL_SIZE, 1.13 * p.amplitude],
+        FbmRecipe::Legacy => [-0.7325 * p.amplitude - voxel_size(), 1.13 * p.amplitude],
         // |meadow|<=54, all four peak weights sum to2520, crest<=3200,
         // foothills<=480, envelope in[0,1], fine relief<=7.95 plus fixed
         // microrelief. Each independent noise band has absolute value <=1.
         FbmRecipe::Alpine => [
-            (-63.0 - alpine_microrelief_amplitude()) * p.amplitude / 1000.0 - VOXEL_SIZE,
+            (-63.0 - alpine_microrelief_amplitude()) * p.amplitude / 1000.0 - voxel_size(),
             (3743.0 + alpine_microrelief_amplitude()) * p.amplitude / 1000.0,
         ],
         _ => [
-            -103.5 * p.amplitude / 1000.0 - VOXEL_SIZE,
+            -103.5 * p.amplitude / 1000.0 - voxel_size(),
             423.5 * p.amplitude / 1000.0,
         ],
     }
@@ -169,8 +169,8 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
 /// Real-arithmetic model estimate. It does not by itself certify the
 /// floating-point canonical generator; use `conservative_grid_error_at`.
 pub fn ideal_grid_error_m(terrain: &FbmTerrain, step_cells: u32) -> f64 {
-    conservative_fbm_slope(terrain) * 2.0_f64.sqrt() * step_cells as f64 * VOXEL_SIZE
-        + (1.0 + 2.0_f64.sqrt()) * VOXEL_SIZE
+    conservative_fbm_slope(terrain) * 2.0_f64.sqrt() * step_cells as f64 * voxel_size()
+        + (1.0 + 2.0_f64.sqrt()) * voxel_size()
 }
 
 /// Region-qualified certificate for triangles with horizontal diameter at most
@@ -231,13 +231,13 @@ pub fn conservative_grid_error_at(
         } else {
             45.0
         };
-    let normalized = (address_bound as f64 + 0.5) * VOXEL_SIZE / p.horizontal_scale;
+    let normalized = (address_bound as f64 + 0.5) * voxel_size() / p.horizontal_scale;
     let max_input = (normalized + 0.5) * max_frequency + 64.0;
     if !max_input.is_finite() || max_input > (1_u64 << 40) as f64 {
         return GeometryError::Uncertified;
     }
     let roundoff = (1_u64 << 24) as f64 * f64::EPSILON * p.amplitude * (1.0 + max_input);
-    if !roundoff.is_finite() || roundoff > VOXEL_SIZE * 0.25 {
+    if !roundoff.is_finite() || roundoff > voxel_size() * 0.25 {
         return GeometryError::Uncertified;
     }
     GeometryError::Certified(ideal_grid_error_m(terrain, step_cells) + 2.0 * roundoff)
@@ -298,18 +298,17 @@ pub fn summarize_native_columns(
             if topology != TopologyClass::Heightfield {
                 continue;
             }
-            let m = c.material((h / VOXEL_SIZE) as i64 - 1);
-            add_face(&mut s.appearance, m, 2, VOXEL_SIZE * VOXEL_SIZE);
+            let m = c.material(c.height_cells() - 1);
+            add_face(&mut s.appearance, m, 2, voxel_size() * voxel_size());
             for (dx, dz, axis) in [(1, 0, 0), (-1, 0, 1), (0, 1, 4), (0, -1, 5)] {
-                let neighbor = world.column(x + dx, z + dz).height_m();
+                let bottom = world.column(x + dx, z + dz).height_cells();
                 // Each exposed side voxel can have a different depth material.
-                let bottom = (neighbor / VOXEL_SIZE) as i64;
-                let top = (h / VOXEL_SIZE) as i64;
+                let top = c.height_cells();
                 // Ground and water have a fixed number of depth runs. Count
                 // their areas without walking every cell in a tall cliff.
                 if bottom < top {
-                    let face = VOXEL_SIZE * VOXEL_SIZE;
-                    let ground = (c.ground_height_m() / VOXEL_SIZE) as i64;
+                    let face = voxel_size() * voxel_size();
+                    let ground = c.ground_height_cells();
                     let mut cuts = [bottom, ground - 12, ground - 1, ground, top];
                     cuts.sort_unstable();
                     for pair in cuts.windows(2) {
@@ -459,7 +458,7 @@ mod tests {
             let slope = conservative_fbm_slope(&t);
             for x in -30..30 {
                 let p = x as f64 * 173.0;
-                assert!((t.height_m(p + 1.0, p) - t.height_m(p, p)).abs() <= slope + VOXEL_SIZE);
+                assert!((t.height_m(p + 1.0, p) - t.height_m(p, p)).abs() <= slope + voxel_size());
             }
             assert!(
                 conservative_grid_error_at(&t, [0, 0], 32, 32)

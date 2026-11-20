@@ -5,7 +5,7 @@
 //! tile's stored volume into the head of an entire river or lake.
 use crate::{
     discrete_water::regional::{RegionalWater, ReservoirId},
-    Cell, FbmRecipe, FbmTerrain, Material, World, VOXEL_SIZE,
+    Cell, FbmRecipe, FbmTerrain, Material, World, voxel_size,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,8 +49,8 @@ impl FbmTerrain {
         if (0..2).any(|a| {
             !min[a].is_finite()
                 || !max[a].is_finite()
-                || min[a].abs() >= i64::MAX as f64 * VOXEL_SIZE
-                || max[a].abs() >= i64::MAX as f64 * VOXEL_SIZE
+                || min[a].abs() >= i64::MAX as f64 * voxel_size()
+                || max[a].abs() >= i64::MAX as f64 * voxel_size()
                 || min[a] > max[a]
                 || max[a] - min[a] > max_span
         }) {
@@ -188,17 +188,17 @@ impl StageVolumeTable {
             return Err("tile water volume exceeds geometry capacity".into());
         }
         if units == 0 {
-            return Ok(self.bottom_y as f64 * VOXEL_SIZE);
+            return Ok(self.bottom_y as f64 * voxel_size());
         }
         for y in 0..16 {
             if self.layer_capacity[y] > 0 && units <= self.cumulative[y + 1] {
                 return Ok((self.bottom_y as f64
                     + y as f64
                     + (units - self.cumulative[y]) as f64 / self.layer_capacity[y] as f64)
-                    * VOXEL_SIZE);
+                    * voxel_size());
             }
         }
-        Ok((self.bottom_y as f64 + 16.) * VOXEL_SIZE)
+        Ok((self.bottom_y as f64 + 16.) * voxel_size())
     }
 }
 
@@ -227,8 +227,8 @@ impl TileGeometry {
                 if let Some(c) = column.terrain_column {
                     if c.visible_top > c.ground_top {
                         source_head = Some(
-                            source_head.map_or(c.visible_top as f64 * VOXEL_SIZE, |old| {
-                                old.max(c.visible_top as f64 * VOXEL_SIZE)
+                            source_head.map_or(c.visible_top as f64 * voxel_size(), |old| {
+                                old.max(c.visible_top as f64 * voxel_size())
                             }),
                         );
                     }
@@ -249,10 +249,10 @@ impl TileGeometry {
             .ok_or("procedural water requires FBM source")?;
         let reaches = terrain
             .water_reaches(
-                [o.x as f64 * VOXEL_SIZE, o.z as f64 * VOXEL_SIZE],
+                [o.x as f64 * voxel_size(), o.z as f64 * voxel_size()],
                 [
-                    (o.x + 16) as f64 * VOXEL_SIZE,
-                    (o.z + 16) as f64 * VOXEL_SIZE,
+                    (o.x + 16) as f64 * voxel_size(),
+                    (o.z + 16) as f64 * voxel_size(),
                 ],
             )?
             .into_iter()
@@ -663,8 +663,8 @@ mod tests {
         panic!("expected generated water fixture")
     }
     fn surface_key(world: &World, r: WaterReach) -> TileKey {
-        let x = ((r.upstream.x_m + r.downstream.x_m) * 0.5 / VOXEL_SIZE).floor() as i64;
-        let z = ((r.upstream.z_m + r.downstream.z_m) * 0.5 / VOXEL_SIZE).floor() as i64;
+        let x = ((r.upstream.x_m + r.downstream.x_m) * 0.5 / voxel_size()).floor() as i64;
+        let z = ((r.upstream.z_m + r.downstream.z_m) * 0.5 / voxel_size()).floor() as i64;
         let c = world.fbm_terrain().unwrap().column_cells(x, z);
         assert!(c.visible_top > c.ground_top);
         TileKey::containing(Cell {
@@ -780,7 +780,7 @@ mod tests {
         assert!(gb.reaches.contains(&reach.key));
         assert_eq!(
             ga.stage_volume
-                .volume_below_stage((ga.initial_head_m().unwrap() / VOXEL_SIZE).round() as i64),
+                .volume_below_stage((ga.initial_head_m().unwrap() / voxel_size()).round() as i64),
             ga.initial_units()
         );
         assert!(ga.stage_volume.capacity() <= 4096 && gb.stage_volume.capacity() <= 4096);

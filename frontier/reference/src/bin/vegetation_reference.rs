@@ -3,7 +3,7 @@
 use frontier_reference::{
     landscape::Landscape, normalized, srgb, vegetation::Vegetation, Camera, Hit,
 };
-use frontier_world::{FbmParams, FbmRecipe, World, VOXEL_SIZE};
+use frontier_world::{FbmParams, FbmRecipe, World, voxel_size};
 use std::{
     error::Error,
     fs::File,
@@ -54,20 +54,20 @@ impl PlantView {
     fn contains(&self, p: &frontier_world::vegetation::PlantRecord) -> bool {
         use frontier_world::vegetation::{Species, MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS};
         let r = if p.species == Species::Rowan {
-            MAX_PLANT_RADIUS_CELLS as f64 * VOXEL_SIZE
+            MAX_PLANT_RADIUS_CELLS as f64 * voxel_size()
         } else {
-            8. * VOXEL_SIZE
+            8. * voxel_size()
         };
-        let h = MAX_PLANT_HEIGHT_CELLS as f64 * VOXEL_SIZE;
+        let h = MAX_PLANT_HEIGHT_CELLS as f64 * voxel_size();
         let center = [
-            p.root.x as f64 * VOXEL_SIZE,
-            p.root.y as f64 * VOXEL_SIZE + h * 0.5,
-            p.root.z as f64 * VOXEL_SIZE,
+            p.root.x as f64 * voxel_size(),
+            p.root.y as f64 * voxel_size() + h * 0.5,
+            p.root.z as f64 * voxel_size(),
         ];
         // Include below-root sphere rasterization, cell extents, and every
         // potential occluder within the finite32m shadow-ray neighbourhood.
         let radius =
-            (2. * r * r + (h * 0.5 + r).powi(2)).sqrt() + 2. * VOXEL_SIZE + self.shadow_margin;
+            (2. * r * r + (h * 0.5 + r).powi(2)).sqrt() + 2. * voxel_size() + self.shadow_margin;
         let delta: [f64; 3] = std::array::from_fn(|a| center[a] - self.camera.eye[a]);
         let dot = |v: [f64; 3]| (0..3).map(|a| delta[a] * v[a]).sum::<f64>();
         let z = dot(self.forward);
@@ -276,7 +276,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let grid = (spp as f64).sqrt() as usize;
-    let size = (extent / VOXEL_SIZE) as usize;
+    let size = (extent / voxel_size()) as usize;
     if grid * grid != spp
         || spp == 0
         || threads == 0
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
         );
     }
     std::fs::create_dir_all(&out)?;
-    let min = center.map(|v| (v / VOXEL_SIZE).floor() as i64 - size as i64 / 2);
+    let min = center.map(|v| (v / voxel_size()).floor() as i64 - size as i64 / 2);
     let max = min.map(|v| v + size as i64);
     let camera = Camera {
         eye,
@@ -319,7 +319,7 @@ fn main() -> Result<()> {
         for t in [near, far] {
             for (a, k) in [0, 2].into_iter().enumerate() {
                 let p = eye[k] + d[k] * t;
-                if p < min[a] as f64 * VOXEL_SIZE || p >= max[a] as f64 * VOXEL_SIZE {
+                if p < min[a] as f64 * voxel_size() || p >= max[a] as f64 * voxel_size() {
                     return Err(
                         "camera footprint exits exact crop: enlarge extent or shift center".into(),
                     );
@@ -483,9 +483,9 @@ mod tests {
                     for voxel in model.voxels.iter().step_by(17) {
                         let c = p.world_cell(voxel.cell);
                         let point = [
-                            c.x as f64 * VOXEL_SIZE,
-                            c.y as f64 * VOXEL_SIZE,
-                            c.z as f64 * VOXEL_SIZE,
+                            c.x as f64 * voxel_size(),
+                            c.y as f64 * voxel_size(),
+                            c.z as f64 * voxel_size(),
                         ];
                         for distance in [0., 16., 32.] {
                             let receiver = std::array::from_fn(|a| point[a] - sun[a] * distance);

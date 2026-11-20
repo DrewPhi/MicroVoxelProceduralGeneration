@@ -1,6 +1,6 @@
 //! A small world-aligned irradiance input shared by the voxel, mesh and air passes.
 use crate::Camera;
-use frontier_world::{Material, World, VOXEL_SIZE};
+use frontier_world::{Cell, Material, World};
 use wgpu::util::DeviceExt;
 
 const SIDE: usize = 13;
@@ -79,10 +79,10 @@ impl GroundField {
 }
 
 fn sample_ground(world: &World, x: i64, z: i64) -> ([f32; 3], f64) {
-    let step = (SPACING / VOXEL_SIZE) as i64;
-    let column = world.column(x * step, z * step);
+    let cell = Cell::from_meters([x as f64 * SPACING, 0., z as f64 * SPACING]);
+    let column = world.column(cell.x, cell.z);
     let height = column.ground_height_m();
-    let material = column.canonical_material_without_fluid((height / VOXEL_SIZE) as i64 - 1);
+    let material = column.canonical_material_without_fluid(column.ground_height_cells() - 1);
     let color = if material == Material::Air || material == Material::Water {
         [0.27, 0.26, 0.24]
     } else {

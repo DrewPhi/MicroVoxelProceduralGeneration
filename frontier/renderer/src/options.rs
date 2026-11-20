@@ -65,7 +65,8 @@ pub struct Options {
     pub native_bins: bool,
 }
 pub fn parse() -> Result<Option<Options>> {
-    parse_args(std::env::args().skip(1))
+    let args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
+    parse_args(args)
 }
 
 /// Consume a boolean switch while preserving the flag-specific diagnostic.
@@ -234,7 +235,19 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 if !(1..=256).contains(&radius) {
                     return Err("--naadf-radius requires integer 1..256 metres".into());
                 }
-                visual.naadf_radius_m = radius;
+                // Older launch scripts specify meters. Convert before storing.
+                let voxels = (radius as f64 / frontier_world::voxel_size()).ceil() as u32;
+                crate::naadf::stream::radius_roots(voxels).map_err(|error| {
+                    format!("--naadf-radius {radius} m: {error}. Use --naadf-radius-voxels to set the native budget directly.")
+                })?;
+                visual.naadf_radius_voxels = voxels;
+                visual.naadf_enabled = true;
+            }
+            "--naadf-radius-voxels" => {
+                explicit_naadf = true;
+                let radius = args.next().ok_or("--naadf-radius-voxels requires an integer")?.parse()?;
+                crate::naadf::stream::radius_roots(radius)?;
+                visual.naadf_radius_voxels = radius;
                 visual.naadf_enabled = true;
             }
             "--naadf-budget-mib" => {
@@ -656,11 +669,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 )
             }
             "--help" | "-h" => {
-                println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius 1..256 (integer metres, enables experiment) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
+                println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius-voxels 1..4096 (native voxel half-extent, enables NAADF); --naadf-radius 1..256 (legacy meters) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
                 println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
                 println!("Water models (opt-in): --water-model ca|discrete|procedural|moving.\n  ca: original local cellular automaton; --live-water on selects this path.\n  discrete: supplied whole-voxel waterfall/basin/outlet demo on a worker.\n  procedural: fixed 1 m generated river-bank tile with finite coarse neighbors and open boundaries.\n  moving: connected 2 m detailed window following the player, a 4 m local footprint and exact dormant history.\nMoving river flow: --water-river-rate 0..1000000 attempts native cells per simulated second at each eligible upstream/downstream continuation (default 128 for new runs; 0 selects finite water). A saved rate persists unless explicitly overridden. With positive input/output, downstream removal may lead accepted supply by at most 16 cells per channel. Blocked supply can stall accepted flow. Lakes remain finite.\nLive saves: --water-save PATH atomically saves terrain, inventory and model-specific water state on clean exit; reload with the same model/source/seed. Requires --scene adaptive, --naadf on, --naadf-follow on and --naadf-gpu-distance off.\nCA controls: --water-demo builds a two-chamber basin; G opens its dam early, P adds one counted water cell in creative mode. --water-active-radius 1|2 selects a 3 m|5 m active cube (default 1); --water-history-cells 32768..16777216 sets persistent capacity (default 1048576, at least the active cube). Unloaded CA borders are sealed.\nComparison renderer settings: --naadf-radius 8 --width 1920 --height 1080 selects an 8 m radius/16 m cube at 1080p. Ordinary NAADF radius defaults remain 64 m; water physics dimensions are independent. See LIVE_WATER.md for launch examples and experimental limits.");
                 println!("Distant terrain defaults to coarse voxels with compact seed appearance. Set FRONTIER_DISTANT_TERRAIN=surface for the heightfield comparison or =voxy for the detailed-map voxel comparison. Set FRONTIER_VOXY_GPU_BATCH=1 to test optional GPU batching.");
-                println!("Visual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables the new watershed terrain and vegetation. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("World grid: --voxel-size METERS selects the native cube edge length for this launch (default 0.0625).\nVisual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables the new watershed terrain and vegetation. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
                 println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world|watershed|watershed (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
@@ -1017,7 +1030,7 @@ fn seeded_spawn(seed: u64, params: frontier_world::FbmParams) -> Result<[f64; 2]
                     if center.visible_top != center.ground_top {
                         continue;
                     }
-                    let h = center.ground_top as f64 * frontier_world::VOXEL_SIZE;
+                    let h = center.ground_top as f64 * frontier_world::voxel_size();
                     let safe =
                         [(-4., 0.), (4., 0.), (0., -4.), (0., 4.)]
                             .into_iter()
@@ -1025,7 +1038,7 @@ fn seeded_spawn(seed: u64, params: frontier_world::FbmParams) -> Result<[f64; 2]
                                 let p = frontier_world::Cell::from_meters([x + dx, 0., z + dz]);
                                 let c = terrain.column_cells(p.x, p.z);
                                 c.visible_top == c.ground_top
-                                    && (c.ground_top as f64 * frontier_world::VOXEL_SIZE - h).abs()
+                                    && (c.ground_top as f64 * frontier_world::voxel_size() - h).abs()
                                         <= 1.5
                             });
                     if safe {
@@ -1078,7 +1091,7 @@ mod tests {
         assert_eq!(world.params.recipe, frontier_world::FbmRecipe::SeededWorld);
         assert_eq!(world.camera_preset, "seeded-world");
         assert!(world.visual.naadf_enabled && world.visual.walking && world.visual.beauty);
-        assert_eq!(world.visual.naadf_radius_m, 64);
+        assert_eq!(world.visual.naadf_radius_voxels, 1024);
         assert_eq!(world.pixel_error, 5.);
         assert_eq!(world.capture_far, Some(6000.));
         assert!(!world.visual.vegetation);
@@ -1128,7 +1141,7 @@ mod tests {
         let default = parse(&[]).unwrap().unwrap();
         assert!(default.visual.naadf_enabled);
         assert_eq!(default.msaa, 1);
-        assert_eq!(default.visual.naadf_radius_m, 64);
+        assert_eq!(default.visual.naadf_radius_voxels, 1024);
         let off = parse(&["--preset", "alpine", "--naadf", "off"])
             .unwrap()
             .unwrap();
@@ -1151,9 +1164,17 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(options.visual.naadf_enabled);
-        assert_eq!(options.visual.naadf_radius_m, 128);
+        assert_eq!(options.visual.naadf_radius_voxels, 2048);
         assert_eq!(options.visual.naadf_budget_mib, 1024);
+        let voxel_options = parse(&["--preset", "alpine", "--naadf-radius-voxels", "1025"])
+            .unwrap()
+            .unwrap();
+        assert!(voxel_options.visual.naadf_enabled);
+        assert_eq!(voxel_options.visual.naadf_radius_voxels, 1025);
+        assert_eq!(crate::naadf::stream::radius_roots(1025).unwrap(), 65);
         for args in [
+            vec!["--naadf-radius-voxels", "0"],
+            vec!["--naadf-radius-voxels", "4097"],
             vec!["--naadf-radius", "0"],
             vec!["--naadf-radius", "257"],
             vec!["--naadf-budget-mib", "15"],

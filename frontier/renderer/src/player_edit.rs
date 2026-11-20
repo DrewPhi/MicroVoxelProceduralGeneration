@@ -3,7 +3,7 @@
 use crate::{naadf, Camera};
 use frontier_world::{
     edit::{self, EditTransaction, HandSettings, Inventory},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::time::Instant;
 
@@ -166,7 +166,7 @@ impl PlayerEdit {
         let mut out = Overlay { text: format!("{:?}: {}  | inventory {}/{}  | 1–6 material\nL click/hold pickup · R place · {:.2} L max · {:.2} m reach\n{}",
             inventory.selected,inventory.counts[inventory.selected as usize],inventory.total(),inventory.capacity,
             self.settings.volume_liters,self.settings.reach_m,self.message), ..Default::default() };
-        let voxel_liters = VOXEL_SIZE.powi(3) * 1000.;
+        let voxel_liters = voxel_size().powi(3) * 1000.;
         if self.settings.volume_liters < voxel_liters {
             out.text
                 .push_str(&format!("\nGrid minimum: one voxel ({voxel_liters:.6} L)"));
@@ -179,16 +179,16 @@ impl PlayerEdit {
                 "\nPickup: {} {:?} · {:.3} L",
                 g.count,
                 g.candidates[0].1,
-                g.count as f64 * VOXEL_SIZE.powi(3) * 1000.
+                g.count as f64 * voxel_size().powi(3) * 1000.
             ));
             let matrix = camera.matrix(camera.position, aspect);
             for &(cell, _) in &g.candidates[..g.count] {
                 let p = [cell.x, cell.y, cell.z];
                 let corners: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
                     let local = glam::DVec3::new(
-                        (p[0] as f64 + ((i & 1) as f64)) * VOXEL_SIZE,
-                        (p[1] as f64 + (((i >> 1) & 1) as f64)) * VOXEL_SIZE,
-                        (p[2] as f64 + (((i >> 2) & 1) as f64)) * VOXEL_SIZE,
+                        (p[0] as f64 + ((i & 1) as f64)) * voxel_size(),
+                        (p[1] as f64 + (((i >> 1) & 1) as f64)) * voxel_size(),
+                        (p[2] as f64 + (((i >> 2) & 1) as f64)) * voxel_size(),
                     ) - camera.position;
                     let clip = matrix * local.as_vec3().extend(1.);
                     (clip.w > 0.025).then(|| [clip.x / clip.w, clip.y / clip.w])
@@ -212,8 +212,8 @@ pub(crate) fn reachable(cell: Cell, camera: Camera, reach: f64) -> bool {
     let eye = camera.position.to_array();
     (0..3)
         .map(|a| {
-            let low = p[a] as f64 * VOXEL_SIZE;
-            let high = low + VOXEL_SIZE;
+            let low = p[a] as f64 * voxel_size();
+            let high = low + voxel_size();
             (eye[a] - eye[a].clamp(low, high)).powi(2)
         })
         .sum::<f64>()
@@ -227,7 +227,7 @@ pub fn intersects_player(cell: Cell, eye: [f64; 3]) -> bool {
     ];
     let high = [eye[0] + 0.225, low[1] + 1.75, eye[2] + 0.225];
     let p = [cell.x, cell.y, cell.z];
-    (0..3).all(|a| p[a] as f64 * VOXEL_SIZE < high[a] && (p[a] as f64 + 1.) * VOXEL_SIZE > low[a])
+    (0..3).all(|a| p[a] as f64 * voxel_size() < high[a] && (p[a] as f64 + 1.) * voxel_size() > low[a])
 }
 #[cfg(test)]
 mod tests {

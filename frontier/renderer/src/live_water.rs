@@ -3,7 +3,7 @@ use crate::{Camera, Result};
 use frontier_world::{
     edit::{EditTransaction, Inventory},
     fluid::{FluidConfig, FluidRegion, FluidWorld, FLUID_CAPACITY},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-// One metre at the authoritative 6.25 cm voxel resolution.
+// The solver allocates regions 16 native cells on each axis.
 const REGION_EDGE_CELLS: i64 = 16;
 const REGIONS_PER_FRAME: usize = 2;
 const STEP_SECONDS: f64 = 0.1;
@@ -240,9 +240,9 @@ impl LiveWater {
     /// A sealed two-chamber native-cell basin, with a removable central dam.
     /// Initial water is an explicitly counted addition, never an infinite source.
     pub fn demo(&mut self, world: &mut World, camera: &mut Camera) -> Result<()> {
-        let x = (camera.position.x / VOXEL_SIZE).floor() as i64;
-        let z = (camera.position.z / VOXEL_SIZE).floor() as i64;
-        let y = (world.ground_height_m(camera.position.x, camera.position.z) / VOXEL_SIZE).round()
+        let x = (camera.position.x / voxel_size()).floor() as i64;
+        let z = (camera.position.z / voxel_size()).floor() as i64;
+        let y = (world.ground_height_m(camera.position.x, camera.position.z) / voxel_size()).round()
             as i64
             + 2;
         // Anchor a 2x1x1m basin on a metre grid for reproducible activation.
@@ -267,9 +267,9 @@ impl LiveWater {
         // Activate the complete demo footprint before adding mass.
         let mut demo_camera = *camera;
         demo_camera.position = glam::DVec3::new(
-            c.x as f64 * VOXEL_SIZE,
-            (c.y as f64 * VOXEL_SIZE) + 1.7,
-            c.z as f64 * VOXEL_SIZE,
+            c.x as f64 * voxel_size(),
+            (c.y as f64 * voxel_size()) + 1.7,
+            c.z as f64 * voxel_size(),
         );
         self.demo_center = Some(c);
         self.demo_open_at = Some(self.fluid.tick() + 20);
@@ -292,9 +292,9 @@ impl LiveWater {
         }
         self.publish(world, cells);
         camera.position = glam::DVec3::new(
-            c.x as f64 * VOXEL_SIZE,
-            c.y as f64 * VOXEL_SIZE + 2.2,
-            c.z as f64 * VOXEL_SIZE - 2.,
+            c.x as f64 * voxel_size(),
+            c.y as f64 * voxel_size() + 2.2,
+            c.z as f64 * voxel_size() - 2.,
         );
         camera.yaw = 0.;
         camera.pitch = -0.7;
@@ -357,7 +357,7 @@ impl LiveWater {
         Ok(())
     }
     fn checkpoint(&self, world: &World) -> Vec<u8> {
-        let mut b = b"FVWATER3".to_vec();
+        let mut b = crate::grid_checkpoint::header(b"FVWATER3");
         for v in Self::identity(world) {
             b.extend(v.to_le_bytes());
         }
@@ -381,6 +381,7 @@ impl LiveWater {
         b
     }
     fn restore(&mut self, world: &mut World, b: &[u8]) -> Result<()> {
+        let b = crate::grid_checkpoint::payload(b)?;
         let mut pos = 8;
         let legacy = b.get(..8) == Some(b"FVWATER2");
         if !legacy && b.get(..8) != Some(b"FVWATER3") {
@@ -481,7 +482,7 @@ mod tests {
     fn atomic_checkpoint_replays_terrain_fluid_and_dry_tombstones() {
         let mut world = World::fbm(19, Default::default()).unwrap();
         let mut live = LiveWater::new(&mut world, None, 1, 1_048_576).unwrap();
-        let y = (world.height_m(0., 0.) / VOXEL_SIZE) as i64 + 20;
+        let y = (world.height_m(0., 0.) / voxel_size()) as i64 + 20;
         let r = FluidRegion::new(
             Cell { x: 0, y, z: 0 },
             Cell {

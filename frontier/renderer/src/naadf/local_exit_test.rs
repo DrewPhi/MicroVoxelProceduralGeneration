@@ -197,7 +197,7 @@ fn fixture_cases() -> Vec<Case> {
 
 #[test]
 fn local_exit_fixture_shader_validates() {
-    let module = naga::front::wgsl::parse_str(SHADER).unwrap();
+    let module = naga::front::wgsl::parse_str(&crate::voxel_shader(SHADER)).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -313,7 +313,7 @@ fn local_exit_matches_native_events_and_hit_material_shadow() {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("local native-plane exit oracle"),

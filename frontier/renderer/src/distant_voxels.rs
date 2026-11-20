@@ -9,7 +9,7 @@ use super::{
 use crate::spatial_appearance::Profile;
 use frontier_world::{
     affine_bounds::{BoundBudget, ColumnBox},
-    FbmRecipe, Material, World, VOXEL_SIZE,
+    FbmRecipe, Material, World, voxel_size,
 };
 use std::{
     collections::BTreeMap,
@@ -146,7 +146,7 @@ fn packed_quad(
     material: Material,
     profile: u32,
 ) -> NativeQuad {
-    let meters = |c: i64| (c as f64 * VOXEL_SIZE) as f32;
+    let meters = |c: i64| (c as f64 * voxel_size()) as f32;
     let axes = [(axis + 1) % 3, (axis + 2) % 3];
     let material = TERRAIN_PALETTE
         .iter()
@@ -327,8 +327,8 @@ impl Generator<'_> {
         self.appearance.exhaustive = false;
         self.face_profiles
             .extend(crate::spatial_appearance::map_header(
-                origin.map(|v| (v as f64 * VOXEL_SIZE) as f32),
-                (stride as f64 * VOXEL_SIZE) as f32,
+                origin.map(|v| (v as f64 * voxel_size()) as f32),
+                (stride as f64 * voxel_size()) as f32,
                 dimension,
                 &refs,
                 at,
@@ -472,7 +472,7 @@ impl Generator<'_> {
             // actual roof of each one, including the thin boundary band.
             for roof in first_roof..self.coarse_quads.len() {
                 let quad = self.coarse_quads[roof];
-                let cell = |p: f32| (f64::from(p) / VOXEL_SIZE) as i64;
+                let cell = |p: f32| (f64::from(p) / voxel_size()).round() as i64;
                 let [x0, top, z0] = quad.anchor.map(cell);
                 let x1 = x0 + cell(quad.extent[1]);
                 let z1 = z0 + cell(quad.extent[0]);
@@ -481,10 +481,10 @@ impl Generator<'_> {
                         return Err("adaptive geometry cancelled".into());
                     }
                     for x in x0..x1 {
-                        let h = self.height(x, z)? as f64 * VOXEL_SIZE;
+                        let h = self.height(x, z)? as f64 * voxel_size();
                         range[0] = range[0].min(h);
                         range[1] = range[1].max(h);
-                        error = error.max((h - top as f64 * VOXEL_SIZE).abs());
+                        error = error.max((h - top as f64 * voxel_size()).abs());
                     }
                 }
             }
@@ -511,7 +511,7 @@ impl Generator<'_> {
                 self.affine_stats.full_range_fallbacks += bound.full_range_fallbacks as u64;
                 // A patch whose entire range fits below the accumulated
                 // error cannot change the tile's conservative certificate.
-                let dominated = bound.roof_range_error(roof_range.map(|y| y as f64 * VOXEL_SIZE))
+                let dominated = bound.roof_range_error(roof_range.map(|y| y as f64 * voxel_size()))
                     <= self.affine_error;
                 #[cfg(test)]
                 let dominated = dominated && !self.samples.coarse_reference;
@@ -522,8 +522,8 @@ impl Generator<'_> {
                     let mut complete = true;
                     for quad in &self.coarse_quads[first_roof..] {
                         let [x, y, z] = quad.anchor.map(f64::from);
-                        let x = x + key.min[0] as f64 * VOXEL_SIZE;
-                        let z = z + key.min[1] as f64 * VOXEL_SIZE;
+                        let x = x + key.min[0] as f64 * voxel_size();
+                        let z = z + key.min[1] as f64 * voxel_size();
                         let x1 = x + f64::from(quad.extent[1]);
                         let z1 = z + f64::from(quad.extent[0]);
                         if let Some(value) =
@@ -695,7 +695,7 @@ impl Generator<'_> {
                     (center - top_range[0])
                         .abs()
                         .max((center - top_range[1]).abs()) as f64
-                        * VOXEL_SIZE,
+                        * voxel_size(),
                 );
                 if can_certify {
                     let bound = bounds.as_ref().map(|bounds| bounds[index]);
@@ -851,7 +851,7 @@ pub(super) fn merge_quads(tile: &mut GeometryTile) {
                 q.anchor[axis].to_bits(),
                 q.anchor[v].to_bits(),
                 q.extent[1 - merge].to_bits(),
-                (q.anchor[u] as f64 / VOXEL_SIZE) as i64,
+                (q.anchor[u] as f64 / voxel_size()).round() as i64,
             )
         };
         quads.sort_unstable_by_key(order);
@@ -962,8 +962,8 @@ mod tests {
         for offset in [0, 32] {
             let fine = mixed_tile(&world, [0, -64 + offset], 32, 4, [4; 4]);
             for t in 0..32 {
-                let fine_z = ((t as f64 + 0.5) * VOXEL_SIZE) as f32;
-                let coarse_z = fine_z + (offset as f64 * VOXEL_SIZE) as f32;
+                let fine_z = ((t as f64 + 0.5) * voxel_size()) as f32;
+                let coarse_z = fine_z + (offset as f64 * voxel_size()) as f32;
                 let a = edge_top(&coarse, 4., true, coarse_z);
                 let b = edge_top(&fine, 0., false, fine_z);
                 let a_faces = side_span(&coarse, 0, 4., coarse_z);
@@ -986,7 +986,7 @@ mod tests {
         let world = World::fbm(7, FbmParams::default()).unwrap();
         let coarse = mixed_tile(&world, [-32, 0], 32, 4, [4, 4, 1, 4]);
         for t in 0..32 {
-            let z = ((t as f64 + 0.5) * VOXEL_SIZE) as f32;
+            let z = ((t as f64 + 0.5) * voxel_size()) as f32;
             let a = world.column(-1, t).height_m() as f32;
             let b = world.column(0, t).height_m() as f32;
             assert_eq!(edge_top(&coarse, 2., true, z), a);

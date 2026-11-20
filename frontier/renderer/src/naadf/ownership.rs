@@ -3,7 +3,7 @@
 use crate::adaptive_geometry::TileKey;
 use frontier_world::{
     vegetation::{PlantRecord, Species, MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS},
-    VOXEL_SIZE,
+    voxel_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 /// A raster fallback is only needed for objects intersecting the part of
@@ -15,11 +15,11 @@ pub(crate) struct Retirement {
 }
 impl Retirement {
     pub fn touches(self, bounds: [[f64; 3]; 2]) -> bool {
-        let lo: [f64; 3] = std::array::from_fn(|a| (self.old[0][a] + VOXEL_SIZE).max(bounds[0][a]));
-        let hi: [f64; 3] = std::array::from_fn(|a| (self.old[1][a] - VOXEL_SIZE).min(bounds[1][a]));
+        let lo: [f64; 3] = std::array::from_fn(|a| (self.old[0][a] + voxel_size()).max(bounds[0][a]));
+        let hi: [f64; 3] = std::array::from_fn(|a| (self.old[1][a] - voxel_size()).min(bounds[1][a]));
         (0..3).all(|a| lo[a] < hi[a])
             && (0..3).any(|a| {
-                lo[a] < self.kept[0][a] + VOXEL_SIZE || hi[a] > self.kept[1][a] - VOXEL_SIZE
+                lo[a] < self.kept[0][a] + voxel_size() || hi[a] > self.kept[1][a] - voxel_size()
             })
     }
 }
@@ -61,25 +61,26 @@ impl Ownership {
         (0..3).all(|a| {
             b[0][a].is_finite()
                 && b[1][a].is_finite()
-                && b[0][a] >= self.bounds[0][a] + VOXEL_SIZE
-                && b[1][a] <= self.bounds[1][a] - VOXEL_SIZE
+                && b[0][a] >= self.bounds[0][a] + voxel_size()
+                && b[1][a] <= self.bounds[1][a] - voxel_size()
         })
     }
     pub fn terrain(&self, key: TileKey) -> bool {
         let min = [
-            key.min[0] as f64 * VOXEL_SIZE,
-            key.min[1] as f64 * VOXEL_SIZE,
+            key.min[0] as f64 * voxel_size(),
+            key.min[1] as f64 * voxel_size(),
         ];
-        let width = key.width_cells as f64 * VOXEL_SIZE;
+        let width = key.width_cells as f64 * voxel_size();
+        let root_m = super::stream::root_size_m();
         let mut lo = [0usize; 2];
         let mut hi = lo;
         for a in 0..2 {
-            if min[a] - 1. < self.bounds[0][a * 2] || min[a] + width + 1. > self.bounds[1][a * 2] {
+            if min[a] - root_m < self.bounds[0][a * 2] || min[a] + width + root_m > self.bounds[1][a * 2] {
                 return false;
             }
             let origin = self.grid_origin[a];
-            let l = (min[a] - origin).floor() as i64 - 1;
-            let h = (min[a] + width - origin).ceil() as i64 + 1;
+            let l = ((min[a] - origin) / root_m).floor() as i64 - 1;
+            let h = ((min[a] + width - origin) / root_m).ceil() as i64 + 1;
             if l < 0 || h > self.n as i64 {
                 return false;
             }
@@ -102,14 +103,14 @@ impl Ownership {
         };
         [
             [
-                p.root.x as f64 * VOXEL_SIZE - r as f64 * VOXEL_SIZE,
-                p.root.y as f64 * VOXEL_SIZE,
-                p.root.z as f64 * VOXEL_SIZE - r as f64 * VOXEL_SIZE,
+                p.root.x as f64 * voxel_size() - r as f64 * voxel_size(),
+                p.root.y as f64 * voxel_size(),
+                p.root.z as f64 * voxel_size() - r as f64 * voxel_size(),
             ],
             [
-                (p.root.x + r + 1) as f64 * VOXEL_SIZE,
-                (p.root.y + h + 1) as f64 * VOXEL_SIZE,
-                (p.root.z + r + 1) as f64 * VOXEL_SIZE,
+                (p.root.x + r + 1) as f64 * voxel_size(),
+                (p.root.y + h + 1) as f64 * voxel_size(),
+                (p.root.z + r + 1) as f64 * voxel_size(),
             ],
         ]
     }
@@ -119,14 +120,14 @@ impl Ownership {
     pub fn ground_bounds(x: i64, z: i64, low: i64, high: i64) -> [[f64; 3]; 2] {
         [
             [
-                (x * 128 - 8) as f64 * VOXEL_SIZE,
-                low as f64 * VOXEL_SIZE,
-                (z * 128 - 8) as f64 * VOXEL_SIZE,
+                (x * 128 - 8) as f64 * voxel_size(),
+                low as f64 * voxel_size(),
+                (z * 128 - 8) as f64 * voxel_size(),
             ],
             [
-                ((x + 1) * 128 + 8) as f64 * VOXEL_SIZE,
-                (high + 13) as f64 * VOXEL_SIZE,
-                ((z + 1) * 128 + 8) as f64 * VOXEL_SIZE,
+                ((x + 1) * 128 + 8) as f64 * voxel_size(),
+                (high + 13) as f64 * voxel_size(),
+                ((z + 1) * 128 + 8) as f64 * voxel_size(),
             ],
         ]
     }

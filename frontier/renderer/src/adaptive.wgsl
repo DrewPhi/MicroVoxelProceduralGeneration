@@ -271,9 +271,9 @@ fn cover_handoff(local:vec3<f32>)->f32 {
     return smoothstep(28.,42.,length(d));
 }
 fn cover_shell_alpha(p:CoverSample,local:vec3<f32>,normal:vec3<f32>,footprint:f32,coverage:f32)->f32 {
-    let height=ceil(p.extra.nz.y*0.5*16.)/16.;
+    let height=ceil(p.extra.nz.y*0.5*VOXELS_PER_METER)/VOXELS_PER_METER;
     let projected=height/max(footprint,0.0001);
-    let band=u32(clamp(floor(height*16./4.),0.,2.));
+    let band=u32(clamp(floor(height*VOXELS_PER_METER/4.),0.,2.));
     return min(coverage,0.6*p.extra.pz[band]*cover_handoff(local)*smoothstep(0.75,1.5,projected));
 }
 fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>,base:vec3<f32>,visibility:f32)->vec3<f32> {
@@ -308,7 +308,7 @@ fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:ve
     // microgeometry contrast; separate substrate/cover sampling is not a full
     // joint ground-and-plant radiance prefilter.
     plant*=mix(mean,max(dot(base,luma),0.),0.85)/max(mean,0.0001);
-    let world_cell=bitcast<vec3<u32>>(vec3<i32>(floor(local*16.)))+camera.paint_origin.xyz;
+    let world_cell=bitcast<vec3<u32>>(vec3<i32>(floor(local*VOXELS_PER_METER)))+camera.paint_origin.xyz;
     let coarse_cell=vec3(world_cell.x,0u,world_cell.z)>>vec3<u32>(3u);
     let footprint=max(length(dx.xz),length(dy.xz));let silhouette_footprint=min(length(dx),length(dy));let attenuation=inverseSqrt(max(1.,footprint*footprint/0.25));
     let grain=(paint_hash(coarse_cell)-0.5)*2.;
@@ -346,7 +346,7 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     var p=position;
     if cover_shell && face_profiles[profile_index].top.w == -6. && normal.y>0.45 {
         let cover=cover_sample(profile_index,position,normal);
-        p.y+=ceil(cover.extra.nz.y*0.5*16.)/16.;
+        p.y+=ceil(cover.extra.nz.y*0.5*VOXELS_PER_METER)/VOXELS_PER_METER;
     }
     out.position=camera.view_projection*vec4<f32>(p,1.);
     out.color=color;out.normal=normal;out.local=p;
@@ -427,10 +427,10 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
 fn shade(in: VertexOut) -> vec4<f32> {
     // Ownership follows the occupied native cell, including faces on box edges.
     if near_shadow.naadf_hi.w>0.5 {
-        let point=(floor(in.local*16.-in.normal*0.01)+0.5)/16.-camera.eye.xyz;
+        let point=(floor(in.local*VOXELS_PER_METER-in.normal*0.01)+0.5)/VOXELS_PER_METER-camera.eye.xyz;
         // Coarse roofs can straddle the exact clip plane. Let their depth
         // compete only within the raster apron reserved by Ownership::terrain.
-        let inset=select(0.,1.,(camera.paint_origin.w&8u)!=0u);
+        let inset=select(0.,16. * NATIVE_VOXEL_METERS,(camera.paint_origin.w&8u)!=0u);
         if all(point>=near_shadow.naadf_lo.xyz+vec3(inset))
             && all(point<near_shadow.naadf_hi.xyz-vec3(inset)) {discard;}
     }
@@ -448,10 +448,10 @@ fn shade(in: VertexOut) -> vec4<f32> {
     }
     let light=terrain_lighting(in.normal,visibility)+indirect;
     var tint=vec3<f32>(1.);
-    let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));
+    let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
-        let distance=length((vec3<f32>(local_cell)+0.5)/16.-camera.eye.xyz);
+        let distance=length((vec3<f32>(local_cell)+0.5)/VOXELS_PER_METER-camera.eye.xyz);
         tint=display_terrain_tint(cell,1.-smoothstep(12.,40.,distance));
     }
     // Evaluate footprint before branching. The smaller singular value retains
@@ -463,7 +463,7 @@ fn shade(in: VertexOut) -> vec4<f32> {
         let p=cover_sample(in.profile_index,in.local,in.normal);let view=normalize(camera.eye.xyz-in.local);
         let coverage=view_coverage(p,view,in.normal)*cover_handoff(in.local);
         let alpha=cover_shell_alpha(p,in.local,in.normal,min(length(dx),length(dy)),coverage);
-        let cell=bitcast<vec3<u32>>(vec3<i32>(floor(in.local*16.)))+camera.paint_origin.xyz;
+        let cell=bitcast<vec3<u32>>(vec3<i32>(floor(in.local*VOXELS_PER_METER)))+camera.paint_origin.xyz;
         if paint_hash(vec3(cell.x,991u,cell.z))>=alpha {discard;}
         return vec4(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.);
     }
@@ -471,7 +471,7 @@ fn shade(in: VertexOut) -> vec4<f32> {
     let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
     let cross_area=cross(dx,dy);
     let smallest=dot(cross_area,cross_area)/max(largest,0.00000001);
-    let footprint=sqrt(smallest)/0.0625;
+    let footprint=sqrt(smallest)/NATIVE_VOXEL_METERS;
     var blend=select(0.,1.,(camera.paint_origin.w&1u)!=0u);
     let minified=smoothstep(1.,2.,footprint);
     if (camera.paint_origin.w&2u)!=0u {blend*=minified;}

@@ -196,7 +196,7 @@ fn direct_corner(){
 
 #[test]
 fn direct_corner_shader_validates() {
-    let module = naga::front::wgsl::parse_str(CORNER_SHADER).unwrap();
+    let module = naga::front::wgsl::parse_str(&crate::voxel_shader(CORNER_SHADER)).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -308,7 +308,7 @@ fn directly_published_roots_match_native_corner_primary_and_shadow() {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(CORNER_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(CORNER_SHADER)),
         });
         let make_pipeline = |direct: bool| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

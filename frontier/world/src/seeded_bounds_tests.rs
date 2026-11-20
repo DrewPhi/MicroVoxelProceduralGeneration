@@ -4,7 +4,7 @@ use crate::{
     affine_bounds::{
         bound_native_height, bound_proxy_residual, BoundBudget, ColumnBox, ProxyPlane,
     },
-    FbmParams, FbmRecipe, FbmTerrain, VOXEL_SIZE,
+    FbmParams, FbmRecipe, FbmTerrain, voxel_size,
 };
 
 fn params() -> FbmParams {
@@ -38,11 +38,11 @@ fn verify(terrain: &FbmTerrain, region: ColumnBox, budget: BoundBudget) -> usize
             let z = region.min[1] + iz as i64;
             let column = terrain.column_cells(x, z);
             wet += usize::from(column.visible_top > column.ground_top);
-            let actual = column.visible_top as f64 * VOXEL_SIZE;
+            let actual = column.visible_top as f64 * voxel_size();
             assert!(actual >= bound.height_range[0] && actual <= bound.height_range[1],
                 "seed={} params={:?} region={region:?} column=({x},{z}) visible={actual} bound={bound:?}",
                 terrain.seed(), terrain.params());
-            let position = [(x as f64 + 0.5) * VOXEL_SIZE, (z as f64 + 0.5) * VOXEL_SIZE];
+            let position = [(x as f64 + 0.5) * voxel_size(), (z as f64 + 0.5) * voxel_size()];
             let proxy = plane.height_at_center
                 + plane.dx * (position[0] - center[0])
                 + plane.dz * (position[1] - center[1]);
@@ -89,9 +89,9 @@ fn seeded_certificates_cover_river_cross_sections_lakes_and_negative_cache_corne
                             anchors.push([r.a.x + factor * r.width, r.a.z]);
                         }
                         for distance in [
-                            r.outer_radius() - VOXEL_SIZE,
+                            r.outer_radius() - voxel_size(),
                             r.outer_radius(),
-                            r.outer_radius() + VOXEL_SIZE,
+                            r.outer_radius() + voxel_size(),
                         ] {
                             anchors.push([r.a.x + distance, r.a.z]);
                         }
@@ -110,9 +110,9 @@ fn seeded_certificates_cover_river_cross_sections_lakes_and_negative_cache_corne
                             ]);
                         }
                         for distance in [
-                            r.outer_radius() - VOXEL_SIZE,
+                            r.outer_radius() - voxel_size(),
                             r.outer_radius(),
-                            r.outer_radius() + VOXEL_SIZE,
+                            r.outer_radius() + voxel_size(),
                         ] {
                             anchors.push([
                                 (r.a.x + r.b.x) * 0.5 - dz / length * distance,
@@ -135,7 +135,7 @@ fn seeded_certificates_cover_river_cross_sections_lakes_and_negative_cache_corne
         );
         tested_lakes += lake_count;
         for anchor in anchors {
-            let c = anchor.map(|v| (v / VOXEL_SIZE).floor() as i64);
+            let c = anchor.map(|v| (v / voxel_size()).floor() as i64);
             for cells in [1, 9, 257] {
                 let region = ColumnBox {
                     min: c.map(|v| v - (cells / 2) as i64),
@@ -181,7 +181,7 @@ fn seeded_certificates_survive_extreme_parameters_and_budget_fallbacks() {
         },
     ] {
         let terrain = FbmTerrain::new(0x7234_abcd, p).unwrap();
-        let spacing_cells = (2400. * p.horizontal_scale / 1800. / VOXEL_SIZE).floor() as i64;
+        let spacing_cells = (2400. * p.horizontal_scale / 1800. / voxel_size()).floor() as i64;
         for min in [
             [-31, -1],
             [0, 0],
@@ -224,7 +224,7 @@ fn watershed_certificates_cover_banks_and_region_edges() {
             anchors.extend([mid, [mid[0] + r.width, mid[1]]]);
         }
         for m in anchors {
-            let c = m.map(|v| (v / VOXEL_SIZE).floor() as i64);
+            let c = m.map(|v| (v / voxel_size()).floor() as i64);
             wet += verify(
                 &terrain,
                 ColumnBox {
@@ -249,14 +249,14 @@ fn watershed_water_stays_close_to_the_bed_at_a_low_saddle() {
     )
     .unwrap();
     // This reach originally extrapolated a stage over 380 m above its bed.
-    let x = (-3802.083333333333_f64 / VOXEL_SIZE).floor() as i64;
-    let z = (2135.416666666667_f64 / VOXEL_SIZE).floor() as i64;
+    let x = (-3802.083333333333_f64 / voxel_size()).floor() as i64;
+    let z = (2135.416666666667_f64 / voxel_size()).floor() as i64;
     let column = terrain.column_cells(x, z);
     assert!(
         column.visible_top > column.ground_top,
         "the channel should still be wet"
     );
-    assert!((column.visible_top - column.ground_top) as f64 * VOXEL_SIZE <= 9. + VOXEL_SIZE);
+    assert!((column.visible_top - column.ground_top) as f64 * voxel_size() <= 9. + voxel_size());
     verify(
         &terrain,
         ColumnBox {
@@ -298,8 +298,8 @@ fn seeded_distant_columns_and_negative_chunk_borders_reproduce_after_eviction() 
     }
     let sample = |x, z| {
         let column = world.column(x, z);
-        let ground = (column.ground_height_m() / VOXEL_SIZE) as i64;
-        let top = (column.height_m() / VOXEL_SIZE) as i64;
+        let ground = (column.ground_height_m() / voxel_size()) as i64;
+        let top = (column.height_m() / voxel_size()) as i64;
         let y = [top + 1, top - 1, ground - 1, ground - 2, ground - 13];
         for &y in &y {
             assert_eq!(column.material(y), world.material(Cell { x, y, z }));
@@ -330,7 +330,7 @@ fn seeded_lake_certificate_excludes_hidden_bed_depth() {
                 };
                 let bound = bound_native_height(&t, region, BoundBudget::default()).unwrap();
                 assert!(
-                    bound.height_range[1] - bound.height_range[0] < VOXEL_SIZE * 2.,
+                    bound.height_range[1] - bound.height_range[0] < voxel_size() * 2.,
                     "flat water must not inherit its hidden bed's error: {bound:?}"
                 );
                 verify(&t, region, BoundBudget::default());
@@ -354,7 +354,7 @@ fn seeded_valley_support_lookup_and_half_node_halo_cache_corners_are_certified()
         let dz = r.b.z - r.a.z;
         let length = dx.hypot(dz);
         for side in [-1., 1.] {
-            for delta in [-VOXEL_SIZE, 0., VOXEL_SIZE] {
+            for delta in [-voxel_size(), 0., voxel_size()] {
                 let distance = r.outer_radius() + delta;
                 let x = (r.a.x + r.b.x) * 0.5 - dz / length * distance * side;
                 let z = (r.a.z + r.b.z) * 0.5 + dx / length * distance * side;
@@ -455,9 +455,9 @@ fn normalized_channel_weights_keep_motion_offender_bounds_useful() {
                 let bound = bound_native_height(&t, region, BoundBudget::default()).unwrap();
                 let point = |x: i64, z: i64| {
                     [
-                        x as f64 * VOXEL_SIZE,
-                        t.column_cells(x, z).visible_top as f64 * VOXEL_SIZE,
-                        z as f64 * VOXEL_SIZE,
+                        x as f64 * voxel_size(),
+                        t.column_cells(x, z).visible_top as f64 * voxel_size(),
+                        z as f64 * voxel_size(),
                     ]
                 };
                 let center = point(x + 32, z + 32);

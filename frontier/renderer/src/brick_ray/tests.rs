@@ -108,8 +108,9 @@ fn trace(
 
 #[test]
 fn wgsl_parses_and_validates() {
-    let module = naga::front::wgsl::parse_str(SHADER)
-        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+    let source = crate::voxel_shader(SHADER);
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),

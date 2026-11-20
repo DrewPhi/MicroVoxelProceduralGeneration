@@ -4,7 +4,7 @@
 use crate::{adaptive_geometry::GeometryTile, spatial_appearance::Profile};
 use frontier_world::{
     vegetation::{self, Species},
-    Material, World, VOXEL_SIZE,
+    Material, World, voxel_size,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -330,7 +330,7 @@ fn blossom_area_m2() -> f32 {
                 }
             }
             area += tops.values().filter(|(_, flower)| *flower).count() as f32
-                * (VOXEL_SIZE * VOXEL_SIZE) as f32;
+                * (voxel_size() * voxel_size()) as f32;
         }
         area / 24.
     })
@@ -382,7 +382,7 @@ fn leaf(
                 }
                 let ground = *heights
                     .entry((c.x, c.z))
-                    .or_insert_with(|| (w.column(c.x, c.z).height_m() / VOXEL_SIZE) as i64);
+                    .or_insert_with(|| w.column(c.x, c.z).height_cells());
                 let y = c.y - ground;
                 if !(0..HEIGHT as i64).contains(&y) || edited.contains(&c) {
                     continue;
@@ -438,7 +438,7 @@ fn leaf(
                 sum += l;
                 sum2 += l * l;
                 columns += 1.;
-                top_heights.push((y + 1) as f32 * VOXEL_SIZE as f32);
+                top_heights.push((y + 1) as f32 * voxel_size() as f32);
             }
         }
     }
@@ -464,7 +464,7 @@ fn leaf(
                 for x in 0..4 {
                     let origin = [
                         (x * 4 + 2) as f64 + 0.5,
-                        top_heights.last().copied().unwrap_or(0.) as f64 / VOXEL_SIZE + 0.37,
+                        top_heights.last().copied().unwrap_or(0.) as f64 / voxel_size() + 0.37,
                         (z * 4 + 2) as f64 + 0.5,
                     ];
                     let mut p = origin.map(|v| v.floor() as i64);
@@ -541,6 +541,7 @@ fn leaf(
 pub(crate) fn eligible(w: &World, tile: &GeometryTile) -> bool {
     enabled()
         && w.vegetation_enabled()
+        && !vegetation::uses_decorative_ground_cover()
         && !tile.exact
         && tile.key.step_cells >= 2
         && tile.gpu_profiles.is_none()
@@ -610,12 +611,12 @@ pub(crate) fn decorate(
     let at = tile.face_profiles.len() as u32;
     let mut header = crate::spatial_appearance::map_header(
         [
-            (origin[0] - tile.key.min[0]) as f32 * VOXEL_SIZE as f32
-                + spacing as f32 * VOXEL_SIZE as f32 * 0.5,
-            (origin[1] - tile.key.min[1]) as f32 * VOXEL_SIZE as f32
-                + spacing as f32 * VOXEL_SIZE as f32 * 0.5,
+            (origin[0] - tile.key.min[0]) as f32 * voxel_size() as f32
+                + spacing as f32 * voxel_size() as f32 * 0.5,
+            (origin[1] - tile.key.min[1]) as f32 * voxel_size() as f32
+                + spacing as f32 * voxel_size() as f32 * 0.5,
         ],
-        spacing as f32 * VOXEL_SIZE as f32,
+        spacing as f32 * voxel_size() as f32,
         dimension,
         &refs,
         at,

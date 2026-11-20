@@ -394,7 +394,7 @@ impl TerrainGpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(include_str!("terrain.wgsl"))),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
@@ -609,9 +609,9 @@ impl TerrainGpu {
             bytemuck::cast_slice(&morph_centers),
         );
         let paint_origin = [
-            (self.center[0] * 16.) as i64 as u32,
+            (self.center[0] / frontier_world::voxel_size()).round() as i64 as u32,
             0u32,
-            (self.center[1] * 16.) as i64 as u32,
+            (self.center[1] / frontier_world::voxel_size()).round() as i64 as u32,
             0u32,
         ];
         queue.write_buffer(
@@ -1022,7 +1022,7 @@ mod tests {
     }
     #[test]
     fn shader_valid() {
-        let m = naga::front::wgsl::parse_str(include_str!("terrain.wgsl")).unwrap();
+        let m = naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("terrain.wgsl"))).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),

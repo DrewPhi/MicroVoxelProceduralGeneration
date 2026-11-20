@@ -181,7 +181,7 @@ fn compute(
 ) -> wgpu::ComputePipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(shader.into()),
+        source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(shader)),
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
@@ -510,7 +510,7 @@ impl Beam {
 #[test]
 fn shader_variants_validate() {
     for source in [HEIGHT_SHADER, HEIGHT_REDUCE, BEAM_SHADER] {
-        let module = naga::front::wgsl::parse_str(source).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(source)).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

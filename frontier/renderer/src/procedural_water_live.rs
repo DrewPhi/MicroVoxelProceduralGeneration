@@ -5,7 +5,7 @@ use frontier_world::{
     discrete_water::{coupled::CoupledWater, DiscreteWater, OpenBoundary, StepStats},
     edit::{EditTransaction, Inventory, MATERIALS},
     procedural_water::{ProceduralWater, TileGeometry, TileKey},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::{
     collections::BTreeSet,
@@ -85,7 +85,7 @@ impl State {
             && geometry.initial_units() > 0
         {
             Ok(geometry.initial_head_m()?
-                + (units as f64 - geometry.initial_units() as f64) / 256. * VOXEL_SIZE)
+                + (units as f64 - geometry.initial_units() as f64) / 256. * voxel_size())
         } else {
             Ok(geometry.stage_volume.local_head_m(units)?)
         }
@@ -621,7 +621,7 @@ impl ProceduralWaterLive {
             return Ok(());
         };
         let state = self.state.as_ref().ok_or("missing procedural save state")?;
-        let mut b = b"FVPWATR1".to_vec();
+        let mut b = crate::grid_checkpoint::header(b"FVPWATR1");
         let edits: Vec<_> = w.terrain_edits().collect();
         b.extend((edits.len() as u64).to_le_bytes());
         for (c, m) in edits {
@@ -652,6 +652,7 @@ impl ProceduralWaterLive {
         Ok(())
     }
     fn restore(&mut self, w: &mut World, b: &[u8]) -> Result<()> {
+        let b = crate::grid_checkpoint::payload(b)?;
         if b.get(..8) != Some(b"FVPWATR1") {
             return Err("expected procedural water save; CA/discrete saves remain separate".into());
         }
@@ -759,7 +760,7 @@ pub(crate) fn choose_bank(w: &World, camera: &Camera) -> Result<(TileKey, [f64; 
                     best = Some((
                         cost,
                         key,
-                        [x, column.visible_top as f64 * VOXEL_SIZE, z],
+                        [x, column.visible_top as f64 * voxel_size(), z],
                         [normal[0] * sign, normal[1] * sign],
                     ));
                 }

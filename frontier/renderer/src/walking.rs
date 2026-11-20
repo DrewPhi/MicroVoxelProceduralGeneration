@@ -1,5 +1,5 @@
 //! Small axis-swept canonical-cell walking controller, independent of display LOD.
-use frontier_world::{Cell, Material, World, VOXEL_SIZE};
+use frontier_world::{Cell, Material, World, voxel_size};
 use std::collections::HashMap;
 
 pub const EYE_HEIGHT: f64 = 1.6875;
@@ -8,6 +8,7 @@ const HALF_WIDTH: f64 = 0.225;
 const EPS: f64 = 1e-8;
 const GRAVITY: f64 = 20.;
 const JUMP_SPEED: f64 = 5.5;
+const STEP_HEIGHT_M: f64 = 0.1875;
 
 #[derive(Default)]
 pub struct WalkingCamera {
@@ -115,7 +116,7 @@ impl WalkingCamera {
                 // Startup/teleport only. Ordinary frames use leading faces.
                 let start = eye;
                 for step in 1..=32 {
-                    eye[1] = start[1] + step as f64 * VOXEL_SIZE;
+                    eye[1] = start[1] + step as f64 * voxel_size();
                     if !overlaps(eye, &mut solid) {
                         break;
                     }
@@ -139,17 +140,18 @@ impl WalkingCamera {
             .max(self.vertical_velocity.abs() + GRAVITY * elapsed);
         let steps = (elapsed * 120.)
             .ceil()
-            .max((elapsed * speed / (VOXEL_SIZE * 0.5)).ceil())
+            .max((elapsed * speed / (voxel_size() * 0.5)).ceil())
             .max(1.) as usize;
         let sub_dt = elapsed / steps as f64;
+        let step_cells = (STEP_HEIGHT_M / voxel_size()).floor() as usize;
         for _ in 0..steps {
             for (axis, velocity) in [(0, horizontal[0]), (2, horizontal[1])] {
                 let delta = velocity * sub_dt;
                 let allowed = sweep(eye, axis, delta, &mut solid);
                 if (allowed - delta).abs() > EPS && self.grounded {
                     let mut stepped = false;
-                    for cells in 1..=3 {
-                        let rise = cells as f64 * VOXEL_SIZE;
+                    for cells in 1..=step_cells {
+                        let rise = cells as f64 * voxel_size();
                         if (sweep(eye, 1, rise, &mut solid) - rise).abs() > EPS {
                             break;
                         }
@@ -186,7 +188,7 @@ impl WalkingCamera {
 fn ease_step(previous: Option<[f64; 3]>, actual: [f64; 3], dt: f64, enabled: bool) -> [f64; 3] {
     let mut shown = actual;
     if let Some(old) = previous.filter(|p| {
-        enabled && dt.is_finite() && dt > 0. && (p[1] - actual[1]).abs() <= 3. * VOXEL_SIZE + EPS
+        enabled && dt.is_finite() && dt > 0. && (p[1] - actual[1]).abs() <= 3. * voxel_size() + EPS
     }) {
         // Only ascending steps need easing: the view never lags above a fall.
         if actual[1] > old[1] {
@@ -215,8 +217,8 @@ fn bounds(eye: [f64; 3]) -> ([f64; 3], [f64; 3]) {
 }
 fn indices(min: [f64; 3], max: [f64; 3]) -> ([i64; 3], [i64; 3]) {
     (
-        min.map(|p| ((p + EPS) / VOXEL_SIZE).floor() as i64),
-        max.map(|p| ((p - EPS) / VOXEL_SIZE).floor() as i64),
+        min.map(|p| ((p + EPS) / voxel_size()).floor() as i64),
+        max.map(|p| ((p - EPS) / voxel_size()).floor() as i64),
     )
 }
 fn cell(p: [i64; 3]) -> Cell {
@@ -255,9 +257,9 @@ fn sweep(eye: [f64; 3], axis: usize, delta: f64, solid: &mut impl FnMut(Cell) ->
     let positive = delta > 0.;
     let mut plane = if positive { hi[axis] + 1 } else { lo[axis] - 1 };
     let last = if positive {
-        ((max[axis] + delta - EPS) / VOXEL_SIZE).floor() as i64
+        ((max[axis] + delta - EPS) / voxel_size()).floor() as i64
     } else {
-        ((min[axis] + delta + EPS) / VOXEL_SIZE).floor() as i64
+        ((min[axis] + delta + EPS) / voxel_size()).floor() as i64
     };
     while if positive {
         plane <= last
@@ -272,11 +274,11 @@ fn sweep(eye: [f64; 3], axis: usize, delta: f64, solid: &mut impl FnMut(Cell) ->
                 p[b] = v;
                 if solid(cell(p)) {
                     return if positive {
-                        (plane as f64 * VOXEL_SIZE - max[axis] - EPS)
+                        (plane as f64 * voxel_size() - max[axis] - EPS)
                             .max(0.)
                             .min(delta)
                     } else {
-                        (((plane + 1) as f64 * VOXEL_SIZE - min[axis]) + EPS)
+                        (((plane + 1) as f64 * voxel_size() - min[axis]) + EPS)
                             .min(0.)
                             .max(delta)
                     };
@@ -330,7 +332,7 @@ mod tests {
     #[test]
     fn presentation_easing_is_bounded_and_does_not_delay_falls_or_teleports() {
         let start = [0., EYE_HEIGHT, 0.];
-        let step = [0., EYE_HEIGHT + VOXEL_SIZE, 0.];
+        let step = [0., EYE_HEIGHT + voxel_size(), 0.];
         let shown = ease_step(Some(start), step, 1. / 60., true);
         assert!(shown[1] > start[1] && shown[1] < step[1]);
         assert_eq!(ease_step(Some(step), start, 1. / 60., true), start);
@@ -414,7 +416,7 @@ mod tests {
             }
             if height == 3 {
                 assert!(eye[0] > 1.);
-                assert!((eye[1] - EYE_HEIGHT - 3. * VOXEL_SIZE).abs() < 1e-6);
+                assert!((eye[1] - EYE_HEIGHT - 3. * voxel_size()).abs() < 1e-6);
             } else {
                 assert!(eye[0] <= 0.5 - HALF_WIDTH);
             }
@@ -432,8 +434,8 @@ mod tests {
         };
         let eye = [0., EYE_HEIGHT, 0.];
         let rise = sweep(eye, 1, 4., &mut |c| sample(c).is_blocking());
-        assert!((rise - (30. * VOXEL_SIZE - BODY_HEIGHT)).abs() < 1e-6);
+        assert!((rise - (30. * voxel_size() - BODY_HEIGHT)).abs() < 1e-6);
         let left = sweep(eye, 0, -5., &mut |c| sample(c).is_blocking());
-        assert!(left >= -7. * VOXEL_SIZE + HALF_WIDTH);
+        assert!(left >= -7. * voxel_size() + HALF_WIDTH);
     }
 }

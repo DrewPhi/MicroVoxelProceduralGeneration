@@ -424,7 +424,7 @@ impl AdaptiveView {
                     Some([x.parse::<f64>().ok()?, z.parse::<f64>().ok()?])
                 })
                 .filter(|v| v.iter().all(|x| x.is_finite()))
-                .map(|v| v.map(|x| (x / crate::VOXEL_SIZE).floor() as i64)),
+                .map(|v| v.map(|x| (x / crate::voxel_size()).floor() as i64)),
 
             upload_budget: 2 * 1024 * 1024,
             background_paused: false,

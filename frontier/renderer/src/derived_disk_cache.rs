@@ -5,7 +5,7 @@ use crate::adaptive_geometry::{
 };
 use crate::mesh::{Mesh, Vertex};
 use frontier_runtime::occlusion::Aabb;
-use frontier_world::{Cell, World, SOURCE_VERSION, VOXEL_SIZE};
+use frontier_world::{Cell, World, SOURCE_VERSION, voxel_size};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -536,12 +536,12 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     put(&mut b, crate::ground_cover::directional_enabled() as u64);
     put(
         &mut b,
-        frontier_world::vegetation::VEGETATION_SOURCE_VERSION as u64,
+        frontier_world::vegetation::source_version() as u64,
     );
     put(&mut b, u64::from(appearance.native_conforming));
     put(&mut b, SOURCE_VERSION as u64);
     put(&mut b, w.seed());
-    put(&mut b, VOXEL_SIZE.to_bits());
+    put(&mut b, voxel_size().to_bits());
     append_appearance_identity(&mut b, appearance.mode);
     put(
         &mut b,

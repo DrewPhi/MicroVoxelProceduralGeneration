@@ -16,6 +16,11 @@ pub mod edit;
 mod edit_index;
 pub use edit_index::EditQueryStats;
 pub mod fluid;
+mod grid;
+pub use grid::{
+    configure_voxel_grid, voxel_grid, voxel_grid_args, voxel_size, InvalidVoxelSize, VoxelGrid,
+    VOXEL_SIZE,
+};
 pub mod moving_water;
 pub mod physical_fluid;
 pub mod procedural_water;
@@ -32,7 +37,6 @@ pub use terrain::{
     REGIONAL_FBM_SOURCE_VERSION,
 };
 
-pub const VOXEL_SIZE: f64 = 0.0625;
 pub const SOURCE_VERSION: u32 = 1;
 pub const CAVE_CENTER_M: [f64; 3] = [-3.0, 3.0, 2.0];
 pub const CAVE_RADIUS_M: f64 = 1.5;
@@ -52,23 +56,11 @@ impl Cell {
         checked_cell(p).expect("position must be finite and within the i64 cell lattice")
     }
     pub fn center_m(self) -> [f64; 3] {
-        [self.x, self.y, self.z].map(|v| (v as f64 + 0.5) * VOXEL_SIZE)
+        [self.x, self.y, self.z].map(|v| (v as f64 + 0.5) * voxel_size())
     }
 }
 fn checked_cell(p: [f64; 3]) -> Option<Cell> {
-    let mut c = [0; 3];
-    for i in 0..3 {
-        let v = (p[i] / VOXEL_SIZE).floor();
-        if !v.is_finite() || v < i64::MIN as f64 || v >= -(i64::MIN as f64) {
-            return None;
-        }
-        c[i] = v as i64;
-    }
-    Some(Cell {
-        x: c[0],
-        y: c[1],
-        z: c[2],
-    })
+    voxel_grid().checked_cell(p)
 }
 
 /// Subtract integer cell origins before converting to f32 for a GPU/local scene.
@@ -82,7 +74,7 @@ impl LocalOrigin {
             cell.y as i128 - self.0.y as i128,
             cell.z as i128 - self.0.z as i128,
         ];
-        delta.map(|d| ((d as f64 + 0.5) * VOXEL_SIZE) as f32)
+        delta.map(|d| ((d as f64 + 0.5) * voxel_size()) as f32)
     }
 }
 
@@ -192,11 +184,17 @@ pub struct WorldColumn<'a> {
     terrain_column: Option<terrain::TerrainColumn>,
 }
 impl WorldColumn<'_> {
+    pub fn height_cells(&self) -> i64 {
+        self.height
+    }
+    pub fn ground_height_cells(&self) -> i64 {
+        self.terrain_column.map_or(self.height, |column| column.ground_top)
+    }
     pub fn height_m(&self) -> f64 {
-        self.height as f64 * VOXEL_SIZE
+        self.height_cells() as f64 * voxel_size()
     }
     pub fn ground_height_m(&self) -> f64 {
-        self.terrain_column.map_or(self.height, |c| c.ground_top) as f64 * VOXEL_SIZE
+        self.ground_height_cells() as f64 * voxel_size()
     }
     /// Edited terrain before live fluid; excludes separately owned vegetation.
     pub fn material_without_fluid(&self, y: i64) -> Material {
@@ -576,7 +574,7 @@ impl World {
     /// to canonical columns, so consumers cannot mistake a smooth H for voxels.
     pub fn height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
-        self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
+        self.height_cells(c.x, c.z) as f64 * voxel_size()
     }
     /// Physical ground top, excluding static water and edits.
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
@@ -658,11 +656,11 @@ impl World {
                 Material::Air
             } else if c.y == h - 1 {
                 let [x, _, z] = c.center_m();
-                terrain.surface_material(x, z, h as f64 * VOXEL_SIZE)
+                terrain.surface_material(x, z, h as f64 * voxel_size())
             } else if c.y >= h - 12 {
                 if terrain.params().recipe == FbmRecipe::Alpine {
                     let [x, _, z] = c.center_m();
-                    if terrain.surface_material(x, z, h as f64 * VOXEL_SIZE) == Material::Stone {
+                    if terrain.surface_material(x, z, h as f64 * voxel_size()) == Material::Stone {
                         return Material::Stone;
                     }
                 }
@@ -790,7 +788,7 @@ fn raycast_matching(
     let mut next = [f64::INFINITY; 3];
     let mut delta = [f64::INFINITY; 3];
     for i in 0..3 {
-        if step[i] < 0 && origin[i] / VOXEL_SIZE == (origin[i] / VOXEL_SIZE).floor() {
+        if step[i] < 0 && origin[i] == c[i] as f64 * voxel_size() {
             c[i] = c[i].checked_sub(1)?;
         }
         if step[i] != 0 {
@@ -799,8 +797,8 @@ fn raycast_matching(
             } else {
                 c[i]
             };
-            next[i] = ((plane as f64 * VOXEL_SIZE - origin[i]) / d[i]).max(0.0);
-            delta[i] = VOXEL_SIZE / d[i].abs();
+            next[i] = ((plane as f64 * voxel_size() - origin[i]) / d[i]).max(0.0);
+            delta[i] = voxel_size() / d[i].abs();
         }
     }
     let mut distance = 0.0;
@@ -1237,8 +1235,8 @@ mod tests {
             (-1, -1),
         ] {
             assert_eq!(
-                topology.height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE),
-                plain.height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE)
+                topology.height_m(x as f64 * voxel_size(), z as f64 * voxel_size()),
+                plain.height_m(x as f64 * voxel_size(), z as f64 * voxel_size())
             );
             for y in base - 80..base + 24 {
                 let c = Cell { x, y, z };
@@ -1253,7 +1251,7 @@ mod tests {
             z: 0,
         };
         assert_eq!(topology.material(cave), Material::Air);
-        let o = [-3.03125, (base as f64 - 31.5) * VOXEL_SIZE, -6.8];
+        let o = [-3.03125, (base as f64 - 31.5) * voxel_size(), -6.8];
         let hit = raycast(&topology, o, [0., 0., 1.], 20.).unwrap();
         assert_eq!(hit.cell.z, 80); // real tunnel back wall, never a mouth cap
         let deck = Cell {
@@ -1262,7 +1260,7 @@ mod tests {
             z: -24,
         };
         assert_eq!(topology.material(deck), Material::Wood);
-        let below = [4.03125, (base as f64 - 20.) * VOXEL_SIZE, -1.46875];
+        let below = [4.03125, (base as f64 - 20.) * voxel_size(), -1.46875];
         let underside = raycast(&topology, below, [0., 1., 0.], 5.).unwrap();
         assert_eq!(underside.cell.y, base + 16);
         assert_eq!(underside.normal, [0, -1, 0]);
@@ -1310,7 +1308,7 @@ mod tests {
         let h = a.height_m(-3.0, 2.0);
         assert!((8.0..11.0).contains(&h));
         assert_eq!(
-            a.material(Cell::from_meters([-3.0, h - VOXEL_SIZE, 2.0])),
+            a.material(Cell::from_meters([-3.0, h - voxel_size(), 2.0])),
             Material::Grass
         );
         a.set(cave, Material::Stone);
@@ -1341,22 +1339,22 @@ mod tests {
             z: 0,
         };
         w.set(p, Material::Wood);
-        let hit = raycast(&w, [-VOXEL_SIZE, 100.03125, 0.03125], [2.0, 0.0, 0.0], 1.0).unwrap();
+        let hit = raycast(&w, [-voxel_size(), 100.03125, 0.03125], [2.0, 0.0, 0.0], 1.0).unwrap();
         assert_eq!(hit.cell, p);
         assert_eq!(hit.normal, [-1, 0, 0]);
-        assert_eq!(hit.distance, VOXEL_SIZE);
+        assert_eq!(hit.distance, voxel_size());
         assert!(raycast(
             &w,
-            [-VOXEL_SIZE, 100.03125, 0.03125],
+            [-voxel_size(), 100.03125, 0.03125],
             [1.0, 0.0, 0.0],
-            VOXEL_SIZE
+            voxel_size()
         )
         .is_some());
         assert!(raycast(
             &w,
-            [-VOXEL_SIZE, 100.03125, 0.03125],
+            [-voxel_size(), 100.03125, 0.03125],
             [1.0, 0.0, 0.0],
-            VOXEL_SIZE / 2.0
+            voxel_size() / 2.0
         )
         .is_none());
         assert!(raycast(&w, [0.0, 100.03125, 0.03125], [-1.0, 0.0, 0.0], 0.0).is_none());
@@ -1405,7 +1403,7 @@ mod tests {
         let start = [center[0] - 1.0, center[1], center[2]];
         let hit = raycast(&w, start, [1.0, 0.0, 0.0], 2.0).unwrap();
         assert_eq!(hit.cell, far);
-        assert_eq!(hit.distance, 1.0 - VOXEL_SIZE / 2.0);
+        assert_eq!(hit.distance, 1.0 - voxel_size() / 2.0);
     }
     fn box_distance(o: [f64; 3], d: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<f64> {
         let n = d.iter().map(|x| x * x).sum::<f64>().sqrt();

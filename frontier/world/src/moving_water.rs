@@ -9,7 +9,7 @@ use crate::{
         StepStats,
     },
     procedural_water::{ProceduralWater, ReachKey, TileKey},
-    Cell, World, VOXEL_SIZE,
+    Cell, World, voxel_size,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -159,7 +159,7 @@ impl MovingWater {
         } else {
             tile.geometry.initial_head_m()?
         };
-        let first_dry = (head / VOXEL_SIZE - 0.5).ceil();
+        let first_dry = (head / voxel_size() - 0.5).ceil();
         let mut cells = Vec::with_capacity(4096);
         for z in 0..16 {
             for y in 0..16 {
@@ -174,7 +174,7 @@ impl MovingWater {
                         water,
                         solid: tile.geometry.solid_at(c).ok_or("tile geometry bounds")?,
                         pressure: if water {
-                            (9.81 / VOXEL_SIZE * (first_dry - c.y as f64).max(0.)) as f32
+                            (9.81 / voxel_size() * (first_dry - c.y as f64).max(0.)) as f32
                         } else {
                             0.
                         },
@@ -584,7 +584,7 @@ impl MovingWater {
             destination.cell_mut(m.to).unwrap().pressure = if old.water {
                 old.pressure
             } else {
-                (9.81 / VOXEL_SIZE * ((plan.equilibrium_head_y - m.to.y as i128).max(0) as f64))
+                (9.81 / voxel_size() * ((plan.equilibrium_head_y - m.to.y as i128).max(0) as f64))
                     as f32
             };
             touched.insert(a);
@@ -726,8 +726,8 @@ impl MovingWater {
             .fbm_terrain()
             .ok_or("environmental flow requires generated rivers")?;
         let reaches = terrain.water_reaches(
-            [min.x as f64 * VOXEL_SIZE, min.z as f64 * VOXEL_SIZE],
-            [max.x as f64 * VOXEL_SIZE, max.z as f64 * VOXEL_SIZE],
+            [min.x as f64 * voxel_size(), min.z as f64 * voxel_size()],
+            [max.x as f64 * voxel_size(), max.z as f64 * voxel_size()],
         )?;
         let mut cache = EnvironmentCache::default();
         let mut columns = BTreeMap::new();
@@ -745,12 +745,12 @@ impl MovingWater {
                     if self.inactive_cell(c)?.solid {
                         continue;
                     }
-                    let px = (x as f64 + 0.5) * VOXEL_SIZE;
-                    let pz = (z as f64 + 0.5) * VOXEL_SIZE;
+                    let px = (x as f64 + 0.5) * voxel_size();
+                    let pz = (z as f64 + 0.5) * voxel_size();
                     let mut best = None;
                     for r in &reaches {
-                        if (y as f64 + 0.5) * VOXEL_SIZE
-                            > r.upstream.stage_m.max(r.downstream.stage_m) + VOXEL_SIZE
+                        if (y as f64 + 0.5) * voxel_size()
+                            > r.upstream.stage_m.max(r.downstream.stage_m) + voxel_size()
                         {
                             continue;
                         }
@@ -850,8 +850,8 @@ impl MovingWater {
                     }
                     let candidate = EnvironmentCandidate {
                         cell: c,
-                        pressure: (9.81 / VOXEL_SIZE
-                            * ((head / VOXEL_SIZE - 0.5).ceil() - y as f64).max(0.))
+                        pressure: (9.81 / voxel_size()
+                            * ((head / voxel_size() - 0.5).ceil() - y as f64).max(0.))
                             as f32,
                     };
                     let channel = cache.channels.entry(canonical_key(key)).or_default();
@@ -1819,8 +1819,8 @@ mod tests {
             .into_iter()
             .find(|r| !r.lake && r.upstream.stage_m > 0.)
             .expect("generated river fixture");
-        let x = (((r.upstream.x_m + r.downstream.x_m) * 0.5) / VOXEL_SIZE).floor() as i64;
-        let z = (((r.upstream.z_m + r.downstream.z_m) * 0.5) / VOXEL_SIZE).floor() as i64;
+        let x = (((r.upstream.x_m + r.downstream.x_m) * 0.5) / voxel_size()).floor() as i64;
+        let z = (((r.upstream.z_m + r.downstream.z_m) * 0.5) / voxel_size()).floor() as i64;
         let col = terrain.column_cells(x, z);
         assert!(col.visible_top > col.ground_top);
         let origin = MovingWater::window_for(Cell {

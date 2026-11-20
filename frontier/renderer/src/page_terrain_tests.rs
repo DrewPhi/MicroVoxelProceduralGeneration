@@ -25,7 +25,7 @@ fn canonical_negative_columns_and_filter_parity() {
                 (x + d, z + d),
             ] {
                 let h = src.height_m(x, z);
-                assert_eq!((h / frontier_world::VOXEL_SIZE).fract(), 0.);
+                assert_eq!((h / frontier_world::voxel_size()).fract(), 0.);
                 height += h * 0.25;
             }
             assert_eq!(v.height[0], height as f32);
@@ -129,7 +129,7 @@ fn cancellation_cannot_publish_partial_cover_and_cache_has_hard_page_limit() {
 }
 #[test]
 fn page_shader_validates() {
-    let module = naga::front::wgsl::parse_str(&shader_source()).unwrap();
+    let module = naga::front::wgsl::parse_str(&crate::voxel_shader(shader_source())).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),

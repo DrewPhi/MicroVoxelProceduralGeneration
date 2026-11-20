@@ -734,7 +734,7 @@ impl AdaptiveGpu {
                 .as_vec3()
                 .to_array()
                 .map(f32::to_bits),
-            paint_origin: origin.to_array().map(|v| (v * 16.) as i64 as u32),
+            paint_origin: origin.to_array().map(|v| (v / frontier_world::voxel_size()).round() as i64 as u32),
             casters,
         };
         let reused = reuse_near_depth(&mut self.shadows.near.cached.borrow_mut(), next);

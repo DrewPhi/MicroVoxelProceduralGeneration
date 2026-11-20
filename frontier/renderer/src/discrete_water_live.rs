@@ -4,7 +4,7 @@ use crate::{live_water::LiveWater, Camera, Result};
 use frontier_world::{
     discrete_water::{DiscreteWater, StepStats},
     edit::{EditTransaction, Inventory, MATERIALS},
-    Cell, Material, World, VOXEL_SIZE,
+    Cell, Material, World, voxel_size,
 };
 use std::{
     collections::BTreeSet,
@@ -80,9 +80,9 @@ impl WaterDriver {
         let Some(c) = self.demo_center() else { return };
         let discrete = matches!(self, Self::Discrete(_));
         camera.position = glam::DVec3::new(
-            c.x as f64 * VOXEL_SIZE + if discrete { 0.9 } else { 0. },
-            c.y as f64 * VOXEL_SIZE + if discrete { 1.9 } else { 2.2 },
-            c.z as f64 * VOXEL_SIZE + if discrete { 2.2 } else { -2. },
+            c.x as f64 * voxel_size() + if discrete { 0.9 } else { 0. },
+            c.y as f64 * voxel_size() + if discrete { 1.9 } else { 2.2 },
+            c.z as f64 * voxel_size() + if discrete { 2.2 } else { -2. },
         );
         camera.yaw = if discrete { -2.84 } else { 0. };
         camera.pitch = if discrete { -0.42 } else { -0.7 };
@@ -430,11 +430,11 @@ impl DiscreteWaterLive {
     }
     fn demo(&mut self, w: &mut World, camera: &mut Camera) -> Result<()> {
         let ground =
-            (w.ground_height_m(camera.position.x, camera.position.z) / VOXEL_SIZE).ceil() as i64;
+            (w.ground_height_m(camera.position.x, camera.position.z) / voxel_size()).ceil() as i64;
         let o = Cell {
-            x: (camera.position.x / VOXEL_SIZE).floor() as i64 - 24,
+            x: (camera.position.x / voxel_size()).floor() as i64 - 24,
             y: ground + 2,
-            z: (camera.position.z / VOXEL_SIZE).floor() as i64 - 24,
+            z: (camera.position.z / voxel_size()).floor() as i64 - 24,
         };
         let mut s = DiscreteWater::new(o, [48, 40, 48])?;
         let mut edits = Vec::new();
@@ -544,9 +544,9 @@ impl DiscreteWaterLive {
         self.publish(w);
         let c = self.center.unwrap();
         camera.position = glam::DVec3::new(
-            c.x as f64 * VOXEL_SIZE + 0.9,
-            c.y as f64 * VOXEL_SIZE + 1.9,
-            c.z as f64 * VOXEL_SIZE + 2.2,
+            c.x as f64 * voxel_size() + 0.9,
+            c.y as f64 * voxel_size() + 1.9,
+            c.z as f64 * voxel_size() + 2.2,
         );
         camera.yaw = -2.84;
         camera.pitch = -0.42;
@@ -572,7 +572,7 @@ impl DiscreteWaterLive {
             .sim
             .as_ref()
             .ok_or("Cannot save in-flight simulation")?;
-        let mut b = b"FVDWATR1".to_vec();
+        let mut b = crate::grid_checkpoint::header(b"FVDWATR1");
         for v in Self::identity(w) {
             b.extend(v.to_le_bytes());
         }
@@ -596,6 +596,7 @@ impl DiscreteWaterLive {
         Ok(b)
     }
     fn restore(&mut self, w: &mut World, b: &[u8]) -> Result<()> {
+        let b = crate::grid_checkpoint::payload(b)?;
         if b.get(..8) != Some(b"FVDWATR1") {
             return Err("Expected discrete water save; CA water saves remain separate".into());
         }

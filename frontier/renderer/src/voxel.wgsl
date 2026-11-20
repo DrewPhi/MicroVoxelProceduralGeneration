@@ -89,9 +89,9 @@ struct VertexOut {
     let light = terrain_lighting(in.normal);
     var tint=vec3<f32>(1.);
     if camera.eye.w>0. {
-        let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));
+        let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
-        let distance=length((vec3<f32>(local_cell)+0.5)/16.-camera.eye.xyz);
+        let distance=length((vec3<f32>(local_cell)+0.5)/VOXELS_PER_METER-camera.eye.xyz);
         tint=terrain_tint(cell,1.-smoothstep(12.,40.,distance));
     }
     return vec4<f32>(in.color * tint * light, 1.0);
@@ -115,7 +115,7 @@ fn sample_index(p:vec2<i32>) -> u32 { return 16641u+u32((p.y+64)*129+p.x+64); }
     let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
     let area=cross(dx,dy);
     let smallest=dot(area,area)/max(largest,0.00000001);
-    let footprint=sqrt(smallest)/0.0625;
+    let footprint=sqrt(smallest)/NATIVE_VOXEL_METERS;
     // Filtering is confined to the owner perimeter. Inside it, resolvable
     // native faces wider than two pixels retain exact normals and canonical materials. The collar
     // reaches the identical proxy transfer at its shared outer endpoint.
@@ -131,9 +131,9 @@ fn sample_index(p:vec2<i32>) -> u32 { return 16641u+u32((p.y+64)*129+p.x+64); }
     // Most native fragments need no macro samples. Derivatives were evaluated
     // before this branch so neighboring fragments remain well-defined.
     // Bias inward by 1/100 voxel to recover the same solid cell on every face.
-    let local_cell=vec3<i32>(floor(i.local*16.-i.normal*0.01));
+    let local_cell=vec3<i32>(floor(i.local*VOXELS_PER_METER-i.normal*0.01));
     let paint_cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
-    let cell_distance=length((vec3<f32>(local_cell)+0.5)/16.-camera.eye.xyz);
+    let cell_distance=length((vec3<f32>(local_cell)+0.5)/VOXELS_PER_METER-camera.eye.xyz);
     let tint=terrain_tint(paint_cell,(1.-smoothstep(12.,40.,cell_distance))*(1.-blend));
     if blend<=0. { return vec4<f32>(exact*tint,1.); }
     let cell=clamp(vec2<i32>(floor(ground)),vec2<i32>(-64),vec2<i32>(63));

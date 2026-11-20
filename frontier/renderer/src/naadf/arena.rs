@@ -2,8 +2,8 @@
 use super::{memory_headroom, scatter, stream::Change, upload, Gpu, Volume};
 const MIB: usize = 1048576;
 impl Volume {
-    pub(super) fn resident_radius(&self) -> u32 {
-        ((self.bounds[1][0] - self.bounds[0][0]) * 0.5) as u32
+    pub(super) fn resident_radius(&self) -> f64 {
+        self.region.dims()[0] as f64 * super::stream::root_size_m() * 0.5
     }
     /// CPU slot reservations may exceed current GPU allocation. Before a write
     /// can upload, ensure_arenas creates/copies enough actual backing storage.

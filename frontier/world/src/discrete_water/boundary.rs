@@ -1,6 +1,6 @@
 //! Explicit prescribed-head ports on a fixed detailed domain. Quotas must be
 //! reserved by the caller before stepping and reconciled with accepted reports.
-use super::{Cell, DiscreteWater, VOXEL_SIZE};
+use super::{Cell, DiscreteWater, voxel_size};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OpenBoundary {
@@ -69,8 +69,8 @@ impl BoundaryState {
         // The interior binary free surface fixes p=0 at the first dry
         // cell CENTER. Quantize the supplied stage to that identical lattice
         // convention; using continuum p=g*(head-y) creates a half-cell seam.
-        let first_dry_y = (self.condition.head_m / VOXEL_SIZE - 0.5).ceil();
-        (9.81 / VOXEL_SIZE * (first_dry_y - exterior_y).max(0.)) as f32
+        let first_dry_y = (self.condition.head_m / voxel_size() - 0.5).ceil();
+        (9.81 / voxel_size() * (first_dry_y - exterior_y).max(0.)) as f32
     }
     pub(super) fn exterior_wet(&self) -> bool {
         self.ghost.map_or_else(|| self.pressure() > 0., |g| g.wet)
@@ -231,7 +231,7 @@ mod tests {
                         cell: c(0, y, z),
                         axis: 0,
                         positive: false,
-                        head_m: 4. * VOXEL_SIZE,
+                        head_m: 4. * voxel_size(),
                         velocity_mps: [0.; 3],
                         import_quota: 10000,
                         export_quota: 10000,
@@ -277,7 +277,7 @@ mod tests {
             cell: c(0, 3, 1),
             axis: 0,
             positive: false,
-            head_m: 5. * VOXEL_SIZE,
+            head_m: 5. * voxel_size(),
             velocity_mps: [2., 0., 0.],
             import_quota: 7,
             export_quota: 0,

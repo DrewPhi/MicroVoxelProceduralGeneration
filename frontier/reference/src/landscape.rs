@@ -1,7 +1,7 @@
 //! Exact heightfield-only native voxel oracle. Every 6.25cm column is sampled;
 //! the max pyramid only rejects empty space and never substitutes coarse geometry.
 use crate::{forward_index, material_id, Hit};
-use frontier_world::{FbmTerrain, Material, VOXEL_SIZE};
+use frontier_world::{FbmTerrain, Material, voxel_size};
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
@@ -31,7 +31,7 @@ impl Landscape {
         Self::build_sampled(terrain, min, size, 1, threads, cache)
     }
     /// Explicit artistic approximation: x/z are grid coordinates with spacing
-    /// `sample_stride * VOXEL_SIZE`. Heights retain native vertical quantization.
+    /// `sample_stride * voxel_size()`. Heights retain native vertical quantization.
     /// A stride above one is never an exact voxel oracle or a certified bound.
     pub fn build_sampled(
         terrain: FbmTerrain,
@@ -53,14 +53,15 @@ impl Landscape {
                 "size must be power of two in16..32768 cells; threads>0",
             ));
         }
-        let spacing = VOXEL_SIZE * sample_stride as f64;
+        let spacing = voxel_size() * sample_stride as f64;
         let mut identity = format!(
-            "native-landscape-v1:{:?}:{:?}:{}:{min:?}:{size}:{}:{}",
+            "native-landscape-v1:{:?}:{:?}:{}:{min:?}:{size}:{}:{}:{}",
             terrain.params(),
             terrain.seed(),
             terrain.source_version(),
             include_str!("../../world/src/terrain.rs"),
-            include_str!("../../world/src/lib.rs")
+            include_str!("../../world/src/lib.rs"),
+            voxel_size().to_bits()
         );
         if terrain.params().recipe == frontier_world::FbmRecipe::Alpine {
             identity.push_str(include_str!("../../world/src/alpine.rs"));
@@ -109,7 +110,7 @@ impl Landscape {
                             let z = min[1] + (part * rows + i / size) as i64;
                             *v = (terrain
                                 .height_m((x as f64 + 0.5) * spacing, (z as f64 + 0.5) * spacing)
-                                / VOXEL_SIZE) as i32;
+                                / voxel_size()).round() as i32;
                         }
                     });
                 }
@@ -169,7 +170,7 @@ impl Landscape {
         self.heights.len() * 4 + self.levels.iter().map(|(_, v)| v.len() * 4).sum::<usize>()
     }
     fn spacing(&self) -> f64 {
-        VOXEL_SIZE * self.sample_stride as f64
+        voxel_size() * self.sample_stride as f64
     }
     fn height(&self, x: i64, z: i64) -> i64 {
         let a = x - self.min[0];
@@ -180,7 +181,7 @@ impl Landscape {
             (self.terrain.height_m(
                 (x as f64 + 0.5) * self.spacing(),
                 (z as f64 + 0.5) * self.spacing(),
-            ) / VOXEL_SIZE) as i64
+            ) / voxel_size()).round() as i64
         }
     }
     fn hit(&self, x: i64, z: i64, y: i64, t: f64, face: usize, h: i64) -> Hit {
@@ -188,7 +189,7 @@ impl Landscape {
             self.terrain.surface_material(
                 (x as f64 + 0.5) * self.spacing(),
                 (z as f64 + 0.5) * self.spacing(),
-                h as f64 * VOXEL_SIZE,
+                h as f64 * voxel_size(),
             )
         };
         let material = if self.terrain.params().recipe.has_static_water() {
@@ -270,7 +271,7 @@ impl Landscape {
             }
         }
         let (n, maxima) = &self.levels[level];
-        let top = maxima[z * n + x] as f64 * VOXEL_SIZE;
+        let top = maxima[z * n + x] as f64 * voxel_size();
         if d[1] == 0. {
             if o[1] >= top {
                 return None;
@@ -345,7 +346,7 @@ impl Landscape {
             && t <= hi
         {
             let h = self.height(x, z);
-            let top = h as f64 * VOXEL_SIZE;
+            let top = h as f64 * voxel_size();
             let tx = if dx == 0. {
                 f64::INFINITY
             } else {
@@ -367,7 +368,7 @@ impl Landscape {
                 let plane = if dc > 0. { c } else { c + 1 };
                 let entry = (plane as f64 - oc) / dc;
                 if entry == t {
-                    let y = forward_index(o[1] / VOXEL_SIZE, d[1] / VOXEL_SIZE, t).0;
+                    let y = forward_index(o[1] / voxel_size(), d[1] / voxel_size(), t).0;
                     let step = if dc > 0. { 1 } else { -1 };
                     let neighbor = if axis == 0 {
                         self.height(x - step, z)
@@ -448,8 +449,8 @@ impl MultiScaleLandscape {
         let mut enter = near;
         let mut exit = far;
         for (axis, index) in [(0, 0), (2, 1)] {
-            let a = native.min[index] as f64 * VOXEL_SIZE;
-            let b = a + native.size as f64 * VOXEL_SIZE;
+            let a = native.min[index] as f64 * voxel_size();
+            let b = a + native.size as f64 * voxel_size();
             if d[axis] == 0. {
                 if o[axis] < a || o[axis] >= b {
                     return self.far.ray(o, d, near, far);
@@ -701,7 +702,7 @@ mod tests {
                     let a = [x as f64 - 16., -10., z as f64 - 16.];
                     let b = [
                         a[0] + 1.,
-                        scene.heights[z * 32 + x] as f64 * VOXEL_SIZE,
+                        scene.heights[z * 32 + x] as f64 * voxel_size(),
                         a[2] + 1.,
                     ];
                     let mut lo = 0f64;
@@ -748,13 +749,13 @@ mod tests {
                 let cx = x * 4096 + 1;
                 let cz = z * 4096 + 1;
                 let h = (terrain.height_m(
-                    (cx as f64 + 0.5) * VOXEL_SIZE,
-                    (cz as f64 + 0.5) * VOXEL_SIZE,
-                ) / VOXEL_SIZE) as i64;
+                    (cx as f64 + 0.5) * voxel_size(),
+                    (cz as f64 + 0.5) * voxel_size(),
+                ) / voxel_size()).round() as i64;
                 let material = terrain.surface_material(
-                    (cx as f64 + 0.5) * VOXEL_SIZE,
-                    (cz as f64 + 0.5) * VOXEL_SIZE,
-                    h as f64 * VOXEL_SIZE,
+                    (cx as f64 + 0.5) * voxel_size(),
+                    (cz as f64 + 0.5) * voxel_size(),
+                    h as f64 * voxel_size(),
                 );
                 stone_columns += usize::from(material == Material::Stone);
                 covered_columns += usize::from(material != Material::Stone);

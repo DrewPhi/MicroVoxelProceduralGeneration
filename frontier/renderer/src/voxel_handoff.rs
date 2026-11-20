@@ -1,7 +1,7 @@
 //! Offline dry-heightfield representation experiment for #83. This is not a
 //! live LOD path or a screen-space certificate. Integer macrocolumn tops and
 //! every exposed unit side face are compared with the original native surface.
-use frontier_world::{World, VOXEL_SIZE};
+use frontier_world::{World, voxel_size};
 const MAX_WIDTH: usize = 128;
 const MAX_FACES: usize = 300_000;
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl Field {
                 if column.height_m() != column.ground_height_m() {
                     return Err("handoff experiment excludes water columns; no opaque replacement for water".into());
                 }
-                Ok((column.height_m() / VOXEL_SIZE) as i64)
+                Ok(column.height_cells())
             },
             cancel,
         )
@@ -113,7 +113,7 @@ impl Field {
         self.heights
             .iter()
             .zip(&other.heights)
-            .map(|(a, b)| (*a as f64 - *b as f64).abs() * VOXEL_SIZE)
+            .map(|(a, b)| (*a as f64 - *b as f64).abs() * voxel_size())
             .fold(0., f64::max)
     }
     fn faces(&self, cancel: &mut impl FnMut() -> bool) -> Result<Vec<Face>, String> {
@@ -233,7 +233,7 @@ mod tests {
             let error = a.vertical_bound_m(&b);
             for z in 0..32 {
                 for x in 0..32 {
-                    assert!((a.height(x, z) - b.height(x, z)).abs() as f64 * VOXEL_SIZE <= error);
+                    assert!((a.height(x, z) - b.height(x, z)).abs() as f64 * voxel_size() <= error);
                     if x == 0 || z == 0 || x == 31 || z == 31 {
                         assert_eq!(a.height(x, z), b.height(x, z));
                     }
@@ -328,9 +328,9 @@ mod tests {
                 writeln!(
                     obj,
                     "v {} {} {}",
-                    p[0] * VOXEL_SIZE,
-                    p[1] * VOXEL_SIZE,
-                    p[2] * VOXEL_SIZE
+                    p[0] * voxel_size(),
+                    p[1] * voxel_size(),
+                    p[2] * voxel_size()
                 )?;
             }
             writeln!(obj, "f {} {} {}", i * 3 + 1, i * 3 + 2, i * 3 + 3)?;

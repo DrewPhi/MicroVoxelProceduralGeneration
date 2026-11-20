@@ -2,7 +2,7 @@
 //! Work and storage depend on column count and exposed spans, never a vertical prism.
 //! Caves, bridges and edits require the volume path and are rejected here.
 use crate::mesh::{Mesh, Vertex};
-use frontier_world::{Cell, Material, World, VOXEL_SIZE};
+use frontier_world::{Cell, Material, World, voxel_size};
 
 const MAX_HALO_COLUMNS: usize = 4_200_000;
 const MAX_QUADS: usize = 4_000_000;
@@ -30,8 +30,8 @@ impl Default for SampledColumn {
 impl SampledColumn {
     pub fn canonical(world: &World, x: i64, z: i64) -> Self {
         let column = world.column(x, z);
-        let height = (column.height_m() / VOXEL_SIZE) as i64;
-        let ground_height = (column.ground_height_m() / VOXEL_SIZE) as i64;
+        let height = column.height_cells();
+        let ground_height = column.ground_height_cells();
         Self {
             height,
             ground_height,
@@ -362,7 +362,7 @@ fn quad(
         position[u] += du;
         position[v] += dv;
         mesh.vertices.push(Vertex {
-            position: position.map(|n| (n as f64 * VOXEL_SIZE) as f32),
+            position: position.map(|n| (n as f64 * voxel_size()) as f32),
             normal,
             color: material.color(),
         });
@@ -401,7 +401,7 @@ mod tests {
             let v = (axis + 2) % 3;
             let p: [[i64; 3]; 4] = std::array::from_fn(|i| {
                 q[i].position
-                    .map(|n| (n as f64 / VOXEL_SIZE).round() as i64)
+                    .map(|n| (n as f64 / voxel_size()).round() as i64)
             });
             let cross = (glam::Vec3::from(q[1].position) - glam::Vec3::from(q[0].position))
                 .cross(glam::Vec3::from(q[2].position) - glam::Vec3::from(q[0].position));
@@ -597,7 +597,7 @@ mod tests {
                     for x in min.x - 1..=min.x + 11 {
                         assert_eq!(
                             out.heights.height(x, z),
-                            Some((world.column(x, z).height_m() / VOXEL_SIZE) as i64)
+                            Some(world.column(x, z).height_cells())
                         );
                     }
                 }
@@ -635,7 +635,7 @@ mod tests {
 
     fn ray(m: &Mesh, o: glam::DVec3, d: glam::DVec3) -> Option<(f64, [f32; 3], [f32; 3])> {
         let shift =
-            glam::DVec3::new(m.origin.x as f64, m.origin.y as f64, m.origin.z as f64) * VOXEL_SIZE;
+            glam::DVec3::new(m.origin.x as f64, m.origin.y as f64, m.origin.z as f64) * voxel_size();
         let mut best = None;
         for t in m.indices.chunks_exact(3) {
             let a = &m.vertices[t[0] as usize];
@@ -688,13 +688,13 @@ mod tests {
             [47, 43],
         )
         .unwrap();
-        let high = *out.heights.values.iter().max().unwrap() as f64 * VOXEL_SIZE;
+        let high = *out.heights.values.iter().max().unwrap() as f64 * voxel_size();
         for z in -16..15 {
             for x in -19..18 {
                 let o = glam::DVec3::new(
-                    (x as f64 + 0.27) * VOXEL_SIZE,
+                    (x as f64 + 0.27) * voxel_size(),
                     high + 2.,
-                    (z as f64 + 0.39) * VOXEL_SIZE,
+                    (z as f64 + 0.39) * voxel_size(),
                 );
                 for direction in [[0., -1., 0.], [0.013, -1., -0.009]] {
                     let d = glam::DVec3::from(direction).normalize();

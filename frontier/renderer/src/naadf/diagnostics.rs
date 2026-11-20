@@ -68,8 +68,9 @@ impl Diagnostics {
         let Some(values) = self.read_words(device, queue)? else {
             return Ok(None);
         };
+        let native_voxel_m = frontier_world::voxel_size();
         let json = format!(
-            r#"{{"instrumented":true,"valid_for_timing":false,"scope":"cumulative since volume creation; includes numerical replays; shadow lane includes primary-hit and mesh-receiver queries","distance_units":"native cells rounded down per event; 0.0625 metres/cell","words_per_lane":32,"primary":{:?},"shadow":{:?},"beam":{:?}}}"#,
+            r#"{{"instrumented":true,"valid_for_timing":false,"scope":"cumulative since volume creation; includes numerical replays; shadow lane includes primary-hit and mesh-receiver queries","distance_units":"native cells rounded down per event; {native_voxel_m} metres/cell","words_per_lane":32,"primary":{:?},"shadow":{:?},"beam":{:?}}}"#,
             &values[..32],
             &values[32..64],
             &values[64..]

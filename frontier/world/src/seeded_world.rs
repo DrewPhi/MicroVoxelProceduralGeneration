@@ -5,7 +5,7 @@
 //! and cache order never changes the world-space descriptors.
 use super::{noise, FbmParams, FbmRecipe, TerrainColumn};
 use crate::alpine::Value;
-use crate::{Material, VOXEL_SIZE};
+use crate::{Material, voxel_size};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -707,10 +707,10 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
 }
 pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
     let f = fields(seed, p, x, z);
-    let ground_top = (f.ground_height_m / VOXEL_SIZE).floor() as i64;
+    let ground_top = (f.ground_height_m / voxel_size()).floor() as i64;
     let visible_top = f
         .water_height_m
-        .map_or(ground_top, |w| (w / VOXEL_SIZE).floor() as i64)
+        .map_or(ground_top, |w| (w / voxel_size()).floor() as i64)
         .max(ground_top);
     let mut surface = match f.biome {
         SeededBiome::Ocean | SeededBiome::Coast => Material::Sand,
@@ -1340,7 +1340,7 @@ mod tests {
                 let x = x + 317.25;
                 let z = z - 189.75;
                 let a = column(19, p, x, z);
-                let b = column(19, p, x + VOXEL_SIZE, z);
+                let b = column(19, p, x + voxel_size(), z);
                 changes += usize::from(a.ground_surface != b.ground_surface);
             }
         }

@@ -2,7 +2,7 @@ use frontier_reference::{
     landscape::{Landscape, MultiScaleLandscape},
     material, shade, srgb, Camera, Hit, SKY,
 };
-use frontier_world::{FbmParams, FbmRecipe, FbmTerrain, VOXEL_SIZE};
+use frontier_world::{FbmParams, FbmRecipe, FbmTerrain, voxel_size};
 use std::{
     error::Error,
     fs::{self, File},
@@ -204,8 +204,8 @@ fn ray_within_native_footprint(
     [near, far].into_iter().all(|t| {
         [0, 2].into_iter().enumerate().all(|(i, axis)| {
             let position = eye[axis] + t * d[axis];
-            let lo = min[i] as f64 * VOXEL_SIZE;
-            let hi = (min[i] as f64 + size as f64) * VOXEL_SIZE;
+            let lo = min[i] as f64 * voxel_size();
+            let hi = (min[i] as f64 + size as f64) * voxel_size();
             position >= lo && position < hi
         })
     })
@@ -259,7 +259,7 @@ fn shaded_tint(cell: [i64; 3], eye: [f64; 3], profile: LightingProfile) -> [f64;
         .iter()
         .zip(eye)
         .map(|(&c, e)| {
-            let delta = (c as f64 + 0.5) * VOXEL_SIZE - e;
+            let delta = (c as f64 + 0.5) * voxel_size() - e;
             delta * delta
         })
         .sum::<f64>()
@@ -300,7 +300,7 @@ fn main() -> Result<()> {
     let mut recipe = FbmRecipe::Regional;
     let mut lighting = Lighting::default();
     let mut center = [-1156., 3469.];
-    let mut extent = 1024.;
+    let mut extent = None;
     let mut output = PathBuf::from("landscape-reference");
     let mut cache = None;
     let mut sample_stride = 1usize;
@@ -317,10 +317,10 @@ fn main() -> Result<()> {
         .min(12);
     let mut build_only = false;
     let mut paint = true;
-    let mut args = std::env::args().skip(1);
+    let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
+            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
             return Ok(());
         }
         if a == "--shadows" {
@@ -343,7 +343,7 @@ fn main() -> Result<()> {
             "--native-extent" => native_extent = v.parse()?,
             "--shadow-distance" => shadow_distance = v.parse()?,
             "--center" => center = vector(&v)?.try_into().map_err(|_| "center needs X,Z")?,
-            "--extent" => extent = v.parse()?,
+            "--extent" => extent = Some(v.parse::<f64>()?),
             "--eye" => camera.eye = vector(&v)?.try_into().map_err(|_| "eye needs X,Y,Z")?,
             "--target" => {
                 camera.target = vector(&v)?.try_into().map_err(|_| "target needs X,Y,Z")?
@@ -383,7 +383,8 @@ fn main() -> Result<()> {
     }
     let lighting = lighting.validate()?;
     let grid = (spp as f64).sqrt() as usize;
-    let size = (extent / VOXEL_SIZE) as usize;
+    let extent = extent.unwrap_or_else(|| 16384. * voxel_size());
+    let size = (extent / voxel_size()).round() as usize;
     if !sample_stride.is_power_of_two()
         || sample_stride > 256
         || !native_extent.is_finite()
@@ -397,7 +398,7 @@ fn main() -> Result<()> {
         || grid * grid != spp
         || spp == 0
         || spp > 65536
-        || extent != size as f64 * VOXEL_SIZE
+        || (extent - size as f64 * voxel_size()).abs() > extent.abs() * f64::EPSILON * 4.
         || !center
             .iter()
             .chain(camera.eye.iter())
@@ -427,7 +428,7 @@ fn main() -> Result<()> {
         .validate(width, height)?;
     let (viewport_width, viewport_height) = (width, height);
     let (width, height) = (crop.width, crop.height);
-    let spacing = VOXEL_SIZE * sample_stride as f64;
+    let spacing = voxel_size() * sample_stride as f64;
     let sample_size = size / sample_stride;
     if size % sample_stride != 0
         || !sample_size.is_power_of_two()
@@ -439,7 +440,7 @@ fn main() -> Result<()> {
     let sample_min = center.map(|v| (v / spacing).floor() as i64 - sample_size as i64 / 2);
     let min = sample_min.map(|v| v * sample_stride as i64);
     let native_size = if sample_stride > 1 {
-        (native_extent / VOXEL_SIZE) as usize
+        (native_extent / voxel_size()) as usize
     } else {
         0
     };
@@ -448,7 +449,7 @@ fn main() -> Result<()> {
         && (!native_size.is_power_of_two()
             || native_size < 16
             || native_size > 32768
-            || native_extent != native_size as f64 * VOXEL_SIZE
+            || native_extent != native_size as f64 * voxel_size()
             || native_extent >= extent)
     {
         return Err(
@@ -457,7 +458,7 @@ fn main() -> Result<()> {
         );
     }
     let native_min = [camera.eye[0], camera.eye[2]]
-        .map(|v| (v / VOXEL_SIZE).floor() as i64 - native_size as i64 / 2);
+        .map(|v| (v / voxel_size()).floor() as i64 - native_size as i64 / 2);
     if native_size > 0
         && (0..2).any(|a| {
             native_min[a] < min[a] || native_min[a] + native_size as i64 > min[a] + size as i64
@@ -480,8 +481,8 @@ fn main() -> Result<()> {
     for z in 0..=32 {
         for x in 0..=32 {
             let h = terrain.height_m(
-                (min[0] as f64 + size as f64 * x as f64 / 32.) * VOXEL_SIZE,
-                (min[1] as f64 + size as f64 * z as f64 / 32.) * VOXEL_SIZE,
+                (min[0] as f64 + size as f64 * x as f64 / 32.) * voxel_size(),
+                (min[1] as f64 + size as f64 * z as f64 / 32.) * voxel_size(),
             );
             range[0] = range[0].min(h);
             range[1] = range[1].max(h);
@@ -661,10 +662,11 @@ fn main() -> Result<()> {
         LightingProfile::Legacy => "same renderer 32m/4m coherent paint; fine grain zero",
         LightingProfile::Regional => "32m/4m coherent paint plus cell hash grain fading over 12..40m from eye to native cell center; f64 distance, f32 paint",
     };
+    let native_voxel_m = voxel_size();
     fs::write(
         output.join("manifest.json"),
         format!(
-            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{VOXEL_SIZE},"lod":{approximate},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":{shadows},"shadow_distance_m":{shadow_distance},"shadow_method":"one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; no AO; occluders beyond finite footprint or shadow distance omitted","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"independent CPU f64 face lighting; canonical material palette","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional profile only; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":false,"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
+            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":{shadows},"shadow_distance_m":{shadow_distance},"shadow_method":"one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; no AO; occluders beyond finite footprint or shadow distance omitted","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"independent CPU f64 face lighting; canonical material palette","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional profile only; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":false,"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,
@@ -758,7 +760,7 @@ mod tests {
         assert_eq!(distance_grain(40.), 0.);
         assert_eq!(distance_grain(1000.), 0.);
         let cell = [-17, 1503, 31];
-        let center = cell.map(|c| (c as f64 + 0.5) * VOXEL_SIZE);
+        let center = cell.map(|c| (c as f64 + 0.5) * voxel_size());
         let near = shaded_tint(cell, center, LightingProfile::Regional);
         let far = shaded_tint(
             cell,

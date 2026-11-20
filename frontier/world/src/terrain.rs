@@ -1,6 +1,6 @@
 //! CPU-canonical, seeded mountain heightfield, independent of renderer spacing.
 //! Greenfield gradient noise/FBM composition; no external implementation copied.
-use crate::{Cell, Material, VOXEL_SIZE};
+use crate::{Cell, Material, voxel_size};
 #[path = "seeded_world.rs"]
 pub(crate) mod seeded_world;
 pub use seeded_world::{
@@ -170,20 +170,20 @@ impl FbmTerrain {
     }
     /// Canonical column top plane (meters), excluding edits. Coordinates select
     /// half-open native columns, including at negative boundaries. The smooth
-    /// generator is evaluated at that column's center and rounded down to 6.25cm.
+    /// generator is evaluated at that column's center and rounded down to the native voxel grid.
     /// Nonfinite/unaddressable coordinates panic like `Cell::from_meters`.
     /// For reliable meter addressing remain within 2^53 native cells.
     pub fn height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
-        self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
+        self.height_cells(c.x, c.z) as f64 * voxel_size()
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
         if self.params.recipe.has_static_water() {
             return self.column_cells(x, z).visible_top;
         }
-        let x = (x as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
-        let z = (z as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
-        (self.elevation(x, z) / VOXEL_SIZE).floor() as i64
+        let x = (x as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
+        let z = (z as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
+        (self.elevation(x, z) / voxel_size()).floor() as i64
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
@@ -227,10 +227,10 @@ impl FbmTerrain {
     /// dropping octaves must never renormalize the retained terrain into a new world.
     pub(crate) fn visual_legacy_height(&self, cell: [i64; 2], retained: u32) -> f64 {
         if retained == self.params.octaves {
-            return self.height_cells(cell[0], cell[1]) as f64 * VOXEL_SIZE;
+            return self.height_cells(cell[0], cell[1]) as f64 * voxel_size();
         }
-        let x = (cell[0] as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
-        let z = (cell[1] as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
+        let x = (cell[0] as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
+        let z = (cell[1] as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
         let wx = x + 0.32 * noise(x * 0.55 + 17.3, z * 0.55 - 8.7, self.seed ^ 0x1234);
         let wz = z + 0.32 * noise(x * 0.55 - 31.9, z * 0.55 + 4.2, self.seed ^ 0x5678);
         let broad = noise(wx * 0.42 + 3.1, wz * 0.42 - 7.8, self.seed ^ 0x9abc);
@@ -250,7 +250,7 @@ impl FbmTerrain {
             freq *= 2.0;
         }
         let h = self.params.amplitude * (0.85 * sum / norm + 0.4 * broad - 0.12);
-        (h / VOXEL_SIZE).floor() * VOXEL_SIZE
+        (h / voxel_size()).floor() * voxel_size()
     }
     fn regional_elevation(&self, x: f64, z: f64) -> f64 {
         // x/z are canonical meters / horizontal_scale. Constants below correspond
@@ -554,16 +554,16 @@ impl FbmTerrain {
     }
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
-        self.column_cells(c.x, c.z).ground_top as f64 * VOXEL_SIZE
+        self.column_cells(c.x, c.z).ground_top as f64 * voxel_size()
     }
     pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
-        let xm = (x as f64 + 0.5) * VOXEL_SIZE;
-        let zm = (z as f64 + 0.5) * VOXEL_SIZE;
+        let xm = (x as f64 + 0.5) * voxel_size();
+        let zm = (z as f64 + 0.5) * voxel_size();
         if self.params.recipe.has_static_water() {
             return seeded_world::column(self.seed, self.params, xm, zm);
         }
         let top = self.height_cells(x, z);
-        let ground_surface = self.surface_material(xm, zm, top as f64 * VOXEL_SIZE);
+        let ground_surface = self.surface_material(xm, zm, top as f64 * voxel_size());
         TerrainColumn {
             ground_top: top,
             visible_top: top,
@@ -862,15 +862,15 @@ mod tests {
             let mut shoulder_changes = 0;
             let mut previous = [false; 2];
             for step in 0..1600 {
-                let z = -400.0 + step as f64 * VOXEL_SIZE;
+                let z = -400.0 + step as f64 * voxel_size();
                 let center = alpine_path_center_m(z);
                 for offset in [-0.25, 0.0, 0.25] {
                     assert!(alpine_path_soil(center + offset, z, seed));
                 }
                 let mut width = 0.0;
                 for ix in -24..=24 {
-                    let offset = ix as f64 * VOXEL_SIZE;
-                    width += f64::from(alpine_path_soil(center + offset, z, seed)) * VOXEL_SIZE;
+                    let offset = ix as f64 * voxel_size();
+                    width += f64::from(alpine_path_soil(center + offset, z, seed)) * voxel_size();
                     if offset.abs() >= 1.3 {
                         assert!(!alpine_path_soil(center + offset, z, seed));
                     }
@@ -923,7 +923,7 @@ mod tests {
                     let x = (alpine_path_center_m(z) + offset) * scale / 1800.0;
                     let z = z * scale / 1800.0;
                     let h = terrain.height_m(x, z);
-                    let c = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                    let c = Cell::from_meters([x, h - voxel_size(), z]);
                     let [cx, _, cz] = c.center_m();
                     let material = terrain.surface_material(x, z, h);
                     assert_eq!(material, world.material(c));
@@ -959,7 +959,7 @@ mod tests {
                 let z = -x - 0.03125;
                 assert_eq!(a.height_m(x, z), h);
                 assert_eq!(world.height_m(x, z), h);
-                let c = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                let c = Cell::from_meters([x, h - voxel_size(), z]);
                 let [cx, _, cz] = c.center_m();
                 assert_eq!(a.height_m(cx - 0.02, cz + 0.02), h);
                 assert_eq!(world.column(c.x, c.z).height_m(), h);
@@ -1094,7 +1094,7 @@ mod tests {
                     for iz in -24..24 {
                         let (x, z) = (ix as f64 * 331.0, iz as f64 * 329.0);
                         let h = terrain.height_m(x, z);
-                        let cell = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+                        let cell = Cell::from_meters([x, h - voxel_size(), z]);
                         let [cx, _, cz] = cell.center_m();
                         let material = terrain.surface_material(x, z, h);
                         counts[match material {
@@ -1112,7 +1112,7 @@ mod tests {
                         for (dx, dz) in [(-0.03, -0.03), (0.03, 0.03)] {
                             assert_eq!(material, terrain.surface_material(cx + dx, cz + dz, h));
                         }
-                        let nx = cx + VOXEL_SIZE;
+                        let nx = cx + voxel_size();
                         adjacent_changes += usize::from(
                             material != terrain.surface_material(nx, cz, terrain.height_m(nx, cz)),
                         );
@@ -1301,14 +1301,14 @@ mod tests {
                 let (x, z) = (x as f64 * 300.0, z as f64 * 300.0);
                 let h = a.height_m(x, z);
                 assert_eq!(h, b.height_m(x, z));
-                assert_eq!((h / VOXEL_SIZE).fract(), 0.0);
+                assert_eq!((h / voxel_size()).fract(), 0.0);
                 differences += usize::from(h != other.height_m(x, z));
                 lo = lo.min(h);
                 hi = hi.max(h);
                 low += usize::from(h < 100.0);
                 high += usize::from(h > 400.0);
                 // Adjacent native columns remain correlated, with no tile boundaries.
-                assert!((h - a.height_m(x + VOXEL_SIZE, z)).abs() < 2.0);
+                assert!((h - a.height_m(x + voxel_size(), z)).abs() < 2.0);
             }
         }
         assert!(hi - lo > 500.0, "relief={lo}..{hi}");
@@ -1325,7 +1325,7 @@ mod tests {
             let terrain = world.fbm_terrain().unwrap();
             let h = terrain.height_m(x, z);
             assert_eq!(h, world.height_m(x, z));
-            let c = Cell::from_meters([x, h - VOXEL_SIZE, z]);
+            let c = Cell::from_meters([x, h - voxel_size(), z]);
             let [cx, _, cz] = c.center_m();
             assert_eq!(terrain.height_m(cx, cz), h);
             assert_eq!(terrain.height_m(cx - 0.02, cz + 0.02), h);
@@ -1390,9 +1390,9 @@ mod tests {
                 let column = world.column(x, z);
                 assert_eq!(
                     column.height_m(),
-                    world.height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE)
+                    world.height_m(x as f64 * voxel_size(), z as f64 * voxel_size())
                 );
-                let top = (column.height_m() / VOXEL_SIZE) as i64;
+                let top = column.height_cells();
                 for y in (-32..160).chain(top - 2..=top + 2) {
                     assert_eq!(column.material(y), world.material(Cell { x, y, z }));
                 }

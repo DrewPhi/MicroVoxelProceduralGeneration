@@ -1,6 +1,6 @@
 //! Reusable opaque voxel template geometry, one instanced draw per model/LOD.
 //! Canonical roots remain integers until after origin subtraction.
-use crate::vegetation::{MeshKey, VegetationFrame, VegetationInstance, VegetationVertex};
+use crate::vegetation::{ground_detail, MeshKey, VegetationFrame, VegetationInstance, VegetationVertex};
 use bytemuck::{Pod, Zeroable};
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
@@ -55,7 +55,7 @@ impl Cull {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vegetation cull"),
-            source: wgpu::ShaderSource::Wgsl(CULL_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(CULL_SHADER)),
         });
         Self {
             pipeline: device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -135,7 +135,7 @@ struct Instance {
 }
 fn pack(instance: &VegetationInstance, origin: [i64; 3]) -> Instance {
     let root = std::array::from_fn(|i| {
-        ((instance.root_cell[i] as i128 - origin[i] as i128) as f64 * 0.0625) as f32
+        ((instance.root_cell[i] as i128 - origin[i] as i128) as f64 * frontier_world::voxel_size()) as f32
     });
     let mut seed = 0x9e3779b9u32;
     for coordinate in instance.root_cell {
@@ -169,6 +169,12 @@ fn pack_shadow(
     coverage: &[crate::vegetation::ShadowCoverage],
 ) -> Instance {
     let mut packed = pack_for_species(instance, origin, key.species);
+    if ground_detail::is_detail(key) {
+        let [x, z] = ground_detail::root_offset(instance.root_cell);
+        packed.root[0] += x;
+        packed.root[2] += z;
+        packed.turn |= ground_detail::INSTANCE_FLAG;
+    }
     if let Some(transition) = transitions
         .iter()
         .find(|t| t.root_cell == instance.root_cell && (t.from == key || t.to == key))
@@ -212,7 +218,10 @@ struct Quad {
     ao: f32,
     transmission: f32,
 }
-fn pack_quads(mesh: &crate::vegetation::VegetationMesh) -> Result<Vec<Quad>, String> {
+fn pack_quads(
+    mesh: &crate::vegetation::VegetationMesh,
+    voxel_m: f32,
+) -> Result<Vec<Quad>, String> {
     if mesh.vertices.len() % 4 != 0 || mesh.indices.len() != mesh.vertices.len() / 4 * 6 {
         return Err("vegetation mesh is not a complete quad stream".into());
     }
@@ -235,11 +244,12 @@ fn pack_quads(mesh: &crate::vegetation::VegetationMesh) -> Result<Vec<Quad>, Str
                 return Err("vegetation quad has varying face material or normal".into());
             }
             for d in 0..3 {
-                let cell = vertex.position[d] as f64 * 16.;
+                let position = vertex.position[d];
+                let cell = (f64::from(position) / f64::from(voxel_m)).round();
                 if !cell.is_finite()
-                    || cell.fract() != 0.
                     || cell < i32::MIN as f64
                     || cell > i32::MAX as f64
+                    || cell as f32 * voxel_m != position
                 {
                     return Err("vegetation quad is outside the native i32 lattice".into());
                 }
@@ -473,7 +483,7 @@ impl VegetationGpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("instanced voxel vegetation"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let instance_attributes = wgpu::vertex_attr_array![3=>Float32x3,4=>Uint32,5=>Float32,6=>Uint32,9=>Float32,10=>Uint32];
         let vertex_attributes =
@@ -540,7 +550,7 @@ impl VegetationGpu {
         });
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("instanced plant shadow depth"),
-            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADOW_SHADER)),
         });
         let depth_layout = crate::adaptive_gpu::adaptive_shadow::near_depth_layout(device);
         let mut shadow_layouts = vec![camera_layout, &depth_layout];
@@ -733,7 +743,19 @@ impl VegetationGpu {
                     }) as u64
             };
             if !self.expanded && !self.templates.contains_key(&batch.key) {
-                new_quads.insert(batch.key, pack_quads(&batch.mesh)?);
+                let detail = ground_detail::is_detail(batch.key);
+                let voxel_m = if detail {
+                    ground_detail::DETAIL_VOXEL_M
+                } else {
+                    frontier_world::voxel_size() as f32
+                };
+                let mut quads = pack_quads(&batch.mesh, voxel_m)?;
+                if detail {
+                    for quad in &mut quads {
+                        quad.face |= ground_detail::QUAD_FLAG;
+                    }
+                }
+                new_quads.insert(batch.key, quads);
             }
             let instances = ((batch.instances.len() * std::mem::size_of::<Instance>()) as u64)
                 .next_power_of_two()
@@ -1492,7 +1514,7 @@ fn select_shadow_casters_stable(
     for entry in frame_batches(frame) {
         let batch = entry.batch;
         let batch_index = entry.index;
-        if batch.mesh.indices.is_empty() {
+        if ground_detail::is_detail(batch.key) || batch.mesh.indices.is_empty() {
             continue;
         }
         for (index, instance) in batch.instances.iter().enumerate() {
@@ -1865,7 +1887,7 @@ mod tests {
                 for origin in [[-302, -139, -35], [0; 3], [300, 121, 55]] {
                     for extent in [[1, 1], [8, 24], [300, 129]] {
                         let mesh = test_quad(axis, positive, origin, extent);
-                        let quads = pack_quads(&mesh).unwrap();
+                        let quads = pack_quads(&mesh, 0.0625).unwrap();
                         let q = quads[0];
                         assert_eq!(q.origin, origin);
                         assert_eq!(q.extent, extent);
@@ -1915,7 +1937,16 @@ mod tests {
                 mesh.vertices.extend(face.vertices);
             }
         }
-        let quads = pack_quads(&mesh).unwrap();
+        let mut decimal_mesh = mesh.clone();
+        for vertex in &mut decimal_mesh.vertices {
+            vertex.position = vertex.position.map(|meters| (meters * 16.).round() * 0.03);
+        }
+        let decimal_quads = pack_quads(&decimal_mesh, 0.03).unwrap();
+        let quads = pack_quads(&mesh, 0.0625).unwrap();
+        for (decimal, default) in decimal_quads.iter().zip(&quads) {
+            assert_eq!(decimal.origin, default.origin);
+            assert_eq!(decimal.extent, default.extent);
+        }
         assert_eq!(quads.len(), 6);
         assert_eq!(quads.len() * 44 + mesh.indices.len() * 4, 6 * 68);
         for &index in &mesh.indices {
@@ -1952,7 +1983,7 @@ mod tests {
                 4 => mesh.indices.swap(1, 2),
                 _ => mesh.vertices[2].transmission = 0.,
             }
-            assert!(pack_quads(&mesh).is_err(), "defect {defect}");
+            assert!(pack_quads(&mesh, 0.0625).is_err(), "defect {defect}");
         }
     }
     #[test]
@@ -2099,7 +2130,7 @@ mod tests {
     #[test]
     fn cull_shader_and_indirect_storage_layout_validate() {
         assert_eq!(std::mem::size_of::<Cluster>(), 48);
-        let module = naga::front::wgsl::parse_str(CULL_SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(CULL_SHADER)).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),
@@ -2188,7 +2219,7 @@ mod tests {
     #[test]
     fn vegetation_shader_validates() {
         for source in [SHADER, SHADOW_SHADER] {
-            let module = naga::front::wgsl::parse_str(source).unwrap();
+            let module = naga::front::wgsl::parse_str(&crate::voxel_shader(source)).unwrap();
             let (_, quad_type) = module
                 .types
                 .iter()

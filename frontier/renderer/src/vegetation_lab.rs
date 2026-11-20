@@ -419,7 +419,7 @@ async fn run_gpu(output: &Path, strict: bool) -> Result<(), Box<dyn std::error::
         .await?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("vegetation lab"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
     });
     let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("sparse vegetation lab"),
@@ -807,7 +807,7 @@ mod tests {
     use super::*;
     #[test]
     fn shader_valid() {
-        let module = naga::front::wgsl::parse_str(SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(SHADER)).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

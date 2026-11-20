@@ -13,6 +13,15 @@ use std::{
 // Version 3: per-record seeded growth, low spreading ground cover and habitat cohorts.
 // This intentionally changes canonical plant records/voxels; display AO does not.
 pub const VEGETATION_SOURCE_VERSION: u32 = 3;
+
+/// Coarse terrain uses decorative ground plants outside the native lattice.
+pub fn uses_decorative_ground_cover() -> bool {
+    crate::voxel_size() >= 0.25
+}
+
+pub fn source_version() -> u32 {
+    VEGETATION_SOURCE_VERSION + u32::from(uses_decorative_ground_cover())
+}
 pub const TILE_SIZE_CELLS: i64 = 256;
 pub const MAX_PLANT_RADIUS_CELLS: i64 = 96;
 pub const MAX_PLANT_HEIGHT_CELLS: i64 = 176;
@@ -1084,7 +1093,7 @@ impl World {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if min[0] >= max[0] || min[1] >= max[1] {
+        if (species != Species::Rowan && uses_decorative_ground_cover()) || min[0] >= max[0] || min[1] >= max[1] {
             return out;
         }
         for tx in min[0].div_euclid(256)..=(max[0] - 1).div_euclid(256) {
@@ -1116,7 +1125,7 @@ impl World {
         if species == Species::Rowan {
             return self.vegetation_records_species(min, max, species);
         }
-        if self.vegetation.is_none() || min[0] >= max[0] || min[1] >= max[1] {
+        if uses_decorative_ground_cover() || self.vegetation.is_none() || min[0] >= max[0] || min[1] >= max[1] {
             return Vec::new();
         }
         let mut records = Vec::new();
@@ -1137,6 +1146,9 @@ impl World {
     }
     fn vegetation_species_voxel(&self, c: Cell, species: Species) -> Option<PlantVoxel> {
         let cache = self.vegetation.as_ref()?;
+        if species != Species::Rowan && uses_decorative_ground_cover() {
+            return None;
+        }
         let radius = if species == Species::Rowan {
             MAX_PLANT_RADIUS_CELLS
         } else {

@@ -1,6 +1,6 @@
 //! Independent f64 native-cell offline oracle. No renderer/world ray traversal is used.
 //! Exact canonical material snapshots and halo face ownership; no display LOD.
-use frontier_world::{Material, World, VOXEL_SIZE};
+use frontier_world::{Material, World, voxel_size};
 pub mod landscape;
 pub mod vegetation;
 
@@ -189,8 +189,8 @@ impl Snapshot {
         let norm = d.iter().map(|v| v * v).sum::<f64>().sqrt();
         let d = d.map(|v| v / norm);
         // Local coordinates in cell units preserve exact native planes.
-        let o = std::array::from_fn::<_, 3, _>(|a| o[a] / VOXEL_SIZE - self.min[a] as f64);
-        let dc = d.map(|v| v / VOXEL_SIZE);
+        let o = std::array::from_fn::<_, 3, _>(|a| o[a] / voxel_size() - self.min[a] as f64);
+        let dc = d.map(|v| v / voxel_size());
         let mut enter = f64::NEG_INFINITY;
         let mut exit = far;
         let mut entries = [f64::NEG_INFINITY; 3];
@@ -398,8 +398,8 @@ mod tests {
                     let mut high = far;
                     let mut faces = 0u16;
                     for a in 0..3 {
-                        let lo = (s.min[a] + p[a] as i64) as f64 * VOXEL_SIZE;
-                        let hi = lo + VOXEL_SIZE;
+                        let lo = (s.min[a] + p[a] as i64) as f64 * voxel_size();
+                        let hi = lo + voxel_size();
                         if d[a] == 0. {
                             if o[a] < lo || o[a] >= hi {
                                 high = -1.;

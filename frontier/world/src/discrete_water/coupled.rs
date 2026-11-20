@@ -237,7 +237,7 @@ impl CoupledWater {
                 } else {
                     port.import_quota = 0;
                 }
-            } else if port.head_m <= (exterior_y + 0.5) * crate::VOXEL_SIZE {
+            } else if port.head_m <= (exterior_y + 0.5) * crate::voxel_size() {
                 port.import_quota = 0;
             }
             // Only currently wet cells reserve outgoing whole units. A unit

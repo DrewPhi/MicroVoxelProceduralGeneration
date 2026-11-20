@@ -17,6 +17,21 @@ const CHILD: u32 = 1 << 31;
 const FULL: u32 = 1 << 30;
 const MASK: u32 = FULL - 1;
 pub type Point = [i64; 3];
+pub const ROOT_EDGE_VOXELS: u32 = 16;
+pub const MAX_RADIUS_ROOTS: u32 = 256;
+pub const MAX_RADIUS_VOXELS: u32 = MAX_RADIUS_ROOTS * ROOT_EDGE_VOXELS;
+
+pub fn root_size_m() -> f64 {
+    ROOT_EDGE_VOXELS as f64 * frontier_world::voxel_size()
+}
+
+pub fn radius_roots(radius_voxels: u32) -> Result<u32, String> {
+    if (1..=MAX_RADIUS_VOXELS).contains(&radius_voxels) {
+        Ok(radius_voxels.div_ceil(ROOT_EDGE_VOXELS))
+    } else {
+        Err(format!("NAADF radius must be 1..={MAX_RADIUS_VOXELS} native voxels"))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
     pub lo: Point,
@@ -27,7 +42,7 @@ impl Region {
         std::array::from_fn(|a| (self.hi[a] - self.lo[a]) as usize)
     }
     pub fn bounds(self) -> [[f64; 3]; 2] {
-        [self.lo.map(|v| v as f64), self.hi.map(|v| v as f64)]
+        [self.lo, self.hi].map(|p| p.map(|v| v as f64 * root_size_m()))
     }
     pub fn intersection(self, other: Self) -> Self {
         Self {
@@ -63,17 +78,18 @@ pub fn target(region: Region, eye: [f64; 3], velocity: [f64; 3], lead_s: f64) ->
     let n = region.hi[0] - region.lo[0];
     let step = (n / 16).clamp(2, 32).min(n / 2);
     let delta: Point = std::array::from_fn(|a| {
-        let offset = eye[a] - (region.lo[a] + n / 2) as f64;
+        let offset = eye[a] / root_size_m() - (region.lo[a] + n / 2) as f64;
+        let speed = velocity[a] / root_size_m();
         // Do not move early toward an opposite-side target or lead far enough
         // to recenter from rest. Once published, the opposite threshold still
         // requires actual motion toward that side.
-        let lead = if offset * velocity[a] > 0. {
-            (velocity[a].abs() * lead_s).min(step as f64 * 0.4)
+        let lead = if offset * speed > 0. {
+            (speed.abs() * lead_s).min(step as f64 * 0.4)
         } else {
             0.
         };
         let retreating_from_lead =
-            lead_s > 0. && offset.abs() < step as f64 && offset * velocity[a] <= 0.;
+            lead_s > 0. && offset.abs() < step as f64 && offset * speed <= 0.;
         let threshold = if retreating_from_lead {
             step as f64
         } else {
@@ -222,12 +238,8 @@ impl State {
         leaf_encoding: Encoding,
         n: usize,
     ) -> Self {
-        let bounds = s.bounds();
         assert!(s.dims.iter().all(|&d| d <= n));
-        let region = Region {
-            lo: bounds[0].map(|v| v as i64),
-            hi: bounds[1].map(|v| v as i64),
-        };
+        let region = s.region();
         let words_per_leaf = leaf_encoding.words_per_brick();
         let mut refs = vec![0u32; s.voxels.len() / words_per_leaf];
         for v in &s.blocks {

@@ -29,7 +29,7 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         let scale = max(1., max(max(abs(eye.x), abs(eye.y)), max(abs(eye.z),
             max(abs(bin.planes.x), abs(bin.planes.y)))));
         // Match the conservative CPU NativeBin bound, allowing for f32 inputs.
-        let margin = 0.0625 / 1024. + 0.000007629395 * scale;
+        let margin = NATIVE_VOXEL_METERS / 1024. + 0.000007629395 * scale;
         let back = select(eye[axis] < bin.planes.x - margin,
             eye[axis] > bin.planes.y + margin, (bin.axis_sign & 4u) != 0u);
         if back { count = 0u; }

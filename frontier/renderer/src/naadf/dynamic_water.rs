@@ -48,7 +48,7 @@ impl Experiment {
             .iter()
             .chain(self.pending.iter().map(|p| &p.volume))
             .all(|volume| {
-                let origin = volume.bounds[0].map(|v| (v * 16.).round() as i64);
+                let origin = volume.region.lo.map(|v| v * 16);
                 let relative = Cell {
                     x: min.x - origin[0],
                     y: min.y - origin[1],
@@ -67,7 +67,7 @@ impl Experiment {
             .iter_mut()
             .chain(self.pending.iter_mut().map(|p| &mut p.volume))
         {
-            let origin = volume.bounds[0].map(|v| (v * 16.).round() as i64);
+            let origin = volume.region.lo.map(|v| v * 16);
             let relative = Cell {
                 x: min.x - origin[0],
                 y: min.y - origin[1],
@@ -113,7 +113,7 @@ impl Experiment {
 /// publishes a shifted static window. This also runs while newer solids/water
 /// are withheld, so an old valid snapshot never moves with the native window.
 pub(super) fn rebase_relative(relative: Cell, old: [f64; 3], new: [f64; 3]) -> Cell {
-    let delta = std::array::from_fn::<_, 3, _>(|a| ((old[a] - new[a]) * 16.).round() as i64);
+    let delta = std::array::from_fn::<_, 3, _>(|a| ((old[a] - new[a]) / frontier_world::voxel_size()).round() as i64);
     Cell {
         x: relative.x + delta[0],
         y: relative.y + delta[1],

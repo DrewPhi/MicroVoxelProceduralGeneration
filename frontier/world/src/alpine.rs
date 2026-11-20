@@ -140,7 +140,7 @@ pub(crate) fn elevation<V: Value>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cell, FbmRecipe, FbmTerrain, Material, World, VOXEL_SIZE};
+    use crate::{Cell, FbmRecipe, FbmTerrain, Material, World, voxel_size};
     fn terrain(seed: u64) -> FbmTerrain {
         FbmTerrain::new(
             seed,
@@ -217,7 +217,7 @@ mod tests {
             let t = terrain(seed);
             let p = t.params();
             for i in 0..1024 {
-                let x = (-50.0 + (i as f64 + 0.5) * VOXEL_SIZE) / p.horizontal_scale;
+                let x = (-50.0 + (i as f64 + 0.5) * voxel_size()) / p.horizontal_scale;
                 let z = -249.96875 / p.horizontal_scale;
                 let full = elevation(x, z, p, true, |x, z, salt| {
                     crate::terrain::noise(x, z, seed ^ salt)
@@ -238,13 +238,13 @@ mod tests {
                     assert!((relief - previous).abs() < 0.015);
                 }
                 previous = relief;
-                let old_cells = (old / VOXEL_SIZE).floor() as i64;
-                let full_cells = (full / VOXEL_SIZE).floor() as i64;
+                let old_cells = (old / voxel_size()).floor() as i64;
+                let full_cells = (full / voxel_size()).floor() as i64;
                 assert!((old_cells - full_cells).abs() <= 1);
                 changed += usize::from(old_cells != full_cells);
                 assert_eq!(
                     t.height_m(x * p.horizontal_scale, z * p.horizontal_scale),
-                    full_cells as f64 * VOXEL_SIZE
+                    full_cells as f64 * voxel_size()
                 );
             }
             assert!(max_relief > 0.015, "seed={seed} max={max_relief}");
@@ -282,7 +282,7 @@ mod tests {
                 c.y -= 1;
                 assert_eq!(w.material(c), Material::Soil);
                 assert_eq!(w.material(Cell { y: c.y + 1, ..c }), Material::Air);
-                assert_eq!(h / VOXEL_SIZE, (h / VOXEL_SIZE).floor());
+                assert_eq!(h / voxel_size(), (h / voxel_size()).floor());
             }
             let mut rock_columns = 0;
             for x in (-1800..=1800).step_by(300) {

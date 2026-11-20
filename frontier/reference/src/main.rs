@@ -1,5 +1,5 @@
 use frontier_reference::*;
-use frontier_world::{World, SOURCE_VERSION, VOXEL_SIZE};
+use frontier_world::{World, SOURCE_VERSION, voxel_size};
 use std::{
     error::Error,
     fs::{self, File},
@@ -118,10 +118,11 @@ fn write_centers(
     let hash = source_fingerprint(false);
     let canonical_hash = source_fingerprint(true);
     let dirty = !git(&["status", "--porcelain"]).is_empty();
+    let native_voxel_m = voxel_size();
     fs::write(
         output.join("center_manifest.json"),
         format!(
-            r#"{{"schema":"frontier-reference-centers-v1","source":"World::new","scene":"fixture","source_version":{SOURCE_VERSION},"seed":{seed},"edit_revision":{edit_revision},"voxel_size_m":{VOXEL_SIZE},"native_min_cell":{FIXTURE_MIN:?},"native_size_cells":{FIXTURE_SIZE:?},"source_fnv1a64":"{hash:016x}","canonical_source_fnv1a64":"{canonical_hash:016x}","git_dirty":{dirty},"width":{width},"height":{height},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"sampling":"pixel center (0.5,0.5)","depth":"ray distance meters, NaN on miss","raw_format":"little endian f32, top-left row-major","git_revision":"{}"}}"#,
+            r#"{{"schema":"frontier-reference-centers-v1","source":"World::new","scene":"fixture","source_version":{SOURCE_VERSION},"seed":{seed},"edit_revision":{edit_revision},"voxel_size_m":{native_voxel_m},"native_min_cell":{FIXTURE_MIN:?},"native_size_cells":{FIXTURE_SIZE:?},"source_fnv1a64":"{hash:016x}","canonical_source_fnv1a64":"{canonical_hash:016x}","git_dirty":{dirty},"width":{width},"height":{height},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"sampling":"pixel center (0.5,0.5)","depth":"ray distance meters, NaN on miss","raw_format":"little endian f32, top-left row-major","git_revision":"{}"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,
@@ -142,7 +143,7 @@ fn main() -> Result<()> {
     let mut threads = std::thread::available_parallelism().map_or(1, usize::from);
     let mut accelerate = true;
     let mut centers_only = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(arg) = args.next() {
         if arg == "--help" {
             println!("frontier-reference --output DIR --width 1920 --height 1080 --spp 64|256 --seed 7 --sample-seed 0 --camera fixture|cave|bridge --eye X,Y,Z --target X,Y,Z --fov-y 60 --near .025 --far 20000 --threads N [--plain] [--centers-only]");
@@ -401,11 +402,12 @@ fn main() -> Result<()> {
         .unwrap_or("unknown")
         .replace(['"', '\\'], "_");
     let ray_count = width as u64 * height as u64 * spp as u64;
+    let native_voxel_m = voxel_size();
     let manifest = format!(
         r#"{{
  "schema":"frontier-reference-v1", "source":"World::new", "source_version":{SOURCE_VERSION}, "seed":{seed}, "edit_revision":{}, "scene":"fixture",
  "git_revision":"{revision}", "git_dirty":{dirty}, "source_fnv1a64":"{hash:016x}", "canonical_source_fnv1a64":"{canonical_hash:016x}",
- "width":{width}, "height":{height}, "spp":{spp}, "threads":{threads}, "accelerated":{accelerate}, "voxel_size_m":{VOXEL_SIZE}, "lod":false,
+ "width":{width}, "height":{height}, "spp":{spp}, "threads":{threads}, "accelerated":{accelerate}, "voxel_size_m":{native_voxel_m}, "lod":false,
  "eye":{:?}, "target":{:?}, "up":[0,1,0], "fov_y_degrees":{}, "near":{}, "far":{},
  "native_min_cell":{:?}, "native_size_cells":{:?}, "crop_policy":"canonical exposed faces only; no crop caps",
  "sampling":"deterministic jittered square stratification (SplitMix64)", "sample_seed":{sample_seed}, "pixel_filter":"box", "exposure":1.0, "ray_count":{ray_count}, "accumulation":"f64 linear then f32 storage", "png_transfer":"IEC 61966-2-1 sRGB",

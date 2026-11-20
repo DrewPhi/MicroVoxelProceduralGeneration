@@ -19,6 +19,7 @@ mod discrete_water_live;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
+mod grid_checkpoint;
 mod ground_cover;
 mod hybrid;
 mod hybrid_gpu;
@@ -55,7 +56,7 @@ mod viewer_visual;
 pub mod volume;
 mod walking;
 
-use frontier_world::{Cell, Material, World, VOXEL_SIZE};
+use frontier_world::{Cell, Material, World, voxel_size};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,
@@ -77,6 +78,18 @@ pub const SEED: u64 = 7;
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
+/// Specialize the shared cell/meter conversions once per shader module.
+fn voxel_shader<'a>(source: impl Into<std::borrow::Cow<'a, str>>) -> std::borrow::Cow<'a, str> {
+    let source = source.into();
+    if !source.contains("NATIVE_VOXEL_METERS") && !source.contains("VOXELS_PER_METER") {
+        return source;
+    }
+    let meters = voxel_size() as f32;
+    let cells = meters.recip();
+    let detail_m = vegetation::ground_detail::DETAIL_VOXEL_M;
+    format!("const NATIVE_VOXEL_METERS: f32 = {meters:e};\nconst VOXELS_PER_METER: f32 = {cells:e};\nconst GROUND_DETAIL_VOXEL_METERS: f32 = {detail_m:e};\n{source}").into()
+}
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// Renderer shader/filter contract; independent of canonical source appearance.
 const ADAPTIVE_RENDER_APPEARANCE_VERSION: u32 = 2;
@@ -397,7 +410,7 @@ impl Gpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("native voxel"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("native voxel"),
@@ -555,7 +568,7 @@ impl Gpu {
                 mesh.origin.x as f64,
                 mesh.origin.y as f64,
                 mesh.origin.z as f64,
-            ) * VOXEL_SIZE,
+            ) * voxel_size(),
             format: output_format,
             scene_format: format,
             medium_ground_height: 0.,
@@ -596,7 +609,7 @@ impl Gpu {
             snapshot.origin.x as f64,
             snapshot.origin.y as f64,
             snapshot.origin.z as f64,
-        ) * VOXEL_SIZE;
+        ) * voxel_size();
         Ok(())
     }
     /// Opt-in contention experiment. Startup checks exact parity; frames only
@@ -681,7 +694,7 @@ impl Gpu {
             mesh.origin.x as f64,
             mesh.origin.y as f64,
             mesh.origin.z as f64,
-        ) * VOXEL_SIZE;
+        ) * voxel_size();
     }
     fn texture(&self, width: u32, height: u32, depth: bool) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
@@ -765,9 +778,9 @@ impl Gpu {
             ),
         );
         let paint_origin = [
-            (self.origin.x * 16.) as i64 as u32,
-            (self.origin.y * 16.) as i64 as u32,
-            (self.origin.z * 16.) as i64 as u32,
+            (self.origin.x / frontier_world::voxel_size()).round() as i64 as u32,
+            (self.origin.y / frontier_world::voxel_size()).round() as i64 as u32,
+            (self.origin.z / frontier_world::voxel_size()).round() as i64 as u32,
             0u32,
         ];
         self.queue
@@ -1301,8 +1314,9 @@ impl Gpu {
             * height as u64;
         let eye = camera.position.to_array();
         let target = (camera.position + camera.direction().as_dvec3()).to_array();
+        let native_voxel_m = voxel_size();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -3206,7 +3220,7 @@ pub fn run() -> Result<()> {
         camera.yaw = 0.;
         camera.pitch = -0.08;
         if scene == "adaptive-topology" {
-            let base = world.topology_base_cells().unwrap() as f64 * VOXEL_SIZE;
+            let base = world.topology_base_cells().unwrap() as f64 * voxel_size();
             let pose = match camera_preset.as_str() {
                 "cave" => Some((
                     DVec3::new(-3., base - 2., -6.8),
@@ -3377,7 +3391,7 @@ pub fn run() -> Result<()> {
             exposed_native_faces: 0,
         }
     } else if scene.starts_with("hybrid") || scene.starts_with("pages") {
-        let base = world.topology_base_cells().unwrap_or(0) as f64 * VOXEL_SIZE;
+        let base = world.topology_base_cells().unwrap_or(0) as f64 * voxel_size();
         let (position, target) = match camera_preset.as_str() {
             "cave" if scene == "hybrid-topology" || scene == "pages-topology" => (
                 DVec3::new(-3., base - 2., -6.8),
@@ -3681,7 +3695,7 @@ pub fn run() -> Result<()> {
             .map_or(frontier_world::SOURCE_VERSION, |source| {
                 source.source_version()
             });
-        metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"native_voxel_m\":{VOXEL_SIZE},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
+        metadata.push_str(&format!(",\"seed\":{seed},\"scene\":{scene:?},\"renderer\":{renderer:?},\"source_version\":{source_version},\"edit_revision\":{}{bounds},\"terrain_recipe\":\"{:?}\",\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{},\"appearance_version\":{},\"surface_layout\":{surface_layout:?},\"view_levels\":{view_levels}}}", world.revision(), params.recipe, params.horizontal_scale, params.amplitude, params.octaves, params.roughness, world.fbm_terrain().map_or(0, |source| source.appearance_version())));
         metadata.pop();
         metadata.push_str(&format!(
             ",{}}}",
@@ -4011,8 +4025,8 @@ pub fn run() -> Result<()> {
         ));
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
-            viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),voxel_size(),params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
+            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
             json.pop();
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));
@@ -4444,7 +4458,7 @@ mod tests {
         let mut world = World::fbm(SEED, Default::default()).unwrap();
         let x = -4097;
         let z = -8193;
-        let y = (world.ground_height_m(x as f64 * VOXEL_SIZE, z as f64 * VOXEL_SIZE) / VOXEL_SIZE)
+        let y = (world.ground_height_m(x as f64 * voxel_size(), z as f64 * voxel_size()) / voxel_size())
             as i64
             + 32;
         let target = Cell { x, y, z };
@@ -4452,9 +4466,9 @@ mod tests {
         world.set(target, Material::Stone);
         world.set(neighbor, Material::Air);
         let origin = [
-            (x as f64 - 0.5) * VOXEL_SIZE,
-            (y as f64 + 0.5) * VOXEL_SIZE,
-            (z as f64 + 0.5) * VOXEL_SIZE,
+            (x as f64 - 0.5) * voxel_size(),
+            (y as f64 + 0.5) * voxel_size(),
+            (z as f64 + 0.5) * voxel_size(),
         ];
         let pick = |place, pending, owns: &dyn Fn(Cell) -> bool| {
             edit_target_in(&world, origin, [1., 0., 0.], place, pending, owns)
@@ -4511,7 +4525,7 @@ mod tests {
     }
     #[test]
     fn wgsl_is_valid() {
-        let module = naga::front::wgsl::parse_str(super::SHADER).unwrap();
+        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(super::SHADER)).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),

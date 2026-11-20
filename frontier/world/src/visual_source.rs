@@ -3,7 +3,7 @@
 //! silhouettes or grid interpolation. They are ideal arithmetic bounds plus native
 //! quantization; floating point enclosure is NOT certified. No render quality pass
 //! follows from producing a page. Native queries and volume ownership are unchanged.
-use crate::{FbmParams, FbmRecipe, FbmTerrain, World, VOXEL_SIZE};
+use crate::{FbmParams, FbmRecipe, FbmTerrain, World, voxel_size};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VisualRequest {
@@ -51,7 +51,7 @@ pub fn ideal_omitted_bound_m(terrain: &FbmTerrain, retained: u32) -> f64 {
     if bound == 0.0 {
         0.0
     } else {
-        bound + VOXEL_SIZE
+        bound + voxel_size()
     }
 }
 

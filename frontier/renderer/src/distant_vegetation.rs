@@ -37,7 +37,7 @@ pub(super) fn tree_baseline(distance: f64) -> u8 {
 /// factor for foliage; wood keeps a separately halved display stride. These
 /// estimates require image validation and are not exact silhouette guarantees.
 pub(super) fn matched_tree_stride(distance: f64, projection: f64, pixel_error: f64) -> u8 {
-    let pixels_per_cell = frontier_world::VOXEL_SIZE * projection / distance.max(1.);
+    let pixels_per_cell = frontier_world::voxel_size() * projection / distance.max(1.);
     let mut stride = 4;
     for next in [8, 16] {
         let foliage_deviation = next as f64 * 0.5 * 1.25 * pixels_per_cell;

@@ -16,6 +16,7 @@ pub(super) fn first_radius(target: u32, progressive: bool) -> u32 {
 
 pub(super) fn next_region(current: Region, target: u32, center: [f64; 3]) -> Region {
     let radius = ((current.hi[0] - current.lo[0]) as u32 / 2 + 4).min(target) as i64;
+    let center = center.map(|meters| meters / super::stream::root_size_m());
     Region {
         lo: center.map(|v| v.floor() as i64 - radius),
         hi: center.map(|v| v.floor() as i64 + radius),
@@ -114,8 +115,8 @@ mod reservation_tests {
 }
 
 /// Sparse milestones are also useful without opening the in-game menu.
-pub(super) fn log_residency(resident: u32, target: u32, seconds: f64) {
-    if resident <= 8 || resident % 32 == 0 || resident == target {
-        eprintln!("NAADF residency: {resident}/{target} m ({seconds:.2}s)");
+pub(super) fn log_residency(resident: f64, target: f64, seconds: f64) {
+    if resident <= 8. || resident % 32. < super::stream::root_size_m() || resident >= target {
+        eprintln!("NAADF residency: {resident:.2}/{target:.2} m ({seconds:.2}s)");
     }
 }

@@ -1,4 +1,4 @@
-//! Bounded exact 6.25 cm volume comparison. Greenfield implementation; no LOD.
+//! Bounded exact native-cell volume comparison. Greenfield implementation; no LOD.
 //!
 //! 8³ bricks are uniform words or densely packed 16-bit cells. A cell stores the
 //! canonical material and six exposed-face bits sampled with the mesh's halo.
@@ -302,7 +302,7 @@ impl BrickRayGpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("exact hierarchical brick ray"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("brick ray"),

@@ -489,7 +489,7 @@ impl PageGpu {
         let shader_source = shader_source();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("reusable height page grid"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(shader_source)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("page grid"),
@@ -600,7 +600,8 @@ impl PageGpu {
             && (position.z - self.center[1]).abs() + far as f64 <= HALF_EXTENT_M * self.step as f64
     }
     pub fn json(&self, cpu: Stats, retained_gpu_bytes: u64) -> String {
-        format!("{{\"layout\":\"bounded_uniform_worldaligned_pages\",\"full_CDLOD\":false,\"proxy_error_certified\":false,\"source_revision\":{},\"camera_epoch_in_content_key\":false,\"source_voxel_m\":0.0625,\"display_spacing_m\":{},\"side_pages\":{},\"active_pages\":{},\"half_extent_m\":{},\"guaranteed_radius_m\":{},\"grid_topologies\":1,\"triangles\":{},\"draw_calls\":1,\"gpu_bytes\":{},\"gpu_bytes_scope\":\"page_buffers_only\",\"retained_clipmap_gpu_bytes\":{},\"page_and_retained_clipmap_gpu_bytes\":{},\"native_and_volume_bytes_counted\":false,\"retained_clipmap_generation\":true,\"upload_budget_per_frame_enforced\":false,\"cpu_cache_pages\":{},\"cpu_cache_payload_bytes\":{},\"cpu_payload_hard_bound_bytes\":{},\"staging_payload_hard_bound_bytes\":{},\"generated_pages\":{},\"reused_pages\":{},\"cancelled_jobs\":{},\"last_generation_ms\":{},\"publications\":{},\"uploaded_pages\":{},\"uploaded_bytes\":{},\"upload_cpu_ms\":{},\"max_frame_upload_bytes\":{},\"legacy_shared_lighting\":true,\"collar_sample_spacing_matched\":{},\"heightfield_safe_source_only\":true,\"exact_volume_owner_preserved\":true}}",
+        let native_voxel_m = frontier_world::voxel_size();
+        format!("{{\"layout\":\"bounded_uniform_worldaligned_pages\",\"full_CDLOD\":false,\"proxy_error_certified\":false,\"source_revision\":{},\"camera_epoch_in_content_key\":false,\"source_voxel_m\":{native_voxel_m},\"display_spacing_m\":{},\"side_pages\":{},\"active_pages\":{},\"half_extent_m\":{},\"guaranteed_radius_m\":{},\"grid_topologies\":1,\"triangles\":{},\"draw_calls\":1,\"gpu_bytes\":{},\"gpu_bytes_scope\":\"page_buffers_only\",\"retained_clipmap_gpu_bytes\":{},\"page_and_retained_clipmap_gpu_bytes\":{},\"native_and_volume_bytes_counted\":false,\"retained_clipmap_generation\":true,\"upload_budget_per_frame_enforced\":false,\"cpu_cache_pages\":{},\"cpu_cache_payload_bytes\":{},\"cpu_payload_hard_bound_bytes\":{},\"staging_payload_hard_bound_bytes\":{},\"generated_pages\":{},\"reused_pages\":{},\"cancelled_jobs\":{},\"last_generation_ms\":{},\"publications\":{},\"uploaded_pages\":{},\"uploaded_bytes\":{},\"upload_cpu_ms\":{},\"max_frame_upload_bytes\":{},\"legacy_shared_lighting\":true,\"collar_sample_spacing_matched\":{},\"heightfield_safe_source_only\":true,\"exact_volume_owner_preserved\":true}}",
             self.source_revision,self.step,COVER_SIDE,self.active.len(),HALF_EXTENT_M*self.step as f64,guaranteed_radius(self.step),self.active.len()*SIDE*SIDE*2,GPU_BYTES,retained_gpu_bytes,GPU_BYTES+retained_gpu_bytes,cpu.cpu_cache_pages,cpu.cpu_cache_pages*SAMPLES*48,(CACHE_PAGES+2*MAX_PAGES)*SAMPLES*48,MAX_PAGES*SAMPLES*48,cpu.generated_pages,cpu.reused_pages,cpu.cancelled_jobs,cpu.last_generation_ms,self.stats.publications,self.stats.uploaded_pages,self.stats.uploaded_bytes,self.upload_cpu_ms,self.max_upload_bytes,self.step==1)
     }
     pub fn prepare(
@@ -639,9 +640,9 @@ impl PageGpu {
             ]),
         );
         let paint = [
-            (self.center[0] * 16.) as i64 as u32,
+            (self.center[0] / frontier_world::voxel_size()).round() as i64 as u32,
             0,
-            (self.center[1] * 16.) as i64 as u32,
+            (self.center[1] / frontier_world::voxel_size()).round() as i64 as u32,
             0,
         ];
         queue.write_buffer(&self.uniform, 112, bytemuck::cast_slice(&paint));

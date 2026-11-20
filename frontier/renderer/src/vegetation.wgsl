@@ -26,14 +26,14 @@ fn triangle_corner(face:u32, vertex:u32)->u32 {
     return corner;
 }
 fn native_vertex(q:Quad, corner:u32)->NativeVertex {
-    let axis=q.face/2u;
+    let axis=(q.face&7u)/2u;
     let u=(axis+1u)%3u;
     let v=(axis+2u)%3u;
     var p=vec3<i32>(q.origin[0],q.origin[1],q.origin[2]);
     if corner==1u || corner==2u {p[u]+=bitcast<i32>(q.extent[0]);}
     if corner==2u || corner==3u {p[v]+=bitcast<i32>(q.extent[1]);}
     var out:NativeVertex;
-    out.position=vec3<f32>(p)*0.0625;
+    out.position=vec3<f32>(p)*select(NATIVE_VOXEL_METERS,GROUND_DETAIL_VOXEL_METERS,(q.face&8u)!=0u);
     out.normal=vec3<f32>(0.);
     out.normal[axis]=select(-1.,1.,(q.face&1u)!=0u);
     return out;
@@ -77,6 +77,7 @@ struct Out {
     @location(4) local:vec3<f32>,
     @location(5) ao:f32,
     @location(6) transmission:f32,
+    @location(7) @interpolate(flat) decorative:u32,
 };
 fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     switch turn&3u {
@@ -123,6 +124,7 @@ fn vertex_out(position:vec3<f32>, normal:vec3<f32>, color:vec3<f32>, root:vec3<f
     out.seed=seed;
     out.ao=ao;
     out.transmission=transmission;
+    out.decorative=turn&8u;
     return out;
 }
 fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
@@ -163,8 +165,8 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
 }
 @fragment fn fs_main(i:Out)->@location(0) vec4<f32> {
     // Ownership follows the occupied native cell, including faces on box edges.
-    if near_shadow.naadf_hi.w>0.5 {
-        let point=(floor(i.local*16.-i.normal*0.01)+0.5)/16.-camera.eye.xyz;
+    if i.decorative==0u && near_shadow.naadf_hi.w>0.5 {
+        let point=(floor(i.local*VOXELS_PER_METER-i.normal*0.01)+0.5)/VOXELS_PER_METER-camera.eye.xyz;
         if all(point>=near_shadow.naadf_lo.xyz)&&all(point<near_shadow.naadf_hi.xyz) {discard;}
     }
 
@@ -172,7 +174,7 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     // Fixed canonical-cell/instance threshold: no time noise or transparency.
     // Opaque survivors write normal scene depth and receive its atmosphere pass.
     if i.fade<1. {
-        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*16.-i.normal*0.01)))+camera.paint_origin.xyz;
+        let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*VOXELS_PER_METER-i.normal*0.01)))+camera.paint_origin.xyz;
         var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u ^ i.seed;
         h=(h^(h>>16u))*2246822519u;
         if f32(h&65535u)/65536.>=i.fade { discard; }

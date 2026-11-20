@@ -23,7 +23,7 @@ const SHADER: &str = concat!(
 );
 #[test]
 fn dynamic_water_shader_validates() {
-    let module = naga::front::wgsl::parse_str(SHADER).unwrap();
+    let module = naga::front::wgsl::parse_str(&crate::voxel_shader(SHADER)).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -134,7 +134,7 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: None,

@@ -1,5 +1,5 @@
 //! Canonical CPU field samples, not engine renders or frame-rate measurements.
-use frontier_world::{Cell, FbmParams, FbmRecipe, FbmTerrain, VOXEL_SIZE};
+use frontier_world::{Cell, FbmParams, FbmRecipe, FbmTerrain, voxel_size};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut n = 257usize;
     let mut recipe = FbmRecipe::SeededWorld;
     let mut center = [0f64; 2];
-    let mut args = std::env::args().skip(1);
+    let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(arg) = args.next() {
         if arg == "--help" {
             println!("seeded_world_gallery [--output DIR] [--seed INTEGER] [--span METERS] [--resolution 257] [--center X,Z] [--recipe seeded-world|watershed]\nRepeat --seed/--span; defaults seeds 7,19,83 and spans 10000,100000m. Canonical CPU samples only; eval timing is not FPS. Then run python3 tools/seeded_world_gallery.py DIR");
@@ -80,8 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let cell = Cell::from_meters([x, 0., z]);
                     let col = terrain.column_cells(cell.x, cell.z);
                     let fields = terrain.sample_fields(
-                        (cell.x as f64 + 0.5) * VOXEL_SIZE,
-                        (cell.z as f64 + 0.5) * VOXEL_SIZE,
+                        (cell.x as f64 + 0.5) * voxel_size(),
+                        (cell.z as f64 + 0.5) * voxel_size(),
                     );
                     rows.push((x, z, col, fields));
                 }
@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut water = 0usize;
             let mut counts = BTreeMap::new();
             for &(x, z, c, f) in &rows {
-                let ground = c.ground_top as f64 * VOXEL_SIZE;
-                let visible = c.visible_top as f64 * VOXEL_SIZE;
+                let ground = c.ground_top as f64 * voxel_size();
+                let visible = c.visible_top as f64 * voxel_size();
                 let wet = c.visible_top > c.ground_top;
                 water += usize::from(wet);
                 *counts.entry(format!("{:?}", f.biome)).or_insert(0usize) += 1;
@@ -149,7 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *count as f64 / rows.len() as f64
                 )?;
             }
-            fs::write(out.join(format!("{file}.json")),format!("{{\"schema\":\"frontier-seeded-world-gallery-v1\",\"recipe\":\"{recipe:?}\",\"seed\":{seed},\"source_version\":{},\"appearance_version\":{},\"span_m\":{span},\"center_xz_m\":{center:?},\"resolution\":{n},\"grid_spacing_m\":{spacing},\"native_voxel_m\":{VOXEL_SIZE},\"params\":{{\"horizontal_scale\":1800,\"amplitude\":1000,\"octaves\":8,\"roughness\":0.5}},\"eval_ms\":{},\"method\":\"CPU canonical quantized ground and visible columns; climate at native column center; elapsed includes column and field queries and row allocation, excludes CSV IO. Static water; sparse map samples do not measure river area exactly. Not engine rendering or FPS.\"}}\n",terrain.source_version(),terrain.appearance_version(),elapsed.as_secs_f64()*1000.))?;
+            let native_voxel_m = voxel_size();
+            fs::write(out.join(format!("{file}.json")),format!("{{\"schema\":\"frontier-seeded-world-gallery-v1\",\"recipe\":\"{recipe:?}\",\"seed\":{seed},\"source_version\":{},\"appearance_version\":{},\"span_m\":{span},\"center_xz_m\":{center:?},\"resolution\":{n},\"grid_spacing_m\":{spacing},\"native_voxel_m\":{native_voxel_m},\"params\":{{\"horizontal_scale\":1800,\"amplitude\":1000,\"octaves\":8,\"roughness\":0.5}},\"eval_ms\":{},\"method\":\"CPU canonical quantized ground and visible columns; climate at native column center; elapsed includes column and field queries and row allocation, excludes CSV IO. Static water; sparse map samples do not measure river area exactly. Not engine rendering or FPS.\"}}\n",terrain.source_version(),terrain.appearance_version(),elapsed.as_secs_f64()*1000.))?;
             println!("{file}: ground {:.1}..{:.1}m, sampled water {:.2}%, biomes {counts:?}, CPU {:.1}ms",low[0],high[0],fraction*100.,elapsed.as_secs_f64()*1000.);
         }
     }

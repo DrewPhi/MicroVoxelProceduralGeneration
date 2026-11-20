@@ -3,7 +3,7 @@
 use crate::{forward_index, material_id, Hit};
 use frontier_world::{
     vegetation::{model_for, PlantRecord, PlantVoxel, Species},
-    Cell, World, VOXEL_SIZE,
+    Cell, World, voxel_size,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -69,8 +69,8 @@ impl Plant {
         Self {
             voxels: voxels.into_boxed_slice(),
             bounds: Bounds {
-                min: min.map(|v| (v - 1) as f64 * VOXEL_SIZE),
-                max: max.map(|v| (v + 1) as f64 * VOXEL_SIZE),
+                min: min.map(|v| (v - 1) as f64 * voxel_size()),
+                max: max.map(|v| (v + 1) as f64 * voxel_size()),
             },
             rank,
         }
@@ -85,12 +85,12 @@ impl Plant {
         let d = d.map(|v| v / scale);
         let norm = d.iter().map(|v| v * v).sum::<f64>().sqrt();
         let d = d.map(|v| v / norm);
-        let min = self.bounds.min.map(|v| (v / VOXEL_SIZE) as i64);
+        let min = self.bounds.min.map(|v| (v / voxel_size()) as i64);
         let size = std::array::from_fn::<_, 3, _>(|a| {
-            ((self.bounds.max[a] - self.bounds.min[a]) / VOXEL_SIZE) as i64
+            ((self.bounds.max[a] - self.bounds.min[a]) / voxel_size()) as i64
         });
-        let o = std::array::from_fn::<_, 3, _>(|a| o[a] / VOXEL_SIZE - min[a] as f64);
-        let dc = d.map(|v| v / VOXEL_SIZE);
+        let o = std::array::from_fn::<_, 3, _>(|a| o[a] / voxel_size() - min[a] as f64);
+        let dc = d.map(|v| v / voxel_size());
         let mut enter = f64::NEG_INFINITY;
         let mut exit = far;
         let mut entries = [f64::NEG_INFINITY; 3];
@@ -454,9 +454,9 @@ mod tests {
                 rotation: 1,
             };
             let plant = Plant::from_record(p, 0);
-            let min = plant.bounds.min.map(|v| (v / VOXEL_SIZE) as i64);
+            let min = plant.bounds.min.map(|v| (v / voxel_size()) as i64);
             let size = std::array::from_fn(|a| {
-                ((plant.bounds.max[a] - plant.bounds.min[a]) / VOXEL_SIZE) as usize
+                ((plant.bounds.max[a] - plant.bounds.min[a]) / voxel_size()) as usize
             });
             let dense = crate::Snapshot::build(min, size, |c| {
                 plant
