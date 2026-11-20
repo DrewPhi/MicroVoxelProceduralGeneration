@@ -4,14 +4,22 @@
 
 use super::{
     profile_probe_bands, Generator, GeometryTile, NativeBin, NativeColumn, NativeQuad, SourceStage,
-    MAX_AFFINE_QUADS, MAX_CERTIFICATE_WIDTH, MAX_VERTICES,
+    TileKey, MAX_AFFINE_QUADS, MAX_CERTIFICATE_WIDTH, MAX_VERTICES,
 };
-use crate::{mesh::Vertex, spatial_appearance::Profile};
+use crate::spatial_appearance::Profile;
 use frontier_world::{
     affine_bounds::{BoundBudget, ColumnBox},
     Material, VOXEL_SIZE,
 };
-use std::{collections::BTreeMap, ops::Range, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc, Mutex, OnceLock,
+    },
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -79,6 +87,160 @@ struct Edge {
 
 type Plane = (usize, i64);
 type Edges = BTreeMap<Plane, [Vec<Edge>; 2]>;
+
+/// Unmerged faces have patch-local profile slots. These can be reused when a
+/// neighboring tile changes pitch, before the new tile's profiles are assigned.
+struct InteriorPatch {
+    run: Run,
+    center_height: i64,
+    roof: Option<NativeQuad>,
+}
+
+struct Interior {
+    patches: Vec<InteriorPatch>,
+    walls: Vec<NativeQuad>,
+}
+
+type InteriorEntry = Option<(TileKey, Arc<Interior>)>;
+
+pub(super) struct InteriorCache {
+    slots: Vec<Mutex<InteriorEntry>>,
+    pub(super) reserved_bytes: usize,
+    pub(super) hits: AtomicU64,
+}
+
+impl InteriorCache {
+    pub(super) fn new(budget: usize) -> Option<Self> {
+        // Each patch has a roof and at most two regular seams with two material
+        // intervals each. Reserve the cap before admitting a cache slot.
+        let per_slot = std::mem::size_of::<Mutex<InteriorEntry>>()
+            + 128
+            + MAX_AFFINE_QUADS as usize
+                * (std::mem::size_of::<InteriorPatch>() + 4 * std::mem::size_of::<NativeQuad>());
+        let slots = budget.saturating_sub(std::mem::size_of::<Self>()) / per_slot;
+        (slots > 0).then(|| Self {
+            slots: (0..slots).map(|_| Mutex::new(None)).collect(),
+            reserved_bytes: std::mem::size_of::<Self>() + slots * per_slot,
+            hits: AtomicU64::new(0),
+        })
+    }
+
+    fn slot(&self, key: TileKey) -> &Mutex<InteriorEntry> {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        &self.slots[hasher.finish() as usize % self.slots.len()]
+    }
+
+    pub(super) fn clear(&self) {
+        for slot in &self.slots {
+            *slot.lock().unwrap() = None;
+        }
+    }
+}
+
+fn packed_quad(
+    anchor: [i64; 3],
+    axis: usize,
+    positive: bool,
+    extent: [i64; 2],
+    material: Material,
+    profile: u32,
+) -> NativeQuad {
+    let meters = |c: i64| (c as f64 * VOXEL_SIZE) as f32;
+    let axes = [(axis + 1) % 3, (axis + 2) % 3];
+    let material = TERRAIN_PALETTE
+        .iter()
+        .position(|&entry| entry == material)
+        .expect("all terrain materials have a palette entry");
+    NativeQuad {
+        anchor: anchor.map(meters),
+        extent: std::array::from_fn(|i| {
+            meters(anchor[axes[i]] + extent[i]) - meters(anchor[axes[i]])
+        }),
+        axis_sign: axis as u32 | if positive { 0 } else { 4 },
+        material: material as u32,
+        profile_index: profile,
+    }
+}
+
+fn wall_quads(
+    axis: usize,
+    plane: i64,
+    positive: bool,
+    span: Range<i64>,
+    low: i64,
+    high: Run,
+) -> impl Iterator<Item = NativeQuad> {
+    let ground = high.ground.clamp(low, high.top);
+    [
+        (low, ground, high.deep_material),
+        (ground, high.top, high.top_material),
+    ]
+    .into_iter()
+    .filter_map(move |(lo, hi, material)| {
+        if lo == hi {
+            return None;
+        }
+        let (anchor, extent) = if axis == 0 {
+            ([plane, lo, span.start], [hi - lo, span.end - span.start])
+        } else {
+            ([span.start, lo, plane], [span.end - span.start, hi - lo])
+        };
+        Some(packed_quad(
+            anchor,
+            axis,
+            positive,
+            extent,
+            material,
+            high.profile,
+        ))
+    })
+}
+
+fn roof_quad(x: &Range<i64>, z: &Range<i64>, run: Run) -> NativeQuad {
+    packed_quad(
+        [x.start, run.top, z.start],
+        1,
+        true,
+        [z.end - z.start, x.end - x.start],
+        run.top_material,
+        run.profile,
+    )
+}
+
+fn rect_edges(
+    edges: &mut Edges,
+    x: Range<i64>,
+    z: Range<i64>,
+    run: Run,
+    interior_width: Option<i64>,
+) {
+    for (axis, line, span) in [(0, x.clone(), z.clone()), (2, z, x)] {
+        for (side, plane) in [line.start, line.end].into_iter().enumerate() {
+            if interior_width.is_some_and(|width| plane != 1 && plane != width - 1) {
+                continue;
+            }
+            edges.entry((axis, plane)).or_default()[side].push(Edge {
+                span: span.clone(),
+                run,
+            });
+        }
+    }
+}
+
+/// Keep the horizontal stair grid while changing how coarsely dry roofs round
+/// in Y. Shared seams still derive their height from the same sample and pitch.
+pub(crate) fn vertical_pitch_divisor() -> u32 {
+    static DIVISOR: OnceLock<u32> = OnceLock::new();
+    *DIVISOR.get_or_init(
+        || match std::env::var("FRONTIER_COARSE_Y_PITCH_DIVISOR").as_deref() {
+            Ok("2") => 2,
+            Ok("4") => 4,
+            Ok("8") => 8,
+            _ => 1,
+        },
+    )
+}
 
 fn round_to_pitch(height: i64, pitch: i64) -> i64 {
     (height + pitch / 2).div_euclid(pitch) * pitch
@@ -168,120 +330,128 @@ impl Generator<'_> {
         Ok(at)
     }
 
-    fn coarse_run(&mut self, sample: [i64; 2], pitch: i64, profile: u32) -> Result<Run, String> {
+    fn coarse_run(
+        &mut self,
+        sample: [i64; 2],
+        pitch: i64,
+        profile: u32,
+    ) -> Result<(Run, i64), String> {
         let column = self.column(sample)?;
         let wet = column.height > column.ground_height;
         let ground = if wet {
             column.ground_height
         } else {
-            round_to_pitch(column.ground_height, pitch)
+            let vertical_pitch = (pitch / i64::from(vertical_pitch_divisor())).max(1);
+            round_to_pitch(column.ground_height, vertical_pitch)
         };
-        Ok(Run {
-            top: if wet { column.height } else { ground },
-            ground,
-            top_material: column.material(column.height - 1),
-            deep_material: column.bands[2],
-            profile,
-        })
+        Ok((
+            Run {
+                top: if wet { column.height } else { ground },
+                ground,
+                top_material: column.material(column.height - 1),
+                deep_material: column.bands[2],
+                profile,
+            },
+            column.height,
+        ))
     }
 
-    fn coarse_quad(
-        &mut self,
-        anchor: [i64; 3],
-        axis: usize,
-        positive: bool,
-        extent: [i64; 2],
-        material: Material,
-        profile: u32,
-    ) -> Result<(), String> {
-        if self.mesh.vertices.len() + 4 > MAX_VERTICES {
-            return Err("adaptive voxel mesh byte budget exceeded".into());
+    fn append_quads(&mut self, quads: impl IntoIterator<Item = NativeQuad>) -> Result<(), String> {
+        for quad in quads {
+            if self.coarse_quads.len() >= MAX_VERTICES / 4 {
+                return Err("adaptive voxel mesh byte budget exceeded".into());
+            }
+            self.coarse_quads.push(quad);
         }
-        let u = (axis + 1) % 3;
-        let v = (axis + 2) % 3;
-        let mut points = [anchor; 4];
-        points[1][u] += extent[0];
-        points[2][u] += extent[0];
-        points[2][v] += extent[1];
-        points[3][v] += extent[1];
-        let base = self.mesh.vertices.len() as u32;
-        let mut normal = [0.; 3];
-        normal[axis] = if positive { 1. } else { -1. };
-        self.mesh.vertices.extend(points.map(|p| Vertex {
-            position: p.map(|c| (c as f64 * VOXEL_SIZE) as f32),
-            normal,
-            color: material.color(),
-        }));
-        self.mesh.indices.extend(if positive {
-            [base, base + 1, base + 2, base, base + 2, base + 3]
-        } else {
-            [base, base + 3, base + 2, base, base + 2, base + 1]
-        });
-        self.face_profile_indices.extend([profile; 4]);
         Ok(())
     }
 
-    fn coarse_rect(
+    fn build_interior(
         &mut self,
-        edges: &mut Edges,
-        rect: [Range<i64>; 2],
-        run: Run,
-    ) -> Result<(), String> {
-        let [x, z] = rect;
-        if x.is_empty() || z.is_empty() {
-            return Ok(());
-        }
-        self.coarse_quad(
-            [x.start, run.top, z.start],
-            1,
-            true,
-            [z.end - z.start, x.end - x.start],
-            run.top_material,
-            run.profile,
-        )?;
-        for (axis, line, span) in [(0, x.clone(), z.clone()), (2, z, x)] {
-            for (side, plane) in [line.start, line.end].into_iter().enumerate() {
-                edges.entry((axis, plane)).or_default()[side].push(Edge {
-                    span: span.clone(),
+        width: i64,
+        pitch: i64,
+        grid: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Interior, String> {
+        let mut interior = Interior {
+            patches: Vec::<InteriorPatch>::with_capacity(grid * grid),
+            walls: Vec::with_capacity(4 * grid * grid),
+        };
+        for z in (0..width).step_by(pitch as usize) {
+            for x in (0..width).step_by(pitch as usize) {
+                if cancelled() {
+                    return Err("adaptive geometry cancelled".into());
+                }
+                let index = interior.patches.len();
+                let (run, center_height) =
+                    self.coarse_run([x + pitch / 2, z + pitch / 2], pitch, index as u32)?;
+                let xx = x.max(1)..(x + pitch).min(width - 1);
+                let zz = z.max(1)..(z + pitch).min(width - 1);
+                let roof = (!xx.is_empty() && !zz.is_empty()).then(|| roof_quad(&xx, &zz, run));
+                if roof.is_some() {
+                    for (axis, plane, span, delta) in [(0, x, zz, 1), (2, z, xx, grid)] {
+                        if plane == 0 {
+                            continue;
+                        }
+                        let neighbor = interior.patches[index - delta].run;
+                        if neighbor.top > run.top {
+                            interior
+                                .walls
+                                .extend(wall_quads(axis, plane, true, span, run.top, neighbor));
+                        } else if run.top > neighbor.top {
+                            interior.walls.extend(wall_quads(
+                                axis,
+                                plane,
+                                false,
+                                span,
+                                neighbor.top,
+                                run,
+                            ));
+                        }
+                    }
+                }
+                interior.patches.push(InteriorPatch {
                     run,
+                    center_height,
+                    roof,
                 });
             }
         }
-        Ok(())
+        Ok(interior)
     }
 
-    fn coarse_wall(
+    fn interior(
         &mut self,
-        axis: usize,
-        plane: i64,
-        positive: bool,
-        span: Range<i64>,
-        low: i64,
-        high: Run,
-    ) -> Result<(), String> {
-        let ground = high.ground.clamp(low, high.top);
-        for (lo, hi, material) in [
-            (low, ground, high.deep_material),
-            (ground, high.top, high.top_material),
-        ] {
-            if lo == hi {
-                continue;
+        width: i64,
+        pitch: i64,
+        grid: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Arc<Interior>, String> {
+        let key = TileKey {
+            edge_steps: [0; 4],
+            ..self.key
+        };
+        let cache = self.samples.pages.coarse_interiors.clone();
+        if let Some(cache) = &cache {
+            let slot = cache.slot(key).lock().unwrap();
+            if let Some((_, data)) = slot.as_ref().filter(|(cached, _)| *cached == key) {
+                cache.hits.fetch_add(1, Relaxed);
+                return Ok(data.clone());
             }
-            let (anchor, extent) = if axis == 0 {
-                ([plane, lo, span.start], [hi - lo, span.end - span.start])
-            } else {
-                ([span.start, lo, plane], [span.end - span.start, hi - lo])
-            };
-            self.coarse_quad(anchor, axis, positive, extent, material, high.profile)?;
         }
-        Ok(())
+        let data = Arc::new(self.build_interior(width, pitch, grid, cancelled)?);
+        if let Some(cache) = &cache {
+            *cache.slot(key).lock().unwrap() = Some((key, data.clone()));
+        }
+        Ok(data)
     }
 
     fn record_coarse_error(
         &mut self,
         min: [i64; 2],
         pitch: i64,
-        first_vertex: usize,
+        first_roof: usize,
+        roof_range: [i64; 2],
         cached_bound: Option<Option<frontier_world::affine_bounds::HeightBound>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), String> {
@@ -292,10 +462,12 @@ impl Generator<'_> {
         let complete = if key.width_cells <= MAX_CERTIFICATE_WIDTH {
             // These rectangles partition the tile. Exhaustively compare the
             // actual roof of each one, including the thin boundary band.
-            for vertex in (first_vertex..self.mesh.vertices.len()).step_by(4) {
-                let cell = |v: Vertex| v.position.map(|p| (f64::from(p) / VOXEL_SIZE) as i64);
-                let [x0, top, z0] = cell(self.mesh.vertices[vertex]);
-                let [x1, _, z1] = cell(self.mesh.vertices[vertex + 2]);
+            for roof in first_roof..self.coarse_quads.len() {
+                let quad = self.coarse_quads[roof];
+                let cell = |p: f32| (f64::from(p) / VOXEL_SIZE) as i64;
+                let [x0, top, z0] = quad.anchor.map(cell);
+                let x1 = x0 + cell(quad.extent[1]);
+                let z1 = z0 + cell(quad.extent[0]);
                 for z in z0..z1 {
                     if z % 32 == 0 && cancelled() {
                         return Err("adaptive geometry cancelled".into());
@@ -312,35 +484,51 @@ impl Generator<'_> {
         } else if self.affine_stats.quad_bounds < MAX_AFFINE_QUADS {
             self.affine_stats.quad_bounds += 1;
             let bound = cached_bound.unwrap_or_else(|| {
-                self.samples.pages.bound(
+                let started = std::time::Instant::now();
+                let result = self.samples.pages.bound(
                     self.world,
                     ColumnBox {
                         min: [key.min[0] + min[0], key.min[1] + min[1]],
                         size_cells: [pitch as u32; 2],
                     },
                     BoundBudget::default(),
-                )
+                );
+                self.affine_stats.coarse_source_ms += started.elapsed().as_secs_f64() * 1000.;
+                result
             });
+            let roof_started = std::time::Instant::now();
             if let Some(bound) = bound {
                 range = bound.height_range;
                 self.affine_stats.noise_cells += bound.noise_cells as u64;
                 self.affine_stats.full_range_fallbacks += bound.full_range_fallbacks as u64;
-                let mut complete = true;
-                for quad in self.mesh.vertices[first_vertex..].chunks_exact(4) {
-                    let position = |i: usize| {
-                        let [x, y, z] = quad[i].position.map(f64::from);
-                        [
-                            x + key.min[0] as f64 * VOXEL_SIZE,
-                            y,
-                            z + key.min[1] as f64 * VOXEL_SIZE,
-                        ]
-                    };
-                    if let Some(value) = bound.quad_error(std::array::from_fn(position)) {
-                        error = error.max(value);
-                    } else {
-                        complete = false;
+                // A patch whose entire range fits below the accumulated
+                // error cannot change the tile's conservative certificate.
+                let dominated = bound.roof_range_error(roof_range.map(|y| y as f64 * VOXEL_SIZE))
+                    <= self.affine_error;
+                #[cfg(test)]
+                let dominated = dominated && !self.samples.coarse_reference;
+                let complete = if dominated {
+                    self.affine_stats.coarse_roofs_skipped += 1;
+                    true
+                } else {
+                    let mut complete = true;
+                    for quad in &self.coarse_quads[first_roof..] {
+                        let [x, y, z] = quad.anchor.map(f64::from);
+                        let x = x + key.min[0] as f64 * VOXEL_SIZE;
+                        let z = z + key.min[1] as f64 * VOXEL_SIZE;
+                        let x1 = x + f64::from(quad.extent[1]);
+                        let z1 = z + f64::from(quad.extent[0]);
+                        if let Some(value) =
+                            bound.quad_error([[x, y, z], [x, y, z1], [x1, y, z1], [x1, y, z]])
+                        {
+                            error = error.max(value);
+                        } else {
+                            complete = false;
+                        }
                     }
-                }
+                    complete
+                };
+                self.affine_stats.coarse_roof_ms += roof_started.elapsed().as_secs_f64() * 1000.;
                 complete
             } else {
                 false
@@ -387,7 +575,9 @@ impl Generator<'_> {
                     key.step_cells,
                     cancelled,
                 )?;
-                self.affine_stats.cpu_ms += started.elapsed().as_secs_f64() * 1000.;
+                let elapsed = started.elapsed().as_secs_f64() * 1000.;
+                self.affine_stats.cpu_ms += elapsed;
+                self.affine_stats.coarse_source_ms += elapsed;
                 bounds
             } else {
                 None
@@ -401,27 +591,54 @@ impl Generator<'_> {
         } else {
             None
         };
+        let use_interior = needs_affine && can_certify;
+        #[cfg(test)]
+        let use_interior = use_interior && !self.samples.coarse_reference;
+        let interior = use_interior
+            .then(|| self.interior(width, pitch, grid as usize, cancelled))
+            .transpose()?;
+        let mut profiles = Vec::with_capacity(interior.as_ref().map_or(0, |i| i.patches.len()));
         let mut edges = Edges::new();
         for z in (0..width).step_by(pitch as usize) {
             for x in (0..width).step_by(pitch as usize) {
                 if cancelled() {
                     return Err("adaptive geometry cancelled".into());
                 }
-                let first_vertex = self.mesh.vertices.len();
+                let first_roof = self.coarse_quads.len();
                 let profile = match seed_profile {
                     Some(profile) => profile,
                     None => self.patch_appearance(x, z, pitch)?,
                 };
                 let on_border = [x == 0, z + pitch == width, x + pitch == width, z == 0];
-                let mut top_range = [i64::MAX, i64::MIN];
-                let mut rect = |g: &mut Self, footprint, run: Run| {
-                    top_range[0] = top_range[0].min(run.top);
-                    top_range[1] = top_range[1].max(run.top);
-                    g.coarse_rect(&mut edges, footprint, run)
-                };
-                let interior = self.coarse_run([x + pitch / 2, z + pitch / 2], pitch, profile)?;
+                let index = ((z / pitch) * i64::from(grid) + x / pitch) as usize;
+                let cached = interior.as_ref().map(|data| &data.patches[index]);
                 let [a, b, c, d] = on_border.map(i64::from);
-                rect(self, [x + a..x + pitch - c, z + d..z + pitch - b], interior)?;
+                let xx = x + a..x + pitch - c;
+                let zz = z + d..z + pitch - b;
+                let (run, center, roof) = if let Some(patch) = cached {
+                    profiles.push(profile);
+                    (
+                        Run {
+                            profile,
+                            ..patch.run
+                        },
+                        patch.center_height,
+                        patch.roof.map(|q| NativeQuad {
+                            profile_index: profile,
+                            ..q
+                        }),
+                    )
+                } else {
+                    let (run, center) =
+                        self.coarse_run([x + pitch / 2, z + pitch / 2], pitch, profile)?;
+                    let roof = (!xx.is_empty() && !zz.is_empty()).then(|| roof_quad(&xx, &zz, run));
+                    (run, center, roof)
+                };
+                let mut top_range = [run.top; 2];
+                if let Some(roof) = roof {
+                    self.append_quads([roof])?;
+                    rect_edges(&mut edges, xx, zz, run, cached.map(|_| width));
+                }
 
                 for (edge, on_border) in on_border.into_iter().enumerate() {
                     if !on_border {
@@ -452,17 +669,20 @@ impl Generator<'_> {
                             let mut sample_xz = [0; 2];
                             sample_xz[axis] = sample[0];
                             sample_xz[along] = sample[1];
-                            let run = self.coarse_run(sample_xz, sample_pitch, profile)?;
+                            let (run, _) = self.coarse_run(sample_xz, sample_pitch, profile)?;
                             let footprint = if axis == 0 {
                                 [inside..inside + 1, clipped]
                             } else {
                                 [clipped, inside..inside + 1]
                             };
-                            rect(self, footprint, run)?;
+                            let [xx, zz] = footprint;
+                            top_range[0] = top_range[0].min(run.top);
+                            top_range[1] = top_range[1].max(run.top);
+                            self.append_quads([roof_quad(&xx, &zz, run)])?;
+                            rect_edges(&mut edges, xx, zz, run, None);
                         }
                     }
                 }
-                let center = self.height(x + pitch / 2, z + pitch / 2)?;
                 self.empirical_error_m = self.empirical_error_m.max(
                     (center - top_range[0])
                         .abs()
@@ -470,12 +690,23 @@ impl Generator<'_> {
                         * VOXEL_SIZE,
                 );
                 if can_certify {
-                    let bound = bounds
-                        .as_ref()
-                        .map(|bounds| bounds[((z / pitch) * i64::from(grid) + x / pitch) as usize]);
-                    self.record_coarse_error([x, z], pitch, first_vertex, bound, cancelled)?;
+                    let bound = bounds.as_ref().map(|bounds| bounds[index]);
+                    self.record_coarse_error(
+                        [x, z],
+                        pitch,
+                        first_roof,
+                        top_range,
+                        bound,
+                        cancelled,
+                    )?;
                 }
             }
+        }
+        if let Some(interior) = interior {
+            self.append_quads(interior.walls.iter().map(|&q| NativeQuad {
+                profile_index: profiles[q.profile_index as usize],
+                ..q
+            }))?;
         }
         for ((axis, plane), mut sides) in edges {
             if cancelled() {
@@ -508,14 +739,14 @@ impl Generator<'_> {
                         self.height(t, outside)?
                     };
                     if edge.run.top > neighbor {
-                        self.coarse_wall(
+                        self.append_quads(wall_quads(
                             axis,
                             plane,
                             positive,
                             edge.span.clone(),
                             neighbor,
                             edge.run,
-                        )?;
+                        ))?;
                     }
                 }
                 continue;
@@ -532,7 +763,14 @@ impl Generator<'_> {
                     } else {
                         (right, left)
                     };
-                    self.coarse_wall(axis, plane, outward, span, low.run.top, high.run)?;
+                    self.append_quads(wall_quads(
+                        axis,
+                        plane,
+                        outward,
+                        span,
+                        low.run.top,
+                        high.run,
+                    ))?;
                 }
                 if right.span.end <= left.span.end {
                     i += 1;
@@ -591,29 +829,8 @@ pub(crate) const TERRAIN_PALETTE: [Material; 10] = [
 
 /// Use the existing instanced axis-face layout, without re-tessellating coarse
 /// faces into native cells. Profiles have already been decorated at this point.
-pub(super) fn pack(tile: &mut GeometryTile) -> Result<(), String> {
-    let mut quads = Vec::with_capacity(tile.mesh.vertices.len() / 4);
-    for (index, face) in tile.mesh.vertices.chunks_exact(4).enumerate() {
-        let axis = face[0]
-            .normal
-            .iter()
-            .position(|&n| n != 0.)
-            .ok_or("coarse face has no normal")?;
-        let material = TERRAIN_PALETTE
-            .iter()
-            .position(|m| m.color() == face[0].color)
-            .ok_or("coarse face color is outside the material palette")?
-            as u32;
-        let extent =
-            [(axis + 1) % 3, (axis + 2) % 3].map(|a| face[2].position[a] - face[0].position[a]);
-        quads.push(NativeQuad {
-            anchor: face[0].position,
-            extent,
-            axis_sign: axis as u32 | if face[0].normal[axis] < 0. { 4 } else { 0 },
-            material,
-            profile_index: tile.face_profile_indices[index * 4],
-        });
-    }
+pub(super) fn merge_quads(tile: &mut GeometryTile) {
+    let quads = &mut tile.native_quads;
     for merge in [0, 1] {
         let order = |q: &NativeQuad| {
             let axis = (q.axis_sign & 3) as usize;
@@ -630,23 +847,20 @@ pub(super) fn pack(tile: &mut GeometryTile) -> Result<(), String> {
             )
         };
         quads.sort_unstable_by_key(order);
-        let mut merged: Vec<NativeQuad> = Vec::with_capacity(quads.len());
-        for quad in quads {
-            if let Some(prev) = merged.last_mut() {
-                let axis = (quad.axis_sign & 3) as usize;
-                let u = (axis + 1 + merge) % 3;
-                let (a, b, c, d, e, f, _) = order(prev);
-                let (g, h, i, j, k, l, _) = order(&quad);
-                if (a, b, c, d, e, f) == (g, h, i, j, k, l)
-                    && prev.anchor[u] + prev.extent[merge] == quad.anchor[u]
-                {
-                    prev.extent[merge] += quad.extent[merge];
-                    continue;
-                }
+        quads.dedup_by(|quad, prev| {
+            let axis = (quad.axis_sign & 3) as usize;
+            let u = (axis + 1 + merge) % 3;
+            let (a, b, c, d, e, f, _) = order(prev);
+            let (g, h, i, j, k, l, _) = order(quad);
+            if (a, b, c, d, e, f) == (g, h, i, j, k, l)
+                && prev.anchor[u] + prev.extent[merge] == quad.anchor[u]
+            {
+                prev.extent[merge] += quad.extent[merge];
+                true
+            } else {
+                false
             }
-            merged.push(quad);
-        }
-        quads = merged;
+        });
     }
     quads.shrink_to_fit();
     for (index, quad) in quads.iter().enumerate() {
@@ -669,14 +883,9 @@ pub(super) fn pack(tile: &mut GeometryTile) -> Result<(), String> {
             });
         }
     }
-    tile.native_quads = quads;
-    tile.mesh.vertices = vec![];
-    tile.mesh.indices = vec![];
-    tile.face_profile_indices = vec![];
     tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
         + tile.native_bins.capacity() * std::mem::size_of::<NativeBin>()
         + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>();
-    Ok(())
 }
 
 #[cfg(test)]
@@ -702,7 +911,7 @@ mod tests {
         let mut tile =
             build_surface_with_geometry(world, key, || false, &mut SourceSamples::new(0), true)
                 .unwrap();
-        pack(&mut tile).unwrap();
+        merge_quads(&mut tile);
         tile
     }
 
@@ -778,6 +987,61 @@ mod tests {
                 if a > b { vec![[b, a]] } else { vec![] }
             );
         }
+    }
+
+    #[test]
+    fn neighboring_pitch_change_reuses_interior_with_fresh_seams_and_profiles() {
+        let world = World::fbm(
+            7,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let key = TileKey {
+            min: [-768, -4608],
+            width_cells: 512,
+            step_cells: 64,
+            edge_steps: [64; 4],
+            source_revision: world.revision(),
+        };
+        let mut samples = SourceSamples::new(0);
+        let cache = Arc::new(InteriorCache::new(1 << 20).unwrap());
+        samples.pages.coarse_interiors = Some(cache.clone());
+        let build = |key, samples: &mut SourceSamples| {
+            let mut tile =
+                build_surface_with_geometry(&world, key, || false, samples, true).unwrap();
+            merge_quads(&mut tile);
+            tile
+        };
+        let initial = build(key, &mut samples);
+        let refined_key = TileKey {
+            edge_steps: [64, 16, 32, 64],
+            ..key
+        };
+        let reused = build(refined_key, &mut samples);
+        let mut reference = SourceSamples::new(0);
+        reference.coarse_reference = true;
+        let cold = build(refined_key, &mut reference);
+        assert_eq!(cache.hits.load(Relaxed), 1);
+        assert_ne!(initial.triangle_count(), reused.triangle_count());
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&reused.native_quads),
+            bytemuck::cast_slice::<_, u8>(&cold.native_quads)
+        );
+        assert_eq!(reused.face_profiles, cold.face_profiles);
+        if let (Some(reused_error), Some(cold_error)) = (reused.affine_error_m, cold.affine_error_m)
+        {
+            assert!((reused_error - cold_error).abs() < 1e-10);
+        } else {
+            panic!("both builds must certify this tile");
+        }
+        assert_eq!(reused.bounds, cold.bounds);
+        assert_eq!(reused.empirical_error_m, cold.empirical_error_m);
+        cache.clear();
+        build(refined_key, &mut samples);
+        assert_eq!(cache.hits.load(Relaxed), 1);
     }
 
     #[test]

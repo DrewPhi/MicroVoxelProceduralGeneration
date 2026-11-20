@@ -1051,6 +1051,22 @@ impl AdaptiveView {
         ));
         json.pop();
         json.push_str(&format!(
+            ",\"coarse_certification\":{{\"source_ms\":{},\"roof_ms\":{},\"dominated_patches\":{},\"page_lock_wait_ms\":{},\"page_evaluation_ms\":{}}}}}",
+            self.latest_cache.coarse_source_bound_ms,
+            self.latest_cache.coarse_roof_bound_ms,
+            self.latest_cache.coarse_roofs_skipped,
+            self.latest_cache.bound_page_lock_ms,
+            self.latest_cache.bound_page_evaluation_ms
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"coarse_interior_cache\":{{\"hits\":{},\"reserved_bytes\":{}}},\"coarse_y_pitch_divisor\":{}}}",
+            self.latest_cache.coarse_interior_hits,
+            self.latest_cache.coarse_interior_cache_bytes,
+            crate::adaptive_geometry::distant_voxels::vertical_pitch_divisor()
+        ));
+        json.pop();
+        json.push_str(&format!(
             ",\"resident_proxy_triangle_bytes\":{}}}",
             self.stats.resident_proxy_triangle_bytes
         ));

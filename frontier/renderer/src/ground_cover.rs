@@ -624,7 +624,12 @@ pub(crate) fn decorate(
     header[0][1][2] = directional_enabled() as u8 as f32;
     tile.face_profiles.extend(header);
     let mut wrappers = HashMap::new();
-    for index in &mut tile.face_profile_indices {
+    let indices = tile.face_profile_indices.iter_mut().chain(
+        tile.native_quads
+            .iter_mut()
+            .map(|quad| &mut quad.profile_index),
+    );
+    for index in indices {
         let old = *index;
         let id = *wrappers.entry(old).or_insert_with(|| {
             let id = tile.face_profiles.len() as u32;

@@ -521,6 +521,12 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
         Mode::Voxy => put(&mut b, 0x564f5859),
         Mode::Seed => put(&mut b, 0x534545440001),
     }
+    if crate::adaptive_geometry::distant_voxels::enabled() {
+        let divisor = crate::adaptive_geometry::distant_voxels::vertical_pitch_divisor();
+        if divisor != 1 {
+            put(&mut b, 0x5950495443480000 | u64::from(divisor));
+        }
+    }
     put(
         &mut b,
         u64::from(w.vegetation_enabled() && crate::ground_cover::enabled()),
@@ -844,6 +850,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
         noise_cells: r.u()?,
         full_range_fallbacks: r.u()?,
         cpu_ms: r.f()?,
+        ..Default::default()
     };
     let area_m2 = r.arr()?;
     let mut color_area = [[0.; 3]; 5];
