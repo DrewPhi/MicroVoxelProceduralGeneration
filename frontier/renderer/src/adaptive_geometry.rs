@@ -1264,30 +1264,37 @@ fn build_surface_with_geometry(
     };
     let affine_stats = generator.affine_stats;
     let appearance = generator.appearance;
-    if !coarse
-        && step as f64 * voxel_size() >= 4.
-        && world
-            .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+    if let Some(terrain) = world
+        .fbm_terrain()
+        .filter(|terrain| !coarse && landscape_paint(terrain, step))
     {
         // A normal at a shared world coordinate uses the same stencil in
         // every LOD. Leave explicit native stairs and water faces untouched.
         let radius = (12. / voxel_size()).round().max(1.) as i64;
-        let mut normals = HashMap::new();
+        let mut painted = HashMap::new();
         for vertex in &mut generator.mesh.vertices {
             if vertex.normal[1] <= 0. || vertex.color == Material::Water.color() {
                 continue;
             }
             let x = key.min[0] + (vertex.position[0] as f64 / voxel_size()).round() as i64;
             let z = key.min[1] + (vertex.position[2] as f64 / voxel_size()).round() as i64;
-            vertex.normal = *normals.entry([x, z]).or_insert_with(|| {
+            let (normal, color) = *painted.entry([x, z]).or_insert_with(|| {
                 let mut height = |x, z| generator.samples.column(world, [x, z]).height;
                 let dx = height(x - radius, z) - height(x + radius, z);
                 let dz = height(x, z - radius) - height(x, z + radius);
-                glam::Vec3::new(dx as f32, (2 * radius) as f32, dz as f32)
+                let normal = glam::Vec3::new(dx as f32, (2 * radius) as f32, dz as f32)
                     .normalize()
-                    .to_array()
+                    .to_array();
+                let (col, color) = terrain.landscape_column(x, z, world.vegetation_enabled());
+                let land = if col.visible_top > col.ground_top {
+                    col.ground_surface.color()
+                } else {
+                    color
+                };
+                (normal, land)
             });
+            vertex.normal = normal;
+            vertex.color = color;
         }
     }
     let mut tile = finish(
@@ -2280,6 +2287,11 @@ struct Generator<'a> {
     face_profile_indices: Vec<u32>,
     appearance: FaceAppearance,
 }
+fn landscape_paint(terrain: &frontier_world::FbmTerrain, step: i64) -> bool {
+    terrain.params().recipe == frontier_world::FbmRecipe::Highlands
+        && step as f64 * voxel_size() >= 4.
+}
+
 impl Generator<'_> {
     fn height(&mut self, x: i64, z: i64) -> Result<i64, String> {
         Ok(self.column([x, z])?.height)
@@ -2418,7 +2430,17 @@ impl Generator<'_> {
             }
         }
         self.record_affine(x, z, s, start_index);
-        let index = self.patch_appearance(x, z, s)?;
+        let index = if self
+            .world
+            .fbm_terrain()
+            .is_some_and(|t| landscape_paint(t, s))
+        {
+            // Mountain proxies share a world-space vertex albedo across patches.
+            // Slot zero selects that interpolated albedo in the terrain shader.
+            0
+        } else {
+            self.patch_appearance(x, z, s)?
+        };
         self.face_profile_indices
             .resize(self.mesh.vertices.len(), index);
         self.face_profile_indices[start_vertex..].fill(index);
@@ -4444,6 +4466,58 @@ mod tests {
         assert_eq!(sa, sb);
         assert!(sa.len() >= 32);
     }
+    #[test]
+    fn highland_landscape_vertices_match_across_two_lod_levels() {
+        let world = World::fbm(
+            19,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .with_vegetation();
+        let width = 512;
+        let boundary = |x, step, edge, local_x| {
+            let mut edges = [step; 4];
+            edges[edge] = 64;
+            let tile = build(
+                &world,
+                TileKey {
+                    min: [x, 0],
+                    width_cells: width,
+                    step_cells: step,
+                    edge_steps: edges,
+                    source_revision: world.revision(),
+                },
+                || false,
+            )
+            .unwrap();
+            for &id in &tile.face_profile_indices {
+                if id != 0 {
+                    // Ground-cover decoration can wrap the base vertex albedo.
+                    let wrapper = tile.face_profiles[id as usize][0];
+                    assert_eq!(wrapper[3], -6.);
+                    assert_eq!(id as i32 + wrapper[0] as i32, 0);
+                }
+            }
+            let mut vertices = std::collections::BTreeMap::new();
+            for v in &tile.mesh.vertices {
+                if v.position[0] == local_x && v.normal[1] > 0. {
+                    let bits = (v.normal.map(f32::to_bits), v.color.map(f32::to_bits));
+                    if let Some(old) = vertices.insert(v.position[2].to_bits(), bits) {
+                        assert_eq!(old, bits);
+                    }
+                }
+            }
+            vertices
+        };
+        let left = boundary(-512, 128, 2, width as f32 * voxel_size() as f32);
+        let right = boundary(0, 64, 0, 0.);
+        assert_eq!(left.len(), 9);
+        assert_eq!(left, right);
+    }
+
     #[test]
     fn neighboring_two_to_one_tiles_share_continuous_edge_segments() {
         let world = World::fbm(7, FbmParams::default()).unwrap();

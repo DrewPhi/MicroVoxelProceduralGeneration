@@ -1,7 +1,7 @@
 //! Kilometre-scale relief beyond the active terrain clip. The lattice is
 //! anchored in world metres so moving the window preserves shared vertices.
 use crate::{atmosphere::texture, Camera};
-use frontier_world::{voxel_size, Cell, FbmTerrain};
+use frontier_world::{voxel_size, Cell, FbmParams, FbmTerrain};
 use glam::{DVec3, Mat4, Vec3};
 use std::sync::mpsc::{self, Receiver};
 use wgpu::util::DeviceExt;
@@ -12,7 +12,7 @@ const LEVELS: usize = 3;
 const HALF: i64 = SIDE as i64 / 2;
 type Patch = ([i64; 2], Vec<[f32; 4]>);
 
-fn samples(terrain: &FbmTerrain, center: [i64; 2]) -> Patch {
+fn samples(terrain: &FbmTerrain, vegetation: bool, center: [i64; 2]) -> Patch {
     let mut out = vec![[0.; 4]; SIDE * SIDE * LEVELS];
     for level in 0..LEVELS {
         let step = SPACING / (1 << (LEVELS - level - 1)) as f64;
@@ -28,8 +28,7 @@ fn samples(terrain: &FbmTerrain, center: [i64; 2]) -> Patch {
                     0.,
                     center[1] as f64 * SPACING + z as f64 * step,
                 ]);
-                let col = terrain.column_cells(cell.x, cell.z);
-                let [r, g, b] = col.top_material().color();
+                let (col, [r, g, b]) = terrain.landscape_column(cell.x, cell.z, vegetation);
                 out[base + (z + HALF) as usize * SIDE + (x + HALF) as usize] =
                     [r, g, b, (col.visible_top as f64 * voxel_size()) as f32];
             }
@@ -64,6 +63,7 @@ pub(crate) struct Horizon {
     group: wgpu::BindGroup,
     center: Option<[i64; 2]>,
     pending: Option<Receiver<Patch>>,
+    source_key: Option<(u64, FbmParams, f64, bool)>,
 }
 
 impl Horizon {
@@ -177,6 +177,7 @@ impl Horizon {
             group,
             center: None,
             pending: None,
+            source_key: None,
         }
     }
 
@@ -184,11 +185,18 @@ impl Horizon {
         &mut self,
         queue: &wgpu::Queue,
         source: &FbmTerrain,
+        vegetation: bool,
         camera: Camera,
         aspect: f32,
         sun: Vec3,
         capture: bool,
     ) {
+        let key = (source.seed(), source.params(), voxel_size(), vegetation);
+        if self.source_key != Some(key) {
+            self.center = None;
+            self.pending = None;
+            self.source_key = Some(key);
+        }
         let center = [camera.position.x, camera.position.z].map(|v| (v / SPACING).round() as i64);
         let mut ready = None;
         if let Some(rx) = &self.pending {
@@ -205,13 +213,14 @@ impl Horizon {
             self.center = Some(center);
             queue.write_buffer(&self.heights, 0, bytemuck::cast_slice(&data));
         }
-        if self.pending.is_none()
+        if (capture || self.pending.is_none())
             && self
                 .center
                 .is_none_or(|old| (0..2).any(|a| old[a].abs_diff(center[a]) >= 4))
         {
             if capture {
-                let (_, data) = samples(source, center);
+                self.pending = None;
+                let (_, data) = samples(source, vegetation, center);
                 self.center = Some(center);
                 queue.write_buffer(&self.heights, 0, bytemuck::cast_slice(&data));
             } else {
@@ -219,7 +228,7 @@ impl Horizon {
                 self.pending = Some(rx);
                 let source = source.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(samples(&source, center));
+                    let _ = tx.send(samples(&source, vegetation, center));
                 });
             }
         }

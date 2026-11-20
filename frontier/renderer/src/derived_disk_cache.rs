@@ -518,7 +518,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     if w.fbm_terrain()
         .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
     {
-        put(&mut b, 1); // shared world-space slope normals on mountain proxies
+        put(&mut b, 2); // shared world-space normals and landscape albedo
     }
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {

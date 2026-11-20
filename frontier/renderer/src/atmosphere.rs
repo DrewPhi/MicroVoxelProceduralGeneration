@@ -734,6 +734,7 @@ impl Atmosphere {
             horizon.prepare(
                 queue,
                 source,
+                world.vegetation_enabled(),
                 camera,
                 self.width as f32 / self.height as f32,
                 sun_direction(settings.sun_elevation, settings.sun_azimuth),

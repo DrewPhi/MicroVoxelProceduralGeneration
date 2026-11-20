@@ -749,7 +749,10 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
     }
 }
 pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
-    let f = fields(seed, p, x, z);
+    column_from_fields(seed, p, x, z, fields(seed, p, x, z))
+}
+
+fn column_from_fields(seed: u64, p: FbmParams, x: f64, z: f64, f: SeededFields) -> TerrainColumn {
     let ground_top = (f.ground_height_m / voxel_size()).floor() as i64;
     let visible_top = f
         .water_height_m
@@ -852,6 +855,53 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
             Material::Soil
         },
     }
+}
+
+/// Subpixel terrain albedo at a canonical column. The same field is sampled
+/// by streamed mountain meshes and the flight horizon at shared positions.
+pub(super) fn landscape(
+    seed: u64,
+    p: FbmParams,
+    cx: i64,
+    cz: i64,
+    vegetation: bool,
+) -> (TerrainColumn, [f32; 3]) {
+    let x = (cx as f64 + 0.5) * voxel_size();
+    let z = (cz as f64 + 0.5) * voxel_size();
+    let f = fields(seed, p, x, z);
+    let col = column_from_fields(seed, p, x, z, f);
+    let mat = col.top_material();
+    let scale = 1800. / p.horizontal_scale;
+    let (nx, nz) = (x * scale, z * scale);
+    let stone = || noise(nx / 420., nz / 420., seed ^ 0x517a);
+    let mix = |a: [f32; 3], b: [f32; 3], u: f64| {
+        std::array::from_fn(|i| a[i] + (b[i] - a[i]) * u.clamp(0., 1.) as f32)
+    };
+    let rgb = match mat {
+        Material::Grass => {
+            let turf = noise(nx / 240., nz / 240., seed ^ 0x5179);
+            let lush = smooth((f.moisture - 0.25) * 2.4 + 0.22 * turf);
+            let meadow = mix([0.36, 0.33, 0.125], [0.135, 0.28, 0.09], lush);
+            let canopy = if vegetation {
+                crate::vegetation::landscape_canopy(seed, cx, cz, f)
+            } else {
+                0.
+            };
+            mix(meadow, [0.086, 0.145, 0.077], canopy)
+        }
+        Material::Stone => mix(
+            [0.32, 0.345, 0.37],
+            [0.46, 0.38, 0.295],
+            0.48 + stone() * 0.85,
+        ),
+        Material::Sand => mix(
+            [0.45, 0.39, 0.27],
+            [0.65, 0.55, 0.35],
+            0.56 + stone() * 0.75,
+        ),
+        _ => mat.color(),
+    };
+    (col, rgb)
 }
 
 /// Analytical pre-quantization envelope; ordinary f64 endpoints are not an

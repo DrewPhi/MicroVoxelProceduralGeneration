@@ -800,10 +800,13 @@ fn tree_candidate(seed: u64, x: i64, z: i64) -> (i64, i64, u64) {
         h,
     )
 }
-fn tree_habitat(seed: u64, x: i64, z: i64, roll: u64) -> bool {
+fn grove_density(seed: u64, x: i64, z: i64) -> f64 {
     let broad = patch_field(seed ^ 0x776f6f646c616e64, x, z, 768);
     let edge = patch_field(seed ^ 0x67726f7665, x, z, 320);
-    let density = (0.06 + 1.8 * (broad - 0.30).max(0.) + 0.35 * (edge - 0.5)).clamp(0.03, 0.94);
+    (0.06 + 1.8 * (broad - 0.30).max(0.) + 0.35 * (edge - 0.5)).clamp(0.03, 0.94)
+}
+fn tree_habitat(seed: u64, x: i64, z: i64, roll: u64) -> bool {
+    let density = grove_density(seed, x, z);
     (roll >> 11) as f64 / ((1u64 << 53) as f64) < density
 }
 fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
@@ -828,7 +831,6 @@ fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
     true
 }
 fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
-    use crate::terrain::SeededBiome;
     let Some(terrain) = world
         .fbm_terrain()
         .filter(|t| t.params().recipe.uses_watersheds())
@@ -837,18 +839,34 @@ fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
     };
     let [x, _, z] = (Cell { x, y: 0, z }).center_m();
     let fields = terrain.sample_fields(x, z);
+    (mix(seed ^ 0x7761746572736864) >> 11) as f64 / ((1u64 << 53) as f64)
+        < biome_tree_density(fields)
+}
+
+pub(crate) fn landscape_canopy(
+    seed: u64,
+    x: i64,
+    z: i64,
+    fields: crate::terrain::SeededFields,
+) -> f64 {
+    // One rowan candidate per 256 x 256 cells. Estimate its projected
+    // crown coverage using the same biome and grove placement probabilities.
+    0.24 * grove_density(seed, x, z) * biome_tree_density(fields)
+}
+
+fn biome_tree_density(fields: crate::terrain::SeededFields) -> f64 {
+    use crate::terrain::SeededBiome;
     if fields.water_height_m.is_some() {
-        return false;
+        return 0.;
     }
-    let density = match fields.biome {
+    match fields.biome {
         SeededBiome::Woodland => 1.,
         SeededBiome::Wetland => 0.65,
         SeededBiome::Plains => 0.24,
         SeededBiome::Mountains => (fields.moisture - 0.43).clamp(0., 0.28),
         SeededBiome::Steppe => 0.035,
         _ => 0.,
-    };
-    (mix(seed ^ 0x7761746572736864) >> 11) as f64 / ((1u64 << 53) as f64) < density
+    }
 }
 fn supported(w: &World, x: i64, z: i64, radius: i64, max_grade: i64) -> Option<i64> {
     let h = w.height_cells(x, z);

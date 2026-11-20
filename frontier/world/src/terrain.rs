@@ -562,6 +562,14 @@ impl FbmTerrain {
         let c = Cell::from_meters([x, 0.0, z]);
         self.column_cells(c.x, c.z).ground_top as f64 * voxel_size()
     }
+    /// Return the canonical visible surface and its landscape-scale albedo.
+    pub fn landscape_column(&self, x: i64, z: i64, vegetation: bool) -> (TerrainColumn, [f32; 3]) {
+        if self.params.recipe == FbmRecipe::Highlands {
+            return seeded_world::landscape(self.seed, self.params, x, z, vegetation);
+        }
+        let column = self.column_cells(x, z);
+        (column, column.top_material().color())
+    }
     pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
         let xm = (x as f64 + 0.5) * voxel_size();
         let zm = (z as f64 + 0.5) * voxel_size();

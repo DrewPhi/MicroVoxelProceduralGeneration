@@ -54,6 +54,14 @@ terrain triangles increased from 7,168 to 44,224. Frame p50/p95/p99 were
 a separate 10-second, 80 m/s pass measured **6.77 / 8.52 / 9.62 ms**.
 These flight measurements include ongoing refinement.
 
+Highlands now samples the same climate, grove density and rock coloration
+at shared mesh vertices and on the distant horizon. On the seed 19 flight
+route, first terrain coverage arrived in **315 ms** (previously 2,518 ms),
+resident face-profile storage fell from **13.2 MiB to 3.1 MiB**, and frame
+p50/p95/p99 measured **7.44 / 9.90 / 11.61 ms**. Seed 40961 measured
+**6.17 / 8.35 / 9.10 ms** on its surveyed approach. Close ridgeline silhouettes
+still show coarse geometry during refinement.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.
