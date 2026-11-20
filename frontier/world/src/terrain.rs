@@ -162,7 +162,7 @@ impl FbmTerrain {
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
-            FbmRecipe::Watershed => 1,
+            FbmRecipe::Watershed => 2,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,

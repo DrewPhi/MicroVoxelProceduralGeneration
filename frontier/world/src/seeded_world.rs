@@ -595,7 +595,10 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
     let l = land(seed, p, x, z);
     let mut ground = l.h;
     let mut water = if ground < 0. { Some(0.) } else { None };
-    let mut riparian = false;
+    let watershed = p.recipe == FbmRecipe::Watershed;
+    let relief = p.amplitude / 1000.;
+    let land_water_ceiling = (l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.);
+    let mut nearest_bank: Option<(f64, f64)> = None;
     if p.amplitude > 0. {
         let region = region(seed, p, x, z);
         let mut weighted_ground = ground;
@@ -630,8 +633,14 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
             total_weight += weight;
-            if p.recipe == FbmRecipe::Watershed {
-                riparian |= d < width * 3. && (profile - stage).abs() < 4. * amplitude;
+            if watershed && stage > 0. {
+                // Use the locally capped water level and a channel-scaled floodplain.
+                // Compare the final combined bed against this stage after blending.
+                let bank_width = (width * 4.5).max(28. * p.horizontal_scale / 1800.);
+                let distance = d / bank_width;
+                if distance < 1. && nearest_bank.is_none_or(|(best, _)| distance < best) {
+                    nearest_bank = Some((distance, stage.min(land_water_ceiling)));
+                }
             }
             if d < width {
                 if r.lake && profile < stage {
@@ -652,27 +661,29 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             water = Some(water.map_or(river_stage, |w: f64| w.max(river_stage)));
         }
     }
-    if p.recipe == FbmRecipe::Watershed {
-        let relief = p.amplitude / 1000.;
+    if watershed {
         // A graph reach can cross a low saddle between its two nodes. Keep
         // the local water in the valley instead of suspending the nominal
         // interpolated stage above the surrounding terrain.
         water = water.map(|stage| {
             stage
-                .min((l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.))
+                .min(land_water_ceiling)
                 .min((ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.))
         });
     }
     let [temperature, moisture] = climate(seed, p, x, z);
     let effective_temperature = temperature - 0.00019 * ground.max(0.);
+    let riparian = nearest_bank.is_some_and(|(_, stage)| {
+        stage > 0. && (stage - 2. * relief..=stage + 7. * relief).contains(&ground)
+    });
     let biome = if ground < -4. {
         SeededBiome::Ocean
+    } else if ground >= 0. && effective_temperature >= 0.29 && riparian {
+        SeededBiome::Wetland
     } else if ground < 10. {
         SeededBiome::Coast
     } else if effective_temperature < 0.29 {
         SeededBiome::Tundra
-    } else if p.recipe == FbmRecipe::Watershed && riparian && moisture >= 0.40 {
-        SeededBiome::Wetland
     } else if l.mountain > 0.62 && ground > 350. * p.amplitude / 1000. {
         SeededBiome::Mountains
     } else if moisture < 0.39 && effective_temperature > 0.48 {
@@ -707,7 +718,11 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
         SeededBiome::Steppe => {
             let x = x * 1800. / p.horizontal_scale;
             let z = z * 1800. / p.horizontal_scale;
-            if f.moisture + 0.12 * noise(x / 86., z / 86., seed ^ 0x5123) < 0.405 {
+            // Even dry steppe has grass. Reserve connected bare patches for
+            // the driest ground where broad and local cover both thin out.
+            let cover = 0.7 * noise(x / 125., z / 125., seed ^ 0x5123)
+                + 0.3 * noise(x / 41., z / 41., seed ^ 0x5125);
+            if f.moisture + 0.18 * cover < 0.20 {
                 Material::Soil
             } else {
                 Material::Grass
@@ -882,6 +897,37 @@ mod tests {
             recipe: FbmRecipe::SeededWorld,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn watershed_keeps_dry_riverbanks_green_and_steppe_grassy() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..params()
+        };
+        let mut dry_grassy_bank = 0;
+        let mut steppe_grass = 0;
+        let mut steppe_soil = 0;
+        let mut desert_sand = 0;
+        for z in -60..=60 {
+            for x in -60..=60 {
+                let (x, z) = (64. * f64::from(x) + 5., 64. * f64::from(z) + 7.);
+                let f = fields(19, p, x, z);
+                let c = column(19, p, x, z);
+                match (f.biome, c.top_material()) {
+                    (SeededBiome::Wetland, Material::Grass) if f.moisture < 0.40 => {
+                        dry_grassy_bank += 1;
+                    }
+                    (SeededBiome::Steppe, Material::Grass) => steppe_grass += 1,
+                    (SeededBiome::Steppe, Material::Soil) => steppe_soil += 1,
+                    (SeededBiome::Desert, Material::Sand) => desert_sand += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(dry_grassy_bank > 20, "dry grassy banks {dry_grassy_bank}");
+        assert!(steppe_grass > steppe_soil && steppe_soil > 0);
+        assert!(desert_sand > 100);
     }
 
     #[test]

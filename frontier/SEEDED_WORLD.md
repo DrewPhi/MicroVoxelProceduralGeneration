@@ -3,7 +3,7 @@
 ## Watershed exploration preset
 
 Watershed is a separate world recipe. It pairs 6.25 cm canonical voxels and
-static water with the smooth surface renderer for distant terrain. To start
+static water with stepped distance LODs. To start
 above a new world, run the following from `frontier/`.
 
 ```sh
@@ -13,8 +13,8 @@ above a new world, run the following from `frontier/`.
 Use the printed integer seed to revisit the same geography. Omit the camera
 and walk flags to start on the ground. `F` switches between walking and free
 flight. Watershed free flight moves at 35 m/s, or 80 m/s with Shift.
-`FRONTIER_DISTANT_TERRAIN=voxy-seed` selects the stepped distance
-renderer for an A/B comparison. The `seeded-world` preset uses its original
+`FRONTIER_DISTANT_TERRAIN=surface` selects smooth distance LODs for an A/B
+comparison. The `seeded-world` preset uses its original
 source and procedural river/save identities.
 
 Watershed varies ridge profiles, highland texture, and foothill relief. Its
@@ -27,8 +27,11 @@ inlet. The water surface is bounded by local land and bed heights where the
 graph's proposed grade crosses a low saddle. This also bounds shoreline and
 water heights used by the renderer's source certificates.
 
-Woodland, wetland, and steppe extend the climate classes. Supported rowan
-trees favor woodland and wet grass banks. The preset uses static inland
+Woodland, wetland, and steppe extend the climate classes. Steppe carries
+grass with bare soil in the driest patches. Low ground close to inland
+channels supports grass even in dry climates, and supported rowan trees
+favor woodland and wet grass banks. Appearance version 2 refreshes cached
+ground cover. The preset uses static inland
 water and a bounded contributing area. Continent-scale spill routing,
 long-term discharge and hydraulic erosion remain open. Generation changes
 have a separate source ID from `SeededWorld`. Renderer caches include the
@@ -44,7 +47,22 @@ The drainage-first approach draws on
 Frontier uses its own finite, globally addressed graph and its existing
 column, water, and affine-bound infrastructure.
 
-### Flight baseline
+### Grass cover and stepped LODs
+
+In a 193×193 canonical survey of the 10 km square around seed 19's origin,
+grass rose from 7.0% to 33.7%. Bare soil fell from 35.4% to 11.5%, and sand
+still covered 36.2%. Seed 997 went from 31.7% to 37.6% grass. Ground and water
+heights matched at all sampled coordinates across seeds 19, 997 and 40961.
+
+The static capture set is in `output/watershed-greening/`. The before and
+after pairs use the same camera, seed, sun and stepped renderer, so they show
+the cover change. The 1920×1080 shots use one sample, a 6 km clip, 64 m NAADF
+and no streaming haze. The desert-bank comparison's frame p95 was 26.5 ms
+before and 27.0 ms after in separate 17-second runs. These still captures
+record full coverage and unresolved detail. The fixed Legacy reference color,
+depth and coverage matched byte for byte, and 201 world tests passed.
+
+### Initial flight baseline with smooth distance LODs
 
 The Radeon 760M / Ryzen 5 7640U flew these 12-second routes at 80 m/s, 1080p
 MSAA1, with a 6 km view, 32 m NAADF radius, 5 px detail target, vegetation,
@@ -72,7 +90,7 @@ Reproduce the high-country route from `frontier/` after a release build.
 Use a fresh report and capture path for each run.
 
 ```sh
-./run.sh --preset watershed --seed 997 --walk off --width 1920 --height 1080 \
+FRONTIER_DISTANT_TERRAIN=surface ./run.sh --preset watershed --seed 997 --walk off --width 1920 --height 1080 \
   --msaa 1 --capture-far 6000 --naadf-radius 32 --pixel-error 5 \
   --streaming-haze 0 --cloud-speed 0 --benchmark-input-lock --warmup 10 \
   --no-adaptive-disk-cache --route fly --route-speed 80 --route-clock realtime \

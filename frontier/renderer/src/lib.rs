@@ -3152,7 +3152,7 @@ pub fn run() -> Result<()> {
     {
         appearance_method::initialize_meadow_application();
     }
-    adaptive_geometry::distant_voxels::Mode::initialize_application(params.recipe);
+    adaptive_geometry::distant_voxels::Mode::initialize_application();
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
         || scene == "pages-topology"

@@ -47,13 +47,8 @@ impl Mode {
         )
     }
 
-    pub(crate) fn initialize_application(recipe: FbmRecipe) {
-        let default = if recipe == FbmRecipe::Watershed {
-            Self::Surface
-        } else {
-            Self::Seed
-        };
-        MODE.get_or_init(|| Self::from_environment(default));
+    pub(crate) fn initialize_application() {
+        MODE.get_or_init(|| Self::from_environment(Self::Seed));
     }
 
     pub(crate) fn current() -> Self {
