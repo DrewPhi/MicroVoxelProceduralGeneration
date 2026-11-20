@@ -12,6 +12,9 @@ pub(super) struct ShadowResources {
     pub sampling_bind: wgpu::BindGroup,
     pub near: NearShadowResources,
     pipelines: [wgpu::RenderPipeline; 6],
+    masked_pipelines: [wgpu::RenderPipeline; 6],
+    mask_layout: wgpu::BindGroupLayout,
+    caster_mask: Option<wgpu::BindGroup>,
     uniform: wgpu::Buffer,
     pub(super) zero_table: wgpu::Buffer,
     binds: Vec<wgpu::BindGroup>,
@@ -95,6 +98,8 @@ impl ShadowResources {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         pipelines: [wgpu::RenderPipeline; 6],
+        masked_pipelines: [wgpu::RenderPipeline; 6],
+        mask_layout: wgpu::BindGroupLayout,
     ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("bounded Alpine shadow map (16 MiB)"),
@@ -173,6 +178,9 @@ impl ShadowResources {
             view,
             sampling_bind,
             pipelines,
+            masked_pipelines,
+            mask_layout,
+            caster_mask: None,
             uniform,
             binds: vec![],
             empty_bind: None,
@@ -241,6 +249,27 @@ impl LightFrame {
 }
 pub(super) fn light_matrix(camera: &Camera, lighting: [f32; 12], origin: DVec3) -> Mat4 {
     LightFrame::new(camera, lighting).matrix(origin)
+}
+
+pub(super) fn caster_mask_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("shadow caster edit columns"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    })
+}
+fn write_caster(bytes: &mut [u8], matrix: Mat4, key: &TileKey) {
+    bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
+    let origin = [key.min[0] as u32, 0, key.min[1] as u32, 0];
+    bytes[80..96].copy_from_slice(bytemuck::cast_slice(&origin));
 }
 
 fn intersects_light_bounds(matrix: Mat4, bounds: [Vec3; 2]) -> bool {
@@ -392,8 +421,11 @@ impl AdaptiveGpu {
                 let c = &self.clusters[key];
                 let transform =
                     matrix * Mat4::from_translation((c.origin - camera.position).as_vec3());
-                near_bytes[i * UNIFORM_STRIDE as usize..i * UNIFORM_STRIDE as usize + 64]
-                    .copy_from_slice(bytemuck::cast_slice(&transform.to_cols_array()));
+                write_caster(
+                    &mut near_bytes[i * UNIFORM_STRIDE as usize..],
+                    transform,
+                    key,
+                );
             }
             if !near_bytes.is_empty() {
                 queue.write_buffer(&self.shadows.near_terrain_uniform, 0, &near_bytes);
@@ -405,9 +437,9 @@ impl AdaptiveGpu {
         let mut bytes = vec![0u8; self.shadows.keys.len() * UNIFORM_STRIDE as usize];
         for (i, key) in self.shadows.keys.iter().enumerate() {
             let c = &self.clusters[key];
-            let matrix = light_frame.matrix(c.origin).to_cols_array();
+            let matrix = light_frame.matrix(c.origin);
             let start = i * UNIFORM_STRIDE as usize;
-            bytes[start..start + 64].copy_from_slice(bytemuck::cast_slice(&matrix));
+            write_caster(&mut bytes[start..], matrix, key);
         }
         if !bytes.is_empty() {
             queue.write_buffer(&self.shadows.uniform, 0, &bytes);
@@ -444,6 +476,12 @@ impl AdaptiveGpu {
             occlusion_query_set: None,
         });
         self.draw_edit_shadows(&mut pass, &self.shadows.pipelines[2], near);
+        let pipelines = if let Some(bind) = &self.shadows.caster_mask {
+            pass.set_bind_group(1, bind, &[]);
+            &self.shadows.masked_pipelines
+        } else {
+            &self.shadows.pipelines
+        };
         let keys = if near {
             &self.shadows.near_keys
         } else {
@@ -464,7 +502,7 @@ impl AdaptiveGpu {
             } else {
                 0
             };
-            pass.set_pipeline(&self.shadows.pipelines[kind]);
+            pass.set_pipeline(&pipelines[kind]);
             let bind = c.profile.as_ref().map_or_else(
                 || {
                     if near {
@@ -766,6 +804,16 @@ impl AdaptiveGpu {
         queue: &wgpu::Queue,
         mask: wgpu::TextureView,
     ) {
+        self.shadows.caster_mask = (self.edit_bytes() > 0).then(|| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("published edit columns for shadow casters"),
+                layout: &self.shadows.mask_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&mask),
+                }],
+            })
+        });
         self.shadows.near.edit_mask = mask;
         self.shadows.cached = None;
         self.shadows.redraw = true;

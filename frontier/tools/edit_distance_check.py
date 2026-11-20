@@ -26,17 +26,17 @@ def write_fixture(template, destination, edits):
     destination.write_bytes(data[:72] + struct.pack('<Q', len(edits)) + records + data[tail:])
 
 
-def capture(out, name, save, eye, target):
+def capture(out, name, save, eye, target, recipe="regional", visual=()):
     checkpoint = out / (save + '.save')
     before = hashlib.sha256(checkpoint.read_bytes()).digest()
     png = out / (name + '.png')
     args = [
-        ROOT / 'target/release/frontier', '--scene', 'adaptive', '--terrain-recipe', 'regional',
+        ROOT / 'target/release/frontier', '--scene', 'adaptive', '--terrain-recipe', recipe,
         '--amplitude', '0', '--vegetation', 'off', '--walk', 'off',
         '--world-save', checkpoint, '--naadf', 'on', '--naadf-radius', '8',
         '--capture-far', '96', '--width', str(WIDTH), '--height', str(HEIGHT), '--msaa', '1',
         '--eye', ','.join(map(str, eye)), '--target', ','.join(map(str, target)),
-        '--capture-linear', '--capture-unresolved', '--no-adaptive-disk-cache', '--capture', png,
+        *visual, '--capture-linear', '--capture-unresolved', '--no-adaptive-disk-cache', '--capture', png,
     ]
     with png.with_suffix('.log').open('w') as log:
         subprocess.run(args, check=True, stdout=log, stderr=log, timeout=150)
@@ -46,6 +46,35 @@ def capture(out, name, save, eye, target):
     raw = struct.unpack_from('<f', encoded, 4 * ((HEIGHT // 2) * WIDTH + WIDTH // 2))[0]
     near, far = 0.025, 96.
     return far * near / (far - raw * (far - near))
+
+
+
+def sunlit_excavation(out, template):
+    # A flat Alpine source exercises the actual directional shadow caster pass.
+    # Both recipe identity words are part of the versioned save format.
+    save = out / 'sun-pit.save'
+    cut = [(x, y, z, 0) for x in range(-28, 28) for y in range(-16, 0) for z in range(-28, 28)]
+    write_fixture(template, save, cut)
+    data = bytearray(save.read_bytes())
+    struct.pack_into('<QQ', data, 16, 3, 4)  # Alpine recipe, source version 4
+    save.write_bytes(data)
+    samples = {}
+    for shadows in ['on', 'off']:
+        name = 'pit-shadow-' + shadows
+        visual = ['--beauty', 'on', '--terrain-shadows', shadows, '--atmosphere', 'off',
+                  '--sun-elevation', '85', '--sun-azimuth', '0', '--ground-bounce', '0']
+        depth = capture(out, name, 'sun-pit', (0, 16, 0), (0, 0, .001), 'alpine', visual)
+        meta = json.loads((out / (name + '.capture.json')).read_text())
+        if abs(depth - 17.) > .025 or meta['visual']['terrain_shadows_active'] != (shadows == 'on'):
+            raise AssertionError(f'{name} missed the floor or used the wrong shadow configuration')
+        rgb = (out / (name + '.linear_rgb.f32')).read_bytes()
+        pixels = [struct.unpack_from('<fff', rgb, 12 * (y * WIDTH + x))
+                  for y in range(HEIGHT // 2 - 3, HEIGHT // 2 + 4)
+                  for x in range(WIDTH // 2 - 3, WIDTH // 2 + 4)]
+        samples[shadows] = [sum(p[c] for p in pixels) / len(pixels) for c in range(3)]
+    if min(samples['off']) <= .25 or max(abs(a-b) for a, b in zip(samples['on'], samples['off'])) > .02:
+        raise AssertionError(f'excavated ground casts a shadow across the sunlit floor: {samples}')
+    return samples
 
 
 def main():
@@ -76,6 +105,7 @@ def main():
             raise AssertionError(f'{name} measured {depth:.5f} m, expected {expected:.5f} m')
         results[name] = {'depth_m': depth, 'expected_m': expected}
         print(f'{name}  {depth:.4f} m', flush=True)
+    results['sunlit_floor_linear_rgb'] = sunlit_excavation(out, args.checkpoint)
     (out / 'result.json').write_text(json.dumps(results, indent=2) + '\n')
 
 

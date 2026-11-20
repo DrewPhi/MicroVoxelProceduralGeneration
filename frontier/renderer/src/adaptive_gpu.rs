@@ -666,6 +666,12 @@ impl AdaptiveGpu {
                 bind_group_layouts: &[&layout],
                 push_constant_ranges: &[],
             });
+        let mask_layout = adaptive_shadow::caster_mask_layout(device);
+        let masked_shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain shadow with excavated columns"),
+            bind_group_layouts: &[&layout, &mask_layout],
+            push_constant_ranges: &[],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("adaptive cluster pipeline"),
             bind_group_layouts: &[
@@ -708,7 +714,9 @@ impl AdaptiveGpu {
         far_constants.insert("traversal_mesh_sun".into(), 0.);
         let mut shell_constants = naadf_constants.clone();
         shell_constants.insert("cover_shell".into(), 1.);
-        let make_pipeline = |step_mode, kind, shadow, far, shell| {
+        type Caster<'a> = Option<(&'a wgpu::PipelineLayout, bool)>;
+        let create_pipeline = |step_mode, kind, caster: Caster<'_>, far, shell| {
+            let shadow = caster.is_some();
             let constants = if shell {
                 &shell_constants
             } else if far {
@@ -761,8 +769,8 @@ impl AdaptiveGpu {
             })];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("adaptive clusters"),
-                layout: Some(if shadow {
-                    &shadow_pipeline_layout
+                layout: Some(if let Some((caster_layout, _)) = caster {
+                    caster_layout
                 } else if batched {
                     batch_pipeline_layout.as_ref().unwrap()
                 } else {
@@ -800,7 +808,14 @@ impl AdaptiveGpu {
                     },
                 },
                 fragment: if shadow {
-                    None
+                    caster
+                        .filter(|(_, masked)| *masked)
+                        .map(|_| wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs_shadow_cut"),
+                            compilation_options: Default::default(),
+                            targets: &[],
+                        })
                 } else {
                     Some(wgpu::FragmentState {
                         module: &shader,
@@ -843,50 +858,60 @@ impl AdaptiveGpu {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false, false);
-        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false, false);
-        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false, false);
-        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false, false);
-        let indexed_proxy_pipeline =
-            make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false, false);
-        let derived_proxy_pipeline =
-            make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false, false);
+        let make_pipeline = |mode, kind, far, shell| create_pipeline(mode, kind, None, far, shell);
+        let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false);
+        let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false);
+        let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false);
+        let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false);
+        let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false);
+        let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false);
         let far_pipelines = (std::env::var("FRONTIER_NAADF_SPLIT_SHADERS").as_deref() == Ok("1"))
             .then(|| {
                 [
-                    make_pipeline(wgpu::VertexStepMode::Instance, 0, false, true, false),
-                    make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, true, false),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 1, false, true, false),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true, false),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true, false),
-                    make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 1, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false),
                 ]
             });
         let cover_pipelines = crate::ground_cover::shell_enabled().then(|| {
             [
-                make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false, true),
-                make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false, true),
-                make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false, true),
-                make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false, true),
-                make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false, true),
-                make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 0, false, true),
+                make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 1, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true),
             ]
         });
-        let shadow_pipelines = [
-            make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false, false),
-            make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 1, true, false, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false, false),
-            make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false, false),
-        ];
+        let caster_pipelines = |layout: &wgpu::PipelineLayout, masked| {
+            [
+                (wgpu::VertexStepMode::Instance, 0),
+                (wgpu::VertexStepMode::Vertex, 0),
+                (wgpu::VertexStepMode::Instance, 1),
+                (wgpu::VertexStepMode::Instance, 2),
+                (wgpu::VertexStepMode::Instance, 3),
+                (wgpu::VertexStepMode::Instance, 4),
+            ]
+            .map(|(mode, kind)| create_pipeline(mode, kind, Some((layout, masked)), false, false))
+        };
+        let shadow_pipelines = caster_pipelines(&shadow_pipeline_layout, false);
+        let masked_pipelines = caster_pipelines(&masked_shadow_layout, true);
         let batch_pipeline = batch_pipeline_layout
             .as_ref()
-            .map(|_| make_pipeline(wgpu::VertexStepMode::Instance, 5, false, false, false));
+            .map(|_| make_pipeline(wgpu::VertexStepMode::Instance, 5, false, false));
         let coarse_batch = batch_layout
             .zip(batch_pipeline)
             .map(|(layout, raster)| coarse_batch::Batch::new(device, layout, raster));
-        let shadows = ShadowResources::new(device, &shadows_layout, shadow_pipelines);
+        let shadows = ShadowResources::new(
+            device,
+            &shadows_layout,
+            shadow_pipelines,
+            masked_pipelines,
+            mask_layout,
+        );
         let indexed_proxy_mode = match std::env::var("FRONTIER_INDEXED_PROXY").as_deref() {
             Ok("1") => 1,
             Ok("2") => 2,

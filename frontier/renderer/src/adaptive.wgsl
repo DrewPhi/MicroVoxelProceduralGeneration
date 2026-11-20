@@ -74,18 +74,19 @@ struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<
 @group(2) @binding(14) var flight_detail: texture_2d_array<f32>;
 @group(2) @binding(15) var flight_sampler: sampler;
 @group(2) @binding(13) var edited_columns: texture_2d<u32>;
-fn edit_owns_column(cell: vec2<u32>) -> bool {
-    let dims = textureDimensions(edited_columns);
+@group(1) @binding(2) var caster_edits: texture_2d<u32>;
+fn edit_owns_column(mask: texture_2d<u32>, cell: vec2<u32>) -> bool {
+    let dims = textureDimensions(mask);
     if dims.y == 1u { return false; }
     let capacity = dims.x * (dims.y - 1u);
-    let bounds = textureLoad(edited_columns, vec2<i32>(0, i32(dims.y-1u)), 0);
+    let bounds = textureLoad(mask, vec2<i32>(0, i32(dims.y-1u)), 0);
     if any(cell - bounds.xy > bounds.zw) { return false; }
     let key = cell >> vec2(3u);
     let h = key.x*0x9e3779b1u ^ key.y*0x85ebca77u;
     var bucket = (h^(h>>16u)) & (capacity-1u);
     let bit = (cell.x&7u) + (cell.y&7u)*8u;
     for (var probe=0u; probe<capacity; probe++) {
-        let word = textureLoad(edited_columns,vec2<i32>(i32(bucket%dims.x),i32(bucket/dims.x)),0);
+        let word = textureLoad(mask,vec2<i32>(i32(bucket%dims.x),i32(bucket/dims.x)),0);
         if (word.z | word.w)==0u {return false;}
         if all(key==word.xy) {return (select(word.z, word.w, bit>=32u) & (1u << (bit&31u))) != 0u;}
         bucket = (bucket+1u) & (capacity-1u);
@@ -455,6 +456,10 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     var normal=vec3<f32>(0.);normal[axis]=select(1.,-1.,negative);
     return vertex_out(position,MATERIAL_COLORS[min(material,9u)],normal,profile_index);
 }
+@fragment fn fs_shadow_cut(in: VertexOut) {
+    let cell = vec2<i32>(floor(in.local.xz*VOXELS_PER_METER-in.normal.xz*.01));
+    if edit_owns_column(caster_edits, bitcast<vec2<u32>>(cell)+draw_camera.paint_origin.xz) {discard;}
+}
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     camera=draw_camera;
     return shade(in);
@@ -466,7 +471,7 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
-    if near_shadow.parameters.y > 0.5 && (camera.paint_origin.w & 16u)==0u && edit_owns_column(bitcast<vec2<u32>>(local_cell.xz)+camera.paint_origin.xz) { discard; }
+    if near_shadow.parameters.y > 0.5 && (camera.paint_origin.w & 16u)==0u && edit_owns_column(edited_columns, bitcast<vec2<u32>>(local_cell.xz)+camera.paint_origin.xz) { discard; }
     // Ownership follows the occupied native cell, including faces on box edges.
     if near_shadow.naadf_hi.w>0.5 {
         let point=(floor(in.local*VOXELS_PER_METER-in.normal*0.01)+0.5)/VOXELS_PER_METER-camera.eye.xyz;

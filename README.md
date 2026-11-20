@@ -125,6 +125,11 @@ openings in the active terrain view. Large edit sets can exceed the distant
 mesh budget, which reduces the area reconstructed around the camera. The
 35 km horizon still samples the unedited procedural source.
 
+Directional shadow maps use the same column mask as the visible surface.
+The edit-distance check measures seven depth views and compares a sunlit
+excavation with shadows enabled and disabled. On the Radeon, both readings
+at the floor center were **0.669 / 0.683 / 0.666** in linear RGB.
+
 ## Code and checks
 
 - `frontier/world/` holds procedural terrain, the canonical lattice, edits,
