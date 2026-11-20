@@ -72,6 +72,7 @@ impl Viewer {
             &mut encoder,
             &stats,
             [self.width, self.height],
+            self.bowl.as_mut().map(|bowl| &mut bowl.growth_controls),
         );
         gpu.queue.submit(Some(encoder.finish()));
         let now_open = ui.menu_open();

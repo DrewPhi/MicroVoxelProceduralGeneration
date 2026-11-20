@@ -1,6 +1,7 @@
 //! Small egui overlay composited at output resolution after the terrain scene.
 use crate::settings::{ResourceProfile, SettingsChanges, SettingsStats, VisualSettings};
 use egui_wgpu::{Renderer, ScreenDescriptor};
+use frontier_world::garden::{GrowthControls, GROWTH_SPEEDS};
 use winit::{
     event::{ElementState, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
@@ -137,6 +138,7 @@ impl SettingsUi {
         encoder: &mut wgpu::CommandEncoder,
         stats: &SettingsStats,
         dimensions: [u32; 2],
+        mut plant_growth: Option<&mut GrowthControls>,
     ) -> SettingsChanges {
         let previous = self.settings.clone();
         let mut changes = SettingsChanges::default();
@@ -250,7 +252,7 @@ impl SettingsUi {
             ))
             .rect_filled(ctx.screen_rect(), 0., egui::Color32::from_black_alpha(105));
             let available = ctx.screen_rect().height() - 50.;
-            egui::Window::new("Frontier · visual settings")
+            egui::Window::new("Frontier · settings")
                 .collapsible(false)
                 .resizable(false)
                 .default_width(480.)
@@ -269,6 +271,22 @@ impl SettingsUi {
                     egui::ScrollArea::vertical()
                         .max_height((available - 80.).max(80.))
                         .show(ui, |ui| {
+                            if let Some(growth) = plant_growth.as_deref_mut() {
+                                ui.heading("Plant growth");
+                                ui.checkbox(&mut growth.infinite_energy, "Infinite plant energy");
+                                ui.add(
+                                    egui::Slider::new(&mut growth.speed_step, 0..=GROWTH_SPEEDS.len())
+                                        .text("Growth speed")
+                                        .custom_formatter(|step, _| {
+                                            GROWTH_SPEEDS.get(step as usize).map_or_else(
+                                                || "Instant".into(),
+                                                |speed| format!("{speed}×"),
+                                            )
+                                        }),
+                                );
+                                ui.small("Instant fast-forwards growth. Seeds still need covering and water.");
+                                ui.separator();
+                            }
                             ui.heading("Image quality");
                             ui.add(
                                 egui::Slider::new(&mut self.loading_draft.pixel_error, 0.5..=12.)

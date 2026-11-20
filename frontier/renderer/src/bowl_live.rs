@@ -3,7 +3,7 @@
 use crate::{Camera, Result};
 use frontier_world::{
     bowl::{Bowl, CAPACITY},
-    garden::{Garden, Tissue},
+    garden::{Garden, GrowthControls, Tissue},
     pockets::{Item, Pockets, HANDFUL},
     Cell, Material, World, VOXEL_SIZE,
 };
@@ -22,6 +22,7 @@ struct HandGesture {
 pub struct BowlLive {
     pub state: Bowl,
     pub garden: Garden,
+    pub growth_controls: GrowthControls,
     pub pockets: Pockets,
     gesture: Option<HandGesture>,
     pub pouring: bool,
@@ -100,6 +101,7 @@ impl BowlLive {
         Self {
             state,
             garden,
+            growth_controls: GrowthControls::default(),
             pockets,
             gesture: None,
             pouring: false,
@@ -345,6 +347,9 @@ impl BowlLive {
             0.
         };
         self.tilt += (target - self.tilt) * (elapsed as f32 * 10.).min(1.);
+        let before = self.garden.cells();
+        let instant = self.growth_controls.is_instant();
+        let mut water_stepped = false;
         for _ in 0..16 {
             if self.debt < 0.025 {
                 break;
@@ -359,21 +364,38 @@ impl BowlLive {
                 pouring || spill,
             );
             self.state.advance(world, 0.025);
-            let before = self.garden.cells();
-            self.garden.advance(world, &mut self.state, 0.025, sun);
-            if self.garden.cells() != before {
-                eprintln!(
-                    "garden growth cells={} leaves={} water_transferred={}",
-                    self.garden.cells(),
-                    self.garden
-                        .plants
-                        .iter()
-                        .flat_map(|p| p.tissue.values())
-                        .filter(|&&t| t == Tissue::Leaf)
-                        .count(),
-                    self.state.plant_transferred
+            water_stepped = true;
+            if !instant {
+                self.garden.advance_with_controls(
+                    world,
+                    &mut self.state,
+                    0.025,
+                    sun,
+                    self.growth_controls,
                 );
             }
+        }
+        if instant && water_stepped {
+            self.garden.advance_with_controls(
+                world,
+                &mut self.state,
+                0.025,
+                sun,
+                self.growth_controls,
+            );
+        }
+        if self.garden.cells() != before {
+            eprintln!(
+                "garden growth cells={} leaves={} water_transferred={}",
+                self.garden.cells(),
+                self.garden
+                    .plants
+                    .iter()
+                    .flat_map(|p| p.tissue.values())
+                    .filter(|&&t| t == Tissue::Leaf)
+                    .count(),
+                self.state.plant_transferred
+            );
         }
         if (pouring || spill) && self.state.units == 0 {
             self.message = "Bowl empty — the water is now in the world".into();
@@ -413,6 +435,11 @@ impl BowlLive {
     }
     pub fn json(&self) -> String {
         let mut out=format!("{{\"units\":{},\"capacity\":{},\"litres\":{},\"scooped_units\":{},\"emitted_units\":{},\"spilled_units\":{},\"airborne\":{},\"absorbed_units\":{},\"damp_cells\":{},\"deposited_units\":{},\"conserved\":{},\"simulation_debt\":{},\"save_count\":{}}}",self.state.units,CAPACITY,self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.state.scooped,self.state.emitted,self.state.spilled,self.state.drops.len(),self.state.moisture.values().sum::<u32>(),self.state.damp.len(),self.state.deposited.len(),self.state.conserved(),self.debt,self.saves);
+        out.pop();
+        out.push_str(&format!(
+            ",\"growth_controls\":{{\"infinite_energy\":{},\"speed_step\":{}}}}}",
+            self.growth_controls.infinite_energy, self.growth_controls.speed_step
+        ));
         out.pop();
         out.push_str(&format!(",\"plant_transferred\":{},\"garden\":{{\"seeds\":{},\"holes\":{},\"plants\":{},\"germinated\":{},\"tissue_cells\":{},\"leaves\":{},\"water_stored\":{},\"transpired\":{},\"tick\":{},\"water_ledger_matches\":{}}}}}",self.state.plant_transferred,self.garden.seeds,self.garden.holes.len(),self.garden.plants.len(),self.garden.plants.iter().filter(|p|p.germination==4).count(),self.garden.cells(),self.garden.plants.iter().flat_map(|p|p.tissue.values()).filter(|&&t|t==Tissue::Leaf).count(),self.garden.plants.iter().map(|p|p.water).sum::<u32>(),self.garden.plants.iter().map(|p|p.transpired).sum::<u64>(),self.garden.tick,self.garden.water_accounted()==self.state.plant_transferred));
         out.pop();
@@ -469,15 +496,19 @@ impl BowlLive {
                 "Plant tips blocked — no open growth directions"
             } else if p.water == 0 && p.hydration == 0 {
                 "Plant thirsty — water near its base"
-            } else if p.energy < 0.85 {
+            } else if p.energy < 0.85 && !self.growth_controls.infinite_energy {
                 "Plant low on energy — needs sunlight"
             } else {
                 "Recursive plant growing"
             };
+            let energy = if self.growth_controls.infinite_energy {
+                "∞".into()
+            } else {
+                format!("{:.1}", p.energy)
+            };
             out.text.push_str(&format!(
-                "\n{stage} • {} cells • energy {:.1} • {} lit leaves • {} growing tips",
+                "\n{stage} • {} cells • energy {energy} • {} lit leaves • {} growing tips",
                 p.tissue.len(),
-                p.energy,
                 p.lit_leaves,
                 p.active_tips()
             ));

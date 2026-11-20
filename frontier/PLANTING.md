@@ -44,6 +44,14 @@ The HUD lists all pocket contents, the hand and action feedback. Terrain edits,
 pockets, seed, tissue, bowl and wet patches survive clean exit/restart. Camera
 position still resets to the shore. `--bowl-save PATH` selects another save slot.
 
+Press **Esc** and open the **Plant growth** controls to turn on **Infinite
+plant energy** or move **Growth speed** from **1×** to **Instant**. Infinite
+energy lets plants grow through darkness without spending stored energy.
+Growth speed advances the plant simulation while water in the bowl and in
+flight runs at the usual rate. Seeds still need covering and water. Instant
+works in short batches for large plants. These controls start at the normal
+settings each time you launch.
+
 ## What grows
 
 `world/src/growth.rs` defines a small recursive bud grammar. The runtime in

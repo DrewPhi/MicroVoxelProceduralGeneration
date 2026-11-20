@@ -6,6 +6,21 @@ use crate::growth::{
 use crate::{bowl::Bowl, Cell, Material, World, VOXEL_SIZE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 const LIMIT: usize = 32;
+pub const GROWTH_SPEEDS: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GrowthControls {
+    pub infinite_energy: bool,
+    /// Index into GROWTH_SPEEDS, with the final slider position selecting Instant.
+    pub speed_step: usize,
+}
+
+impl GrowthControls {
+    pub fn is_instant(self) -> bool {
+        self.speed_step >= GROWTH_SPEEDS.len()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tissue {
     Seed = 0,
@@ -423,15 +438,34 @@ impl Garden {
         }
     }
     pub fn advance(&mut self, world: &mut World, bowl: &mut Bowl, dt: f64, sun: [f64; 3]) {
-        if !dt.is_finite() || dt < 0. {
+        self.advance_with_controls(world, bowl, dt, sun, GrowthControls::default());
+    }
+
+    pub fn advance_with_controls(
+        &mut self,
+        world: &mut World,
+        bowl: &mut Bowl,
+        dt: f64,
+        sun: [f64; 3],
+        controls: GrowthControls,
+    ) {
+        if !dt.is_finite() || dt <= 0. {
             return;
         }
-        self.phase += dt.min(0.25);
-        if self.phase < 1. {
+        let ticks = if controls.is_instant() {
+            if self.plants.is_empty() {
+                return;
+            }
+            64
+        } else {
+            self.phase += dt.min(0.25) * f64::from(GROWTH_SPEEDS[controls.speed_step]);
+            let ticks = self.phase.floor() as usize;
+            self.phase -= ticks as f64;
+            ticks
+        };
+        if ticks == 0 {
             return;
         }
-        self.phase -= 1.;
-        self.tick += 1;
         let length = sun.iter().map(|v| v * v).sum::<f64>().sqrt();
         let sun = sun.map(|v| {
             if length > 0. && v.is_finite() {
@@ -440,7 +474,33 @@ impl Garden {
                 0.
             }
         });
+        // Large recursive plants can need several frames even at the fastest
+        // setting. Stop early for dry, blocked, or energy-starved plants.
+        let instant_start = controls.is_instant().then(std::time::Instant::now);
+        for _ in 0..ticks {
+            let progressing = self.growth_tick(world, bowl, sun, controls);
+            if instant_start.is_some_and(|start| {
+                !progressing || start.elapsed() >= std::time::Duration::from_millis(4)
+            }) {
+                break;
+            }
+        }
+    }
+
+    fn growth_tick(
+        &mut self,
+        world: &mut World,
+        bowl: &mut Bowl,
+        sun: [f64; 3],
+        controls: GrowthControls,
+    ) -> bool {
+        self.tick += 1;
+        let instant_energy = controls.is_instant() && controls.infinite_energy;
+        let mut progressing = false;
         for p in &mut self.plants {
+            if controls.is_instant() && p.at_capacity() {
+                continue;
+            }
             p.age += 1;
             let h = &mut self.holes[p.hole];
             let cap = offset(h.seed, [0, 1, 0]);
@@ -456,11 +516,14 @@ impl Garden {
                     continue;
                 }
                 p.germination += 1;
-                if p.germination == 4 {
+                progressing = true;
+                if p.germination == 4 && !controls.infinite_energy {
                     p.energy -= 1.2;
                 }
                 continue;
             }
+            let previous_energy = p.energy;
+            let previous_cursor = p.cursor;
             Self::uptake(p, h.seed, bowl);
             if p.age % 20 == 0 {
                 if p.water > 0 {
@@ -471,7 +534,7 @@ impl Garden {
                 }
             }
             p.lit_leaves = 0;
-            if sun[1] > 0. && (p.water > 0 || p.hydration > 0) {
+            if !instant_energy && sun[1] > 0. && (p.water > 0 || p.hydration > 0) {
                 let leaves = p
                     .tissue
                     .iter()
@@ -509,16 +572,20 @@ impl Garden {
                 } else {
                     (lit * leaves.len() / sampled) as u32
                 };
-                p.energy =
-                    (p.energy + p.lit_leaves as f64 * 0.55 * sun[1]).min(p.energy_capacity());
+                if !controls.infinite_energy {
+                    p.energy =
+                        (p.energy + p.lit_leaves as f64 * 0.55 * sun[1]).min(p.energy_capacity());
+                }
             }
-            p.energy = (p.energy - p.tissue.values().map(|t| t.maintenance()).sum::<f64>()).max(0.);
+            if !controls.infinite_energy {
+                p.energy =
+                    (p.energy - p.tissue.values().map(|t| t.maintenance()).sum::<f64>()).max(0.);
+            }
             // Small seedlings grow one cell/s; larger canopies grow up to eight.
-            // Every cell still pays full energy/water cost. No unbounded rewrite.
             if self.seed_program.is_some()
                 && p.age % 12 == 0
                 && p.cursor == p.program.len()
-                && p.energy >= Tissue::Reinforcement.cost()
+                && (controls.infinite_energy || p.energy >= Tissue::Reinforcement.cost())
                 && (p.water > 0 || p.hydration > 0)
             {
                 let remaining = MAX_STEPS.saturating_sub(p.program.len());
@@ -528,7 +595,11 @@ impl Garden {
                         .take(remaining),
                 );
             }
-            let budget = (1 + p.lit_leaves / 8).min(8);
+            let budget = if instant_energy {
+                8
+            } else {
+                (1 + p.lit_leaves / 8).min(8)
+            };
             for _ in 0..budget {
                 p.prepare_step(self.seed_program.as_ref());
                 if p.cursor >= p.program.len() || p.at_capacity() {
@@ -549,7 +620,9 @@ impl Garden {
                     p.cursor += 1;
                     continue;
                 }
-                if p.energy < next.tissue.cost() || (p.hydration == 0 && p.water == 0) {
+                if (!controls.infinite_energy && p.energy < next.tissue.cost())
+                    || (p.hydration == 0 && p.water == 0)
+                {
                     break;
                 }
                 if p.hydration == 0 {
@@ -557,15 +630,20 @@ impl Garden {
                     p.transpired += 1;
                     p.hydration = 4;
                 }
-                p.energy -= next.tissue.cost();
+                if !controls.infinite_energy {
+                    p.energy -= next.tissue.cost();
+                }
                 p.hydration -= 1;
                 p.cursor += 1;
                 p.tissue.insert(next.cell, next.tissue);
                 world.set(next.cell, next.tissue.material());
             }
+            progressing |=
+                p.cursor != previous_cursor || (p.has_growth() && p.energy > previous_energy);
         }
         debug_assert!(bowl.conserved());
         debug_assert!(self.water_accounted() == bowl.plant_transferred);
+        progressing
     }
     pub fn water_accounted(&self) -> u64 {
         self.plants
@@ -1031,6 +1109,80 @@ mod tests {
         }
         assert_eq!(restored.snapshot(), garden.snapshot());
         assert_eq!(water.snapshot(19), bowl.snapshot(19));
+    }
+
+    #[test]
+    fn faster_growth_runs_the_same_simulation_ticks() {
+        let (mut world, mut garden, mut bowl, top) = scene();
+        garden.dig(&mut world, top).unwrap();
+        garden.plant(&mut world, 0).unwrap();
+        garden.cover(&mut world, 0).unwrap();
+        supply(&mut bowl, top, 20);
+        let (mut fast_world, mut fast_garden, mut fast_bowl) =
+            (world.clone(), garden.clone(), bowl.clone());
+        let sun = [0., 1., 0.];
+        for _ in 0..64 {
+            garden.advance(&mut world, &mut bowl, 0.25, sun);
+        }
+        for _ in 0..8 {
+            fast_garden.advance_with_controls(
+                &mut fast_world,
+                &mut fast_bowl,
+                0.25,
+                sun,
+                GrowthControls {
+                    speed_step: 3,
+                    ..GrowthControls::default()
+                },
+            );
+        }
+        assert!(garden.cells() > 1);
+        assert_eq!(fast_garden.snapshot(), garden.snapshot());
+        assert_eq!(fast_bowl.snapshot(19), bowl.snapshot(19));
+    }
+
+    #[test]
+    fn instant_infinite_energy_preserves_cover_water_and_stored_energy() {
+        let (mut world, mut garden, mut bowl, top) = scene();
+        garden.dig(&mut world, top).unwrap();
+        garden.plant(&mut world, 0).unwrap();
+        garden.plants[0].energy = 0.;
+        let controls = GrowthControls {
+            infinite_energy: true,
+            speed_step: GROWTH_SPEEDS.len(),
+        };
+        let dark = [0., -1., 0.];
+        garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
+        assert_eq!(garden.plants[0].germination, 0);
+        garden.cover(&mut world, 0).unwrap();
+        garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
+        assert_eq!(garden.plants[0].germination, 0);
+        supply(&mut bowl, top, 12);
+        // The wall-time limit can spread the batch across frames on slower machines.
+        for _ in 0..8 {
+            garden.advance_with_controls(&mut world, &mut bowl, 0.025, dark, controls);
+        }
+        let grown = garden.cells();
+        assert!(grown > 10);
+        assert_eq!(garden.plants[0].energy, 0.);
+        assert!(garden.water_accounted() <= 12);
+        assert_eq!(garden.water_accounted(), bowl.plant_transferred);
+        assert!(bowl.conserved());
+        for (&cell, &tissue) in &garden.plants[0].tissue {
+            assert_eq!(world.material(cell), tissue.material());
+        }
+        assert_eq!(
+            Garden::restore(&garden.snapshot(), 19).unwrap().snapshot(),
+            garden.snapshot()
+        );
+        bowl.moisture.insert(offset(top, [1, 0, 0]), 1);
+        bowl.removed.insert(offset(top, [200, 0, 0]));
+        bowl.scooped += 1;
+        for _ in 0..4 {
+            garden.advance(&mut world, &mut bowl, 0.25, dark);
+        }
+        assert_eq!(garden.cells(), grown);
+        assert_eq!(garden.plants[0].energy, 0.);
     }
 
     #[test]
