@@ -17,8 +17,10 @@ cargo build --release --locked --bin frontier
 
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
-**V** switches between the aircraft and free camera. **F** switches to walking
-from the aircraft. The flight path checks the edited voxel world for collisions.
+**C** switches between the pilot and exterior chase views. **V** switches
+between the aircraft and free camera. **F** switches to walking from the
+aircraft. The fuselage, wingtips and wheels check swept paths against the
+edited voxels. The chase camera also checks the space behind the aircraft.
 
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. The preset renders a 6 km active terrain view with a
@@ -39,6 +41,18 @@ An airborne turn-return run on seed 8123 with 12.5 cm voxels measured
 Watershed seed 997 test (1.5 km view, 32 m native radius) measured
 **20.29 / 23.86 / 25.05 ms**. Enabling the existing 4-root height tiles
 and traversal gate gave **17.83 / 20.27 / 20.96 ms** on that ground test.
+The current Watershed and Highlands paths also share conservative empty-ray
+prefixes across 8×8 screen tiles. This brought the ground measurement to
+**14.56 / 16.90 / 17.50 ms**. Set `FRONTIER_NAADF_PLAYER_BEAMS=0` to run
+the control. Native visibility was checked against the independent CPU ray
+oracle during partial residency, shell growth and toroidal shifts.
+
+An empty native volume now keeps its coverage stable while flying. In the
+seed 19 flyover, completed tile builds fell from 1,334 to 145 and visible
+terrain triangles increased from 7,168 to 44,224. Frame p50/p95/p99 were
+**9.01 / 11.24 / 13.69 ms**. At the surveyed flight spawn on seed 40961,
+a separate 10-second, 80 m/s pass measured **6.77 / 8.52 / 9.62 ms**.
+These flight measurements include ongoing refinement.
 
 ## Play the baseline
 

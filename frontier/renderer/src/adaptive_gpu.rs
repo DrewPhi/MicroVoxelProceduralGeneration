@@ -1762,7 +1762,7 @@ impl AdaptiveGpu {
                 * if self.prepare_reuse_enabled {
                     view_transform.matrix(local_eye)
                 } else {
-                    Mat4::look_to_rh(local_eye, direction, Vec3::Y)
+                    Mat4::look_to_rh(local_eye, direction, camera.view_up())
                 };
             let mut bytes = [0u8; 208];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));

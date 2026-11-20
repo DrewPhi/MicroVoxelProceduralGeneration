@@ -556,11 +556,14 @@ impl AdaptiveStream {
         let world_has_distant_voxels = world.topology_base_cells().is_none()
             && crate::adaptive_geometry::distant_voxels::enabled();
         let alpine = is_alpine(&world);
-        let min_direct_split_width = if world_has_distant_voxels {
+        let highlands = world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands);
+        let min_direct_split_width = if world_has_distant_voxels || highlands {
             match std::env::var("FRONTIER_LOD_DIRECT_SPLIT").as_deref() {
                 Ok("0") => None,
                 Ok("1") => Some(0),
-                _ if alpine => {
+                _ if alpine || highlands => {
                     // Limit the extra work to macro tiles (256 m at 6.25 cm).
                     // Small foreground splits need to publish in shorter batches.
                     Some(4096)
@@ -1067,7 +1070,10 @@ impl AdaptiveStream {
             // A kilometre-scale starter tile needs more than eight samples
             // across to show the Alpine skyline before fine tiles are ready.
             // A 16-by-16 grid still fits the affine certificate budget.
-            let root_segments = if coarse_voxels && alpine && camera.far >= 3000. {
+            let root_segments = if (coarse_voxels && alpine
+                || self.min_direct_split_width.is_some())
+                && camera.far >= 3000.
+            {
                 16
             } else {
                 8

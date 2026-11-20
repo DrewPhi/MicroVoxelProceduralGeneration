@@ -33,16 +33,20 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--terrain-only', action='store_true',
                         help='exercise persistent editing with water simulation disabled')
+    parser.add_argument('--voxel-size', type=float, choices=[0.0625, 0.125, 0.25], default=0.0625)
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     binary = ROOT / 'target/release/frontier'
     cmd = [str(binary), '--scene', 'adaptive', '--terrain-recipe', 'regional',
            '--amplitude', '0', '--vegetation', 'off', '--walk', 'off',
+           '--voxel-size', str(args.voxel_size),
            '--naadf', 'on', '--naadf-radius', '8',
            '--width', '1280', '--height', '720', '--eye', '0,1.7,0',
            '--target', '0,0,0.5']
     persistence = ['--world-save'] if args.terrain_only else ['--live-water', 'on', '--water-save']
+    if args.voxel_size > 0.0625:
+        cmd += ['--pickup-reach', '3']
     base = cmd + persistence + [str(out/'world.save')]
     cmd = base + ['--capture-on-exit', str(out/'exit.png'), '--report', str(out/'game.json')]
     ready = '8.00/8.00 m' if args.terrain_only else 'water simulation started'
@@ -86,8 +90,10 @@ def main():
             if app.returncode:
                 raise RuntimeError(f'viewer exit {app.returncode}')
             state = inventory(out/'world.save')
-            # Three picked solid cells, one returned: no capture-click edit.
-            if sum(state['counts']) != 2 or state['sequence'] != 3:
+            # Each larger voxel already fills the hand. On the native grid
+            # the charged pickup collects two, and placement returns one.
+            remaining = 2 if args.voxel_size == 0.0625 else 1
+            if sum(state['counts']) != remaining or state['sequence'] != 3:
                 raise RuntimeError(f'pickup/hold/place result failed: {state}')
             if not state['edits']:
                 raise RuntimeError('expected edited terrain after placement')

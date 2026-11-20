@@ -173,7 +173,7 @@ pub fn select(
         let next_hi: [i64; 3] = std::array::from_fn(|a| hi[a].max(p[a]));
         if (0..3).any(|a| {
             (next_hi[a] as i128 - next_lo[a] as i128 + 1) as f64 * voxel_size()
-                > settings.extent_m + 1e-10
+                > settings.extent_m.max(voxel_size()) + 1e-10
         }) {
             continue;
         }

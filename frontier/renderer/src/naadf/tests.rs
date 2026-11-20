@@ -176,6 +176,23 @@ fn naadf_reserved_growth_gpu_matches_canonical_rays() {
     );
 }
 
+#[test]
+#[ignore = "hardware parity for occupied-height tiles and beam prefixes during shell growth"]
+fn naadf_height_beams_follow_partial_residency() {
+    gpu_matches_canonical_rays_with_storage(
+        false,
+        false,
+        false,
+        traversal::Options {
+            height_tile: Some(4),
+            height_gate: true,
+            beam: true,
+            ..Default::default()
+        },
+        true,
+    );
+}
+
 fn gpu_matches_canonical_rays(
     force_wide_pigment: bool,
     gpu_distance: bool,

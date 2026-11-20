@@ -173,7 +173,7 @@ impl SettingsUi {
                         );
                         if let Some((speed, altitude, bank)) = stats.flight {
                             ui.label(format!("{:.0} km/h   ·   {altitude:.0} m ASL   ·   bank {bank:+.0}°", speed * 3.6));
-                            ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  V free camera");
+                            ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");
                         }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {

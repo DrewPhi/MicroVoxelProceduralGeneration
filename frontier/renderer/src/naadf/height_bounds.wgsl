@@ -1,6 +1,6 @@
 // Reduce exact occupied roots, including mixed roots for plants and edits.
 // Conservative even when a mixed root contains just one occupied native cell.
-struct HeightBuild { n:u32, sparse:u32, _padding:vec2<u32>, ring:vec4<u32> };
+struct HeightBuild { n:u32, sparse:u32, active_x:u32, active_y:u32, ring:vec4<u32> };
 @group(0) @binding(0) var<uniform> settings:HeightBuild;
 @group(0) @binding(1) var height_roots:texture_3d<u32>;
 @group(0) @binding(2) var height_out:texture_storage_2d<r32uint,write>;
@@ -35,8 +35,10 @@ fn main(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) id:
     if index==0u {atomicStore(&highest,0u);}
     workgroupBarrier();
     let column=group.xy*height_tile_roots+id.xy;
-    if all(column<vec2(settings.n)) {
-        var y=settings.n;
+    // n is the physical toroidal texture edge. Residency can occupy only a
+    // subvolume during startup and expansion; ring.w carries its Z extent.
+    if all(column<vec2(settings.active_x,settings.ring.w)) {
+        var y=settings.active_y;
         loop {
             if y==0u {break;}
             // Other invocations may already have proved a higher maximum.

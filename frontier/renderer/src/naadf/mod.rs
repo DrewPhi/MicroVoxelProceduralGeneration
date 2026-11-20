@@ -23,6 +23,7 @@ pub(super) mod stream;
 #[cfg(test)]
 mod tests;
 mod traversal;
+pub(crate) use traversal::configure_player;
 #[cfg(test)]
 mod traversal_boundary_test;
 mod upload;
@@ -332,12 +333,19 @@ impl Volume {
                 encoder,
                 self.ownership.id,
                 self.n,
+                self.region.dims(),
                 self.sparse_roots,
                 self.ring,
                 gpu.naadf_gpu_stages.as_ref(),
             );
         }
-        if primary {
+        if primary
+            && (self.occupied.is_some()
+                || self.dynamic_water_key.is_some()
+                || gpu.camera_submerged.get()
+                || self.diagnostics.enabled
+                || capture_layer() != CaptureLayer::Scene)
+        {
             self.beam.encode(
                 &gpu.device,
                 encoder,
@@ -995,9 +1003,7 @@ impl Experiment {
                 .source_world
                 .as_ref()
                 .is_none_or(|old| old.shares_source_lineage(world))
-            && root_distance::occupancy::requested().is_none()
-            && !traversal::options().height_enabled()
-            && !traversal::options().beam;
+            && root_distance::occupancy::requested().is_none();
         if local_edits {
             if let Some(old) = self.request {
                 r.revision = old.revision;
@@ -1042,15 +1048,11 @@ impl Experiment {
             self.startup_publications.clear();
             self.startup_generated_roots = 0;
             self.expanding = true;
-            let options = traversal::options();
-            // Opt-in whole-volume acceleration experiments retain their original
-            // build path until their cache domains support partial residency.
-            self.incremental_startup = startup::enabled()
-                && self.active.is_none()
-                && !r.gpu_distance
-                && !r.sparse_roots
-                && !options.height_enabled()
-                && !options.beam;
+            // Height tiles use the published residency dimensions and physical
+            // ring separately. Shell growth and edit publications invalidate
+            // their reduction through the new ownership ID.
+            self.incremental_startup =
+                startup::enabled() && self.active.is_none() && !r.gpu_distance && !r.sparse_roots;
             self.growth_pending = false;
             self.status = "Building nearby exact voxels".into();
             self.error = None;
@@ -1543,8 +1545,15 @@ impl Experiment {
             a.bounds[1].map(|v| v - voxel_size()),
         ])
     }
+    /// An unmodified volume containing only air owns no visible terrain or
+    /// plants. Publishing a new air window must not cancel far refinement.
+    pub(crate) fn empty_unedited_volume(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| {
+            a.occupied.is_none() && a.revision == 0 && a.dynamic_water_key.is_none()
+        })
+    }
     pub(crate) fn desired_owner(&self) -> Option<std::sync::Arc<ownership::Ownership>> {
-        if self.restoring_raster {
+        if self.restoring_raster || self.empty_unedited_volume() {
             None
         } else if let Some(s) = &self.shift {
             Some(s.change.retiring.clone())
@@ -1554,13 +1563,16 @@ impl Experiment {
     }
 
     pub(crate) fn retirement(&self) -> Option<ownership::Retirement> {
+        if self.empty_unedited_volume() {
+            return None;
+        }
         Some(ownership::Retirement {
             old: self.active.as_ref()?.bounds,
             kept: self.shift.as_ref()?.change.retiring.bounds,
         })
     }
     pub(crate) fn restore_owner_id(&self) -> Option<u64> {
-        if self.restoring_raster || self.request.is_none() {
+        if self.restoring_raster || self.request.is_none() || self.empty_unedited_volume() {
             Some(0)
         } else {
             self.shift.as_ref().map(|s| s.change.retiring.id)

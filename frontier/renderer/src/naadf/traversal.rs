@@ -21,36 +21,57 @@ pub(super) struct Options {
     pub(super) local_exit_repair: bool,
 }
 
+static PLAYER_BEAMS: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn configure_player(enabled: bool) {
+    PLAYER_BEAMS.get_or_init(|| enabled);
+}
+
 pub(super) fn options() -> Options {
     static OPTIONS: OnceLock<Options> = OnceLock::new();
-    *OPTIONS.get_or_init(|| Options {
-        integer_fastpath: enabled("FRONTIER_NAADF_INTEGER_FASTPATH"),
-        specialize_format: enabled("FRONTIER_NAADF_SPECIALIZE_FORMAT"),
-        shadow_coarse_after_m: std::env::var("FRONTIER_NAADF_SHADOW_COARSE_AFTER_M")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v >= 0. && *v <= 4096.)
-            .unwrap_or(0.),
-        cache: match std::env::var("FRONTIER_NAADF_CACHE_NODES").as_deref() {
-            Ok("1") => 1,
-            Ok("2") => 2,
-            Ok("3") => 3,
-            _ => 0,
-        },
-        height_tile: std::env::var("FRONTIER_NAADF_HEIGHT_TILE_ROOTS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|n| matches!(n, 1 | 4 | 8)),
-        height_mips: enabled("FRONTIER_NAADF_HEIGHT_MIPS"),
-        height_gate: enabled("FRONTIER_NAADF_HEIGHT_GATE"),
-        height_probe: std::env::var("FRONTIER_NAADF_HEIGHT_PROBE_LEVEL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|level| *level <= 9),
-        beam: enabled("FRONTIER_NAADF_BEAM"),
-        diagnostics: enabled("FRONTIER_NAADF_DIAGNOSTICS"),
-        local_exit_repair: enabled("FRONTIER_NAADF_LOCAL_EXIT_REPAIR")
-            && super::root_distance::direct_publication(),
+    *OPTIONS.get_or_init(|| {
+        let player = PLAYER_BEAMS.get().copied().unwrap_or(false)
+            && std::env::var("FRONTIER_NAADF_PLAYER_BEAMS").as_deref() != Ok("0");
+        let player_default = player
+            && [
+                "FRONTIER_NAADF_HEIGHT_TILE_ROOTS",
+                "FRONTIER_NAADF_HEIGHT_GATE",
+                "FRONTIER_NAADF_HEIGHT_MIPS",
+                "FRONTIER_NAADF_HEIGHT_PROBE_LEVEL",
+                "FRONTIER_NAADF_BEAM",
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none());
+        Options {
+            integer_fastpath: enabled("FRONTIER_NAADF_INTEGER_FASTPATH"),
+            specialize_format: enabled("FRONTIER_NAADF_SPECIALIZE_FORMAT"),
+            shadow_coarse_after_m: std::env::var("FRONTIER_NAADF_SHADOW_COARSE_AFTER_M")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v >= 0. && *v <= 4096.)
+                .unwrap_or(0.),
+            cache: match std::env::var("FRONTIER_NAADF_CACHE_NODES").as_deref() {
+                Ok("1") => 1,
+                Ok("2") => 2,
+                Ok("3") => 3,
+                _ => 0,
+            },
+            height_tile: std::env::var("FRONTIER_NAADF_HEIGHT_TILE_ROOTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n| matches!(n, 1 | 4 | 8))
+                .or(player_default.then_some(4)),
+            height_mips: enabled("FRONTIER_NAADF_HEIGHT_MIPS"),
+            height_gate: player_default || enabled("FRONTIER_NAADF_HEIGHT_GATE"),
+            height_probe: std::env::var("FRONTIER_NAADF_HEIGHT_PROBE_LEVEL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|level| *level <= 9),
+            beam: player_default || enabled("FRONTIER_NAADF_BEAM"),
+            diagnostics: enabled("FRONTIER_NAADF_DIAGNOSTICS"),
+            local_exit_repair: enabled("FRONTIER_NAADF_LOCAL_EXIT_REPAIR")
+                && super::root_distance::direct_publication(),
+        }
     })
 }
 
@@ -320,6 +341,7 @@ impl Height {
         encoder: &mut wgpu::CommandEncoder,
         owner: u64,
         n: u32,
+        active: [usize; 3],
         sparse: bool,
         ring: [u32; 3],
         stages: Option<&std::sync::Arc<super::gpu_stages::Profiler>>,
@@ -331,7 +353,16 @@ impl Height {
         queue.write_buffer(
             &self.settings,
             0,
-            bytemuck::cast_slice(&[n, u32::from(sparse), 0, 0, ring[0], ring[1], ring[2], 0]),
+            bytemuck::cast_slice(&[
+                n,
+                u32::from(sparse),
+                active[0] as u32,
+                active[1] as u32,
+                ring[0],
+                ring[1],
+                ring[2],
+                active[2] as u32,
+            ]),
         );
         let timing = stages.and_then(|p| p.begin(super::gpu_stages::Stage::HeightBase));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

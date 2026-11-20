@@ -98,6 +98,24 @@ fn terrain_shadow(local:vec3<f32>) -> f32 {
     if any(uv<vec2<f32>(0.002)) || any(uv>vec2<f32>(0.998)) || p.z<=0. || p.z>=1. { return 1.; }
     let texel = 1./vec2<f32>(textureDimensions(shadow_depth));
     let depth = p.z-0.000025;
+    // A coarse mountain triangle can differ from its sampled surface by
+    // metres. Filter shadow visibility over that uncertainty so a surrogate
+    // facet grazing the sun does not cast an abrupt triangular silhouette.
+    let spacing = f32(1u << (u32(camera.paint.w) & 31u)) * NATIVE_VOXEL_METERS;
+    if camera.sun.w > .5 && spacing >= 4. && (camera.paint_origin.w & 10u) == 0u {
+        let size = vec2<i32>(textureDimensions(shadow_depth));
+        let pixel = uv * vec2<f32>(size)-.5;
+        let base = vec2<i32>(floor(pixel));
+        let f = fract(pixel);
+        let span = min(45., spacing * .65) / 11999.;
+        let s00 = textureLoad(shadow_depth,base,0);
+        let s10 = textureLoad(shadow_depth,base+vec2(1,0),0);
+        let s01 = textureLoad(shadow_depth,base+vec2(0,1),0);
+        let s11 = textureLoad(shadow_depth,base+vec2(1,1),0);
+        let shaded = smoothstep(vec4(0.),vec4(span),vec4(depth)-vec4(s00,s10,s01,s11));
+        let edge = min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+        return 1.-mix(mix(shaded.x,shaded.y,f.x),mix(shaded.z,shaded.w,f.x),f.y)*smoothstep(.002,.04,edge);
+    }
     let a = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(-0.65,-0.65)*texel,depth);
     let b = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(0.65,-0.65)*texel,depth);
     let c = textureSampleCompareLevel(shadow_depth,shadow_sampler,uv+vec2(-0.65,0.65)*texel,depth);

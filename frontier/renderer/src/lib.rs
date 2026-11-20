@@ -4,6 +4,7 @@ mod adaptive_gpu;
 mod adaptive_stream;
 mod adaptive_view;
 mod aircraft;
+mod aircraft_model;
 mod appearance_hierarchy;
 mod appearance_map;
 mod appearance_method;
@@ -269,6 +270,8 @@ struct BrickCacheMetrics {
 }
 
 struct Gpu {
+    airframe: Option<aircraft_model::Model>,
+    airframe_pose: Option<Camera>,
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
     alpine_appearance: bool,
@@ -588,6 +591,8 @@ impl Gpu {
             sample_count,
             voxel_filter,
             terrain: None,
+            airframe: None,
+            airframe_pose: None,
             adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
@@ -768,6 +773,19 @@ impl Gpu {
             Instant::now(),
         );
         self.draw_encode_calls.set(self.draw_encode_calls.get() + 1);
+        if let (Some(model), Some(pose)) = (&self.airframe, self.airframe_pose) {
+            let sun = self.visual_settings.as_ref().map_or(Vec3::Y, |s| {
+                atmosphere::sun_direction(s.sun_elevation, s.sun_azimuth)
+            });
+            model.prepare(
+                &self.queue,
+                *camera,
+                pose,
+                width as f32 / height as f32,
+                sun,
+                self.water_time.get(),
+            );
+        }
         self.queue.write_buffer(
             &self.uniform,
             0,
@@ -946,6 +964,13 @@ impl Gpu {
             )
         {
             return;
+        }
+        if let Some(model) = self
+            .airframe
+            .as_ref()
+            .filter(|_| self.airframe_pose.is_some())
+        {
+            model.draw(&mut pass);
         }
         // Dense opaque vegetation occludes expensive terrain shading here.
         // Keep terrain-first as a diagnostic A/B; it was slower on the laptop.
@@ -2359,11 +2384,32 @@ impl Viewer {
             );
         }
         if let Some(gpu) = &mut self.gpu {
-            // Use the current frame's restoration proof, never last frame's
-            // potentially pre-transition vegetation readiness.
+            gpu.airframe_pose = self
+                .aircraft
+                .as_ref()
+                .and_then(|plane| plane.exterior_pose());
+            if gpu.airframe_pose.is_some()
+                && gpu
+                    .airframe
+                    .as_ref()
+                    .is_none_or(|m| m.samples != gpu.sample_count)
+            {
+                gpu.airframe = Some(aircraft_model::Model::new(
+                    &gpu.device,
+                    gpu.scene_format,
+                    gpu.sample_count,
+                ));
+            }
+            // Restore raster ownership using this frame's vegetation readiness.
             let restore_id = gpu.naadf.as_ref().map_or(Some(0), |n| n.restore_owner_id());
             let plants = &gpu.vegetation_stats;
-            let plant_coverage = if restore_id.is_some_and(|id| id != 0) {
+            let plant_coverage = if gpu
+                .naadf
+                .as_ref()
+                .is_some_and(|n| n.empty_unedited_volume())
+            {
+                true
+            } else if restore_id.is_some_and(|id| id != 0) {
                 // An incoming strip must not wait for refinements elsewhere.
                 // Only admitted fallback coverage in the retiring area matters.
                 plants.naadf_retire_unresolved == 0
@@ -2474,8 +2520,7 @@ impl Viewer {
                 .is_some_and(|n| {
                     n.ready_for_capture()
                         && self.adaptive_view.as_ref().is_none_or(|v| {
-                            n.desired_owner()
-                                .is_some_and(|o| v.published_naadf_owner == o.id)
+                            v.published_naadf_owner == n.desired_owner().map_or(0, |o| o.id)
                         })
                 });
         if waiting_naadf {
@@ -3019,12 +3064,19 @@ impl ApplicationHandler for Viewer {
                                 }
                             }
                         }
+                        if key == KeyCode::KeyC && !event.repeat {
+                            if let Some(plane) = &mut self.aircraft {
+                                plane.toggle_view(&mut self.camera, &self.world);
+                            }
+                        }
                         if key == KeyCode::KeyV
                             && !event.repeat
                             && self.world.fbm_terrain().is_some()
                         {
                             self.camera.roll = 0.;
-                            if self.aircraft.take().is_none() {
+                            if let Some(plane) = self.aircraft.take() {
+                                plane.exit(&mut self.camera);
+                            } else {
                                 self.player_edit.cancel();
                                 self.aircraft = Some(aircraft::Aircraft::default());
                                 self.visual_settings.walking = false;
@@ -3035,7 +3087,9 @@ impl ApplicationHandler for Viewer {
                             }
                         }
                         if key == KeyCode::KeyF && !event.repeat {
-                            self.aircraft = None;
+                            if let Some(plane) = self.aircraft.take() {
+                                plane.exit(&mut self.camera);
+                            }
                             self.camera.roll = 0.;
                             self.visual_settings.walking = !self.visual_settings.walking;
                             self.walking.reset();
@@ -3234,6 +3288,7 @@ pub fn run() -> Result<()> {
         appearance_method::initialize_meadow_application();
     }
     adaptive_geometry::distant_voxels::Mode::initialize_application(visual_settings.flight_horizon);
+    naadf::configure_player(params.recipe.uses_watersheds());
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
         || scene == "pages-topology"
