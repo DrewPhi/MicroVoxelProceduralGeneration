@@ -786,16 +786,17 @@ pub(crate) fn noise(x: f64, z: f64, seed: u64) -> f64 {
     let grad = |dx: i64, dz: i64| {
         let a = u - dx as f64;
         let b = v - dz as f64;
-        match hash(ix.wrapping_add(dx), iz.wrapping_add(dz), seed) & 7 {
-            0 => a,
-            1 => -a,
-            2 => b,
-            3 => -b,
-            4 => (a + b) * std::f64::consts::FRAC_1_SQRT_2,
-            5 => (a - b) * std::f64::consts::FRAC_1_SQRT_2,
-            6 => (-a + b) * std::f64::consts::FRAC_1_SQRT_2,
-            _ => (-a - b) * std::f64::consts::FRAC_1_SQRT_2,
-        }
+        // Scale after adding the signed axes to preserve the historical
+        // rounding of diagonal gradients in saved procedural worlds.
+        const X: [f64; 8] = [1., -1., 0., 0., 1., 1., -1., -1.];
+        const Z: [f64; 8] = [0., 0., 1., -1., 1., -1., 1., -1.];
+        let i = (hash(ix.wrapping_add(dx), iz.wrapping_add(dz), seed) & 7) as usize;
+        let scale = if i < 4 {
+            1.
+        } else {
+            std::f64::consts::FRAC_1_SQRT_2
+        };
+        (a * X[i] + b * Z[i]) * scale
     };
     let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
     (1.6 * lerp(

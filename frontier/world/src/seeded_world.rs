@@ -265,20 +265,22 @@ struct Region {
     bin_size: f64,
 }
 impl Region {
-    fn candidates(&self, x: f64, z: f64) -> impl Iterator<Item = Reach> + '_ {
+    fn bin(&self, x: f64, z: f64) -> usize {
         let ix = ((x - self.origin[0]) / self.bin_size)
             .floor()
             .clamp(0., (REGION_BINS_PER_AXIS - 1) as f64) as usize;
         let iz = ((z - self.origin[1]) / self.bin_size)
             .floor()
             .clamp(0., (REGION_BINS_PER_AXIS - 1) as f64) as usize;
-        self.bins[iz * REGION_BINS_PER_AXIS + ix]
-            .iter()
-            .map(|&i| self.reaches[i])
+        iz * REGION_BINS_PER_AXIS + ix
+    }
+    fn candidates(&self, x: f64, z: f64) -> impl Iterator<Item = Reach> + '_ {
+        self.bins[self.bin(x, z)].iter().map(|&i| self.reaches[i])
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
+    recipe: FbmRecipe,
     seed: u64,
     scale: u64,
     amplitude: u64,
@@ -345,6 +347,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
     let key = Key {
+        recipe: p.recipe,
         seed,
         scale: p.horizontal_scale.to_bits(),
         amplitude: p.amplitude.to_bits(),
@@ -900,6 +903,19 @@ mod tests {
     }
 
     #[test]
+    fn drainage_cache_distinguishes_recipes() {
+        let seeded = params();
+        let watershed = FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..seeded
+        };
+        let original = region(997, seeded, -1., 1.);
+        let other = region(997, watershed, -1., 1.);
+        assert!(!Arc::ptr_eq(&original, &other));
+        assert!(Arc::ptr_eq(&original, &region(997, seeded, -1., 1.)));
+    }
+
+    #[test]
     fn watershed_keeps_dry_riverbanks_green_and_steppe_grassy() {
         let p = FbmParams {
             recipe: FbmRecipe::Watershed,
@@ -1422,6 +1438,25 @@ pub(crate) fn reaches_intersecting(
     if max[0] - min[0] > spacing * 4. || max[1] - min[1] > spacing * 4. {
         return Vec::new();
     }
+    let intersects = |r: &Reach| {
+        let radius = r.outer_radius();
+        r.a.x.min(r.b.x) - radius <= max[0]
+            && r.a.x.max(r.b.x) + radius >= min[0]
+            && r.a.z.min(r.b.z) - radius <= max[1]
+            && r.a.z.max(r.b.z) + radius >= min[1]
+    };
+    // Most affine patches and water-feature queries fit inside one bin.
+    // Its entries already retain original reach order and contain no duplicates.
+    let region_width = spacing * 4.;
+    if (0..2).all(|i| (min[i] / region_width).floor() == (max[i] / region_width).floor()) {
+        let local = region(seed, p, min[0], min[1]);
+        if local.bin(min[0], min[1]) == local.bin(max[0], max[1]) {
+            return local
+                .candidates(min[0], min[1])
+                .filter(intersects)
+                .collect();
+        }
+    }
     let mut out: Vec<Reach> = Vec::new();
     let mut visited = Vec::with_capacity(4);
     for x in [min[0], max[0]] {
@@ -1433,15 +1468,7 @@ pub(crate) fn reaches_intersecting(
             {
                 continue;
             }
-            for &r in &region.reaches {
-                let radius = r.outer_radius();
-                if r.a.x.min(r.b.x) - radius > max[0]
-                    || r.a.x.max(r.b.x) + radius < min[0]
-                    || r.a.z.min(r.b.z) - radius > max[1]
-                    || r.a.z.max(r.b.z) + radius < min[1]
-                {
-                    continue;
-                }
+            for &r in region.reaches.iter().filter(|r| intersects(r)) {
                 if !out
                     .iter()
                     .any(|old| old.owner == r.owner && old.segment == r.segment)
