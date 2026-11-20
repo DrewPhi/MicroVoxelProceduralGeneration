@@ -1011,6 +1011,7 @@ impl AdaptiveGpu {
         settings: &crate::settings::VisualSettings,
         regional: bool,
         alpine: bool,
+        terrain_shadow_appearance: bool,
         amplitude: f32,
     ) {
         // With no plant pass there is no depth-map clear/draw. Do not sample
@@ -1035,7 +1036,7 @@ impl AdaptiveGpu {
             sun.z,
             if regional { 1. } else { 0. },
             settings.overcast,
-            if alpine && settings.terrain_shadows && sun.y > 0. {
+            if terrain_shadow_appearance && settings.terrain_shadows && sun.y > 0. {
                 1.
             } else {
                 0.

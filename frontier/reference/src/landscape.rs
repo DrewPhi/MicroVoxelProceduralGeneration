@@ -65,7 +65,7 @@ impl Landscape {
         if terrain.params().recipe == frontier_world::FbmRecipe::Alpine {
             identity.push_str(include_str!("../../world/src/alpine.rs"));
         }
-        if terrain.params().recipe == frontier_world::FbmRecipe::SeededWorld {
+        if terrain.params().recipe.has_static_water() {
             identity.push_str(include_str!("../../world/src/seeded_world.rs"));
         }
         if sample_stride != 1 {
@@ -191,7 +191,7 @@ impl Landscape {
                 h as f64 * VOXEL_SIZE,
             )
         };
-        let material = if self.terrain.params().recipe == frontier_world::FbmRecipe::SeededWorld {
+        let material = if self.terrain.params().recipe.has_static_water() {
             // Share only the canonical source definition, not renderer traversal
             // or its run compression. Water never replaces the underlying bed.
             self.terrain

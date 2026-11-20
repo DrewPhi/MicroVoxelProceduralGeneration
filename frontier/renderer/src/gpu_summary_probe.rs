@@ -27,7 +27,7 @@ impl CanonicalPage {
     pub fn sample(world: &World, min: [i64; 2]) -> Result<Self, String> {
         if world
             .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+            .is_some_and(|t| t.params().recipe.has_static_water())
         {
             return Err("summary probe experiment does not support static-water columns".into());
         }

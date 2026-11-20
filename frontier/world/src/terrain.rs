@@ -61,6 +61,13 @@ pub enum FbmRecipe {
     Alpine,
     /// Continuous climate, continental relief and globally addressed local drainage.
     SeededWorld,
+    /// Accumulated watershed drainage, varied relief and biome cover.
+    Watershed,
+}
+impl FbmRecipe {
+    pub fn has_static_water(self) -> bool {
+        matches!(self, Self::SeededWorld | Self::Watershed)
+    }
 }
 
 /// Physical source settings, not display/LOD settings. Changing them changes the world.
@@ -146,6 +153,7 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
+            FbmRecipe::Watershed => 1,
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
@@ -154,6 +162,7 @@ impl FbmTerrain {
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
+            FbmRecipe::Watershed => 1,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,
@@ -169,7 +178,7 @@ impl FbmTerrain {
         self.height_cells(c.x, c.z) as f64 * VOXEL_SIZE
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
-        if self.params.recipe == FbmRecipe::SeededWorld {
+        if self.params.recipe.has_static_water() {
             return self.column_cells(x, z).visible_top;
         }
         let x = (x as f64 + 0.5) * VOXEL_SIZE / self.params.horizontal_scale;
@@ -178,7 +187,7 @@ impl FbmTerrain {
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
-            FbmRecipe::SeededWorld => {
+            FbmRecipe::SeededWorld | FbmRecipe::Watershed => {
                 seeded_world::fields(
                     self.seed,
                     self.params,
@@ -395,7 +404,7 @@ impl FbmTerrain {
     /// and continuous moisture, never a display normal or an independent patch map.
     /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
-        if self.params.recipe == FbmRecipe::SeededWorld {
+        if self.params.recipe.has_static_water() {
             let c = Cell::from_meters([x, 0.0, z]);
             return self.column_cells(c.x, c.z).top_material();
         }
@@ -467,13 +476,13 @@ impl FbmTerrain {
     /// Segment endpoint AABBs expanded by maximum width contain every possible
     /// wet core; tiny floating-point padding keeps boundary queries inclusive.
     pub fn seeded_water_feature_spacing(&self, min: [f64; 2], max: [f64; 2]) -> Option<f64> {
-        if self.params.recipe != FbmRecipe::SeededWorld {
+        if !self.params.recipe.has_static_water() {
             return None;
         }
         let scale = self.params.horizontal_scale / 1800.;
         let spacing = 2400. * scale;
         if (0..2).any(|a| max[a] - min[a] > spacing * 4.) {
-            return Some(4. * scale); // Half the source's minimum 8 m river radius.
+            return Some(0.5 * seeded_world::minimum_radius(self.params) * scale);
         }
         self.seeded_reaches(min, max)
             .into_iter()
@@ -500,15 +509,16 @@ impl FbmTerrain {
     /// diameter rather than the display grid width. Vertical relief retains its
     /// independent certified bound. This is not a water-area coverage proof.
     pub fn seeded_water_feature_debt(&self, min: [f64; 2], max: [f64; 2], step_m: f64) -> f64 {
-        if self.params.recipe != FbmRecipe::SeededWorld {
+        if !self.params.recipe.has_static_water() {
             return 0.;
         }
         let scale = self.params.horizontal_scale / 1800.;
         // Large boxes use source-wide maximum lake diameter, without enumerating
         // an unbounded collection of drainage descriptors.
         if (0..2).any(|a| max[a] - min[a] > 9600. * scale) {
-            return if step_m > 4. * scale {
-                (step_m * std::f64::consts::SQRT_2).min(200. * scale)
+            return if step_m > 0.5 * seeded_world::minimum_radius(self.params) * scale {
+                (step_m * std::f64::consts::SQRT_2)
+                    .min(2. * seeded_world::maximum_lake_radius(self.params) * scale)
             } else {
                 0.
             };
@@ -549,7 +559,7 @@ impl FbmTerrain {
     pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
         let xm = (x as f64 + 0.5) * VOXEL_SIZE;
         let zm = (z as f64 + 0.5) * VOXEL_SIZE;
-        if self.params.recipe == FbmRecipe::SeededWorld {
+        if self.params.recipe.has_static_water() {
             return seeded_world::column(self.seed, self.params, xm, zm);
         }
         let top = self.height_cells(x, z);

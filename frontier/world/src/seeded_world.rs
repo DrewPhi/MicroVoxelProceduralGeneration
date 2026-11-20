@@ -1,11 +1,10 @@
-//! Greenfield endless terrain: climate FBM, continental uplift and finite local D8 drainage.
-//! The drainage lattice is global; cached regions are only an acceleration structure.
-//! Every above-sea node supplies a spring and drains to its lowest neighbor or a
-//! local endorheic lake. This finite local model does not claim globally conserved
-//! runoff or geological erosion. It requires no recursive watershed traversal.
-//! Each worker caches at most eight immutable regions with 256 candidate bins;
-//! source identity contains every physical parameter and cache order changes no output.
-use super::{noise, FbmParams, TerrainColumn};
+//! Climate fBm, continental uplift and globally addressed drainage.
+//! The original seeded recipe uses local D8 routing. Watershed adds a bounded
+//! upstream halo, jittered drainage nodes and valley profiles shaped by incision.
+//! Cached regions are an acceleration structure. Each has 256 candidate bins
+//! and cache order never changes the world-space descriptors.
+use super::{noise, FbmParams, FbmRecipe, TerrainColumn};
+use crate::alpine::Value;
 use crate::{Material, VOXEL_SIZE};
 use std::{
     cell::RefCell,
@@ -18,6 +17,54 @@ pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
 const CLIMATE_CACHE_CAPACITY: usize = 4096;
 const REGION_CACHE_CAPACITY: usize = 8;
 const REGION_BINS_PER_AXIS: usize = 16;
+const RUNOFF_HOPS: usize = 8;
+pub(crate) const WATERSHED_MAX_WATER_DEPTH: f64 = 9.;
+pub(crate) const WATERSHED_WATER_ABOVE_LAND: f64 = 0.7;
+
+pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
+    if p.recipe == FbmRecipe::Watershed {
+        3.
+    } else {
+        8.
+    }
+}
+
+pub(crate) fn maximum_lake_radius(p: FbmParams) -> f64 {
+    if p.recipe == FbmRecipe::Watershed {
+        140.
+    } else {
+        100.
+    }
+}
+
+pub(crate) fn global_height_range(p: FbmParams) -> [f64; 2] {
+    let authored = if p.recipe == FbmRecipe::Watershed {
+        [-600., 2320.]
+    } else {
+        [-402., 1663.]
+    };
+    authored.map(|h| h * p.amplitude / 1000.)
+}
+
+/// Shared scalar and affine composition. Independent texture contributes most
+/// on high slopes, with a second broad field breaking up lowland relief.
+pub(crate) fn watershed_relief<V: Value>(
+    continent: V,
+    mountain: V,
+    ridge: V,
+    hills: V,
+    fine: V,
+    strata: V,
+) -> V {
+    let spine = ridge.mul(ridge).mul(ridge).scale(1520.);
+    let highlands = mountain.mul(mountain).mul(spine.add(strata.scale(145.)));
+    continent
+        .scale(440.)
+        .add(V::point(90.))
+        .add(highlands)
+        .add(hills.mul(V::point(50.).add(strata.scale(30.))))
+        .add(fine.scale(5.))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SeededBiome {
@@ -27,6 +74,9 @@ pub enum SeededBiome {
     Plains,
     Tundra,
     Mountains,
+    Woodland,
+    Wetland,
+    Steppe,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SeededFields {
@@ -72,12 +122,17 @@ fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
     let ridge = 1. - fbm(seed, x, z, 3600., 4, 0.48, 0x5105).abs();
     let foothill = fbm(seed, x, z, 1800., 3, 0.45, 0x5106);
     let fine = fbm(seed, x, z, 90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let h = p.amplitude / 1000.
-        * (400. * continental
+    let authored = if p.recipe == FbmRecipe::Watershed {
+        let strata = fbm(seed, x, z, 1050., 3, 0.45, 0x5121);
+        watershed_relief(continental, mountain, ridge, foothill, fine, strata)
+    } else {
+        400. * continental
             + 65.
             + 1150. * mountain * mountain * ridge * ridge
             + 45. * foothill
-            + 3. * fine);
+            + 3. * fine
+    };
+    let h = p.amplitude / 1000. * authored;
     Land {
         h,
         continental,
@@ -162,10 +217,17 @@ fn climate(seed: u64, p: FbmParams, x: f64, z: f64) -> [f64; 2] {
 // renderer spacing and cached query order never change their stages.
 fn node(seed: u64, p: FbmParams, ix: i64, iz: i64) -> Node {
     let spacing = 2400. * p.horizontal_scale / 1800.;
-    let l = land(seed, p, ix as f64 * spacing, iz as f64 * spacing);
+    let mut x = ix as f64 * spacing;
+    let mut z = iz as f64 * spacing;
+    if p.recipe == FbmRecipe::Watershed {
+        let unit = |salt| (super::hash(ix, iz, seed ^ salt) >> 11) as f64 / (1u64 << 53) as f64;
+        x += (unit(0x5131) - 0.5) * 0.32 * spacing;
+        z += (unit(0x5132) - 0.5) * 0.32 * spacing;
+    }
+    let l = land(seed, p, x, z);
     Node {
-        x: ix as f64 * spacing,
-        z: iz as f64 * spacing,
+        x,
+        z,
         stage: (l.h - 12. * p.amplitude / 1000.).max(0.),
         potential: l.h - 12. * p.amplitude / 1000.,
     }
@@ -183,6 +245,8 @@ pub(crate) struct Reach {
     pub(crate) b: Node,
     pub(crate) width: f64,
     pub(crate) width_b: f64,
+    pub(crate) depth: f64,
+    valley_radius: f64,
     pub(crate) lake: bool,
     pub(crate) owner: [i64; 2],
     pub(crate) segment: u8,
@@ -190,12 +254,7 @@ pub(crate) struct Reach {
 impl Reach {
     /// Compact river-valley conditioning stays inside one drainage-node halo.
     pub(crate) fn outer_radius(self) -> f64 {
-        let width = self.width.max(self.width_b);
-        if self.lake {
-            3. * width
-        } else {
-            18. * width
-        }
+        self.valley_radius
     }
 }
 #[derive(Debug)]
@@ -233,6 +292,54 @@ thread_local! {
         RefCell::new(VecDeque::new())
     };
 }
+
+/// Rainfall accumulates along strictly descending links. For an interior node,
+/// each iteration adds exactly one more upstream hop, so the finite halo gives
+/// identical discharge to neighboring regions even when their caches differ.
+fn accumulated_runoff(nodes: &[Node], side: usize, seed: u64, p: FbmParams) -> Vec<f64> {
+    let mut links = Vec::with_capacity(nodes.len());
+    let mut local = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        let [t, m] = climate(seed, p, node.x, node.z);
+        local.push(if node.potential > 0. {
+            0.035 + 1.1 * smooth((m - 0.23 - 0.12 * t) / 0.52)
+        } else {
+            0.
+        });
+        links.push(downstream(nodes, side, i));
+    }
+    let mut flow = local.clone();
+    let mut next = local.clone();
+    for _ in 0..RUNOFF_HOPS {
+        next.copy_from_slice(&local);
+        for (i, &j) in links.iter().enumerate() {
+            if i != j {
+                next[j] += flow[i];
+            }
+        }
+        std::mem::swap(&mut next, &mut flow);
+    }
+    flow
+}
+
+fn downstream(nodes: &[Node], side: usize, i: usize) -> usize {
+    let x = i % side;
+    let z = i / side;
+    if nodes[i].potential <= 0. || x == 0 || z == 0 || x + 1 == side || z + 1 == side {
+        return i;
+    }
+    let mut best = i;
+    for row in z - 1..=z + 1 {
+        for col in x - 1..=x + 1 {
+            let j = row * side + col;
+            if nodes[j].potential < nodes[best].potential {
+                best = j;
+            }
+        }
+    }
+    best
+}
+
 fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
@@ -257,50 +364,85 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     }
     // Build outside the cache borrow. A one-node halo includes every incident
     // edge affecting this region, including diagonals and negative boundaries.
-    let mut nodes = Vec::with_capacity(64);
-    for iz in rz * 4 - 2..=rz * 4 + 5 {
-        for ix in rx * 4 - 2..=rx * 4 + 5 {
+    let watershed = p.recipe == FbmRecipe::Watershed;
+    // The row just outside the accumulated halo is needed to choose the
+    // downstream link of its outermost contributors.
+    let halo = if watershed { RUNOFF_HOPS + 1 } else { 0 };
+    let side = 8 + 2 * halo;
+    let base = [rx * 4 - 2 - halo as i64, rz * 4 - 2 - halo as i64];
+    let mut nodes = Vec::with_capacity(side * side);
+    for iz in base[1]..base[1] + side as i64 {
+        for ix in base[0]..base[0] + side as i64 {
             nodes.push(node(seed, p, ix, iz));
         }
     }
+    let flow = watershed.then(|| accumulated_runoff(&nodes, side, seed, p));
+    let river_width = |index: usize| {
+        let n = nodes[index];
+        let authored = if let Some(flow) = &flow {
+            (3. + 10. * flow[index].sqrt()).min(44.)
+        } else {
+            let [temperature, moisture] = climate(seed, p, n.x, n.z);
+            let runoff = (moisture - 0.10 * temperature).clamp(0., 1.);
+            8. + 16. * smooth((runoff - 0.15) / 0.60)
+        };
+        authored * p.horizontal_scale / 1800.
+    };
     let mut reaches = Vec::new();
-    for j in 1..7 {
-        for i in 1..7 {
-            let a = nodes[j * 8 + i];
+    for j in halo + 1..halo + 7 {
+        for i in halo + 1..halo + 7 {
+            let index = j * side + i;
+            let a = nodes[index];
             if a.potential <= 0. {
                 continue;
             }
-            let mut b = a;
-            for dz in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let q = nodes[((j as isize + dz) * 8 + i as isize + dx) as usize];
-                    if q.potential < b.potential {
-                        b = q;
-                    }
-                }
-            }
-            let lake = b.x == a.x && b.z == a.z;
-            // Every downhill edge is present, so confluences never terminate because
-            // an accumulation threshold changed at a cache boundary.
-            // Bounded local rainfall/runoff proxy, not accumulated discharge.
-            // All incident edges evaluate the same globally addressed node width.
-            let river_width = |n: Node| {
-                let [temperature, moisture] = climate(seed, p, n.x, n.z);
-                let runoff = (moisture - 0.10 * temperature).clamp(0., 1.);
-                (8. + 16. * smooth((runoff - 0.15) / 0.60)) * p.horizontal_scale / 1800.
-            };
+            let next = downstream(&nodes, side, index);
+            let b = nodes[next];
+            let lake = next == index;
             let width = if lake {
-                100. * p.horizontal_scale / 1800.
+                let radius = flow.as_ref().map_or(100., |flow| {
+                    (38. + 21. * flow[index].sqrt()).min(maximum_lake_radius(p))
+                });
+                radius * p.horizontal_scale / 1800.
             } else {
-                river_width(a)
+                river_width(index)
             };
-            let owner = [rx * 4 - 2 + i as i64, rz * 4 - 2 + j as i64];
+            let owner = [base[0] + i as i64, base[1] + j as i64];
+            let depth = if lake {
+                7.
+            } else if watershed {
+                (0.7 + 0.18 * width * 1800. / p.horizontal_scale).min(7.)
+            } else {
+                4.
+            };
             if lake {
+                let lake_end = if let Some(flow) = &flow {
+                    // Extend the lake up its principal inlet. Its water stage
+                    // remains exactly the shared sink stage.
+                    let inlet = (j - 1..=j + 1)
+                        .flat_map(|row| (i - 1..=i + 1).map(move |col| row * side + col))
+                        .filter(|&k| k != index && downstream(&nodes, side, k) == index)
+                        .max_by(|&a, &b| flow[a].total_cmp(&flow[b]));
+                    inlet.map_or(b, |k| {
+                        let dx = nodes[k].x - a.x;
+                        let dz = nodes[k].z - a.z;
+                        let extension = 1.35 * width / dx.hypot(dz);
+                        Node {
+                            x: a.x + dx * extension,
+                            z: a.z + dz * extension,
+                            ..a
+                        }
+                    })
+                } else {
+                    b
+                };
                 reaches.push(Reach {
                     a,
-                    b,
+                    b: lake_end,
                     width,
                     width_b: width,
+                    depth,
+                    valley_radius: 3. * width,
                     lake,
                     owner,
                     segment: 0,
@@ -314,8 +456,8 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                 // Two explicit bounded oscillations keep bends legible at the
                 // kilometre node scale; low-amplitude FBM alone looked straight.
                 // The envelope has zero value/slope at both shared nodes.
-                // offset<=.16*spacing and support<=24*18*scale: together
-                // <.5*spacing, preserving the one-node candidate halo.
+                // The bend, endpoint jitter and valley support together
+                // span less than one grid interval beyond incident nodes.
                 let phase = |salt| {
                     let bits = super::hash(owner[0], owner[1], seed ^ salt);
                     (bits >> 11) as f64 / ((1u64 << 53) as f64) * std::f64::consts::TAU
@@ -344,7 +486,21 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                     }
                 };
                 let points: [Node; 17] = std::array::from_fn(|i| point(i as u8));
-                let downstream_width = river_width(b);
+                let downstream_width = river_width(next);
+                let valley_radius = watershed.then(|| {
+                    // Deep channels through uplift need broader shoulders than
+                    // the water itself. Look for incision along the entire edge,
+                    // so adjacent segments do not abruptly narrow the valley.
+                    let incision = points
+                        .iter()
+                        .step_by(4)
+                        .map(|n| land(seed, p, n.x, n.z).h - n.stage)
+                        .fold(0.0_f64, f64::max);
+                    let scale = p.horizontal_scale / 1800.;
+                    let authored_incision = incision / (p.amplitude / 1000.).max(1e-12);
+                    (190. + 2.2 * authored_incision).clamp(190., 820.) * scale
+                });
+                let max_width: f64 = if watershed { 44. } else { 24. };
                 let widths: [f64; 17] = std::array::from_fn(|i| {
                     if i == 0 {
                         return width;
@@ -361,16 +517,22 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                             * (std::f64::consts::PI * t).sin().powi(2)
                             * (std::f64::consts::TAU * t + phase2).sin();
                     (baseline * pulse).clamp(
-                        8. * p.horizontal_scale / 1800.,
-                        24. * p.horizontal_scale / 1800.,
+                        minimum_radius(p) * p.horizontal_scale / 1800.,
+                        max_width * p.horizontal_scale / 1800.,
                     )
                 });
                 for segment in 0..16 {
+                    let segment_width = widths[segment as usize];
+                    let segment_width_b = widths[segment as usize + 1];
+                    let widest = segment_width.max(segment_width_b);
                     reaches.push(Reach {
                         a: points[segment as usize],
                         b: points[segment as usize + 1],
-                        width: widths[segment as usize],
-                        width_b: widths[segment as usize + 1],
+                        width: segment_width,
+                        width_b: segment_width_b,
+                        depth,
+                        valley_radius: valley_radius
+                            .map_or(18. * widest, |radius| radius.max(14. * widest)),
                         lake,
                         owner,
                         segment,
@@ -402,7 +564,8 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     });
     REGIONS.with(|cache| {
         let mut c = cache.borrow_mut();
-        if c.len() >= REGION_CACHE_CAPACITY {
+        let capacity = if watershed { 20 } else { REGION_CACHE_CAPACITY };
+        while c.len() >= capacity {
             c.pop_front();
         }
         c.push_back((key, Arc::clone(&value)));
@@ -432,6 +595,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
     let l = land(seed, p, x, z);
     let mut ground = l.h;
     let mut water = if ground < 0. { Some(0.) } else { None };
+    let mut riparian = false;
     if p.amplitude > 0. {
         let region = region(seed, p, x, z);
         let mut weighted_ground = ground;
@@ -447,7 +611,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                 continue;
             }
             let amplitude = p.amplitude / 1000.;
-            let depth = if r.lake { 7. } else { 4. } * amplitude;
+            let depth = r.depth * amplitude;
             let bank_height = 0.7 * amplitude;
             let profile = if d <= width {
                 stage - depth + (depth + bank_height) * smooth(d / width)
@@ -457,7 +621,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                     + (l.h - stage - bank_height) * smooth((d - width) / (outer - width))
             };
             // Sea-level reach caps may cut the seabed, never raise a ring.
-            let profile = if stage == 0. && l.h < 0. {
+            let profile = if p.recipe == FbmRecipe::Watershed || (stage == 0. && l.h < 0.) {
                 profile.min(l.h)
             } else {
                 profile
@@ -466,6 +630,9 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
             total_weight += weight;
+            if p.recipe == FbmRecipe::Watershed {
+                riparian |= d < width * 3. && (profile - stage).abs() < 4. * amplitude;
+            }
             if d < width {
                 if r.lake && profile < stage {
                     lake_stage = Some(lake_stage.map_or(stage, |old| old.min(stage)));
@@ -485,6 +652,17 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             water = Some(water.map_or(river_stage, |w: f64| w.max(river_stage)));
         }
     }
+    if p.recipe == FbmRecipe::Watershed {
+        let relief = p.amplitude / 1000.;
+        // A graph reach can cross a low saddle between its two nodes. Keep
+        // the local water in the valley instead of suspending the nominal
+        // interpolated stage above the surrounding terrain.
+        water = water.map(|stage| {
+            stage
+                .min((l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.))
+                .min((ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.))
+        });
+    }
     let [temperature, moisture] = climate(seed, p, x, z);
     let effective_temperature = temperature - 0.00019 * ground.max(0.);
     let biome = if ground < -4. {
@@ -493,10 +671,16 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
         SeededBiome::Coast
     } else if effective_temperature < 0.29 {
         SeededBiome::Tundra
+    } else if p.recipe == FbmRecipe::Watershed && riparian && moisture >= 0.40 {
+        SeededBiome::Wetland
     } else if l.mountain > 0.62 && ground > 350. * p.amplitude / 1000. {
         SeededBiome::Mountains
     } else if moisture < 0.39 && effective_temperature > 0.48 {
         SeededBiome::Desert
+    } else if p.recipe == FbmRecipe::Watershed && moisture >= 0.56 {
+        SeededBiome::Woodland
+    } else if p.recipe == FbmRecipe::Watershed && moisture < 0.44 {
+        SeededBiome::Steppe
     } else {
         SeededBiome::Plains
     };
@@ -519,6 +703,16 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
         .max(ground_top);
     let mut surface = match f.biome {
         SeededBiome::Ocean | SeededBiome::Coast => Material::Sand,
+        SeededBiome::Woodland | SeededBiome::Wetland => Material::Grass,
+        SeededBiome::Steppe => {
+            let x = x * 1800. / p.horizontal_scale;
+            let z = z * 1800. / p.horizontal_scale;
+            if f.moisture + 0.12 * noise(x / 86., z / 86., seed ^ 0x5123) < 0.405 {
+                Material::Soil
+            } else {
+                Material::Grass
+            }
+        }
         SeededBiome::Tundra => {
             if f.temperature < 0.18 {
                 Material::Snow
@@ -531,6 +725,15 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
         SeededBiome::Mountains => {
             if f.temperature < 0.36 {
                 Material::Snow
+            } else if p.recipe == FbmRecipe::Watershed && f.moisture >= 0.46 {
+                let x = x * 1800. / p.horizontal_scale;
+                let z = z * 1800. / p.horizontal_scale;
+                let patch = noise(x / 190., z / 190., seed ^ 0x5124);
+                if f.temperature + 0.12 * patch > 0.41 && patch > -0.08 {
+                    Material::Grass
+                } else {
+                    Material::Stone
+                }
             } else {
                 Material::Stone
             }
@@ -583,7 +786,11 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
 /// and output scaling is 1.6; clamping cannot increase that bound.
 pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
     let a = p.amplitude / 1000.;
-    let global = [-402. * a, 1663. * a];
+    let global = global_height_range(p);
+    if p.recipe == FbmRecipe::Watershed {
+        // The affine path supplies the local conservative bounds for this recipe.
+        return global;
+    }
     let x = (min[0] + max[0]) * 0.5;
     let z = (min[1] + max[1]) * 0.5;
     let radius = ((max[0] - min[0]) * 0.5).hypot((max[1] - min[1]) * 0.5);
@@ -652,7 +859,7 @@ pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2
                 // Every conditioned height is a convex combination of the
                 // original source and compact valley profiles. This diagnostic
                 // hull intentionally drops weights; certified callers use AA.
-                let depth = if r.lake { 7. * a } else { 4. * a };
+                let depth = r.depth * a;
                 let profile_lo = if dlo < r.width.max(r.width_b) {
                     slo - depth
                 } else {
@@ -675,6 +882,47 @@ mod tests {
             recipe: FbmRecipe::SeededWorld,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn watershed_reaches_agree_across_halos_and_vary_with_runoff() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..params()
+        };
+        let mut common = 0;
+        let mut min_width = f64::INFINITY;
+        let mut max_width: f64 = 0.;
+        for seed in [19, 83, 40961] {
+            for z in [-9601., -1., 1., 9601.] {
+                let west = region(seed, p, -1., z);
+                let east = region(seed, p, 1., z);
+                for r in &west.reaches {
+                    if let Some(other) = east
+                        .reaches
+                        .iter()
+                        .find(|b| b.owner == r.owner && b.segment == r.segment)
+                    {
+                        common += 1;
+                        let fingerprint = |r: &Reach| {
+                            [
+                                r.a.x, r.a.z, r.a.stage, r.b.x, r.b.z, r.b.stage, r.width,
+                                r.width_b, r.depth,
+                            ]
+                            .map(f64::to_bits)
+                        };
+                        assert_eq!(fingerprint(r), fingerprint(other));
+                    }
+                    assert!(r.b.stage <= r.a.stage);
+                    if !r.lake {
+                        min_width = min_width.min(r.width);
+                        max_width = max_width.max(r.width);
+                    }
+                }
+            }
+        }
+        assert!(common > 100);
+        assert!(max_width > min_width * 2., "{min_width}..{max_width}");
     }
     #[test]
     fn deterministic_columns_survive_negative_boundaries_and_cache_eviction() {
@@ -1129,9 +1377,17 @@ pub(crate) fn reaches_intersecting(
         return Vec::new();
     }
     let mut out: Vec<Reach> = Vec::new();
+    let mut visited = Vec::with_capacity(4);
     for x in [min[0], max[0]] {
         for z in [min[1], max[1]] {
-            for &r in &region(seed, p, x, z).reaches {
+            let region = region(seed, p, x, z);
+            if visited
+                .iter()
+                .any(|previous| Arc::ptr_eq(previous, &region))
+            {
+                continue;
+            }
+            for &r in &region.reaches {
                 let radius = r.outer_radius();
                 if r.a.x.min(r.b.x) - radius > max[0]
                     || r.a.x.max(r.b.x) + radius < min[0]
@@ -1147,6 +1403,7 @@ pub(crate) fn reaches_intersecting(
                     out.push(r);
                 }
             }
+            visited.push(region);
         }
     }
     out

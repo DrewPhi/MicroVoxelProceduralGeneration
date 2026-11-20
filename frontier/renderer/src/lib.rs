@@ -249,6 +249,7 @@ struct Gpu {
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
     alpine_appearance: bool,
+    terrain_shadow_appearance: bool,
     terrain_amplitude: f32,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -509,6 +510,7 @@ impl Gpu {
             visual_settings: None,
             regional_appearance: false,
             alpine_appearance: false,
+            terrain_shadow_appearance: false,
             terrain_amplitude: 1000.,
             device,
             queue,
@@ -2172,16 +2174,21 @@ impl Viewer {
                     movement += direction;
                 }
             }
+            let fast_flight = self.fbm
+                || (!self.visual_settings.walking
+                    && self.world.fbm_terrain().is_some_and(|terrain| {
+                        terrain.params().recipe == frontier_world::FbmRecipe::Watershed
+                    }));
             let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
                 || self.keys.contains(&KeyCode::ShiftRight)
             {
-                if self.fbm {
+                if fast_flight {
                     80.
                 } else {
                     15.
                 }
             } else {
-                if self.fbm {
+                if fast_flight {
                     35.
                 } else {
                     3.
@@ -3049,7 +3056,6 @@ fn capture_pose(
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
     appearance_method::initialize_application();
-    adaptive_geometry::distant_voxels::Mode::initialize_application();
     let Some(options::Options {
         live_water: live_water_enabled,
         discrete_water,
@@ -3146,6 +3152,7 @@ pub fn run() -> Result<()> {
     {
         appearance_method::initialize_meadow_application();
     }
+    adaptive_geometry::distant_voxels::Mode::initialize_application(params.recipe);
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
         || scene == "pages-topology"
@@ -3237,6 +3244,11 @@ pub fn run() -> Result<()> {
         if camera_preset == "aerial" {
             camera.position.y += 300.;
             camera.pitch = -0.3;
+            if let Some(source) = world.fbm_terrain().filter(|t| {
+                t.params().recipe == frontier_world::FbmRecipe::Watershed
+            }) {
+                camera.yaw = terrain::seeded_world_heading(source, start_x, start_z).0;
+            }
         }
         capture_pose(
             &mut camera,
@@ -4045,7 +4057,7 @@ pub fn run() -> Result<()> {
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,
-            visual.overcast, visual.terrain_shadows, visual.terrain_shadows && scene.starts_with("adaptive") && viewer.world.fbm_terrain().is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine) && visual.sun_elevation > 0., viewer.visual_menu_enabled, viewer.visual_menu_enabled,
+            visual.overcast, visual.terrain_shadows, viewer.gpu.as_ref().and_then(|gpu| gpu.adaptive.as_ref()).is_some_and(|adaptive| adaptive.shadows_active()), viewer.visual_menu_enabled, viewer.visual_menu_enabled,
             viewer.camera.fov_y, viewer.camera.far
         ));
         json.pop();

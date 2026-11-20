@@ -218,6 +218,10 @@ impl Gpu {
         self.alpine_appearance = world
             .fbm_terrain()
             .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine);
+        self.terrain_shadow_appearance = self.alpine_appearance
+            || world
+                .fbm_terrain()
+                .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Watershed);
         self.regional_appearance = world
             .fbm_terrain()
             .is_some_and(|s| s.params().recipe != frontier_world::FbmRecipe::Legacy);

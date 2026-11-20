@@ -818,6 +818,29 @@ fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
     }
     true
 }
+fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
+    use crate::terrain::SeededBiome;
+    let Some(terrain) = world
+        .fbm_terrain()
+        .filter(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+    else {
+        return true;
+    };
+    let [x, _, z] = (Cell { x, y: 0, z }).center_m();
+    let fields = terrain.sample_fields(x, z);
+    if fields.water_height_m.is_some() {
+        return false;
+    }
+    let density = match fields.biome {
+        SeededBiome::Woodland => 1.,
+        SeededBiome::Wetland => 0.65,
+        SeededBiome::Plains => 0.24,
+        SeededBiome::Mountains => (fields.moisture - 0.43).clamp(0., 0.28),
+        SeededBiome::Steppe => 0.035,
+        _ => 0.,
+    };
+    (mix(seed ^ 0x7761746572736864) >> 11) as f64 / ((1u64 << 53) as f64) < density
+}
 fn supported(w: &World, x: i64, z: i64, radius: i64, max_grade: i64) -> Option<i64> {
     let h = w.height_cells(x, z);
     if w.source(Cell { x, y: h - 1, z }) != Material::Grass {
@@ -882,14 +905,22 @@ fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option
     (x, z, seed, species)
 }
 fn tree_supported(w: &World, x: i64, z: i64) -> Option<i64> {
-    let h = supported(w, x, z, 6, 2)?;
+    let max_grade = if w
+        .fbm_terrain()
+        .is_some_and(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+    {
+        4
+    } else {
+        2
+    };
+    let h = supported(w, x, z, 6, max_grade)?;
     for dx in -6..=6 {
         for dz in -6..=6 {
             if dx * dx + dz * dz > 36 {
                 continue;
             }
             let y = w.height_cells(x + dx, z + dz);
-            if (y - h).abs() > 2
+            if (y - h).abs() > max_grade
                 || w.source(Cell {
                     x: x + dx,
                     y: y - 1,
@@ -916,7 +947,8 @@ fn place_tile_region(
 ) -> Vec<PlantRecord> {
     let mut records = Vec::new();
     let (x, z, seed) = tree_candidate(w.seed, tx, tz);
-    if species == Species::Rowan && tree_allowed(w.seed, tx, tz) {
+    if species == Species::Rowan && tree_allowed(w.seed, tx, tz) && biome_allows_tree(w, x, z, seed)
+    {
         if let Some(y) = tree_supported(w, x, z) {
             records.push(PlantRecord {
                 species: Species::Rowan,
@@ -949,8 +981,11 @@ fn place_tile_region(
                         .map(|r| (r.root.x, r.root.z)),
                 );
             } else {
-                let (a, b, _) = tree_candidate(w.seed, tx + dx, tz + dz);
-                if tree_allowed(w.seed, tx + dx, tz + dz) && tree_supported(w, a, b).is_some() {
+                let (a, b, seed) = tree_candidate(w.seed, tx + dx, tz + dz);
+                if tree_allowed(w.seed, tx + dx, tz + dz)
+                    && biome_allows_tree(w, a, b, seed)
+                    && tree_supported(w, a, b).is_some()
+                {
                     trees.push((a, b));
                 }
             }

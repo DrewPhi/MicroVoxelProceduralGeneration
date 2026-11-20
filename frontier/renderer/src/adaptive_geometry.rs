@@ -1068,7 +1068,7 @@ fn build_surface_with_geometry(
     let defer_profiles = !coarse
         && world
             .fbm_terrain()
-            .is_none_or(|t| t.params().recipe != frontier_world::FbmRecipe::SeededWorld)
+            .is_none_or(|t| !t.params().recipe.has_static_water())
         && samples.gpu_profiles.enabled
         && !near_profile_shared()
         && samples.gpu_job_allowed
@@ -1580,7 +1580,7 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
             if TRACK_EXTREMA {
                 note([x, z], h);
             }
-            let water_column = (terrain.params().recipe == frontier_world::FbmRecipe::SeededWorld)
+            let water_column = (terrain.params().recipe.has_static_water())
                 .then(|| {
                     let c = terrain.column_cells(x, z);
                     NativeColumn {
@@ -2405,7 +2405,7 @@ impl Generator<'_> {
         let seeded = self
             .world
             .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+            .is_some_and(|t| t.params().recipe.has_static_water());
         let method = crate::appearance_method::for_world(self.world);
         let shared_near = near_profile_shared();
         #[cfg(test)]
@@ -2949,7 +2949,7 @@ impl Generator<'_> {
         let seeded = self
             .world
             .fbm_terrain()
-            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::SeededWorld);
+            .is_some_and(|t| t.params().recipe.has_static_water());
         let probe = if !seeded && self.key.width_cells > MAX_NATIVE_WIDTH && stride > 1 {
             appearance_mode(self.world).probe_cells.min(stride)
         } else {

@@ -609,7 +609,7 @@ impl World {
         let column = self
             .terrain
             .as_ref()
-            .filter(|t| t.params().recipe == FbmRecipe::SeededWorld)
+            .filter(|t| t.params().recipe.has_static_water())
             .map(|t| t.column_cells(c.x, c.z));
         let h = column.map_or_else(|| self.height_cells(c.x, c.z), |v| v.visible_top);
         self.source_with_column(c, h, column)
@@ -651,7 +651,7 @@ impl World {
             }
         }
         if let Some(terrain) = &self.terrain {
-            if terrain.params().recipe == FbmRecipe::SeededWorld {
+            if terrain.params().recipe.has_static_water() {
                 return column.expect("FBM source column").material(c.y);
             }
             return if c.y >= h {

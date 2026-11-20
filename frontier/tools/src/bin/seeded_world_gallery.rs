@@ -12,11 +12,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seeds = Vec::<u64>::new();
     let mut spans = Vec::<f64>::new();
     let mut n = 257usize;
+    let mut recipe = FbmRecipe::SeededWorld;
     let mut center = [0f64; 2];
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" {
-            println!("seeded_world_gallery [--output DIR] [--seed INTEGER] [--span METERS] [--resolution 257] [--center X,Z]\nRepeat --seed/--span; defaults seeds 7,19,83 and spans 10000,100000m. Canonical CPU samples only; eval timing is not FPS. Then run python3 tools/seeded_world_gallery.py DIR");
+            println!("seeded_world_gallery [--output DIR] [--seed INTEGER] [--span METERS] [--resolution 257] [--center X,Z] [--recipe seeded-world|watershed]\nRepeat --seed/--span; defaults seeds 7,19,83 and spans 10000,100000m. Canonical CPU samples only; eval timing is not FPS. Then run python3 tools/seeded_world_gallery.py DIR");
             return Ok(());
         }
         let value = args.next().ok_or("flag requires a value")?;
@@ -24,6 +25,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--output" => out = value.into(),
             "--seed" => seeds.push(value.parse()?),
             "--span" => spans.push(value.parse()?),
+            "--recipe" => {
+                recipe = match value.as_str() {
+                    "seeded-world" => FbmRecipe::SeededWorld,
+                    "watershed" => FbmRecipe::Watershed,
+                    _ => return Err("--recipe requires seeded-world|watershed".into()),
+                }
+            }
             "--resolution" => n = value.parse()?,
             "--center" => {
                 let (x, z) = value.split_once(',').ok_or("center requires X,Z")?;
@@ -55,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let terrain = FbmTerrain::new(
             seed,
             FbmParams {
-                recipe: FbmRecipe::SeededWorld,
+                recipe,
                 ..Default::default()
             },
         )?;
@@ -141,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *count as f64 / rows.len() as f64
                 )?;
             }
-            fs::write(out.join(format!("{file}.json")),format!("{{\"schema\":\"frontier-seeded-world-gallery-v1\",\"recipe\":\"SeededWorld\",\"seed\":{seed},\"source_version\":{},\"appearance_version\":{},\"span_m\":{span},\"center_xz_m\":{center:?},\"resolution\":{n},\"grid_spacing_m\":{spacing},\"native_voxel_m\":{VOXEL_SIZE},\"params\":{{\"horizontal_scale\":1800,\"amplitude\":1000,\"octaves\":8,\"roughness\":0.5}},\"eval_ms\":{},\"method\":\"CPU canonical quantized ground and visible columns; climate at native column center; elapsed includes column and field queries and row allocation, excludes CSV IO. Static water; sparse map samples do not measure river area exactly. Not engine rendering or FPS.\"}}\n",terrain.source_version(),terrain.appearance_version(),elapsed.as_secs_f64()*1000.))?;
+            fs::write(out.join(format!("{file}.json")),format!("{{\"schema\":\"frontier-seeded-world-gallery-v1\",\"recipe\":\"{recipe:?}\",\"seed\":{seed},\"source_version\":{},\"appearance_version\":{},\"span_m\":{span},\"center_xz_m\":{center:?},\"resolution\":{n},\"grid_spacing_m\":{spacing},\"native_voxel_m\":{VOXEL_SIZE},\"params\":{{\"horizontal_scale\":1800,\"amplitude\":1000,\"octaves\":8,\"roughness\":0.5}},\"eval_ms\":{},\"method\":\"CPU canonical quantized ground and visible columns; climate at native column center; elapsed includes column and field queries and row allocation, excludes CSV IO. Static water; sparse map samples do not measure river area exactly. Not engine rendering or FPS.\"}}\n",terrain.source_version(),terrain.appearance_version(),elapsed.as_secs_f64()*1000.))?;
             println!("{file}: ground {:.1}..{:.1}m, sampled water {:.2}%, biomes {counts:?}, CPU {:.1}ms",low[0],high[0],fraction*100.,elapsed.as_secs_f64()*1000.);
         }
     }

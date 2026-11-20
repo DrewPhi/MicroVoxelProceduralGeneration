@@ -1006,23 +1006,28 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let ridge = Aa::point(1.).sub(band(3600., 4, 0.48, 0x5105).abs());
     let hills = band(1800., 3, 0.45, 0x5106);
     let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let base = continent
-        .scale(400.)
-        .add(Aa::point(65.))
-        .add(mountain.mul(mountain).mul(ridge.mul(ridge)).scale(1150.))
-        .add(hills.scale(45.))
-        .add(fine.scale(3.))
-        .scale(p.amplitude / 1000.);
+    let authored = if p.recipe == FbmRecipe::Watershed {
+        let strata = band(1050., 3, 0.45, 0x5121);
+        crate::terrain::seeded_world::watershed_relief(
+            continent, mountain, ridge, hills, fine, strata,
+        )
+    } else {
+        continent
+            .scale(400.)
+            .add(Aa::point(65.))
+            .add(mountain.mul(mountain).mul(ridge.mul(ridge)).scale(1150.))
+            .add(hills.scale(45.))
+            .add(fine.scale(3.))
+    };
+    let base = authored.scale(p.amplitude / 1000.);
     let rx = x.range();
     let rz = z.range();
     let spacing = 2400. * p.horizontal_scale / 1800.;
     if rx.hi - rx.lo > spacing * 4. || rz.hi - rz.lo > spacing * 4. {
         // Huge root regions use the proven finite source envelope; no graph
         // search or mistaken empty candidate list may certify absent channels.
-        return Aa::interval(
-            (-402. * p.amplitude / 1000.).next_down(),
-            (1663. * p.amplitude / 1000.).next_up(),
-        );
+        let [lo, hi] = crate::terrain::seeded_world::global_height_range(p);
+        return Aa::interval(lo.next_down(), hi.next_up());
     }
     let reaches = t.seeded_reaches([rx.lo, rz.lo], [rx.hi, rz.hi]);
     let smooth = |v: I| {
@@ -1087,7 +1092,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             hi: stage.hi.max(0.),
         };
         let amplitude = p.amplitude / 1000.;
-        let depth = if r.lake { 7. } else { 4. } * amplitude;
+        let depth = r.depth * amplitude;
         let bank = I::point(0.7 * amplitude);
         let inner = |d: I| {
             stage
@@ -1116,7 +1121,10 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
                 hi: a.hi.max(b.hi),
             }
         };
-        if stage.lo == 0. && base_range.lo < 0. {
+        if p.recipe == FbmRecipe::Watershed {
+            profile.lo = profile.lo.min(base_range.lo);
+            profile.hi = profile.hi.min(base_range.hi);
+        } else if stage.lo == 0. && base_range.lo < 0. {
             // The source permits cuts, but no raised banks, where a zero-stage
             // reach is already below sea level.
             profile.lo = profile.lo.min(base_range.lo);
@@ -1204,6 +1212,25 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let roundoff = fp_pad(64. * (contributions.len() + 1) as f64 * magnitude);
     ground.lo = (ground.lo.max(hull.lo) - roundoff).next_down();
     ground.hi = (ground.hi.min(hull.hi) + roundoff).next_up();
+    let bounded_stage = |stage: I, ground: I| {
+        if p.recipe != FbmRecipe::Watershed {
+            return stage;
+        }
+        use crate::terrain::seeded_world::{WATERSHED_MAX_WATER_DEPTH, WATERSHED_WATER_ABOVE_LAND};
+        let a = p.amplitude / 1000.;
+        let land_ceiling = base_range.add(I::point(WATERSHED_WATER_ABOVE_LAND * a));
+        let depth_ceiling = ground.add(I::point(WATERSHED_MAX_WATER_DEPTH * a));
+        I {
+            lo: stage
+                .lo
+                .min(land_ceiling.lo.max(0.))
+                .min(depth_ceiling.lo.max(0.)),
+            hi: stage
+                .hi
+                .min(land_ceiling.hi.max(0.))
+                .min(depth_ceiling.hi.max(0.)),
+        }
+    };
     if let Some(stage) = guaranteed_stage {
         let lower = stage.min(possible_lake_lower);
         // Prove a wholly wet region without carrying its hidden bed into the
@@ -1224,19 +1251,33 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
                 stage_upper = stage_upper.min(lake.hi);
             }
         }
+        let stage = bounded_stage(
+            I {
+                lo: lower,
+                hi: stage_upper,
+            },
+            ground,
+        );
         Aa::interval(
-            ground.lo.max(0.).max(lower),
-            ground.hi.max(stage_upper).max(0.),
+            ground.lo.max(0.).max(stage.lo),
+            ground.hi.max(stage.hi).max(0.),
         )
     } else {
-        Aa::interval(ground.lo.max(0.), ground.hi.max(stage_upper).max(0.))
+        let stage = bounded_stage(
+            I {
+                lo: 0.,
+                hi: stage_upper,
+            },
+            ground,
+        );
+        Aa::interval(ground.lo.max(0.), ground.hi.max(stage.hi).max(0.))
     }
 }
 
 fn elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let p = t.params();
     let seed = t.seed();
-    if p.recipe == FbmRecipe::SeededWorld {
+    if p.recipe.has_static_water() {
         return seeded_elevation(
             t,
             x.scale(p.horizontal_scale),

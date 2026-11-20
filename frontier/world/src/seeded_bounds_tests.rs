@@ -203,6 +203,71 @@ fn seeded_certificates_survive_extreme_parameters_and_budget_fallbacks() {
 }
 
 #[test]
+fn watershed_certificates_cover_banks_and_region_edges() {
+    let mut wet = 0;
+    for seed in [19, 997, 40961] {
+        let terrain = FbmTerrain::new(
+            seed,
+            FbmParams {
+                recipe: FbmRecipe::Watershed,
+                ..params()
+            },
+        )
+        .unwrap();
+        let mut anchors = vec![[0., 0.], [-9600., 0.], [0., 9600.]];
+        for r in terrain
+            .seeded_reaches([-4500.; 2], [4500.; 2])
+            .iter()
+            .step_by(13)
+        {
+            let mid = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
+            anchors.extend([mid, [mid[0] + r.width, mid[1]]]);
+        }
+        for m in anchors {
+            let c = m.map(|v| (v / VOXEL_SIZE).floor() as i64);
+            wet += verify(
+                &terrain,
+                ColumnBox {
+                    min: c.map(|v| v - 64),
+                    size_cells: [129; 2],
+                },
+                BoundBudget::default(),
+            );
+        }
+    }
+    assert!(wet > 100, "wet samples {wet}");
+}
+
+#[test]
+fn watershed_water_stays_close_to_the_bed_at_a_low_saddle() {
+    let terrain = FbmTerrain::new(
+        997,
+        FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..params()
+        },
+    )
+    .unwrap();
+    // This reach originally extrapolated a stage over 380 m above its bed.
+    let x = (-3802.083333333333_f64 / VOXEL_SIZE).floor() as i64;
+    let z = (2135.416666666667_f64 / VOXEL_SIZE).floor() as i64;
+    let column = terrain.column_cells(x, z);
+    assert!(
+        column.visible_top > column.ground_top,
+        "the channel should still be wet"
+    );
+    assert!((column.visible_top - column.ground_top) as f64 * VOXEL_SIZE <= 9. + VOXEL_SIZE);
+    verify(
+        &terrain,
+        ColumnBox {
+            min: [x - 32, z - 32],
+            size_cells: [65; 2],
+        },
+        BoundBudget::default(),
+    );
+}
+
+#[test]
 fn seeded_huge_region_global_fallback_still_contains_sea_and_land() {
     for seed in [997, 0x8215_11] {
         let terrain = FbmTerrain::new(seed, params()).unwrap();

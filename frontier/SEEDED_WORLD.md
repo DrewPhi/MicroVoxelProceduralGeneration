@@ -1,5 +1,107 @@
 # Seeded world playtest
 
+## Watershed exploration preset
+
+Watershed is a separate world recipe. It pairs 6.25 cm canonical voxels and
+static water with the smooth surface renderer for distant terrain. To start
+above a new world, run the following from `frontier/`.
+
+```sh
+./run.sh --preset watershed --seed random --camera aerial --walk off --msaa 1
+```
+
+Use the printed integer seed to revisit the same geography. Omit the camera
+and walk flags to start on the ground. `F` switches between walking and free
+flight. Watershed free flight moves at 35 m/s, or 80 m/s with Shift.
+`FRONTIER_DISTANT_TERRAIN=voxy-seed` selects the stepped distance
+renderer for an A/B comparison. The `seeded-world` preset uses its original
+source and procedural river/save identities.
+
+Watershed varies ridge profiles, highland texture, and foothill relief. Its
+drainage graph uses jittered global nodes and accumulates a climate-derived
+runoff estimate for eight upstream hops. Shared world-space endpoints and
+their accumulation halo make reach descriptors independent of region load
+order. The accumulated runoff varies channel width and depth. Deep incisions
+get broad valley shoulders, and sink lakes can stretch toward their main
+inlet. The water surface is bounded by local land and bed heights where the
+graph's proposed grade crosses a low saddle. This also bounds shoreline and
+water heights used by the renderer's source certificates.
+
+Woodland, wetland, and steppe extend the climate classes. Supported rowan
+trees favor woodland and wet grass banks. The preset uses static inland
+water and a bounded contributing area. Continent-scale spill routing,
+long-term discharge and hydraulic erosion remain open. Generation changes
+have a separate source ID from `SeededWorld`. Renderer caches include the
+recipe and distance representation.
+
+For a source survey, build the `seeded_world_gallery` tool and run it with
+`--recipe watershed`. The chart script described below accepts the generated
+directory. Dense local surveys are needed to show narrow channels. Sparse
+100 km samples can quantify broad coverage and miss individual tributaries.
+
+The drainage-first approach draws on
+[Génevaux et al., Terrain Generation Using Procedural Models Based on Hydrology](https://www.cs.purdue.edu/cgvlab/www/publications/Genevaux13ToG/).
+Frontier uses its own finite, globally addressed graph and its existing
+column, water, and affine-bound infrastructure.
+
+### Flight baseline
+
+The Radeon 760M / Ryzen 5 7640U flew these 12-second routes at 80 m/s, 1080p
+MSAA1, with a 6 km view, 32 m NAADF radius, 5 px detail target, vegetation,
+terrain shadows and no streaming haze. Disk cache was disabled. The water
+artifact comparison used the same camera route and the surface path.
+
+| Scene | Seed | Frame p50 / p95 / p99, ms | Coverage frames | Resident terrain clusters | Terrain triangles |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| High country | 997 | 16.68 / 17.18 / 17.52 | 710/710 | 862 | 56,840 |
+| Mountain valley | 19 | 16.66 / 17.25 / 17.93 | 710/710 | 490 | 34,840 |
+| Woodland inlet | 40961 | 16.69 / 17.25 / 17.69 | 709/709 | 352 | 27,856 |
+| Low river | 997 | 16.67 / 17.19 / 17.70 | 710/710 | 559 | 23,744 |
+
+Final pending selection memory was zero in each run. Peak builder reservation
+was about 85 MiB. Vsync was active. The full GPU span p95 was 10.5–12.4 ms.
+Zero measured frames met the detail target. Narrow banks still show aliasing
+and visible refinement at flight speed. The high-country capture exposed
+oversized blue water columns in both distance renderers. The source survey
+traced one to a 380 m difference between the proposed stage and the local
+bed. The same flight after correcting the canonical water height removed the
+large columns. A 16-sample offline valley comparison also shows the effect of
+widening the valley shoulders before that fix.
+
+Reproduce the high-country route from `frontier/` after a release build.
+Use a fresh report and capture path for each run.
+
+```sh
+./run.sh --preset watershed --seed 997 --walk off --width 1920 --height 1080 \
+  --msaa 1 --capture-far 6000 --naadf-radius 32 --pixel-error 5 \
+  --streaming-haze 0 --cloud-speed 0 --benchmark-input-lock --warmup 10 \
+  --no-adaptive-disk-cache --route fly --route-speed 80 --route-clock realtime \
+  --seconds 12 --eye -3610,1420,707 --target -2050,800,3100 \
+  --report output/high-country.json --capture-on-exit output/high-country.png
+```
+
+The mountain valley uses eye `-1050,1280,-550`, target `1300,700,1200`.
+The woodland inlet uses eye `-3300,250,800`, target `-900,30,3300`.
+The low river uses eye `-800,420,-350`, target `100,175,1000`.
+The latest captures, source surveys and footage are in the ignored
+`output/watershed-exploration/` directory. The source-v8 regression survey
+matched all 66,049 sampled rows, and the fixed Legacy reference matched
+the previous PNG, float color, depth and coverage byte for byte.
+
+Five final 100 km surveys of seeds 7, 19, 83, 997 and 40961 each contained all
+nine biome classes. Sampling 193×193 sites for canonical columns and climate
+took 326–332 ms per survey. Positive water stages in those samples had depths
+of at most 7 m. The bounded per-thread drainage cache retains up to 20 regions
+for Watershed; this lets the wide survey reuse regions across scanlines. The
+world suite passed 200 tests, including the exact low-saddle regression and
+held-out bank and region-edge certificate checks.
+
+The separately recorded keyboard-and-mouse flight turned 73° and moved 361 m
+from its start. Its frame trace shows the ordinary and Shift-boost speed bands.
+Recording timings are separate from the benchmark table.
+
+## Original seeded-world preset
+
 This is the first implementation checkpoint for [issue #87](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/87). The original design brief and acceptance criteria are in [agent_context/seeded_world_issue.md](agent_context/seeded_world_issue.md). The issue remains open for its broader acceptance gates.
 
 From this directory:
