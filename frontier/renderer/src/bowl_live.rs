@@ -1,6 +1,5 @@
-//! First-person bowl interaction and small voxel view model. Droplets use the
-//! world-space native grid; the overlay projects them with canonical occlusion.
-use crate::{Camera, Result};
+//! Desert inventory, physical bowl interaction, and garden updates.
+use crate::{avatar::Hands, vessel::Vessel, Camera, Result};
 use frontier_world::{
     bowl::{Bowl, CAPACITY},
     garden::{Garden, GrowthControls, Tissue},
@@ -26,7 +25,10 @@ pub struct BowlLive {
     pub pockets: Pockets,
     gesture: Option<HandGesture>,
     pub pouring: bool,
-    pub tilt: f32,
+    scooping: bool,
+    dip: f64,
+    tilt: f64,
+    pub vessel: Vessel,
     pub message: String,
     path: PathBuf,
     identity: String,
@@ -105,33 +107,16 @@ impl BowlLive {
             pockets,
             gesture: None,
             pouring: false,
+            scooping: false,
+            dip: 0.,
             tilt: 0.,
+            vessel: Vessel::default(),
             message: "Find the shoreline and scoop some water".into(),
             path,
             identity,
             debt: 0.,
             clock: Instant::now(),
             saves: 0,
-        }
-    }
-    pub fn scoop(&mut self, world: &mut World, camera: Camera) {
-        match self.state.scoop(
-            world,
-            camera.position.to_array(),
-            camera.direction().as_dvec3().to_array(),
-        ) {
-            Ok(n) => {
-                eprintln!(
-                    "bowl scoop accepted units={n} held={} conserved={}",
-                    self.state.units,
-                    self.state.conserved()
-                );
-                self.message = format!(
-                    "Scooped {:.2} L from the pond",
-                    n as f64 * VOXEL_SIZE.powi(3) * 1000.
-                )
-            }
-            Err(e) => self.message = e.into(),
         }
     }
     pub(crate) fn holds_seed(&self) -> bool {
@@ -149,6 +134,8 @@ impl BowlLive {
     pub fn select_pocket(&mut self, index: usize) {
         self.gesture = None;
         self.pouring = false;
+        self.scooping = false;
+        self.vessel = Vessel::default();
         self.message = match self.pockets.select(index) {
             Ok(()) => format!(
                 "Hands: {}",
@@ -163,6 +150,8 @@ impl BowlLive {
     pub fn stow(&mut self) {
         self.gesture = None;
         self.pouring = false;
+        self.scooping = false;
+        self.vessel = Vessel::default();
         self.message = match self.pockets.stow() {
             Ok(()) => "Item put in your pocket".into(),
             Err(e) => e.into(),
@@ -196,10 +185,9 @@ impl BowlLive {
             );
         }
         if self.pockets.bowl() {
-            if left && pressed {
-                self.scoop(world, camera);
-            }
-            if !left {
+            if left {
+                self.scooping = pressed;
+            } else {
                 self.pouring = pressed;
             }
             return;
@@ -324,7 +312,7 @@ impl BowlLive {
     pub fn update(
         &mut self,
         world: &mut World,
-        camera: Camera,
+        hands: Hands,
         spill: bool,
         active: bool,
         sun: [f64; 3],
@@ -333,20 +321,34 @@ impl BowlLive {
         self.clock = Instant::now();
         if !active {
             self.pouring = false;
+            self.scooping = false;
             self.gesture = None;
             return;
         }
         self.debt = (self.debt + elapsed).min(0.4);
-        let pouring = self.pockets.bowl() && self.pouring;
-        let spill = self.pockets.bowl() && spill;
+        let equipped = self.pockets.bowl();
+        let pouring = equipped && self.pouring;
+        let scoop = equipped && self.scooping && !pouring && !spill;
         let target = if spill {
-            1.35
+            1.9
         } else if pouring {
-            0.85
+            0.95
         } else {
             0.
         };
-        self.tilt += (target - self.tilt) * (elapsed as f32 * 10.).min(1.);
+        let response = (elapsed * 11.).min(1.);
+        self.tilt += (target - self.tilt) * response;
+        self.dip += (f64::from(scoop) - self.dip) * response;
+        if equipped {
+            self.vessel.update(
+                hands.vessel(self.dip, self.tilt),
+                elapsed.clamp(0.001, 0.12),
+            );
+        } else {
+            self.vessel = Vessel::default();
+        }
+        let spilling_before = self.state.spilled;
+        let mut filled = 0;
         let before = self.garden.cells();
         let instant = self.growth_controls.is_instant();
         let mut water_stepped = false;
@@ -355,14 +357,9 @@ impl BowlLive {
                 break;
             }
             self.debt -= 0.025;
-            self.state.emit(
-                world,
-                camera.position.to_array(),
-                camera.direction().as_dvec3().to_array(),
-                0.025,
-                spill,
-                pouring || spill,
-            );
+            filled += self
+                .vessel
+                .step(world, &mut self.state, scoop, !pouring, 0.025);
             self.state.advance(world, 0.025);
             water_stepped = true;
             if !instant {
@@ -397,8 +394,24 @@ impl BowlLive {
                 self.state.plant_transferred
             );
         }
-        if (pouring || spill) && self.state.units == 0 {
-            self.message = "Bowl empty — the water is now in the world".into();
+        if filled > 0 {
+            eprintln!(
+                "bowl scoop accepted units={filled} held={} conserved={}",
+                self.state.units,
+                self.state.conserved()
+            );
+            self.message = "Water scooped from the pond".into();
+        } else if scoop && self.state.units == 0 {
+            self.message = "Hold Ctrl and look down to dip the rim into the pond".into();
+        }
+        if self.state.spilled > spilling_before {
+            self.message = if self.state.units == 0 {
+                "Spilled the bowl".into()
+            } else {
+                "Water spilled over the rim".into()
+            };
+        } else if pouring && self.state.units == 0 {
+            self.message = "Bowl empty".into();
         }
     }
     pub fn save(&mut self, world: &World) -> Result<()> {
@@ -447,8 +460,11 @@ impl BowlLive {
         out.push_str(&format!(",\"pockets\":{{\"hand\":{:?},\"slots\":{},\"picked_voxels\":{},\"placed_voxels\":{},\"carried_voxels\":{},\"handful_limit\":{},\"loose_conserved\":{},\"inventory_valid\":{}}}}}",self.pockets.hand.as_ref().map_or("Empty".into(),Item::name),format!("[{}]",self.pockets.slots.iter().map(|v|format!("{:?}",v.as_ref().map_or("Empty".into(),Item::name))).collect::<Vec<_>>().join(",")),self.pockets.picked,self.pockets.placed,self.pockets.carried(),HANDFUL,self.pockets.conserved(),self.pockets.validate(self.garden.seeds)));
         out
     }
-    pub fn overlay(&self, world: &World, camera: Camera, aspect: f32) -> Overlay {
-        let mut out=Overlay{text:format!("WOODEN BOWL   {:.2} / {:.2} L\nLeft click: scoop • Hold right/R: pour • Hold Q: tip/spill • B: equip\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,CAPACITY as f64*VOXEL_SIZE.powi(3)*1000.,self.message),fill:self.state.units as f32/CAPACITY as f32,..Default::default()};
+    pub fn overlay(&self, camera: Camera, aspect: f32) -> Overlay {
+        let mut out = Overlay {
+            fill: self.state.units as f32 / CAPACITY as f32,
+            ..Default::default()
+        };
         let pockets = self
             .pockets
             .slots
@@ -469,6 +485,11 @@ impl BowlLive {
             .as_ref()
             .map_or("Empty".into(), Item::name);
         out.text=format!("Hands: {hands} • bowl {:.2} L\n{pockets}\n1–4 swap pocket • E stow • Empty hands: hold left to gather • Right/R: place/pour\n{}",self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.message);
+        if self.pockets.bowl() {
+            out.text.push_str(
+                "\nCtrl crouch • Hold left to dip • Hold right to pour • C change camera",
+            );
+        }
         if self.holds_seed() {
             out.text.push_str("\nG · Program seed");
         }
@@ -542,66 +563,10 @@ impl BowlLive {
             }
         }
 
-        // Small bounded particle count: nearest-solid occlusion comes from canonical
-        // cells, not approximate LOD depths. Each displayed droplet is a whole cube.
-        let mut drops = self.state.drops.iter().collect::<Vec<_>>();
-        drops.sort_by(|a, b| {
-            let dist =
-                |c: Cell| glam::DVec3::from_array(c.center_m()).distance_squared(camera.position);
-            dist(b.cell).total_cmp(&dist(a.cell))
-        });
-        for d in drops {
-            let center = glam::DVec3::from_array(d.cell.center_m());
-            let delta = center - camera.position;
-            let distance = delta.length();
-            if distance > 0.
-                && frontier_world::raycast_solid(
-                    world,
-                    camera.position.to_array(),
-                    delta.to_array(),
-                    (distance - VOXEL_SIZE).max(0.),
-                )
-                .is_some()
-            {
-                continue;
-            }
-            cube(
-                d.cell,
-                [40, 139, 177],
-                |p| {
-                    let rel = glam::DVec3::from_array(p) - camera.position;
-                    let v = matrix * rel.as_vec3().extend(1.);
-                    (v.w > 0.025).then_some([v.x / v.w, v.y / v.w])
-                },
-                &mut out.faces,
-            );
-        }
         if let Some(held) = &self.pockets.hand {
             let mut voxels = Vec::new();
             match held {
-                Item::Bowl => {
-                    for y in 0..3 {
-                        for z in -2i64..=2 {
-                            for x in -2i64..=2 {
-                                let r = x * x + z * z;
-                                if r <= 4 && (y == 0 || r > 1) {
-                                    voxels.push((Cell { x, y, z }, [139, 83, 42]));
-                                }
-                            }
-                        }
-                    }
-                    let mut water = 0;
-                    for y in 1..3 {
-                        for z in -1i64..=1 {
-                            for x in -1i64..=1 {
-                                if x * x + z * z <= 1 && water < self.state.units {
-                                    water += 1;
-                                    voxels.push((Cell { x, y, z }, [43, 153, 188]));
-                                }
-                            }
-                        }
-                    }
-                }
+                Item::Bowl => return out,
                 Item::Seed => voxels.push((Cell { x: 0, y: 1, z: 0 }, [12, 12, 12])),
                 Item::Sand(cells) => {
                     for (i, m) in cells.iter().enumerate() {
@@ -622,7 +587,7 @@ impl BowlLive {
                 }
             }
             let occupied: std::collections::BTreeSet<_> = voxels.iter().map(|(c, _)| *c).collect();
-            let rotation = glam::Mat3::from_rotation_x(self.tilt);
+            let rotation = glam::Mat3::IDENTITY;
             let view = glam::Vec3::new(1., 2., 1.);
             let mut faces = Vec::new();
             for (c, color) in voxels {
@@ -678,37 +643,6 @@ impl BowlLive {
         out
     }
 }
-fn cube(
-    c: Cell,
-    color: [u8; 3],
-    project: impl Fn([f64; 3]) -> Option<[f32; 2]>,
-    out: &mut Vec<([[f32; 2]; 4], [u8; 3])>,
-) {
-    let points: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
-        project([
-            (c.x as f64 + (i & 1) as f64) * VOXEL_SIZE,
-            (c.y as f64 + ((i >> 1) & 1) as f64) * VOXEL_SIZE,
-            (c.z as f64 + ((i >> 2) & 1) as f64) * VOXEL_SIZE,
-        ])
-    });
-    // Complete cube faces; painter order is sufficient for this tiny view model.
-    for (indices, shade) in [
-        ([0, 1, 5, 4], 0.65),
-        ([0, 4, 6, 2], 0.75),
-        ([1, 3, 7, 5], 0.85),
-        ([4, 5, 7, 6], 0.8),
-        ([0, 2, 3, 1], 0.9),
-        ([2, 6, 7, 3], 1.),
-    ] {
-        if let [Some(a), Some(b), Some(c), Some(d)] = indices.map(|i| points[i]) {
-            let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-            if area > 0. {
-                out.push(([a, b, c, d], color.map(|v| (v as f32 * shade) as u8)));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod garden_save_tests {
     use super::*;

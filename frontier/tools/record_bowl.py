@@ -39,11 +39,19 @@ def main():
    previous_x,previous_y=px,py
  def scoop():
   before=(out/'game.log').read_text().count('bowl scoop accepted')
-  for i in range(7):
-   click();pause(.45)
-   if (out/'game.log').read_text().count('bowl scoop accepted')>before:return
-   key('w',.4);pause(.2)
-  raise RuntimeError('could not scoop pond water through actual input')
+  x.key('Control_L',True)
+  x.button(x.d,1,1,0);x.flush(x.d)
+  try:
+   for _ in range(18):
+    pause(.32)
+    if (out/'game.log').read_text().count('bowl scoop accepted')>before:
+     pause(.24)
+     return
+    key('w',.36)
+  finally:
+   x.button(x.d,1,0,0);x.flush(x.d);pause(.25)
+   x.key('Control_L',False)
+  raise RuntimeError('could not dip the bowl rim into pond water through actual input')
  try:
   with (out/'game.log').open('w') as log,(out/'record.log').open('w') as rlog:
    app=subprocess.Popen(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT);x=X11();deadline=time.monotonic()+120

@@ -167,8 +167,8 @@ impl SettingsUi {
                 return;
             }
             if !self.open && !self.bowl_overlay.text.is_empty() {
-                egui::Area::new(egui::Id::new("bowl controls")).anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui|{
-                    egui::Frame::popup(ui.style()).show(ui,|ui|{ui.label(&self.bowl_overlay.text);ui.add(egui::ProgressBar::new(self.bowl_overlay.fill).desired_width(250.));});
+                egui::Area::new(egui::Id::new("bowl controls")).anchor(egui::Align2::LEFT_BOTTOM,[14.,-14.]).interactable(false).show(ctx,|ui|{
+                    egui::Frame::popup(ui.style()).show(ui,|ui|{ui.add(egui::Label::new(&self.bowl_overlay.text).selectable(false));ui.add(egui::ProgressBar::new(self.bowl_overlay.fill).desired_width(250.));});
                 });
                 let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("bowl model")));
                 let r=ctx.screen_rect();let project=|p:[f32;2]|egui::pos2(r.left()+(p[0]+1.)*0.5*r.width(),r.top()+(1.-p[1])*0.5*r.height());

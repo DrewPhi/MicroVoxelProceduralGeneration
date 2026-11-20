@@ -14,7 +14,8 @@ fn offset(c: Cell, [x, y, z]: [i64; 3]) -> Cell {
         z: c.z + z,
     }
 }
-pub const CAPACITY: u32 = 8; // 1.953125 litres at the native resolution.
+pub const CAPACITY: u32 = 20; // 4.8828125 litres at the native resolution.
+const MAX_DROPS: usize = 128;
 #[derive(Clone, Debug)]
 pub struct Drop {
     pub cell: Cell,
@@ -58,18 +59,34 @@ impl Bowl {
         if hit.material != Material::Water {
             return Err("Aim at water within 2.2 m");
         }
+        self.scoop_at(world, hit.cell, CAPACITY)
+    }
+
+    pub fn scoop_at(
+        &mut self,
+        world: &mut World,
+        contact: Cell,
+        limit: u32,
+    ) -> Result<u32, &'static str> {
+        if world.material(contact) != Material::Water {
+            return Err("Lower the rim into the pond");
+        }
         if self.units == CAPACITY {
             return Err("Bowl is full");
         }
+        let count = (CAPACITY - self.units).min(limit) as usize;
+        if count == 0 {
+            return Ok(0);
+        }
         let mut picked = Vec::new();
-        let mut frontier = VecDeque::from([hit.cell]);
-        let mut visited = BTreeSet::from([hit.cell]);
+        let mut frontier = VecDeque::from([contact]);
+        let mut visited = BTreeSet::from([contact]);
         while let Some(cell) = frontier.pop_front() {
             if world.material(cell) != Material::Water {
                 continue;
             }
             picked.push(cell);
-            if picked.len() == (CAPACITY - self.units) as usize {
+            if picked.len() == count {
                 break;
             }
             for delta in SIDES.into_iter().chain([DOWN, UP]) {
@@ -289,20 +306,33 @@ impl Bowl {
             let c = Cell::from_meters(std::array::from_fn(|a| {
                 eye[a] + dir[a] * 0.45 + right[a] * 0.27 - up[a] * 0.14
             }));
-            if world.material(c) != Material::Air || self.drops.iter().any(|d| d.cell == c) {
-                continue;
-            }
-            self.units -= 1;
-            self.emitted += 1;
-            if spill {
-                self.spilled += 1;
-            }
-            self.drops.push(Drop {
-                cell: c,
-                velocity: [dir[0] * 1.2, -0.7, dir[2] * 1.2],
-                credit: [0.; 3],
-            });
+            self.emit_at(world, c, [dir[0] * 1.2, -0.7, dir[2] * 1.2], spill);
         }
+    }
+
+    pub fn emit_at(
+        &mut self,
+        world: &World,
+        cell: Cell,
+        velocity: [f64; 3],
+        accidental: bool,
+    ) -> bool {
+        if self.units == 0
+            || self.drops.len() >= MAX_DROPS
+            || world.material(cell) != Material::Air
+            || self.drops.iter().any(|drop| drop.cell == cell)
+        {
+            return false;
+        }
+        self.units -= 1;
+        self.emitted += 1;
+        self.spilled += u64::from(accidental);
+        self.drops.push(Drop {
+            cell,
+            velocity,
+            credit: [0.; 3],
+        });
+        true
     }
     fn absorb(&mut self, world: &mut World, at: Cell) {
         *self.moisture.entry(at).or_default() += 1;
@@ -552,8 +582,7 @@ impl Bowl {
                 "P" if v.len() == 10 => {
                     let velocity = [real(v[4])?, real(v[5])?, real(v[6])?];
                     let credit = [real(v[7])?, real(v[8])?, real(v[9])?];
-                    if b.drops.len() >= CAPACITY as usize || b.drops.iter().any(|d| d.cell == cell)
-                    {
+                    if b.drops.len() >= MAX_DROPS || b.drops.iter().any(|d| d.cell == cell) {
                         false
                     } else {
                         b.drops.push(Drop {

@@ -8,6 +8,8 @@ mod appearance_map;
 mod appearance_method;
 mod appearance_visibility;
 mod atmosphere;
+mod avatar;
+mod avatar_gpu;
 mod bowl_live;
 pub mod brick_ray;
 mod build_memory;
@@ -55,6 +57,7 @@ mod vegetation_gpu;
 pub mod vegetation_lab;
 mod vegetation_mesher;
 mod vegetation_scene;
+mod vessel;
 mod viewer_visual;
 pub mod volume;
 mod walking;
@@ -1622,6 +1625,8 @@ struct Viewer {
     multisample: Option<wgpu::Texture>,
     camera: Camera,
     walking: walking::WalkingCamera,
+    avatar: avatar::Avatar,
+    avatar_gpu: Option<avatar_gpu::AvatarGpu>,
     frame_trace: playability::FrameTrace,
     shadow_trace: playability::ShadowTrace,
     keys: HashSet<KeyCode>,
@@ -1696,13 +1701,13 @@ impl Viewer {
         }
         Ok(())
     }
-    fn poll_terrain(&mut self) {
+    fn poll_terrain(&mut self, view_camera: Camera) {
         if let (Some(view), Some(gpu)) = (&mut self.adaptive_view, &mut self.gpu) {
             let (width, height) = self
                 .atmosphere
                 .as_ref()
                 .map_or((self.width, self.height), |a| a.dimensions());
-            if let Err(error) = view.poll(gpu, self.camera, width, height) {
+            if let Err(error) = view.poll(gpu, view_camera, width, height) {
                 self.error = Some(error);
             }
             return;
@@ -2187,17 +2192,13 @@ impl Viewer {
                 ));
             }
         }
-        if let Some(bowl) = &self.bowl {
-            if let Some(ui) = &mut self.settings_ui {
-                ui.set_bowl_overlay(bowl.overlay(
-                    &self.world,
-                    self.camera,
-                    self.width as f32 / self.height.max(1) as f32,
-                ));
-            }
-        }
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
+        let walking_avatar = self.bowl.is_some() && self.visual_settings.walking;
+        let sun = atmosphere::sun_direction(
+            self.visual_settings.sun_elevation,
+            self.visual_settings.sun_azimuth,
+        );
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
             let right = forward.cross(Vec3::Y);
@@ -2231,12 +2232,27 @@ impl Viewer {
                 }
             };
             if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
-                let horizontal =
-                    Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
+                let mut horizontal = (Vec3::new(movement.x, 0., movement.z).normalize_or_zero()
+                    * speed.min(6.))
+                .as_dvec3();
+                if walking_avatar {
+                    let eye = self
+                        .walking
+                        .physical_eye()
+                        .map_or(self.camera.position, DVec3::from_array);
+                    horizontal = self.avatar.move_intent(
+                        &self.world,
+                        eye,
+                        horizontal,
+                        movement.y < 0.,
+                        self.walking.grounded(),
+                        f64::from(dt),
+                    );
+                }
                 self.camera.position = DVec3::from_array(self.walking.advance_presented(
                     &self.world,
                     self.camera.position.to_array(),
-                    [horizontal.x as f64, horizontal.z as f64],
+                    [horizontal.x, horizontal.z],
                     self.keys.contains(&KeyCode::Space),
                     dt as f64,
                     self.visual_settings.step_smoothing,
@@ -2304,19 +2320,45 @@ impl Viewer {
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
         }
+        if walking_avatar {
+            let eye = self
+                .walking
+                .physical_eye()
+                .map_or(self.camera.position, DVec3::from_array);
+            self.avatar.advance_pose(
+                &self.world,
+                eye,
+                self.camera.yaw,
+                self.walking.grounded(),
+                f64::from(dt),
+            );
+        }
+        let view_camera = if walking_avatar {
+            self.avatar.view(&self.world, self.camera)
+        } else {
+            self.camera
+        };
         if let Some(bowl) = &mut self.bowl {
+            let hands = self.avatar.hands(self.camera);
+            let interacting = self.grabbed && self.pending_teleport.is_none();
             bowl.update(
                 &mut self.world,
-                self.camera,
+                hands,
                 self.keys.contains(&KeyCode::KeyQ),
-                self.grabbed && self.pending_teleport.is_none(),
-                atmosphere::sun_direction(
-                    self.visual_settings.sun_elevation,
-                    self.visual_settings.sun_azimuth,
-                )
-                .as_dvec3()
-                .to_array(),
+                interacting,
+                sun.as_dvec3().to_array(),
             );
+            self.avatar.trace(
+                self.camera,
+                bowl.state.units,
+                bowl.state.spilled,
+                f64::from(dt),
+            );
+            if let Some(ui) = &mut self.settings_ui {
+                ui.set_bowl_overlay(
+                    bowl.overlay(view_camera, self.width as f32 / self.height.max(1) as f32),
+                );
+            }
         }
         if let Some(live) = &mut self.live_water {
             live.observe_camera(self.camera);
@@ -2335,7 +2377,7 @@ impl Viewer {
             }
         }
         let terrain_started = Instant::now();
-        self.poll_terrain();
+        self.poll_terrain(view_camera);
         let terrain_ms = terrain_started.elapsed().as_secs_f64() * 1000.;
         let plants_started = Instant::now();
         if let Some(gpu) = &mut self.gpu {
@@ -2348,7 +2390,7 @@ impl Viewer {
                     .as_ref()
                     .and_then(|v| v.static_world())
                     .unwrap_or(&self.world),
-                self.camera,
+                view_camera,
                 width,
                 height,
             )?;
@@ -2387,7 +2429,7 @@ impl Viewer {
                     .as_ref()
                     .and_then(|v| v.static_world())
                     .unwrap_or(&self.world),
-                self.camera,
+                view_camera,
             );
             if let Some((origin, dimensions, generation, states)) =
                 self.live_water.as_ref().and_then(|v| v.dynamic_water())
@@ -2425,7 +2467,7 @@ impl Viewer {
                 .gpu
                 .as_ref()
                 .and_then(|g| g.naadf.as_ref())
-                .is_some_and(|n| n.bounds_for(self.camera).is_none())
+                .is_some_and(|n| n.bounds_for(view_camera).is_none())
         {
             // Keep the last coherent presentation while a changed canonical
             // source restores its mesh cover. Flush uploads without drawing holes.
@@ -2436,7 +2478,7 @@ impl Viewer {
             return Ok(());
         }
         if let Some(pages) = self.gpu.as_ref().and_then(|g| g.pages.as_ref()) {
-            if !pages.contains(self.camera.position, self.camera.far) {
+            if !pages.contains(view_camera.position, view_camera.far) {
                 return Err("page experiment camera outran its coherent finite cover; readiness failed (no incomplete cover presented)".into());
             }
         }
@@ -2534,7 +2576,7 @@ impl Viewer {
         if let Some(terrain) = self.gpu.as_ref().and_then(|g| g.terrain.as_ref()) {
             let center = terrain.center();
             self.terrain_center_lag_end_m =
-                (self.camera.position.x - center[0]).hypot(self.camera.position.z - center[1]);
+                (view_camera.position.x - center[0]).hypot(view_camera.position.z - center[1]);
             self.terrain_center_lag_max_m = self
                 .terrain_center_lag_max_m
                 .max(self.terrain_center_lag_end_m);
@@ -2577,7 +2619,7 @@ impl Viewer {
         };
         if benchmark_preparing {
             gpu.observe_water_camera(
-                &self.camera,
+                &view_camera,
                 &self.world,
                 self.visual_started.elapsed().as_secs_f32(),
             );
@@ -2621,21 +2663,41 @@ impl Viewer {
             probe.begin_frame(&mut encoder, slot);
         }
         gpu.observe_water_camera(
-            &self.camera,
+            &view_camera,
             &self.world,
             self.visual_started.elapsed().as_secs_f32(),
         );
-        gpu.prepare_ground_light(&self.world, self.camera);
+        gpu.prepare_ground_light(&self.world, view_camera);
         let target = frame.texture.create_view(&Default::default());
         let multisample_view = self
             .multisample
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
+        let depth_view = depth.create_view(&Default::default());
+        let (scene_color, scene_resolve, scene_depth, scene_width, scene_height) =
+            if let Some(atmosphere) = &self.atmosphere {
+                let (width, height) = atmosphere.dimensions();
+                (
+                    atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
+                    atmosphere.msaa_view().map(|_| atmosphere.scene_view()),
+                    atmosphere.depth_view(),
+                    width,
+                    height,
+                )
+            } else {
+                (
+                    multisample_view.as_ref().unwrap_or(&target),
+                    multisample_view.as_ref().map(|_| &target),
+                    &depth_view,
+                    config.width,
+                    config.height,
+                )
+            };
         if let Some(atmosphere) = &self.atmosphere {
             let (width, height) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(gpu.medium_ground_height);
             atmosphere.set_lighting_context(
-                &self.camera,
+                &view_camera,
                 gpu.adaptive.as_ref(),
                 self.adaptive_view.as_ref(),
                 gpu.camera_submerged.get(),
@@ -2643,53 +2705,56 @@ impl Viewer {
             );
             atmosphere.prepare(
                 &gpu.queue,
-                self.camera
-                    .matrix(self.camera.position, width as f32 / height as f32)
+                view_camera
+                    .matrix(view_camera.position, width as f32 / height as f32)
                     .inverse(),
                 Vec3::ZERO,
-                self.camera.position,
+                view_camera.position,
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
             );
             gpu.native_sample_phase
                 .set(atmosphere.prepare_native_history(
                     &gpu.queue,
-                    self.camera,
+                    view_camera,
                     gpu.polished_appearance && self.visual_settings.voxel_filter,
                     self.world.revision(),
                 ));
-            gpu.draw(
+        }
+        gpu.draw(
+            &mut encoder,
+            scene_color,
+            scene_resolve,
+            scene_depth,
+            &view_camera,
+            scene_width,
+            scene_height,
+            timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
+            timing.and_then(|slot| {
+                self.gpu_probe
+                    .as_ref()
+                    .and_then(|p| p.vegetation_writes(slot))
+            }),
+        );
+        if let Some(bowl) = &self.bowl {
+            avatar_gpu::AvatarGpu::draw(
+                &mut self.avatar_gpu,
+                gpu,
                 &mut encoder,
-                atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
-                atmosphere.msaa_view().map(|_| atmosphere.scene_view()),
-                atmosphere.depth_view(),
-                &self.camera,
-                width,
-                height,
-                timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
-                timing.and_then(|slot| {
-                    self.gpu_probe
-                        .as_ref()
-                        .and_then(|p| p.vegetation_writes(slot))
-                }),
+                scene_color,
+                scene_resolve,
+                scene_depth,
+                &self.avatar,
+                walking_avatar && self.avatar.third_person,
+                bowl,
+                self.camera,
+                view_camera,
+                scene_width as f32 / scene_height as f32,
+                sun,
             );
+        }
+        if let Some(atmosphere) = &self.atmosphere {
             atmosphere.encode_with_shadows(&mut encoder, &target, gpu.adaptive.as_ref());
-        } else {
-            gpu.draw(
-                &mut encoder,
-                multisample_view.as_ref().unwrap_or(&target),
-                multisample_view.as_ref().map(|_| &target),
-                &depth.create_view(&Default::default()),
-                &self.camera,
-                config.width,
-                config.height,
-                timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
-                timing.and_then(|slot| {
-                    self.gpu_probe
-                        .as_ref()
-                        .and_then(|p| p.vegetation_writes(slot))
-                }),
-            );
         }
         if let Some(ui) = &self.settings_ui {
             ui.render(&mut encoder, &target);
@@ -3063,9 +3128,13 @@ impl ApplicationHandler for Viewer {
                                 }
                             }
                         }
+                        if key == KeyCode::KeyC && !event.repeat && self.bowl.is_some() {
+                            self.avatar.third_person = !self.avatar.third_person;
+                        }
                         if key == KeyCode::KeyF && !event.repeat {
                             self.visual_settings.walking = !self.visual_settings.walking;
                             self.walking.reset();
+                            self.avatar.reset();
                             if let Some(ui) = &mut self.settings_ui {
                                 ui.set_walking(self.visual_settings.walking);
                             }
@@ -3274,6 +3343,7 @@ pub fn run() -> Result<()> {
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
     let bowl = if params.recipe == frontier_world::FbmRecipe::Desert && !live_water_enabled {
+        avatar::rocks(&mut world, start_xz);
         Some(bowl_live::BowlLive::new(&mut world, bowl_save)?)
     } else {
         None
@@ -3954,6 +4024,8 @@ pub fn run() -> Result<()> {
         },
         camera,
         walking: Default::default(),
+        avatar: avatar::Avatar::new(),
+        avatar_gpu: None,
         frame_trace: Default::default(),
         shadow_trace: Default::default(),
         terrain_data,

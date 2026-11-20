@@ -22,7 +22,8 @@ closes the workshop without applying the draft.
 
 ## Try it
 
-1. Select pocket **2**, scoop pond water with **left click**, walk to dry sand.
+1. Select pocket **2**, crouch with **Ctrl**, look down, and **hold left click**
+   until the bowl touches the pond. Release to lift it, then carry it to dry sand.
 2. Press **E** to stow the bowl and empty your hands.
 3. Aim at nearby sand: tap **left click** for one voxel, or hold and release
    for up to four (0.977 L). The selection outline and charge bar show the amount.

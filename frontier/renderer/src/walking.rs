@@ -64,6 +64,10 @@ impl WalkingCamera {
         self.presented_eye = Some(shown);
         shown
     }
+    pub fn grounded(&self) -> bool {
+        self.grounded
+    }
+
     pub fn physical_eye(&self) -> Option<[f64; 3]> {
         self.last_eye
     }
