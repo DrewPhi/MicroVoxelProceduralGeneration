@@ -1,6 +1,6 @@
 // Shared exact hierarchy for primary rays and occlusion queries. Generated
 // with group0 for the ray pass and the shared near-shadow group for mesh receivers.
-struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>,ring:vec4<u32>,cache:vec4<u32>,edit_min:vec4<i32>,edit_max:vec4<i32>};
+struct NaadfCamera {matrix:mat4x4<f32>,inverse:mat4x4<f32>,eye:vec4<f32>,extent:vec4<u32>,viewport:vec4<f32>,sun:vec4<f32>,sky:vec4<f32>,far_matrix:mat4x4<f32>,shadow:vec4<f32>,forward:vec4<f32>,right:vec4<f32>,up:vec4<f32>,projection:vec4<f32>,ring:vec4<u32>,cache:vec4<u32>,edit_min:vec4<i32>,edit_max:vec4<i32>,water:vec4<f32>};
 struct Pigment {rgb:vec3<f32>,material:u32};
 @group(NAADF_GROUP) @binding(NAADF_BASE) var<uniform> naadf:NaadfCamera;
 @group(NAADF_GROUP) @binding(NAADF_BASE+1u) var chunks:texture_3d<u32>;
@@ -301,12 +301,12 @@ fn local_exit(o:vec3<f32>,d:vec3<f32>,lo:vec3<i32>,hi:vec3<i32>,current_cell:vec
 
 // Rare direct-root replay ignores all proof fields. Only crossed axes change
 // cell identity; o+d*t never reclassifies a transverse voxel at a corner.
-fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)->VoxelHit {
+fn trace_native_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,skip_water:bool,maximum:f32)->VoxelHit {
     var visits=vec3<u32>(0);
     if naadf.extent.x==0u {return VoxelHit(false,0.,vec3(0.),0u,visits,0u);}
     let interval=voxel_interval(o,d);
     var t=max(minimum,max(0.,interval.x));
-    let exit=interval.y;
+    let exit=min(interval.y,maximum);
     if t>=exit {return VoxelHit(false,t,vec3(0.),0u,visits,0u);}
     let extent=vec3<i32>(naadf.extent.xyz);
     var cell=clamp(forward_cell(o+d*t,d),vec3(0),extent-vec3(1));
@@ -350,7 +350,7 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
                 node=naadf_leaf_word((node&0x3fffffffu)+vp.x+4u*(vp.y+4u*vp.z));
             }
         }
-        let solid=(node&0x40000000u)!=0u && !(all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_state(cell)==1u);
+        let solid=(node&0x40000000u)!=0u && !(water_node(node) && (skip_water || (all(dynamic_water.size.xyz>vec3(0u)) && water_state(cell)==1u)));
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,0u);}
         if solid && !was_solid && faces!=0u {
             return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,0u);
@@ -376,17 +376,20 @@ fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)
     return VoxelHit(false,t,vec3(0.),0u,visits,0u);
 }
 
+fn trace_native(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool)->VoxelHit {
+    return trace_native_mode(o,d,minimum,occlusion,measure,false,1e30);
+}
 fn trace_near_corner(o:vec3<f32>,d:vec3<f32>,t:f32)->vec3<bool> {
     let p=o+d*t;
     let error=max(vec3(0.001),4.e-7*(abs(o)+abs(d*t)));
     return (abs(p-round(p))<=error)&(d!=vec3(0.));
 }
 
-fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,allow_height:bool)->VoxelHit {
+fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,allow_height:bool,skip_water:bool,maximum:f32)->VoxelHit {
     var visits=vec3<u32>(0);var flags=0u;
     let lane=u32(occlusion);
     if naadf.extent.x==0u{return VoxelHit(false,0.,vec3(0.),0u,visits,flags);}
-    let interval=voxel_interval(o,d);var t=max(minimum,max(0.,interval.x));let exit=interval.y;
+    let interval=voxel_interval(o,d);var t=max(minimum,max(0.,interval.x));let exit=min(interval.y,maximum);
     if t>=exit{return VoxelHit(false,t,vec3(0.),0u,visits,flags);}
     var cell=clamp(forward_cell(o+d*t,d),vec3(0),vec3<i32>(naadf.extent.xyz)-vec3(1));
     var faces=0u;var was_solid=false;
@@ -537,7 +540,11 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
                 scale=1u;parent_lo=vec3<i32>((c/4u)*4u);parent_hi=parent_lo+vec3(4);
             }
         }
-        if all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
+        if skip_water && water_node(node) {
+            // A homogeneous water cube is empty to the optical ray. Retain
+            // its size, but never decode its old pigment as a skip proof.
+            node=0u;
+        } else if all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
             scale=1u;
             if water_state(cell)==1u {node=0u;}
         }
@@ -623,6 +630,17 @@ fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,al
     }
     if all(cell>=vec3(0)) && all(cell<extent) {flags|=TRACE_STALLED;}
     return VoxelHit(false,t,vec3(0.),0u,visits,flags);
+}
+fn trace_impl(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bool,allow_height:bool)->VoxelHit {
+    return trace_impl_mode(o,d,minimum,occlusion,measure,allow_height,false,1e30);
+}
+// Optical rays skip homogeneous water at the same scale as the native hierarchy.
+fn trace_water_optics(o:vec3<f32>,d:vec3<f32>,maximum:f32)->VoxelHit {
+    var hit=trace_impl_mode(o,d,0.,false,false,false,true,maximum);
+    if (hit.flags&(TRACE_STALLED|TRACE_ROOT_CORNER))!=0u {
+        hit=trace_native_mode(o,d,0.,false,false,true,maximum);
+    }
+    return hit;
 }
 fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,measure:bool)->VoxelHit {
     let lane=u32(occlusion);

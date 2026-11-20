@@ -45,8 +45,10 @@ mod settings_ui;
 mod source_cache_probe;
 mod source_page_cache;
 mod spatial_appearance;
+mod streaming_haze;
 mod surface_compare;
 mod terrain;
+mod terrain_light;
 mod vegetation;
 mod vegetation_generation_lab;
 mod vegetation_gpu;
@@ -295,6 +297,9 @@ struct Gpu {
     /// Linear scene target; output/UI/capture retain `format`.
     scene_format: wgpu::TextureFormat,
     medium_ground_height: f32,
+    ground_field: std::cell::RefCell<terrain_light::GroundField>,
+    camera_submerged: std::cell::Cell<bool>,
+    water_time: std::cell::Cell<f32>,
     sample_count: u32,
     voxel_filter: bool,
     terrain: Option<terrain::TerrainGpu>,
@@ -558,6 +563,9 @@ impl Gpu {
             format: output_format,
             scene_format: format,
             medium_ground_height: 0.,
+            ground_field: Default::default(),
+            camera_submerged: Default::default(),
+            water_time: Default::default(),
             sample_count,
             voxel_filter,
             terrain: None,
@@ -1005,7 +1013,42 @@ impl Gpu {
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
-    fn capture(&self, camera: &Camera, path: &Path, width: u32, height: u32) -> Result<()> {
+    fn prepare_ground_light(&self, world: &World, camera: Camera) {
+        let Some(settings) = &self.visual_settings else {
+            return;
+        };
+        if !settings.beauty || settings.visibility_benchmark {
+            return;
+        }
+        let field = self
+            .ground_field
+            .borrow_mut()
+            .prepare(world, camera, settings.ground_bounce);
+        let data = bytemuck::bytes_of(&field);
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.prepare_ground_light(&self.queue, data);
+        }
+        if let Some(native) = &self.naadf {
+            native.prepare_ground_light(&self.queue, data);
+        }
+    }
+
+    fn observe_water_camera(&self, camera: &Camera, world: &World, elapsed: f32) {
+        self.camera_submerged
+            .set(world.material(Cell::from_meters(camera.position.to_array())) == Material::Water);
+        self.water_time.set(elapsed);
+    }
+
+    fn capture(
+        &self,
+        world: &World,
+        camera: &Camera,
+        path: &Path,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        self.observe_water_camera(camera, world, 0.);
+        self.prepare_ground_light(world, *camera);
         let texture = self.texture(width, height, false);
         let depth = self.texture(width, height, true);
         let floating = self.format == wgpu::TextureFormat::Rgba32Float;
@@ -1045,6 +1088,13 @@ impl Gpu {
             post_attachment_bytes = atmosphere.attachment_bytes();
             let (rw, rh) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(self.medium_ground_height);
+            atmosphere.set_lighting_context(
+                camera,
+                self.adaptive.as_ref(),
+                None,
+                self.camera_submerged.get(),
+                0.,
+            );
             atmosphere.prepare(
                 &self.queue,
                 camera
@@ -1076,11 +1126,7 @@ impl Gpu {
                         None,
                         None,
                     );
-                    atmosphere.encode_with_shadows(
-                        &mut warmup,
-                        &target,
-                        self.adaptive.as_ref().map(|a| a.near_shadow_bind()),
-                    );
+                    atmosphere.encode_with_shadows(&mut warmup, &target, self.adaptive.as_ref());
                     self.queue.submit(Some(warmup.finish()));
                 }
             }
@@ -1097,11 +1143,7 @@ impl Gpu {
                 None,
                 None,
             );
-            atmosphere.encode_with_shadows(
-                &mut encoder,
-                &target,
-                self.adaptive.as_ref().map(|a| a.near_shadow_bind()),
-            );
+            atmosphere.encode_with_shadows(&mut encoder, &target, self.adaptive.as_ref());
         } else {
             self.draw(
                 &mut encoder,
@@ -1329,7 +1371,11 @@ impl Gpu {
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
         metadata.pop();
-        metadata.push_str(&format!(",{}}}", self.vegetation_json()));
+        metadata.push_str(&format!(
+            ",\"camera_submerged\":{},{}}}",
+            self.camera_submerged.get(),
+            self.vegetation_json()
+        ));
         metadata.pop();
         metadata.push_str(&format!(
             ",\"naadf_gpu_stages\":{}}}",
@@ -2530,6 +2576,11 @@ impl Viewer {
             Err(error) => return Err(error.into()),
         };
         if benchmark_preparing {
+            gpu.observe_water_camera(
+                &self.camera,
+                &self.world,
+                self.visual_started.elapsed().as_secs_f32(),
+            );
             let target = frame.texture.create_view(&Default::default());
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             {
@@ -2569,6 +2620,12 @@ impl Viewer {
         if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
             probe.begin_frame(&mut encoder, slot);
         }
+        gpu.observe_water_camera(
+            &self.camera,
+            &self.world,
+            self.visual_started.elapsed().as_secs_f32(),
+        );
+        gpu.prepare_ground_light(&self.world, self.camera);
         let target = frame.texture.create_view(&Default::default());
         let multisample_view = self
             .multisample
@@ -2577,6 +2634,13 @@ impl Viewer {
         if let Some(atmosphere) = &self.atmosphere {
             let (width, height) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(gpu.medium_ground_height);
+            atmosphere.set_lighting_context(
+                &self.camera,
+                gpu.adaptive.as_ref(),
+                self.adaptive_view.as_ref(),
+                gpu.camera_submerged.get(),
+                self.visual_started.elapsed().as_secs_f32(),
+            );
             atmosphere.prepare(
                 &gpu.queue,
                 self.camera
@@ -2609,11 +2673,7 @@ impl Viewer {
                         .and_then(|p| p.vegetation_writes(slot))
                 }),
             );
-            atmosphere.encode_with_shadows(
-                &mut encoder,
-                &target,
-                gpu.adaptive.as_ref().map(|a| a.near_shadow_bind()),
-            );
+            atmosphere.encode_with_shadows(&mut encoder, &target, gpu.adaptive.as_ref());
         } else {
             gpu.draw(
                 &mut encoder,
@@ -3034,9 +3094,13 @@ impl ApplicationHandler for Viewer {
                             ));
                             self.capture_number += 1;
                             if let (Some(gpu), Some(config)) = (&self.gpu, &self.config) {
-                                if let Err(error) =
-                                    gpu.capture(&self.camera, &path, config.width, config.height)
-                                {
+                                if let Err(error) = gpu.capture(
+                                    &self.world,
+                                    &self.camera,
+                                    &path,
+                                    config.width,
+                                    config.height,
+                                ) {
                                     eprintln!("capture failed: {error}");
                                 }
                             }
@@ -3724,7 +3788,7 @@ pub fn run() -> Result<()> {
         }
         gpu.settle_vegetation(&world, camera, width, height)?;
         gpu.settle_naadf(&world, camera)?;
-        gpu.capture(&camera, &path, width, height)?;
+        gpu.capture(&world, &camera, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
         metadata.pop(); // capture writes exactly one JSON object.
@@ -3801,7 +3865,7 @@ pub fn run() -> Result<()> {
                     view.pixel_error,
                 );
                 let destination = directory.join(format!("{name}.png"));
-                gpu.capture(&camera, &destination, width, height)?;
+                gpu.capture(&world, &camera, &destination, width, height)?;
                 let mut diagnostic =
                     metadata.replace("\"debug_view\":0", &format!("\"debug_view\":{mode}"));
                 for version in [2, 3, 4, 6] {
@@ -3979,7 +4043,13 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            gpu.capture(&viewer.camera, &path, config.width, config.height)?;
+            gpu.capture(
+                &viewer.world,
+                &viewer.camera,
+                &path,
+                config.width,
+                config.height,
+            )?;
             if let Some(adaptive) = &viewer.adaptive_view {
                 let metadata_path = path.with_extension("capture.json");
                 let mut metadata = std::fs::read_to_string(&metadata_path)?;
@@ -4222,6 +4292,13 @@ pub fn run() -> Result<()> {
             .filter(|p| p.full_supported)
             .map(|p| p.full_stats.summary());
         json.pop();
+        json.push_str(&format!(
+            ",\"lighting\":{{\"ground_bounce\":{},\"sunbeams\":{},\"streaming_haze\":{},\"peak_haze_regions\":{}}}",
+            visual.ground_bounce,
+            visual.sunbeams,
+            visual.streaming_haze,
+            viewer.atmosphere.as_ref().map_or(0, |a| a.peak_haze_regions()),
+        ));
         json.push_str(&format!(",\"gpu_full_render\":{{\"supported\":{},\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps\"}}}}",
             full.is_some(),full.as_ref().map_or(0,|s|s.sample_count),number(full.as_ref().and_then(|s|s.p50_ms)),number(full.as_ref().and_then(|s|s.p95_ms)),number(full.as_ref().and_then(|s|s.p99_ms))));
         if let Some(probe) = &viewer.gpu_probe {

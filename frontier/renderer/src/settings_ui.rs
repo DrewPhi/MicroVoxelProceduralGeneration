@@ -336,7 +336,10 @@ impl SettingsUi {
                                 egui::Slider::new(&mut self.settings.exposure, 0.4..=2.5)
                                     .text("Exposure"),
                             );
+                            ui.add(egui::Slider::new(&mut self.settings.ground_bounce, 0.0..=2.0).text("Ground bounce"));
                             ui.add_enabled_ui(self.settings.atmosphere, |ui| {
+                                ui.add(egui::Slider::new(&mut self.settings.sunbeams, 0.0..=2.0).text("Sunbeams"));
+                                ui.add(egui::Slider::new(&mut self.settings.streaming_haze, 0.0..=1.0).text("Streaming haze"));
                                 ui.add(
                                     egui::Slider::new(
                                         &mut self.settings.fog_density,

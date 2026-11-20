@@ -1,11 +1,10 @@
 //! Inexpensive, independently switchable sky / height fog / cloud composition.
-//! This pass uses physical scene depth, never streaming readiness or LOD state.
+//! Base aerial perspective uses scene depth. Temporary refinement haze uses published terrain metadata.
 use crate::{native_history::NativeHistory, settings::VisualSettings, Camera};
 use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 const SKY_SHADER: &str = include_str!("atmosphere_sky.wgsl");
-const AIR_SHADER: &str = include_str!("atmosphere_air.wgsl");
 const SHADER: &str = include_str!("atmosphere.wgsl");
 const BLIT: &str = r#"
 @group(0) @binding(0) var image: texture_2d<f32>;
@@ -29,6 +28,9 @@ struct Uniform {
     weather: [f32; 4],
     // Contract v2: beauty enabled, shadowed air enabled, debug mode, reserved.
     beauty: [f32; 4],
+    lighting: [f32; 4],
+    far_shadow: [[f32; 4]; 4],
+    haze_regions: [[f32; 4]; crate::streaming_haze::REGIONS],
 }
 
 /// Opt-in shader diagnostics; default presentation and legacy profile are unchanged.
@@ -55,6 +57,15 @@ pub(crate) fn sun_direction(elevation_degrees: f32, azimuth_degrees: f32) -> Vec
     )
 }
 
+#[derive(Clone, Copy, Default)]
+struct LightingContext {
+    shadow_projection: [[f32; 4]; 4],
+    shadow_active: bool,
+    submerged: bool,
+    regions: [[f32; 4]; crate::streaming_haze::REGIONS],
+    region_count: usize,
+}
+
 pub(crate) struct Atmosphere {
     scene: wgpu::TextureView,
     depth: wgpu::TextureView,
@@ -76,7 +87,10 @@ pub(crate) struct Atmosphere {
     air: wgpu::TextureView,
     air_bind: wgpu::BindGroup,
     air_pipeline: wgpu::RenderPipeline,
-    fallback_shadow: wgpu::BindGroup,
+    lighting_context: std::cell::Cell<LightingContext>,
+    streaming_haze: std::cell::RefCell<crate::streaming_haze::StreamingHaze>,
+    draw_air: std::cell::Cell<bool>,
+    peak_haze_regions: std::cell::Cell<usize>,
     beauty_enabled: std::cell::Cell<bool>,
     medium_ground_height: std::cell::Cell<f32>,
     width: u32,
@@ -216,7 +230,13 @@ fn air_shader_source(samples: u32) -> String {
             "textureLoad(depth,pixel,0)",
         )
     };
-    AIR_SHADER
+    let source = concat!(
+        "const NAADF_GROUP:u32=1u;const NAADF_BASE:u32=3u;\n",
+        include_str!("naadf/trace.wgsl"),
+        include_str!("ground_light.wgsl"),
+        include_str!("atmosphere_air.wgsl"),
+    );
+    source
         .replace("// DEPTH_BINDING", binding)
         .replace("DEPTH_LOAD", load)
 }
@@ -273,10 +293,10 @@ impl Atmosphere {
         );
         let air = texture(
             device,
-            "half resolution shadowed meadow air",
+            "quarter resolution shadowed world air",
             wgpu::TextureFormat::Rgba16Float,
-            width.div_ceil(2),
-            height.div_ceil(2),
+            width.div_ceil(4),
+            height.div_ceil(4),
             1,
         );
         let composite = texture(device, "atmosphere composite", format, width, height, 1);
@@ -445,35 +465,12 @@ impl Atmosphere {
             ],
         });
         let near_layout = crate::adaptive_gpu::adaptive_shadow::near_sampling_layout(device);
-        let fallback_depth = texture(
-            device,
-            "disabled air shadow",
-            wgpu::TextureFormat::Depth32Float,
-            1,
-            1,
-            1,
-        );
-        let fallback_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("disabled air shadow parameters"),
-            contents: &[0u8; 112],
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
-        let fallback_shadow = crate::adaptive_gpu::adaptive_shadow::near_sampling_bind(
-            device,
-            &fallback_depth,
-            &fallback_sampler,
-            &fallback_uniform,
-            &crate::naadf::Bindings::empty(device),
-        );
+        let far_layout = crate::adaptive_gpu::adaptive_shadow::sampling_layout(device);
         let air_source = air_shader_source(sample_count);
         let air_pipeline = make_pipeline_groups(
             device,
-            "shadowed meadow air",
-            &[&air_layout, &near_layout],
+            "shadowed world air",
+            &[&air_layout, &near_layout, &far_layout],
             &air_source,
             wgpu::TextureFormat::Rgba16Float,
             "fs_main",
@@ -548,7 +545,10 @@ impl Atmosphere {
             air,
             air_bind,
             air_pipeline,
-            fallback_shadow,
+            lighting_context: Default::default(),
+            streaming_haze: Default::default(),
+            draw_air: Default::default(),
+            peak_haze_regions: Default::default(),
             scene_format,
             beauty_enabled: std::cell::Cell::new(false),
             medium_ground_height: std::cell::Cell::new(0.0),
@@ -632,7 +632,8 @@ impl Atmosphere {
         };
         history_bytes
             + pixels * (scene_bpp * scene_samples + 4 * samples + composite_bpp)
-            + half_pixels * 8 * 2
+            + half_pixels * 8
+            + u64::from(self.width.div_ceil(4)) * u64::from(self.height.div_ceil(4)) * 8
             + 4
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
@@ -644,6 +645,36 @@ impl Atmosphere {
         self.medium_ground_height
             .set(if height_m.is_finite() { height_m } else { 0.0 });
     }
+    pub(crate) fn set_lighting_context(
+        &self,
+        camera: &Camera,
+        shadows: Option<&crate::adaptive_gpu::AdaptiveGpu>,
+        terrain: Option<&crate::adaptive_view::AdaptiveView>,
+        submerged: bool,
+        time: f32,
+    ) {
+        let issues = terrain
+            .filter(|v| v.pending_count > 0 && !v.quality_ready)
+            .map(|v| (v.stats.current_offenders.as_slice(), v.pixel_error));
+        let (regions, region_count) =
+            self.streaming_haze
+                .borrow_mut()
+                .prepare(issues, camera.position, time);
+        self.lighting_context.set(LightingContext {
+            shadow_projection: shadows
+                .map_or(glam::Mat4::IDENTITY, |a| a.far_shadow_projection(camera))
+                .to_cols_array_2d(),
+            shadow_active: shadows.is_some_and(|a| a.near_shadows_active()),
+            submerged,
+            regions,
+            region_count,
+        });
+    }
+
+    pub(crate) fn peak_haze_regions(&self) -> usize {
+        self.peak_haze_regions.get()
+    }
+
     pub(crate) fn prepare_native_history(
         &self,
         queue: &wgpu::Queue,
@@ -682,6 +713,31 @@ impl Atmosphere {
         self.beauty_enabled
             .set(settings.beauty && settings.atmosphere);
         let sun = sun_direction(settings.sun_elevation, settings.sun_azimuth);
+        let context = self.lighting_context.get();
+        let beams = settings.beauty
+            && settings.atmosphere
+            && settings.terrain_shadows
+            && !settings.visibility_benchmark
+            && settings.fog_density > 0.
+            && settings.sun_elevation > 0.
+            && context.shadow_active
+            && !context.submerged
+            && atmosphere_debug() != 3
+            && (settings.sunbeams > 0. || matches!(atmosphere_debug(), 1 | 2));
+        self.draw_air.set(beams);
+        let haze_strength = if settings.beauty
+            && settings.atmosphere
+            && !settings.visibility_benchmark
+            && !context.submerged
+        {
+            settings.streaming_haze
+        } else {
+            0.
+        };
+        if haze_strength > 0. {
+            self.peak_haze_regions
+                .set(self.peak_haze_regions.get().max(context.region_count));
+        }
         let uniform = Uniform {
             inverse_view_projection: inverse_view_projection.to_cols_array_2d(),
             relative_eye: relative_eye.extend(0.0).to_array(),
@@ -704,16 +760,18 @@ impl Atmosphere {
             ],
             beauty: [
                 if settings.beauty { 1.0 } else { 0.0 },
-                // The nearby-tree medium is diagnostic-only: its camera-local
-                // density and finite shadow coverage look unstable in motion.
-                if settings.terrain_shadows && matches!(atmosphere_debug(), 1 | 2) {
-                    1.0
-                } else {
-                    0.0
-                },
+                if beams { 1. } else { 0. },
                 atmosphere_debug() as f32,
                 post_aa_strength(),
             ],
+            lighting: [
+                settings.sunbeams,
+                haze_strength,
+                context.region_count as f32,
+                0.,
+            ],
+            far_shadow: context.shadow_projection,
+            haze_regions: context.regions,
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
@@ -724,7 +782,7 @@ impl Atmosphere {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         output: &wgpu::TextureView,
-        near_shadow: Option<&wgpu::BindGroup>,
+        shadows: Option<&crate::adaptive_gpu::AdaptiveGpu>,
     ) {
         if self.beauty_enabled.get() {
             {
@@ -746,11 +804,9 @@ impl Atmosphere {
                 pass.set_bind_group(0, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
             }
-            // Keep the experimental medium available for explicit diagnostics,
-            // but do not integrate it during ordinary play.
-            if matches!(atmosphere_debug(), 1 | 2) {
+            if let Some(shadows) = shadows.filter(|_| self.draw_air.get()) {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("half resolution shadowed meadow air"),
+                    label: Some("quarter resolution shadowed world air"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &self.air,
                         resolve_target: None,
@@ -765,7 +821,8 @@ impl Atmosphere {
                 });
                 pass.set_pipeline(&self.air_pipeline);
                 pass.set_bind_group(0, &self.air_bind, &[]);
-                pass.set_bind_group(1, near_shadow.unwrap_or(&self.fallback_shadow), &[]);
+                pass.set_bind_group(1, shadows.near_shadow_bind(), &[]);
+                pass.set_bind_group(2, shadows.far_shadow_bind(), &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -834,9 +891,8 @@ mod tests {
         }
     }
     #[test]
-    fn atmosphere_uniform_contract_v2() {
-        // mat4 + six vec4 slots; WGSL uniform and Rust upload must agree.
-        assert_eq!(std::mem::size_of::<super::Uniform>(), 160);
+    fn atmosphere_uniform_contract() {
+        assert_eq!(std::mem::size_of::<super::Uniform>(), 368);
         assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
         let module = naga::front::wgsl::parse_str(&super::shader_source(1)).unwrap();
         let (_, uniform) = module
@@ -850,7 +906,7 @@ mod tests {
         assert_eq!(*span as usize, std::mem::size_of::<super::Uniform>());
         assert_eq!(
             members.last().unwrap().offset as usize,
-            std::mem::offset_of!(super::Uniform, beauty)
+            std::mem::offset_of!(super::Uniform, haze_regions)
         );
     }
 

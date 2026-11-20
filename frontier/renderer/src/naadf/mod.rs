@@ -43,6 +43,8 @@ use wgpu::util::DeviceExt;
 const SHADER: &str = concat!(
     "const NAADF_GROUP:u32=0u;const NAADF_BASE:u32=0u;\n",
     include_str!("trace.wgsl"),
+    include_str!("../water.wgsl"),
+    include_str!("../ground_light.wgsl"),
     include_str!("ray.wgsl")
 );
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +250,7 @@ struct Uniform {
     cache: [u32; 4],
     edit_min: [i32; 4],
     edit_max: [i32; 4],
+    water: [f32; 4],
 }
 struct Volume {
     resources: Bindings,
@@ -582,6 +585,7 @@ impl Pending {
             voxels: voxels.clone(),
             palette: palette.clone(),
             dynamic_water: dynamic_water::empty(&gpu.device),
+            ground_light: crate::terrain_light::buffer(&gpu.device),
         };
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NAADF snapshot"),
@@ -1592,6 +1596,12 @@ impl Experiment {
         a.encode_traversal(gpu, encoder, [width, height], primary);
     }
 
+    pub(crate) fn prepare_ground_light(&self, queue: &wgpu::Queue, data: &[u8]) {
+        if let Some(active) = &self.active {
+            queue.write_buffer(&active.resources.ground_light, 0, data);
+        }
+    }
+
     pub fn prepare(&self, gpu: &Gpu, camera: Camera, width: u32, height: u32) {
         let Some(a) = &self.active else {
             return;
@@ -1612,7 +1622,10 @@ impl Experiment {
             bytemuck::bytes_of(&Uniform {
                 matrix: matrix.to_cols_array_2d(),
                 inverse: matrix.inverse().to_cols_array_2d(),
-                eye: (camera.position - origin).as_vec3().extend(0.).to_array(),
+                eye: (camera.position - origin)
+                    .as_vec3()
+                    .extend(if gpu.camera_submerged.get() { 1. } else { 0. })
+                    .to_array(),
                 extent: [
                     ((a.bounds[1][0] - a.bounds[0][0]) * 16.) as u32,
                     ((a.bounds[1][1] - a.bounds[0][1]) * 16.) as u32,
@@ -1659,6 +1672,12 @@ impl Experiment {
                     },
                     f32::from(u8::from(ray_profile().0)),
                     f32::from(u8::from(ray_profile().1)),
+                    0.,
+                ],
+                water: [
+                    origin.x.rem_euclid(128.) as f32,
+                    origin.z.rem_euclid(128.) as f32,
+                    gpu.water_time.get(),
                     0.,
                 ],
             }),
@@ -1859,14 +1878,15 @@ pub(crate) struct Bindings {
     pub voxels: wgpu::Buffer,
     pub palette: wgpu::Buffer,
     pub dynamic_water: wgpu::Buffer,
+    pub ground_light: wgpu::Buffer,
 }
 pub(crate) fn binding_layout(first: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..9)
+    (0..10)
         .map(|i| wgpu::BindGroupLayoutEntry {
             binding: first + i,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: match i {
-                0 => wgpu::BindingType::Buffer {
+                0 | 9 => wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
@@ -1941,6 +1961,10 @@ impl Bindings {
                 binding: first + 8,
                 resource: self.dynamic_water.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: first + 9,
+                resource: self.ground_light.as_entire_binding(),
+            },
         ]
     }
     pub fn empty(device: &wgpu::Device) -> Self {
@@ -1978,6 +2002,7 @@ impl Bindings {
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(&[0; 16], wgpu::BufferUsages::STORAGE),
             dynamic_water: dynamic_water::empty(device),
+            ground_light: crate::terrain_light::buffer(device),
         }
     }
 }

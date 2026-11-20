@@ -50,8 +50,16 @@ impl HeightBound {
     /// The affine source-minus-proxy difference reaches its extrema at triangle
     /// vertices. This avoids extrapolating a skinny fan's plane across its AABB.
     pub fn triangle_error(&self, vertices: [[f64; 3]; 3]) -> Option<f64> {
+        self.vertex_error(&vertices)
+    }
+    /// The two triangles of a quad share two corners. Bound both with one
+    /// interval evaluation per corner.
+    pub fn quad_error(&self, vertices: [[f64; 3]; 4]) -> Option<f64> {
+        self.vertex_error(&vertices)
+    }
+    fn vertex_error(&self, vertices: &[[f64; 3]]) -> Option<f64> {
         let mut error = 0.0_f64;
-        for v in vertices {
+        for &v in vertices {
             if !v.iter().all(|v| v.is_finite()) {
                 return None;
             }
@@ -1850,6 +1858,15 @@ mod tests {
                         BoundBudget::default(),
                     )
                     .unwrap();
+                    let quad_error = aa.quad_error(corners).unwrap();
+                    let pair_error = aa
+                        .triangle_error([corners[0], corners[1], corners[2]])
+                        .unwrap()
+                        .max(
+                            aa.triangle_error([corners[0], corners[2], corners[3]])
+                                .unwrap(),
+                        );
+                    assert_eq!(quad_error, pair_error);
                     let error = triangles
                         .iter()
                         .map(|tri| aa.triangle_error(*tri).unwrap())

@@ -3,6 +3,9 @@
 struct AtmosphereUniform {
     inverse_view_projection:mat4x4<f32>,relative_eye:vec4<f32>,world_eye:vec4<f32>,
     sun:vec4<f32>,fog:vec4<f32>,weather:vec4<f32>,beauty:vec4<f32>,
+    lighting: vec4<f32>, // shafts, streaming haze, region count, reserved
+    far_shadow: mat4x4<f32>,
+    haze_regions: array<vec4<f32>,8>,
 };
 @group(0) @binding(0) var<uniform> atmosphere:AtmosphereUniform;
 struct VertexOutput {@builtin(position) position:vec4<f32>,@location(0) uv:vec2<f32>};

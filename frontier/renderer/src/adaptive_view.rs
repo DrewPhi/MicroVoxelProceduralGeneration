@@ -269,7 +269,15 @@ impl AdaptiveView {
                 cover.ready = None;
             } else if cover_admitted && geometry_upload_idle {
                 let started = Instant::now();
-                match adaptive.promote_appearance(device, queue, tile) {
+                let mut result = adaptive.promote_appearance(device, queue, tile);
+                if result
+                    .as_ref()
+                    .is_err_and(|e| crate::adaptive_gpu::resource_capacity_error(e))
+                    && adaptive.evict_warm()
+                {
+                    result = adaptive.promote_appearance(device, queue, tile);
+                }
+                match result {
                     Ok(()) => {
                         cover.upload_bytes += tile.bytes as u64;
                         cover.promotions += 1;
@@ -604,7 +612,7 @@ impl AdaptiveView {
             if let Some(frame) = &self.pending {
                 self.retain_keys.extend(frame.tiles.iter().map(|t| t.key));
             }
-            adaptive.retain(&self.retain_keys);
+            adaptive.retain(&self.retain_keys, !self.topology_supported);
             self.retain_dirty = false;
         }
         let mut uploaded = 0;
@@ -631,7 +639,14 @@ impl AdaptiveView {
                     break;
                 }
                 let upload_started = Instant::now();
-                let upload_result = adaptive.upload(&gpu.device, &gpu.queue, tile);
+                let mut upload_result = adaptive.upload(&gpu.device, &gpu.queue, tile);
+                if upload_result
+                    .as_ref()
+                    .is_err_and(|e| crate::adaptive_gpu::resource_capacity_error(e))
+                    && adaptive.evict_warm()
+                {
+                    upload_result = adaptive.upload(&gpu.device, &gpu.queue, tile);
+                }
                 self.upload_cpu_ms += upload_started.elapsed().as_secs_f64() * 1000.;
                 if let Err(error) = upload_result {
                     if crate::adaptive_gpu::resource_capacity_error(&error) {
@@ -669,7 +684,7 @@ impl AdaptiveView {
                         .filter(|t| !t.is_empty())
                         .map(|t| t.key)
                         .collect();
-                    adaptive.retain(&raster_keys);
+                    adaptive.retain(&raster_keys, !self.topology_supported);
                     self.owner_guard = crate::adaptive_stream::PartitionGuard::new(
                         keys.iter().copied(),
                         self.topology_supported,
@@ -1009,6 +1024,10 @@ impl AdaptiveView {
         json.push_str(&format!(",\"preparation_workers\":{}}}", self.worker_count));
         json.pop();
         let disk = self.latest_cache.disk;
+        json.push_str(&format!(
+            ",\"terrain_bound_pages\":{{\"batches\":{},\"evictions\":{}}}",
+            self.latest_cache.bound_page_batches, self.latest_cache.bound_page_evictions
+        ));
         json.push_str(&format!(",\"disk_cache\":{{\"hits\":{},\"misses\":{},\"invalid\":{},\"writes\":{},\"errors\":{},\"evictions\":{},\"read_bytes\":{},\"written_bytes\":{},\"read_ms\":{},\"write_ms\":{},\"resident_bytes\":{}}}}}", disk.hits, disk.misses, disk.invalid, disk.writes, disk.errors, disk.evictions, disk.read_bytes, disk.written_bytes, disk.read_ms, disk.write_ms, disk.resident_bytes));
         json.pop();
         json.push_str(&format!(",\"disk_writeback\":{{\"queued_entries\":{},\"peak_queued_entries\":{},\"queued_payload_bytes\":{},\"peak_queued_payload_bytes\":{},\"skipped_writes\":{},\"encode_buffer_cap_bytes\":{},\"encode_buffer_reserved_bytes\":{},\"peak_encode_buffer_reserved_bytes\":{}}}}}", disk.writeback_queued_entries, disk.writeback_peak_queued_entries, disk.writeback_queued_payload_bytes, disk.writeback_peak_queued_payload_bytes, disk.writeback_skipped_writes, disk.writeback_encode_buffer_cap_bytes, disk.writeback_encode_buffer_reserved_bytes, disk.writeback_peak_encode_buffer_reserved_bytes));
@@ -1193,6 +1212,7 @@ impl AdaptiveView {
         ));
         let planning = self.planning;
         json.pop();
+        json.push_str(&format!(",\"turn_cache\":{{\"warm_clusters\":{},\"warm_bytes\":{},\"reuses\":{},\"evictions\":{},\"prefetch_selections\":{}}}", self.stats.warm_clusters, self.stats.warm_bytes, self.stats.warm_reuses, self.stats.warm_evictions, planning.turn_prefetches));
         json.push_str(&format!(",\"planning\":{{\"calls\":{},\"full_calls\":{},\"retained_calls\":{},\"total_ms\":{},\"max_ms\":{},\"prepared_batches_without_plan\":{},\"obsolete_transaction_preemptions\":{},\"obsolete_transaction_pending_jobs\":{}}}}}", planning.calls, planning.full_calls, planning.retained_calls, planning.total_ms, planning.max_ms, planning.prepared_batches_without_plan, planning.obsolete_transaction_preemptions, planning.obsolete_transaction_pending_jobs));
         let memory = self.build_memory;
         json.pop();

@@ -130,8 +130,7 @@ impl Generator<'_> {
             }
             for x in -1..=dimension as i64 {
                 let p = [origin[0] + x * stride, origin[1] + z * stride];
-                self.height(p[0], p[1])?;
-                columns.push(self.heights[&p]);
+                columns.push(self.column(p)?);
             }
         }
         let row = dimension + 2;
@@ -170,8 +169,7 @@ impl Generator<'_> {
     }
 
     fn coarse_run(&mut self, sample: [i64; 2], pitch: i64, profile: u32) -> Result<Run, String> {
-        self.height(sample[0], sample[1])?;
-        let column = self.heights[&sample];
+        let column = self.column(sample)?;
         let wet = column.height > column.ground_height;
         let ground = if wet {
             column.ground_height
@@ -284,6 +282,7 @@ impl Generator<'_> {
         min: [i64; 2],
         pitch: i64,
         first_vertex: usize,
+        cached_bound: Option<Option<frontier_world::affine_bounds::HeightBound>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), String> {
         let started = std::time::Instant::now();
@@ -312,14 +311,16 @@ impl Generator<'_> {
             true
         } else if self.affine_stats.quad_bounds < MAX_AFFINE_QUADS {
             self.affine_stats.quad_bounds += 1;
-            let bound = self.samples.pages.bound(
-                self.world,
-                ColumnBox {
-                    min: [key.min[0] + min[0], key.min[1] + min[1]],
-                    size_cells: [pitch as u32; 2],
-                },
-                BoundBudget::default(),
-            );
+            let bound = cached_bound.unwrap_or_else(|| {
+                self.samples.pages.bound(
+                    self.world,
+                    ColumnBox {
+                        min: [key.min[0] + min[0], key.min[1] + min[1]],
+                        size_cells: [pitch as u32; 2],
+                    },
+                    BoundBudget::default(),
+                )
+            });
             if let Some(bound) = bound {
                 range = bound.height_range;
                 self.affine_stats.noise_cells += bound.noise_cells as u64;
@@ -334,12 +335,10 @@ impl Generator<'_> {
                             z + key.min[1] as f64 * VOXEL_SIZE,
                         ]
                     };
-                    for indices in [[0, 1, 2], [0, 2, 3]] {
-                        if let Some(value) = bound.triangle_error(indices.map(position)) {
-                            error = error.max(value);
-                        } else {
-                            complete = false;
-                        }
+                    if let Some(value) = bound.quad_error(std::array::from_fn(position)) {
+                        error = error.max(value);
+                    } else {
+                        complete = false;
                     }
                 }
                 complete
@@ -368,6 +367,34 @@ impl Generator<'_> {
         let key = self.key;
         let width = i64::from(key.width_cells);
         let pitch = i64::from(key.step_cells);
+        let grid = key.width_cells / key.step_cells;
+        let patches = u64::from(grid) * u64::from(grid);
+        let needs_affine = key.width_cells > MAX_CERTIFICATE_WIDTH;
+        let can_certify = !needs_affine || patches <= MAX_AFFINE_QUADS;
+        // An incomplete certificate is discarded by the caller. Avoid doing
+        // the first 256 analyses when the entire tile needs a global fallback.
+        if !can_certify {
+            self.affine_complete = false;
+            self.affine_stats.unavailable_quads = patches;
+        }
+        let bounds = if needs_affine && can_certify {
+            if let Some(cache) = &self.samples.pages.terrain_bounds {
+                let started = std::time::Instant::now();
+                let bounds = cache.tile(
+                    self.world.fbm_terrain().unwrap(),
+                    key.min,
+                    key.width_cells,
+                    key.step_cells,
+                    cancelled,
+                )?;
+                self.affine_stats.cpu_ms += started.elapsed().as_secs_f64() * 1000.;
+                bounds
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let seed_profile = if Mode::current() == Mode::Seed && key.width_cells >= 128 && pitch >= 4
         {
             Some(self.seed_appearance(cancelled)?)
@@ -442,7 +469,12 @@ impl Generator<'_> {
                         .max((center - top_range[1]).abs()) as f64
                         * VOXEL_SIZE,
                 );
-                self.record_coarse_error([x, z], pitch, first_vertex, cancelled)?;
+                if can_certify {
+                    let bound = bounds
+                        .as_ref()
+                        .map(|bounds| bounds[((z / pitch) * i64::from(grid) + x / pitch) as usize]);
+                    self.record_coarse_error([x, z], pitch, first_vertex, bound, cancelled)?;
+                }
             }
         }
         for ((axis, plane), mut sides) in edges {

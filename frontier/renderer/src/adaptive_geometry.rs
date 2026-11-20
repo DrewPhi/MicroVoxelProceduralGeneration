@@ -34,6 +34,8 @@ pub(crate) mod deferred_cover;
 
 #[path = "distant_voxels.rs"]
 pub(crate) mod distant_voxels;
+#[path = "terrain_bound_pages.rs"]
+mod terrain_bound_pages;
 
 /// Integer source addresses, independent of camera/view epoch. A cache belongs to
 /// one immutable source snapshot; revision is checked before construction.
@@ -1733,6 +1735,7 @@ const SOURCE_SHARDS: usize = 32;
 #[derive(Clone)]
 struct SharedSourcePages {
     shards: [Arc<Mutex<SourceShard>>; SOURCE_SHARDS],
+    terrain_bounds: Option<Arc<terrain_bound_pages::Cache>>,
 }
 #[derive(Clone, Copy, PartialEq)]
 struct BoundKey {
@@ -1772,7 +1775,19 @@ struct SourceShard {
 }
 impl SharedSourcePages {
     fn new(bytes: usize) -> Self {
+        let bound_page_budget = (bytes / 8).min(16 * 1024 * 1024);
+        let terrain_bounds = (distant_voxels::enabled()
+            && std::env::var_os("FRONTIER_TERRAIN_BOUND_PAGES").is_none_or(|v| v != "0"))
+        .then(|| terrain_bound_pages::Cache::new(bound_page_budget))
+        .flatten()
+        .map(Arc::new);
+        let bytes = if terrain_bounds.is_some() {
+            bytes - bound_page_budget
+        } else {
+            bytes
+        };
         Self {
+            terrain_bounds,
             shards: std::array::from_fn(|i| {
                 let budget = bytes / SOURCE_SHARDS + usize::from(i < bytes % SOURCE_SHARDS);
                 // Direct-mapped immutable source bounds reserve at most 1/8 of
@@ -1840,6 +1855,16 @@ impl SharedSourcePages {
     /// snapshot, not five independent passes through the same locks.
     fn snapshot(&self) -> CacheStats {
         let mut out = CacheStats::default();
+        if let Some(cache) = &self.terrain_bounds {
+            let stats = cache.stats();
+            out.affine_cache_hits += stats.hits;
+            out.affine_cache_misses += stats.misses;
+            out.affine_cache_bytes += stats.bytes;
+            out.source_cache_bytes += stats.bytes;
+            out.source_cache_peak_bytes += stats.bytes;
+            out.bound_page_batches = stats.batches;
+            out.bound_page_evictions = stats.evictions;
+        }
         for shard in &self.shards {
             let shard = shard.lock().unwrap();
             let stats = shard.pages.stats();
@@ -1941,6 +1966,9 @@ impl SharedSourcePages {
         value
     }
     fn clear(&self) {
+        if let Some(cache) = &self.terrain_bounds {
+            cache.clear();
+        }
         for shard in &self.shards {
             let mut shard = shard.lock().unwrap();
             shard.pages.clear();
@@ -2182,26 +2210,26 @@ struct Generator<'a> {
 }
 impl Generator<'_> {
     fn height(&mut self, x: i64, z: i64) -> Result<i64, String> {
-        let p = [x, z];
+        Ok(self.column([x, z])?.height)
+    }
+    fn column(&mut self, p: [i64; 2]) -> Result<NativeColumn, String> {
         if let Some(column) = self.heights.get(&p) {
-            return Ok(column.height);
+            return Ok(*column);
         }
         if self.heights.len() >= MAX_SAMPLES {
             return Err("adaptive sample budget exceeded".into());
         }
         let column = self
             .samples
-            .column(self.world, [self.key.min[0] + x, self.key.min[1] + z]);
-        let h = column.height;
-        if (h as i128).abs() > 16_777_216 {
+            .column(self.world, [self.key.min[0] + p[0], self.key.min[1] + p[1]]);
+        if column.height.unsigned_abs() > 16_777_216 {
             return Err("adaptive local vertical precision exceeded".into());
         }
         self.heights.insert(p, column);
-        Ok(h)
+        Ok(column)
     }
     fn material(&mut self, x: i64, z: i64, y: i64) -> Result<Material, String> {
-        self.height(x, z)?;
-        Ok(self.heights[&[x, z]].material(y))
+        Ok(self.column([x, z])?.material(y))
     }
     fn point(&mut self, x: i64, z: i64) -> Result<[f32; 3], String> {
         let h = self.height(x, z)?;
@@ -3224,6 +3252,8 @@ pub struct CacheStats {
     pub affine_cache_hits: u64,
     pub affine_cache_misses: u64,
     pub affine_cache_bytes: usize,
+    pub bound_page_batches: u64,
+    pub bound_page_evictions: u64,
     pub appearance_cache_hits: u64,
     pub appearance_cache_misses: u64,
     pub appearance_cache_bytes: usize,
@@ -3739,6 +3769,8 @@ impl GeometryCache {
             affine_cache_hits: source.affine_cache_hits,
             affine_cache_misses: source.affine_cache_misses,
             affine_cache_bytes: source.affine_cache_bytes,
+            bound_page_batches: source.bound_page_batches,
+            bound_page_evictions: source.bound_page_evictions,
             appearance_cache_hits: source.appearance_cache_hits,
             appearance_cache_misses: source.appearance_cache_misses,
             appearance_cache_bytes: source.appearance_cache_bytes,

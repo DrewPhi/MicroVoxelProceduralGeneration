@@ -482,6 +482,7 @@ fn gpu_matches_canonical_rays_for_source(
                         projection: basis[3],
                         edit_min: [i32::MIN; 4],
                         edit_max: [i32::MAX; 4],
+                        water: [0.; 4],
                         ring: [
                             volume.ring[0],
                             volume.ring[1],

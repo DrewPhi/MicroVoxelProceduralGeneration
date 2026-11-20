@@ -114,6 +114,7 @@ pub(crate) fn native_band(bounds: [[f64; 3]; 2], eye: DVec3, radius: f64) -> boo
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PlanningStats {
+    pub turn_prefetches: u64,
     pub calls: u64,
     pub full_calls: u64,
     pub retained_calls: u64,
@@ -495,6 +496,10 @@ pub struct AdaptiveStream {
     committed_index: HashMap<([i64; 2], u32), usize>,
     committed_ancestors: HashSet<([i64; 2], u32)>,
     committed_pose: Option<(Camera, u32, u32)>,
+    turn_preload: bool,
+    turn_pose: Option<(Camera, Projection)>,
+    recent_turn_poses: VecDeque<(std::time::Instant, Camera, Projection)>,
+    last_side_prefetch: Option<std::time::Instant>,
     occlusion: Option<(Camera, OcclusionSet)>,
     prediction_occlusion: Option<(Camera, OcclusionSet)>,
     /// Measured-latency extrapolation; never changes current-view quality.
@@ -509,6 +514,18 @@ pub struct AdaptiveStream {
     #[cfg(test)]
     finest_cells: u32,
 }
+
+pub(super) fn turn_preload_enabled() -> bool {
+    std::env::var_os("FRONTIER_TURN_PRELOAD").is_none_or(|value| value != "0")
+}
+
+fn turn_side_views(camera: &Camera) -> [Camera; 2] {
+    [-25_f32, 25.0].map(|angle| Camera {
+        yaw: camera.yaw + angle.to_radians(),
+        ..*camera
+    })
+}
+
 impl AdaptiveStream {
     pub fn new(world: World, settings: StreamSettings) -> Result<Self, String> {
         if world.fbm_terrain().is_none()
@@ -521,6 +538,8 @@ impl AdaptiveStream {
             );
         }
         settings.validate()?;
+        let world_has_distant_voxels = world.topology_base_cells().is_none()
+            && crate::adaptive_geometry::distant_voxels::enabled();
         Ok(Self {
             cache: GeometryCache::new(world.clone(), settings.cpu_cache_bytes),
             world,
@@ -547,6 +566,10 @@ impl AdaptiveStream {
             committed_index: HashMap::new(),
             committed_ancestors: HashSet::new(),
             committed_pose: None,
+            turn_preload: turn_preload_enabled() && world_has_distant_voxels,
+            turn_pose: None,
+            recent_turn_poses: VecDeque::new(),
+            last_side_prefetch: None,
             occlusion: None,
             prediction_occlusion: None,
             prediction: None,
@@ -707,6 +730,7 @@ impl AdaptiveStream {
             return frame;
         };
         self.refresh_occlusion(camera);
+        let side_views = self.track_turn(camera, p);
         if self.obsolete_transaction_preempt
             && !self
                 .transaction_refinements
@@ -883,7 +907,15 @@ impl AdaptiveStream {
             .world
             .fbm_terrain()
             .is_some_and(|t| crate::scene_policy::polished(t.params().recipe));
-        let (refine, predicted_footprint) = if polished && !near.is_empty() {
+        let side_slot = near.is_empty()
+            && self
+                .last_side_prefetch
+                .is_none_or(|t| t.elapsed().as_millis() >= 650)
+            && self
+                .recent_turn_poses
+                .back()
+                .is_none_or(|(t, _, _)| t.elapsed().as_millis() >= 200);
+        let (mut refine, predicted_footprint) = if polished && !near.is_empty() {
             (near, None)
         } else {
             select_with_prediction(
@@ -893,6 +925,21 @@ impl AdaptiveStream {
                 self.settings.refinements_per_transaction,
             )
         };
+        // Once near detail is ready, spend an occasional transaction on the
+        // side of the view. Keep it separate from coherent visible batches.
+        let side_refinement = if side_slot && predicted_footprint.is_none() {
+            side_views
+                .as_ref()
+                .and_then(|views| self.side_refinement(camera, p, views))
+        } else {
+            None
+        };
+        if let Some(key) = side_refinement {
+            refine.clear();
+            refine.insert(key);
+            self.last_side_prefetch = Some(std::time::Instant::now());
+            self.planning.turn_prefetches += 1;
+        }
         // The experiment never adds work outside the existing priority budget.
         let direct_native = direct_native.filter(|key| refine.contains(key));
         self.predicted_footprint = predicted_footprint;
@@ -907,7 +954,10 @@ impl AdaptiveStream {
         };
         if same {
             for tile in self.committed.clone() {
-                if !self.tile_visible(&tile, camera, p) && !self.prediction_protects(tile.key) {
+                if side_refinement != Some(tile.key)
+                    && !self.tile_visible(&tile, camera, p)
+                    && !self.prediction_protects(tile.key)
+                {
                     let key = self
                         .cached_coarse(
                             tile.key.min,
@@ -930,7 +980,10 @@ impl AdaptiveStream {
                 {
                     k = coarse;
                 }
-                if k != tile.key || self.accepts(&tile, camera, p) || !refine.contains(&tile.key) {
+                if k != tile.key
+                    || (side_refinement != Some(tile.key) && self.accepts(&tile, camera, p))
+                    || !refine.contains(&tile.key)
+                {
                     nodes.push(Node {
                         min: k.min,
                         width: k.width_cells,
@@ -1005,7 +1058,10 @@ impl AdaptiveStream {
                     .get(&(n.min, n.width))
                     .map(|&i| self.committed[i].clone())
                 {
-                    if !self.tile_visible(&t, camera, p) && !self.prediction_protects(t.key) {
+                    if side_refinement != Some(t.key)
+                        && !self.tile_visible(&t, camera, p)
+                        && !self.prediction_protects(t.key)
+                    {
                         let key = self
                             .cached_coarse(
                                 t.key.min,
@@ -1028,7 +1084,10 @@ impl AdaptiveStream {
                         width: n.width,
                         step: coarse.map(|k| k.step_cells).unwrap_or(t.key.step_cells),
                     };
-                    if coarse.is_some() || self.accepts(&t, camera, p) || !refine.contains(&t.key) {
+                    if coarse.is_some()
+                        || (side_refinement != Some(t.key) && self.accepts(&t, camera, p))
+                        || !refine.contains(&t.key)
+                    {
                         nodes.push(old)
                     } else if should_split(t.key) {
                         split(old, &mut nodes)
@@ -1428,6 +1487,7 @@ impl AdaptiveStream {
                 || self.committed_ancestors.contains(&(n.min, n.width_cells));
             if is_coarsening
                 && ((self.native_protects(tile, camera) && tile.key.step_cells > 1)
+                    || self.turn_protects(tile, camera, p)
                     || (self.frustum_visible(tile, camera, p)
                         && self.projected_error(tile, camera, p)
                             > self.settings.pixel_error * 0.65))
@@ -1448,6 +1508,68 @@ impl AdaptiveStream {
             }
         }
         safe
+    }
+    fn track_turn(&mut self, camera: &Camera, p: Projection) -> Option<[Camera; 2]> {
+        if !self.turn_preload {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        let close = |pose: &Camera| pose.position.distance_squared(camera.position) <= 24.0 * 24.0;
+        self.recent_turn_poses.retain(|(seen, pose, projection)| {
+            now.duration_since(*seen).as_secs_f32() < 1.5 && close(pose) && *projection == p
+        });
+        if let Some((previous, projection)) = self
+            .turn_pose
+            .filter(|(pose, projection)| close(pose) && *projection == p)
+        {
+            if previous.direction().dot(camera.direction()) >= 10_f32.to_radians().cos() {
+                return Some(turn_side_views(camera));
+            }
+            self.recent_turn_poses
+                .push_back((now, previous, projection));
+            if self.recent_turn_poses.len() > 3 {
+                self.recent_turn_poses.pop_front();
+            }
+        }
+        self.turn_pose = Some((*camera, p));
+        Some(turn_side_views(camera))
+    }
+    fn side_refinement(
+        &self,
+        camera: &Camera,
+        p: Projection,
+        views: &[Camera; 2],
+    ) -> Option<TileKey> {
+        self.committed
+            .iter()
+            .filter_map(|tile| {
+                if tile.key.step_cells <= 1 || self.frustum_visible(tile, camera, p) {
+                    return None;
+                }
+                let error = views
+                    .iter()
+                    .filter(|side| self.frustum_visible(tile, side, p))
+                    .map(|side| self.projected_error(tile, side, p))
+                    .fold(0.0, f64::max);
+                (error > self.settings.pixel_error * 2.0).then_some((tile.key, error))
+            })
+            .max_by(|(a, a_error), (b, b_error)| a_error.total_cmp(b_error).then_with(|| b.cmp(a)))
+            .map(|(key, _)| key)
+    }
+    fn turn_protects(&self, tile: &GeometryTile, camera: &Camera, p: Projection) -> bool {
+        if !self.turn_preload || self.frustum_visible(tile, camera, p) {
+            return false;
+        }
+        let needs_detail = |pose: &Camera, projection: Projection| {
+            self.frustum_visible(tile, pose, projection)
+                && self.projected_error(tile, pose, projection) > self.settings.pixel_error
+        };
+        self.recent_turn_poses
+            .iter()
+            .any(|(_, pose, projection)| needs_detail(pose, *projection))
+            || turn_side_views(camera)
+                .iter()
+                .any(|side| needs_detail(side, p))
     }
     fn cached_coarse(
         &mut self,
@@ -1498,6 +1620,7 @@ impl AdaptiveStream {
                 }
                 if (!self.tile_visible(&tile, camera, p)
                     || self.projected_error(&tile, camera, p) <= self.settings.pixel_error * 0.65)
+                    && !self.turn_protects(&tile, camera, p)
                     && (!self.prediction_protects(tile.key)
                         || self.prediction.as_ref().is_none_or(|predicted| {
                             !self.frustum_visible(&tile, predicted, p)
@@ -5024,6 +5147,29 @@ mod worker_tests {
             .predicted_retention
             .iter()
             .all(|r| r.key.min[0] >= 36 * 16));
+    }
+    #[test]
+    fn side_preload_tracks_recent_headings_and_releases_them_after_a_jump() {
+        let world = World::fbm(7, frontier_world::FbmParams::default()).unwrap();
+        let mut stream = AdaptiveStream::new(world, StreamSettings::default()).unwrap();
+        stream.turn_preload = true;
+        let mut camera = Camera::fixture();
+        let p = camera_projection(&camera, 320, 180).unwrap();
+        let original_yaw = camera.yaw;
+        let side = stream.track_turn(&camera, p).unwrap();
+        assert!((side[0].yaw - (original_yaw - 25_f32.to_radians())).abs() < 1e-6);
+        for _ in 0..6 {
+            camera.yaw += 15_f32.to_radians();
+            stream.track_turn(&camera, p);
+        }
+        assert_eq!(stream.recent_turn_poses.len(), 3);
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        stream.recent_turn_poses[0].0 = expired;
+        stream.track_turn(&camera, p);
+        assert_eq!(stream.recent_turn_poses.len(), 2);
+        camera.position.x += 100.0;
+        stream.track_turn(&camera, p);
+        assert!(stream.recent_turn_poses.is_empty());
     }
     #[test]
     fn turn_route_prefetches_unseen_detail_with_current_quality_backlog() {

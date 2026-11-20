@@ -3,6 +3,8 @@
 const ADAPTIVE_SHADER: &str = concat!(
     "const NAADF_GROUP:u32=2u;const NAADF_BASE:u32=3u;\n",
     include_str!("naadf/trace.wgsl"),
+    include_str!("ground_light.wgsl"),
+    include_str!("water.wgsl"),
     include_str!("adaptive.wgsl")
 );
 
@@ -16,6 +18,7 @@ use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
 #[path = "adaptive_shadow.rs"]
@@ -28,6 +31,9 @@ use adaptive_shadow::ShadowResources;
 
 const PAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
+const WARM_CACHE_MAX_BYTES: u64 = 96 * 1024 * 1024;
+const WARM_CACHE_MAX_CLUSTERS: usize = 1024;
+const WARM_CACHE_TTL: Duration = Duration::from_secs(12);
 pub(crate) const MAX_CLUSTERS: usize = 16384;
 const UNIFORM_STRIDE: u64 = 256;
 pub(crate) const CAMERA_UNIFORM_BYTES: u64 = UNIFORM_STRIDE * MAX_CLUSTERS as u64;
@@ -186,6 +192,21 @@ struct Cluster {
     certificate_kind: u8,
     slot: u32,
 }
+impl Cluster {
+    fn payload_bytes(&self) -> u64 {
+        self.vertices.range.end - self.vertices.range.start
+            + self
+                .indices
+                .as_ref()
+                .map_or(0, |i| i.range.end - i.range.start)
+            + self.profile.as_ref().map_or(0, |p| {
+                p.table.range.end - p.table.range.start
+                    + p.indices
+                        .as_ref()
+                        .map_or(0, |i| i.range.end - i.range.start)
+            })
+    }
+}
 /// Bounded current-draw diagnostic; None projected error means unbounded.
 #[derive(Clone, Copy, Debug)]
 pub struct VisibleOffender {
@@ -216,6 +237,10 @@ pub struct GpuProfileStats {
 }
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DrawStats {
+    pub warm_clusters: usize,
+    pub warm_bytes: u64,
+    pub warm_reuses: u64,
+    pub warm_evictions: u64,
     pub gpu_profiles: GpuProfileStats,
     pub prepare_shadow_ms: f64,
     pub prepare_order_ms: f64,
@@ -561,6 +586,11 @@ pub struct AdaptiveGpu {
     vertices: Vec<Arena>,
     indices: Vec<Arena>,
     clusters: HashMap<TileKey, Cluster>,
+    warm_enabled: bool,
+    warm: HashMap<TileKey, (Instant, u64)>,
+    warm_bytes: u64,
+    warm_reuses: u64,
+    warm_evictions: u64,
     slots: Vec<u32>,
     visible: Vec<DrawItem>,
     camera_upload: Vec<u8>,
@@ -930,6 +960,12 @@ impl AdaptiveGpu {
             vertices: vec![],
             indices: vec![],
             clusters: HashMap::new(),
+            warm_enabled: crate::adaptive_stream::turn_preload_enabled()
+                && crate::adaptive_geometry::distant_voxels::enabled(),
+            warm: HashMap::new(),
+            warm_bytes: 0,
+            warm_reuses: 0,
+            warm_evictions: 0,
             slots: (0..MAX_CLUSTERS as u32).rev().collect(),
             visible: vec![],
             camera_upload: vec![],
@@ -1038,15 +1074,21 @@ impl AdaptiveGpu {
         &self,
         owner: &crate::naadf::ownership::Ownership,
     ) -> (usize, usize) {
-        let certified = self.clusters.keys().filter(|k| owner.terrain(**k)).count();
+        let certified = self
+            .clusters
+            .keys()
+            .filter(|k| !self.warm.contains_key(k) && owner.terrain(**k))
+            .count();
         let overlap = self
             .clusters
-            .values()
-            .filter(|c| {
-                (0..3).all(|a| {
-                    c.proxy_bounds[1][a] >= owner.bounds[0][a]
-                        && c.proxy_bounds[0][a] <= owner.bounds[1][a]
-                })
+            .iter()
+            .filter(|(key, c)| {
+                !self.warm.contains_key(key) && {
+                    (0..3).all(|a| {
+                        c.proxy_bounds[1][a] >= owner.bounds[0][a]
+                            && c.proxy_bounds[0][a] <= owner.bounds[1][a]
+                    })
+                }
             })
             .count();
         (certified, overlap)
@@ -1361,14 +1403,77 @@ impl AdaptiveGpu {
         }
         Ok(())
     }
-    /// Release unneeded ranges while retaining allocated pages for future travel.
-    pub fn retain(&mut self, keys: &HashSet<TileKey>) {
-        let removed: Vec<_> = self
-            .clusters
-            .keys()
-            .filter(|k| !keys.contains(k))
-            .copied()
-            .collect();
+    /// Only published owners can draw. Keep inactive, immutable coarse
+    /// payloads in existing arena pages for a quick turn back.
+    pub fn retain(&mut self, keys: &HashSet<TileKey>, allow_warm: bool) {
+        let now = Instant::now();
+        let budget = if self.warm_enabled && allow_warm {
+            (self.resource_budget_bytes / 4).min(WARM_CACHE_MAX_BYTES)
+        } else {
+            0
+        };
+        self.warm.retain(|key, &mut (_, bytes)| {
+            let active = keys.contains(key);
+            if active {
+                self.warm_bytes -= bytes;
+                self.warm_reuses += 1;
+            }
+            !active
+        });
+        let mut removed = Vec::new();
+        for (&key, cluster) in &self.clusters {
+            if keys.contains(&key) || self.warm.contains_key(&key) {
+                continue;
+            }
+            let bytes = cluster.payload_bytes();
+            if budget > 0 && bytes <= budget && key.step_cells > 1 && !cluster.appearance_pending {
+                self.warm.insert(key, (now, bytes));
+                self.warm_bytes += bytes;
+            } else {
+                removed.push(key);
+            }
+        }
+        if self.warm_bytes > budget
+            || self.warm.len() > WARM_CACHE_MAX_CLUSTERS
+            || self
+                .warm
+                .values()
+                .any(|(since, _)| now.duration_since(*since) >= WARM_CACHE_TTL)
+        {
+            let mut oldest: Vec<_> = self
+                .warm
+                .iter()
+                .map(|(&key, &(since, bytes))| (since, key, bytes))
+                .collect();
+            oldest.sort_unstable();
+            for (since, key, bytes) in oldest {
+                if self.warm_bytes <= budget
+                    && self.warm.len() <= WARM_CACHE_MAX_CLUSTERS
+                    && now.duration_since(since) < WARM_CACHE_TTL
+                {
+                    break;
+                }
+                self.warm.remove(&key);
+                self.warm_bytes -= bytes;
+                self.warm_evictions += 1;
+                removed.push(key);
+            }
+        }
+        self.release_clusters(removed);
+        self.visible.retain(|item| keys.contains(&item.key));
+    }
+    /// Published and pending keys are never warm and may use the whole pool.
+    pub(super) fn evict_warm(&mut self) -> bool {
+        if self.warm.is_empty() {
+            return false;
+        }
+        let keys: Vec<_> = self.warm.drain().map(|(key, _)| key).collect();
+        self.warm_evictions += keys.len() as u64;
+        self.warm_bytes = 0;
+        self.release_clusters(keys);
+        true
+    }
+    fn release_clusters(&mut self, removed: Vec<TileKey>) {
         if !removed.is_empty() {
             self.residency_revision = self.residency_revision.wrapping_add(1);
             self.resident_stats = None;
@@ -1389,7 +1494,6 @@ impl AdaptiveGpu {
             }
             self.slots.push(c.slot);
         }
-        self.visible.retain(|item| keys.contains(&item.key));
     }
     /// Select only published owners. Resident preparation must never become visible.
     pub fn prepare(
@@ -1469,7 +1573,6 @@ impl AdaptiveGpu {
                         - c.vertices.range.start
                         - c.count as u64 * if c.derived_proxy { 20 } else { 40 };
                 }
-                stats.resident_bytes += profile_bytes;
                 if c.proxy_triangles {
                     stats.resident_proxy_triangle_bytes +=
                         c.vertices.range.end - c.vertices.range.start;
@@ -1478,10 +1581,7 @@ impl AdaptiveGpu {
                     stats.resident_native_quad_bytes +=
                         c.vertices.range.end - c.vertices.range.start;
                 }
-                stats.resident_bytes += c.vertices.range.end - c.vertices.range.start
-                    + c.indices
-                        .as_ref()
-                        .map_or(0, |i| i.range.end - i.range.start);
+                stats.resident_bytes += c.payload_bytes();
             }
             self.resident_stats = Some(stats);
         }
@@ -1753,6 +1853,10 @@ impl AdaptiveGpu {
         stats
     }
     fn update_command_stats(&self, stats: &mut DrawStats) {
+        stats.warm_clusters = self.warm.len();
+        stats.warm_bytes = self.warm_bytes;
+        stats.warm_reuses = self.warm_reuses;
+        stats.warm_evictions = self.warm_evictions;
         stats.prepare_reuse_enabled = self.prepare_reuse_enabled;
         stats.gpu_profiles = self.gpu_profile_stats;
         stats.indexed_proxy_enabled = self.indexed_proxy_enabled;
