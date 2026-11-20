@@ -477,6 +477,36 @@ impl FbmTerrain {
     pub(crate) fn seeded_reaches(&self, min: [f64; 2], max: [f64; 2]) -> Vec<seeded_world::Reach> {
         seeded_world::reaches_intersecting(self.seed, self.params, min, max)
     }
+    /// Candidate horizontal bounds for inland static water. The native column
+    /// still determines whether a candidate is wet. None means the requested
+    /// box exceeds a single drainage query's supported extent.
+    pub fn inland_water_core_boxes(
+        &self,
+        min: [f64; 2],
+        max: [f64; 2],
+    ) -> Option<Vec<[[f64; 2]; 2]>> {
+        if !self.params.recipe.has_static_water() || self.params.amplitude == 0. {
+            return Some(Vec::new());
+        }
+        let extent = 9600. * self.params.horizontal_scale / 1800.;
+        if (0..2).any(|a| max[a] - min[a] > extent) {
+            return None;
+        }
+        Some(
+            self.seeded_reaches(min, max)
+                .into_iter()
+                .filter(|r| r.a.stage.max(r.b.stage) > 0.)
+                .map(|r| {
+                    let width = r.width.max(r.width_b) + voxel_size();
+                    [
+                        [r.a.x.min(r.b.x) - width, r.a.z.min(r.b.z) - width],
+                        [r.a.x.max(r.b.x) + width, r.a.z.max(r.b.z) + width],
+                    ]
+                })
+                .collect(),
+        )
+    }
+
     /// Conservative river/lake core-support spacing hint, in meters. This is
     /// a display sampling rule, not a height certificate or water-area estimate.
     /// Segment endpoint AABBs expanded by maximum width contain every possible

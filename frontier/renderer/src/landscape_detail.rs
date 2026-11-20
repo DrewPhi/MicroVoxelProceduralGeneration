@@ -10,6 +10,86 @@ const SIDE: usize = 257;
 const HALO_SIDE: usize = SIDE + 2;
 const STEP_M: f64 = 8.;
 const RECENTER: i64 = 32;
+const RIVER_SIDE: usize = SIDE * 2;
+const RIVER_STEP: f64 = 16.;
+
+// Each byte stores the fraction of sixteen native column probes that contain
+// inland water. The lattice spans 8.2 km and shares its center with the fine grid.
+struct Rivers {
+    min: [i64; 2],
+    cover: Vec<u8>,
+}
+impl Rivers {
+    fn make(terrain: &FbmTerrain, center: [i64; 2], previous: Option<&Self>) -> Self {
+        let min = center.map(|i| i.div_euclid(2) - (SIDE as i64 - 1));
+        let candidates = river_candidates(terrain, min);
+        let cover = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(i, possible)| {
+                if !possible {
+                    return 0;
+                }
+                let x = min[0] + (i % RIVER_SIDE) as i64;
+                let z = min[1] + (i / RIVER_SIDE) as i64;
+                if let Some(old) = previous {
+                    let (u, v) = (x - old.min[0], z - old.min[1]);
+                    if (0..RIVER_SIDE as i64).contains(&u) && (0..RIVER_SIDE as i64).contains(&v) {
+                        return old.cover[v as usize * RIVER_SIDE + u as usize];
+                    }
+                }
+                let mut wet = 0;
+                for dz in [-6., -2., 2., 6.] {
+                    for dx in [-6., -2., 2., 6.] {
+                        let cell = Cell::from_meters([
+                            x as f64 * RIVER_STEP + dx,
+                            0.,
+                            z as f64 * RIVER_STEP + dz,
+                        ]);
+                        let col = terrain.column_cells(cell.x, cell.z);
+                        wet += u32::from(col.visible_top > 0 && col.visible_top > col.ground_top);
+                    }
+                }
+                ((wet * 255 + 8) / 16) as u8
+            })
+            .collect();
+        Self { min, cover }
+    }
+}
+
+// The broad phase only skips texels beyond every possible inland wet core.
+// Half a footprint and one native cell cover all sixteen canonical probes.
+fn river_candidates(terrain: &FbmTerrain, min: [i64; 2]) -> Vec<bool> {
+    let mut mask = vec![false; RIVER_SIDE * RIVER_SIDE];
+    let pad = 0.5 * RIVER_STEP + voxel_size();
+    let supported = 9600. * terrain.params().horizontal_scale / 1800.;
+    let block = (((supported - 2. * pad) / RIVER_STEP).floor() as usize).clamp(1, RIVER_SIDE);
+    for z in (0..RIVER_SIDE).step_by(block) {
+        for x in (0..RIVER_SIDE).step_by(block) {
+            let start = [x, z];
+            let end = start.map(|i| (i + block).min(RIVER_SIDE));
+            let lo = [0, 1].map(|a| (min[a] + start[a] as i64) as f64 * RIVER_STEP - pad);
+            let hi = [0, 1].map(|a| (min[a] + end[a] as i64 - 1) as f64 * RIVER_STEP + pad);
+            let boxes = terrain
+                .inland_water_core_boxes(lo, hi)
+                .unwrap_or_else(|| vec![[lo, hi]]);
+            for [a, b] in boxes {
+                let first = [0, 1].map(|i| {
+                    (((a[i] - pad) / RIVER_STEP).ceil() as i64 - min[i])
+                        .clamp(start[i] as i64, end[i] as i64) as usize
+                });
+                let past = [0, 1].map(|i| {
+                    (((b[i] + pad) / RIVER_STEP).floor() as i64 + 1 - min[i])
+                        .clamp(start[i] as i64, end[i] as i64) as usize
+                });
+                for row in first[1]..past[1] {
+                    mask[row * RIVER_SIDE + first[0]..row * RIVER_SIDE + past[0]].fill(true);
+                }
+            }
+        }
+    }
+    mask
+}
 
 #[derive(Clone, Copy, PartialEq)]
 struct Source {
@@ -28,6 +108,7 @@ struct Grid {
     // Lattice address of the first *visible* texel; the CPU grid has a halo.
     min: [i64; 2],
     samples: Vec<Sample>,
+    rivers: Rivers,
 }
 impl Grid {
     fn get(&self, x: i64, z: i64) -> Option<Sample> {
@@ -55,7 +136,7 @@ impl Grid {
                     let [r, g, b] = if wet { col.ground_surface.color() } else { rgb }.map(unorm);
                     let depth =
                         ((col.visible_top - col.ground_top) as f64 * source.edge).clamp(0., 12.);
-                    // Keep 255 for dry land. Both texture layers can then be
+                    // Keep 255 for dry land. Both near shading layers can be
                     // constructed from the same compact canonical sample.
                     let code = if wet {
                         (depth * (254. / 12.)).round() as u8
@@ -70,8 +151,13 @@ impl Grid {
                 samples.push(sample);
             }
         }
+        let rivers = Rivers::make(
+            &terrain,
+            min.map(|i| i + SIDE as i64 / 2),
+            reusable.map(|g| &g.rivers),
+        );
         let area = SIDE * SIDE;
-        let mut pixels = vec![0; area * 8];
+        let mut pixels = vec![0; area * 12];
         for v in 0..SIDE {
             for u in 0..SIDE {
                 let j = (v + 1) * HALO_SIDE + u + 1;
@@ -84,6 +170,10 @@ impl Grid {
                 let at = (v * SIDE + u) * 4;
                 let [x, y, z] = n.to_array().map(|v| unorm(0.5 + v * 0.5));
                 let [r, g, b, depth] = samples[j].albedo;
+                for k in 0..4 {
+                    pixels[8 * area + at + k] =
+                        rivers.cover[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2];
+                }
                 let dry = depth == 255;
                 pixels[at..at + 4].copy_from_slice(&[x, y, z, if dry { 255 } else { 0 }]);
                 pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[
@@ -99,6 +189,7 @@ impl Grid {
                 source,
                 min,
                 samples,
+                rivers,
             },
             pixels,
         )
@@ -115,7 +206,7 @@ pub(crate) struct Texture {
 }
 impl Texture {
     pub(super) fn bytes(&self) -> u64 {
-        self.texture.width() as u64 * self.texture.height() as u64 * 8
+        self.texture.width() as u64 * self.texture.height() as u64 * 12
     }
     pub(crate) fn new(device: &wgpu::Device, side: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -123,7 +214,7 @@ impl Texture {
             size: wgpu::Extent3d {
                 width: side,
                 height: side,
-                depth_or_array_layers: 2,
+                depth_or_array_layers: 3,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -253,6 +344,41 @@ impl super::AdaptiveGpu {
 mod tests {
     use super::*;
     #[test]
+    fn far_river_coverage_matches_brute_force_native_probes_in_a_drainage_basin() {
+        let terrain = FbmTerrain::new(
+            19,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let center = [800, 800];
+        let rivers = Rivers::make(&terrain, center, None);
+        let mut mixed = 0;
+        for z in (160..350).step_by(3) {
+            for x in (160..350).step_by(3) {
+                let mut wet = 0;
+                for dz in [-6., -2., 2., 6.] {
+                    for dx in [-6., -2., 2., 6.] {
+                        let p = Cell::from_meters([
+                            (rivers.min[0] + x as i64) as f64 * 16. + dx,
+                            0.,
+                            (rivers.min[1] + z as i64) as f64 * 16. + dz,
+                        ]);
+                        let c = terrain.column_cells(p.x, p.z);
+                        wet += u32::from(c.visible_top > 0 && c.visible_top > c.ground_top);
+                    }
+                }
+                let cover = rivers.cover[z * RIVER_SIDE + x];
+                assert_eq!(u32::from(cover), (wet * 255 + 8) / 16);
+                mixed += u32::from(cover > 0 && cover < 255);
+            }
+        }
+        assert!(mixed > 10);
+    }
+
+    #[test]
     fn moving_window_preserves_shared_height_normal_and_albedo() {
         let source = Source {
             seed: 40961,
@@ -267,6 +393,15 @@ mod tests {
         let (new, after) = Grid::make(source, [-64 + RECENTER, -128 - RECENTER], Some(&old));
         let shift = RECENTER as usize;
         let area = SIDE * SIDE * 4;
+        let river_shift = shift / 2;
+        for v in river_shift..RIVER_SIDE {
+            for u in 0..RIVER_SIDE - river_shift {
+                assert_eq!(
+                    old.rivers.cover[(v - river_shift) * RIVER_SIDE + u + river_shift],
+                    new.rivers.cover[v * RIVER_SIDE + u]
+                );
+            }
+        }
         for v in shift..SIDE {
             for u in 0..SIDE - shift {
                 let i = ((v - shift) * SIDE + u + shift) * 4;

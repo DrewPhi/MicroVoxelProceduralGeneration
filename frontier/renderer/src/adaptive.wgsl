@@ -470,6 +470,21 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     camera=batch_cameras[in.camera_slot].value;
     return shade(in);
 }
+fn river_texel(cell:vec2<i32>)->f32 {
+    let channel=u32((cell.x&1)+2*(cell.y&1));
+    return textureLoad(flight_detail,cell/2,2,0)[channel];
+}
+fn river_coverage(relative:vec2<f32>, spacing:f32)->f32 {
+    let side=vec2<f32>(textureDimensions(flight_detail));
+    let center=(side-1.)*.5;
+    let cell=(relative+near_shadow.parameters.zw-center*8.)/16.+2.*center;
+    let edge=min(cell,2.*side-1.-cell);
+    let fade=smoothstep(1.,12.,min(edge.x,edge.y))*smoothstep(6.,24.,spacing);
+    if fade<=0. {return 0.;}
+    let q=vec2<i32>(floor(cell));let f=fract(cell);
+    return fade*mix(mix(river_texel(q),river_texel(q+vec2(1,0)),f.x),
+                    mix(river_texel(q+vec2(0,1)),river_texel(q+vec2(1,1)),f.x),f.y);
+}
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
@@ -558,9 +573,15 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if diagnostic==5u {return vec4<f32>(blend,blend,blend,1.);}
     if diagnostic==6u {return vec4<f32>(light,1.);}
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
-    if diagnostic==0u && in.water!=0u {
+    var river=0.;
+    if diagnostic==0u && in.water==0u && near_shadow.parameters.z > -1e10
+        && (camera.paint_origin.w & 26u)==0u && in.normal.y>.35 && in.local.y>0. {
+        let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
+        river=river_coverage(in.local.xz-camera.eye.xz,spacing);
+    }
+    if diagnostic==0u && (in.water!=0u || river>.003) {
         let direction=normalize(in.local-camera.eye.xyz);
-        var normal=normalize(in.normal);
+        var normal=select(vec3(0.,1.,0.),normalize(in.normal),in.water!=0u);
         var bed=vec3(.30,.35,.25);
         var depth=4.;
         let phase=near_shadow.water_phase;
@@ -583,8 +604,10 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let reflected=reflect(direction,normal);
         let above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
         let below=water_medium(bed*light,depth);
-        let color=mix(below,above,water_fresnel(-dot(direction,normal)));
-        return vec4(color+visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x),1.);
+        let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
+            visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
+        if in.water!=0u {return vec4(color,1.);}
+        return vec4(mix(in.color*tint*light,color,river),1.);
     }
     let resolved=in.color*tint*light;
     if blend<=0. && diagnostic!=8u {return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,resolved,visibility),1.);}

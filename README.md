@@ -125,6 +125,12 @@ kept coarse coverage throughout. A separate descent from 300 m to 5.5 m
 above sea level resumed native streaming before reaching a saved 3 m deck.
 The final native window covered the deck and the save remained byte-identical.
 
+A second flight field covers 8.2 km of inland drainage. Each 16 m footprint
+uses 16 native column probes, and the terrain shader blends their water
+coverage into coarse mountain and valley surfaces. This keeps narrow reaches
+visible between mesh vertices. The combined water, normal and albedo texture
+uses 774 KiB. Saved edits and the exact native volume retain ownership.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.
