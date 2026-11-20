@@ -75,6 +75,13 @@ passes with this field measured **8.05 / 10.42 / 11.90 ms** and
 **8.79 / 11.27 / 12.65 ms**. The control (`FRONTIER_FLIGHT_DETAIL=0`)
 measured **8.33 / 10.86 / 12.51 ms**.
 
+With 32×32 macro patches, the seed 19 flyover drew 176,512 visible triangles
+at capture and measured **8.29 / 10.73 / 11.71 ms**. The 16×16 control drew
+55,896 and measured **9.00 / 11.65 / 13.87 ms**. First coverage took 658 ms
+and 449 ms respectively. On seed 40961 the two p95 measurements were 7.73
+and 8.60 ms. Both routes still had pending refinements at capture. Set
+`FRONTIER_HIGHLANDS_PATCH_ROWS=16` for the coarser control.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.

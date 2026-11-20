@@ -514,6 +514,7 @@ pub struct AdaptiveStream {
     recent_turn_poses: VecDeque<(std::time::Instant, Camera, Projection)>,
     last_side_prefetch: Option<std::time::Instant>,
     min_direct_split_width: Option<u32>,
+    macro_segments: u32,
     visible_vertical_bound: bool,
     occlusion: Option<(Camera, OcclusionSet)>,
     prediction_occlusion: Option<(Camera, OcclusionSet)>,
@@ -604,6 +605,13 @@ impl AdaptiveStream {
             recent_turn_poses: VecDeque::new(),
             last_side_prefetch: None,
             min_direct_split_width,
+            macro_segments: if highlands
+                && std::env::var("FRONTIER_HIGHLANDS_PATCH_ROWS").as_deref() != Ok("16")
+            {
+                32
+            } else {
+                16
+            },
             visible_vertical_bound: visible_vertical_bound_for_alpine(alpine),
             occlusion: None,
             prediction_occlusion: None,
@@ -1030,6 +1038,7 @@ impl AdaptiveStream {
                             step: k.step_cells,
                         },
                         self.min_direct_split_width,
+                        self.macro_segments,
                         &mut nodes,
                     );
                 } else {
@@ -1069,12 +1078,12 @@ impl AdaptiveStream {
             }
             // A kilometre-scale starter tile needs more than eight samples
             // across to show the Alpine skyline before fine tiles are ready.
-            // A 16-by-16 grid still fits the affine certificate budget.
+            // Highlands evaluates dense samples inside bounded affine regions.
             let root_segments = if (coarse_voxels && alpine
                 || self.min_direct_split_width.is_some())
                 && camera.far >= 3000.
             {
-                16
+                self.macro_segments
             } else {
                 8
             };
@@ -1135,7 +1144,12 @@ impl AdaptiveStream {
                     {
                         nodes.push(old)
                     } else if should_split(t.key) {
-                        split_refinement(old, self.min_direct_split_width, &mut nodes)
+                        split_refinement(
+                            old,
+                            self.min_direct_split_width,
+                            self.macro_segments,
+                            &mut nodes,
+                        )
                     } else {
                         nodes.push(Node {
                             step: refined_leaf_step(t.key, direct_native),
@@ -2520,15 +2534,12 @@ fn split(n: Node, out: &mut Vec<Node>) {
         }
     }
 }
-fn split_refinement(node: Node, min_direct_width: Option<u32>, out: &mut Vec<Node>) {
+fn split_refinement(node: Node, min_direct_width: Option<u32>, segments: u32, out: &mut Vec<Node>) {
     let start = out.len();
     split(node, out);
     if min_direct_width.is_some_and(|width| node.width >= width) {
         for child in &mut out[start..] {
-            // Start each requested child at up to 16 rows and columns. This
-            // stays within the large-tile affine certificate's 256-patch
-            // limit and avoids building a same-pitch intermediate partition.
-            child.step = (child.width / 16).max(1);
+            child.step = (child.width / segments).max(1);
         }
     }
 }
@@ -3043,7 +3054,7 @@ mod tests {
             width: 256,
             step: 16,
         };
-        split_refinement(parent, Some(256), &mut children);
+        split_refinement(parent, Some(256), 16, &mut children);
         assert_eq!(children.len(), 4);
         assert_eq!(
             children[3],

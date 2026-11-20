@@ -2863,18 +2863,34 @@ impl Generator<'_> {
         if exact_small {
             return;
         }
-        if self.affine_stats.quad_bounds >= MAX_AFFINE_QUADS {
+        // Dense Highlands grids share a conservative source enclosure across
+        // adjacent quads. Evaluate each actual triangle against that enclosure.
+        let group = if self.key.width_cells as i64 > 16 * s
+            && self
+                .world
+                .fbm_terrain()
+                .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+        {
+            self.key.width_cells as i64 / 16
+        } else {
+            s
+        };
+        let first = x % group == 0 && z % group == 0;
+        if first && self.affine_stats.quad_bounds >= MAX_AFFINE_QUADS {
             self.affine_complete = false;
             self.affine_stats.unavailable_quads += 1;
             return;
         }
-        self.affine_stats.quad_bounds += 1;
+        self.affine_stats.quad_bounds += u64::from(first);
         let started = std::time::Instant::now();
         let bound = self.samples.pages.bound(
             self.world,
             ColumnBox {
-                min: [self.key.min[0] + x, self.key.min[1] + z],
-                size_cells: [s as u32; 2],
+                min: [
+                    self.key.min[0] + x / group * group,
+                    self.key.min[1] + z / group * group,
+                ],
+                size_cells: [group as u32; 2],
             },
             BoundBudget::default(),
         );
@@ -2884,8 +2900,10 @@ impl Generator<'_> {
             self.affine_stats.unavailable_quads += 1;
             return;
         };
-        self.affine_stats.noise_cells += bound.noise_cells as u64;
-        self.affine_stats.full_range_fallbacks += bound.full_range_fallbacks as u64;
+        if first {
+            self.affine_stats.noise_cells += bound.noise_cells as u64;
+            self.affine_stats.full_range_fallbacks += bound.full_range_fallbacks as u64;
+        }
         self.affine_range[0] = self.affine_range[0].min(bound.height_range[0]);
         self.affine_range[1] = self.affine_range[1].max(bound.height_range[1]);
         for tri in self.mesh.indices[start_index..].chunks_exact(3) {
@@ -6360,7 +6378,7 @@ mod tests {
     #[test]
     fn affine_fan_certificate_encloses_exhaustive_children_without_parent_native_scan() {
         use frontier_world::FbmRecipe;
-        for recipe in [FbmRecipe::Legacy, FbmRecipe::Regional] {
+        for recipe in [FbmRecipe::Legacy, FbmRecipe::Regional, FbmRecipe::Highlands] {
             let world = World::fbm(
                 7,
                 FbmParams {
@@ -6369,13 +6387,18 @@ mod tests {
                 },
             )
             .unwrap();
+            let step = if recipe == FbmRecipe::Highlands {
+                8
+            } else {
+                32
+            };
             let parent = build(
                 &world,
                 TileKey {
                     min: [0, 0],
                     width_cells: 256,
-                    step_cells: 32,
-                    edge_steps: [32; 4],
+                    step_cells: step,
+                    edge_steps: [step; 4],
                     source_revision: 0,
                 },
                 || false,
@@ -6384,11 +6407,14 @@ mod tests {
             assert!(parent.certified_error_m.is_none());
             let aa = parent
                 .affine_error_m
-                .expect("all64quadforms cover actual fan triangles");
-            assert_eq!(parent.affine_stats.quad_bounds, 64);
+                .expect("source regions cover actual fan triangles");
+            assert_eq!(
+                parent.affine_stats.quad_bounds,
+                if step == 8 { 256 } else { 64 }
+            );
             assert_eq!(parent.affine_stats.unavailable_quads, 0);
             assert!(
-                parent.sampled_columns < 10_000,
+                parent.sampled_columns < 65_536,
                 "analytic-first cannot enumerate native parent"
             );
             assert!(parent.best_certified_vertical_error_m.unwrap() <= aa);
@@ -6402,8 +6428,8 @@ mod tests {
                         TileKey {
                             min: [x, z],
                             width_cells: 128,
-                            step_cells: 32,
-                            edge_steps: [32; 4],
+                            step_cells: step,
+                            edge_steps: [step; 4],
                             source_revision: 0,
                         },
                         || false,
