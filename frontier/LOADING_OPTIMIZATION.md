@@ -508,3 +508,122 @@ with it (identical RGB); this single pair does not demonstrate a speedup. It sta
 opt-in through `FRONTIER_PROFILE_CENTER_REUSE=1`. Source/appearance work remains
 an important unresolved throughput cost; less code work in one loop alone does
 not establish a faster game.
+
+## Packed coarse quads and reusable interiors
+
+The seed and detailed voxel paths emit packed quads directly. Ground-cover
+profiles are assigned before the two directional merge passes. The interior
+of an affine-certified tile uses direct comparisons between adjacent column
+runs. The existing span sweep owns the thin border and its joins. A bounded
+source-owned cache retains interior roofs and walls with patch-local profile
+slots, keyed by world revision, tile footprint and pitch. A different neighbor
+pitch regenerates the affected boundary and maps the reused faces to current
+profile indices. `FRONTIER_COARSE_INTERIOR_CACHE=0` runs the direct interior
+builder without memoization.
+
+A source height range and the emitted roof extrema cheaply bound the whole
+patch. When that bound is below the certified maximum already accumulated for
+the tile, the per-quad affine tests cannot improve its conservative certificate.
+All other patches use the affine corner calculation. Large-tile diagnostics
+report coarse source-bound time, roof-comparison time, dominated patch count,
+and interior cache hits. With `FRONTIER_PROFILE_SOURCE=1` the bound-page cache
+also reports lock wait and evaluation sums. These are overlapping worker
+measurements. The page evaluation and wait are included in the coarse source
+time when the corresponding tile completes. Small tiles retain exact column
+enumeration.
+
+The interval evaluator now shares lattice gradients across the point and
+range evaluations and omits the unused point Hessian. In a standalone release
+probe over 1,728 seed-7 Alpine, Legacy and Seeded World boxes at four pitches,
+the bound-field digest matched the baseline. The optimized path took about
+82 ms versus 87 ms over alternating samples. A sign-branching interval
+multiply made the same probe slower, about 98 ms, and was discarded.
+
+`FRONTIER_COARSE_Y_PITCH_DIVISOR=2|4|8` tests finer Y rounding for dry stair
+roofs. The same quantization is applied to both sides of a shared edge.
+Voxel-pitch and water samples retain their native heights. Derived cache
+identity includes the alternative divisor. The default divisor is 1.
+
+### Radeon 760M measurements
+
+Ryzen 5 7640U, Radeon 760M, RADV Mesa 25.2.8, 1920×1080, MSAA1, and
+6.25 cm canonical voxels. The baseline was Frontier commit `0a167a9`. These
+experiments extend the current engine in place and use no legacy engine code.
+Use the walk-and-turn command above on each release binary. The preset comes
+before `--no-adaptive-disk-cache`; every reported run has zero disk hits, misses,
+and writes. The first exploratory loop put the disable flag before the preset
+and its cache-contaminated timings were discarded.
+
+| Alpine walk and turn | Runs | Frame p50 / p95 / p99, ms | Terrain uploads, MiB |
+| --- | ---: | ---: | ---: |
+| Baseline | 2 | 24.18 / 32.27 / 46.12 | 131.8 |
+| Packed quads and interior reuse, divisor 1 | 2 | 24.52 / 30.73 / 42.08 | 150.8 |
+| Packed quads, interior reuse disabled | 1 | 24.47 / 31.78 / 45.95 | 140.8 |
+| Packed quads with visible-part error bound | 1 | 24.52 / 30.60 / 44.10 | 145.9 |
+| Packed quads, divisor 4 | 2 | 23.80 / 29.79 / 41.25 | 95.0 |
+| Packed quads, divisor 4 with visible-part error bound | 1 | 24.04 / 30.34 / 39.85 | 93.1 |
+| Packed quads, divisor 8 | 1 | 24.02 / 31.34 / 44.07 | 93.9 |
+
+The numbers average each run's reported quantiles. Coverage held in every
+measured frame. No run reached the 3 px target during movement. The optional
+visible-part projection reduced frames with an unbounded projection from 37–38
+to 8 in one pass and to 0 in the divisor-4 pass. Both fell short of the 3 px
+target. The packed path reused
+418 and 434 tile interiors across the two divisor-1 walk runs. The route can
+build a different number of tiles in the same wall time, so total worker time
+alone cannot establish the cost of a tile.
+
+For the stationary Alpine horizon, vegetation was disabled to compare terrain
+at a 6 km clip. Seed, camera, exact radius, fog, and target stayed fixed. Each
+row is one cold run followed by 189 settled frame samples. Output is in
+`output/lod-optimization/horizon-cold-*`.
+
+| 6 km horizon | First quality / reserve, s | Frame p50 / p95 / p99, ms | Reported terrain triangles | Resident clusters |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | 15.53 / 21.28 | 20.66 / 22.45 / 23.05 | 2,149,658 | 3,739 |
+| Packed quads, divisor 1 | 14.61 / 20.17 | 19.64 / 23.09 / 23.34 | 2,149,658 | 3,739 |
+| Packed quads, divisor 4 | 5.78 / 10.24 | 20.17 / 22.54 / 23.62 | 2,247,054 | 2,788 |
+| Packed quads, divisor 8 | 4.85 / 9.09 | 21.04 / 24.12 / 24.96 | 2,348,244 | 2,650 |
+| Surface | 9.13 / 10.58 | 17.49 / 20.35 / 21.24 | 334,432 | 1,716 |
+
+All tested variants reached the 6 px reserve and had zero pending selection bytes at the
+end. The divisor-1 capture matches the baseline PNG pixel for pixel. The
+surface lowers GPU time and changes the distant slopes, material transitions,
+and shadows. The smaller Y pitch retains stairs and changes their size,
+distribution, and shading. Both remain selectable for visual evaluation. Divisor 8 reached quality
+sooner than divisor 4 and paid for the extra faces in both frame-time tests.
+In the divisor-1 run, large-tile source bounds accounted for 36.18 s of summed
+worker time and roof comparison for 0.135 s. Bound-page lock wait was 0.85 s.
+Once prepared, the whole GPU span and exact terrain pass dominate the frame
+budget, and reducing roof arithmetic further cannot materially improve it.
+
+```sh
+FRONTIER_PROFILE_SOURCE=1 FRONTIER_DISTANT_TERRAIN=voxy-seed ./run.sh \
+  --preset alpine --seed 7 --vegetation off --vegetation-near 32 --msaa 1 \
+  --width 1920 --height 1080 --naadf-radius 64 --naadf-follow off \
+  --capture-far 6000 --pixel-error 7.5 --adaptive-refinements 24 \
+  --eye -43.625,75,-289.5625 --target 0,490,3300 \
+  --cloud-speed 0 --fog-density 0 --streaming-haze 0 \
+  --terrain-cache-mib 2179 --build-memory-mib 2179 --terrain-gpu-mib 1452 \
+  --plant-cpu-mib 581 --plant-gpu-mib 871 --triangle-budget 4000000 \
+  --benchmark-input-lock --adaptive-wait-quality --frames 240 --warmup 50 \
+  --no-adaptive-disk-cache --capture-on-exit output/horizon.png \
+  --report output/horizon.json
+```
+
+The fixed player-height spiky capture used Legacy seed 7, a 300 m clip,
+32 m NAADF radius, 5 px target, MSAA1 and no atmosphere or terrain shadows.
+The original and packed versions reached the requested target. Their linear
+color RMSE against the independent 256-spp native reference was 0.02302 and
+0.02304. These asynchronous runs settled with different terrain selections.
+The prepared horizon PNG and the fixed-key mesh parity test provide stronger
+controls for the packing change.
+
+The divisor-4 spiky capture also met the target and had 0.02167 linear color
+RMSE against the same native reference. Its different tile selection and roof
+heights change the image. The choice remains opt-in pending motion appearance
+acceptance. The library test suite passed 812 tests, with 45 explicit
+diagnostics ignored. The interior regression compares the reused packed
+payload, shader profiles, bounds and certificate for a changed seam against
+the full edge-sweep control and verifies that clearing the cache removes reuse.
+The seam and water-face tests also pass with the divisor set to 4 and 8.

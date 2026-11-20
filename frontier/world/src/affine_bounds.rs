@@ -57,6 +57,15 @@ impl HeightBound {
     pub fn quad_error(&self, vertices: [[f64; 3]; 4]) -> Option<f64> {
         self.vertex_error(&vertices)
     }
+    /// Conservative discrepancy between any source height in this patch and
+    /// any roof height in the given range. Correlation with X/Z is ignored.
+    pub fn roof_range_error(&self, [lo, hi]: [f64; 2]) -> f64 {
+        I::point(self.height_range[1])
+            .sub(I::point(lo))
+            .hi
+            .max(I::point(hi).sub(I::point(self.height_range[0])).hi)
+    }
+
     fn vertex_error(&self, vertices: &[[f64; 3]]) -> Option<f64> {
         let mut error = 0.0_f64;
         for &v in vertices {
@@ -544,7 +553,7 @@ fn fade_i(t: I) -> I {
 fn fade_second(t: f64) -> f64 {
     60.0 * t * (2.0 * t * t - 3.0 * t + 1.0)
 }
-fn fade_range(t: I) -> (I, I, I) {
+fn fade_range<const SECOND: bool>(t: I) -> (I, I, I) {
     let f0 = fade_i(I::point(t.lo));
     let f1 = fade_i(I::point(t.hi));
     let value = I {
@@ -555,7 +564,6 @@ fn fade_range(t: I) -> (I, I, I) {
         lo: f64::INFINITY,
         hi: f64::NEG_INFINITY,
     };
-    let mut dd = d;
     for q in [t.lo, t.hi, 0.0, 0.5, 1.0] {
         if q < t.lo || q > t.hi {
             continue;
@@ -569,6 +577,13 @@ fn fade_range(t: I) -> (I, I, I) {
         d.lo = d.lo.min(dm.lo);
         d.hi = d.hi.max(dm.hi);
     }
+    if !SECOND {
+        return (value, d, I::point(0.0));
+    }
+    let mut dd = I {
+        lo: f64::INFINITY,
+        hi: f64::NEG_INFINITY,
+    };
     for q in [
         t.lo,
         t.hi,
@@ -617,11 +632,11 @@ fn lerp_hessian(a: I, b: I, t: I) -> I {
     }
 }
 /// Value, U/V gradient and UU/UV/VV Hessian of one noise-cell polynomial.
-fn noise_jet(u: I, v: I, i: i64, j: i64, seed: u64) -> [I; 6] {
-    let (fu, du, ddu) = fade_range(u);
-    let (fv, dv, ddv) = fade_range(v);
-    let grad = |dx: i64, dz: i64| {
-        let g = gradient_pair(i.wrapping_add(dx), j.wrapping_add(dz), seed);
+fn noise_jet<const SECOND: bool>(u: I, v: I, gradients: [[f64; 2]; 4]) -> [I; 6] {
+    let (fu, du, ddu) = fade_range::<SECOND>(u);
+    let (fv, dv, ddv) = fade_range::<SECOND>(v);
+    let grad = |dx: usize, dz: usize| {
+        let g = gradients[dx + dz * 2];
         (
             u.sub(I::point(dx as f64))
                 .scale(g[0])
@@ -629,7 +644,7 @@ fn noise_jet(u: I, v: I, i: i64, j: i64, seed: u64) -> [I; 6] {
             g,
         )
     };
-    let line = |dz: i64| {
+    let line = |dz: usize| {
         let (g0, a) = grad(0, dz);
         let (g1, b) = grad(1, dz);
         let delta = g1.sub(g0);
@@ -639,8 +654,12 @@ fn noise_jet(u: I, v: I, i: i64, j: i64, seed: u64) -> [I; 6] {
             lerp_i(g0, g1, fu),
             I::point(a[0]).add(du.mul(delta)).add(fu.scale(dax)),
             I::point(a[1]).add(fu.scale(daz)),
-            ddu.mul(delta).add(du.scale(2.0 * dax)),
-            du.scale(daz),
+            if SECOND {
+                ddu.mul(delta).add(du.scale(2.0 * dax))
+            } else {
+                I::point(0.0)
+            },
+            if SECOND { du.scale(daz) } else { I::point(0.0) },
         ]
     };
     let a = line(0);
@@ -649,17 +668,36 @@ fn noise_jet(u: I, v: I, i: i64, j: i64, seed: u64) -> [I; 6] {
         lerp_i(a[0], b[0], fv),
         lerp_i(a[1], b[1], fv),
         lerp_i(a[2], b[2], fv).add(dv.mul(b[0].sub(a[0]))),
-        lerp_hessian(a[3], b[3], fv),
-        lerp_hessian(a[4], b[4], fv).add(dv.mul(b[1].sub(a[1]))),
-        dv.mul(b[2].sub(a[2]))
-            .scale(2.0)
-            .add(ddv.mul(b[0].sub(a[0]))),
+        if SECOND {
+            lerp_hessian(a[3], b[3], fv)
+        } else {
+            I::point(0.0)
+        },
+        if SECOND {
+            lerp_hessian(a[4], b[4], fv).add(dv.mul(b[1].sub(a[1])))
+        } else {
+            I::point(0.0)
+        },
+        if SECOND {
+            dv.mul(b[2].sub(a[2]))
+                .scale(2.0)
+                .add(ddv.mul(b[0].sub(a[0])))
+        } else {
+            I::point(0.0)
+        },
     ]
     .map(|x| x.scale(1.6))
 }
 fn noise_taylor(u: Aa, v: Aa, i: i64, j: i64, seed: u64) -> Aa {
-    let point = noise_jet(I::point(u.c), I::point(v.c), i, j, seed);
-    let range = noise_jet(u.range(), v.range(), i, j, seed);
+    let gradients = std::array::from_fn(|index| {
+        gradient_pair(
+            i.wrapping_add((index % 2) as i64),
+            j.wrapping_add((index / 2) as i64),
+            seed,
+        )
+    });
+    let point = noise_jet::<false>(I::point(u.c), I::point(v.c), gradients);
+    let range = noise_jet::<true>(u.range(), v.range(), gradients);
     let mut r = up_add(
         up_mul(point[1].abs_max(), u.r),
         up_mul(point[2].abs_max(), v.r),

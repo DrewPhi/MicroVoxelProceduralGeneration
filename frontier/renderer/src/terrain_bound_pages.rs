@@ -43,6 +43,8 @@ pub(super) struct Stats {
     pub(super) evictions: u64,
     pub(super) batches: u64,
     pub(super) bytes: usize,
+    pub(super) lock_ns: u64,
+    pub(super) evaluation_ns: u64,
 }
 
 pub(super) struct Cache {
@@ -52,6 +54,9 @@ pub(super) struct Cache {
     evictions: AtomicU64,
     batches: AtomicU64,
     bytes: AtomicUsize,
+    lock_ns: AtomicU64,
+    evaluation_ns: AtomicU64,
+    profile: bool,
 }
 
 impl Cache {
@@ -72,6 +77,9 @@ impl Cache {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             batches: AtomicU64::new(0),
+            lock_ns: AtomicU64::new(0),
+            evaluation_ns: AtomicU64::new(0),
+            profile: std::env::var_os("FRONTIER_PROFILE_SOURCE").is_some_and(|v| v == "1"),
             bytes: AtomicUsize::new(
                 size_of::<Self>() + SHARDS * sets * size_of::<[Option<Box<Page>>; WAYS]>(),
             ),
@@ -85,6 +93,8 @@ impl Cache {
             evictions: self.evictions.load(Relaxed),
             batches: self.batches.load(Relaxed),
             bytes: self.bytes.load(Relaxed),
+            lock_ns: self.lock_ns.load(Relaxed),
+            evaluation_ns: self.evaluation_ns.load(Relaxed),
         }
     }
 
@@ -149,7 +159,12 @@ impl Cache {
             ^ u64::from(address.pitch).wrapping_mul(0x94d049bb133111eb);
         let hash = (key ^ (key >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         let hash = hash ^ (hash >> 29);
+        let start = self.profile.then(std::time::Instant::now);
         let mut lock = self.shards[hash as usize % SHARDS].lock().unwrap();
+        if let Some(start) = start {
+            self.lock_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+        }
         let shard = &mut *lock;
         shard.clock = shard.clock.wrapping_add(1);
         let set_count = shard.sets.len();
@@ -179,6 +194,7 @@ impl Cache {
         };
         page.last_used = shard.clock;
         let mut misses = 0;
+        let start = self.profile.then(std::time::Instant::now);
         for index in first..first + count {
             let bit = 1_u64 << index;
             if page.ready & bit == 0 {
@@ -199,6 +215,11 @@ impl Cache {
                 misses += 1;
             }
             out.push(page.bounds[index]);
+        }
+        drop(lock);
+        if let Some(start) = start.filter(|_| misses > 0) {
+            self.evaluation_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
         }
         self.batches.fetch_add(1, Relaxed);
         self.misses.fetch_add(misses, Relaxed);

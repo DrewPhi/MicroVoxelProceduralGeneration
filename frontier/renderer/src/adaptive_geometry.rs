@@ -200,6 +200,9 @@ pub struct AffineStats {
     pub noise_cells: u64,
     pub full_range_fallbacks: u64,
     pub cpu_ms: f64,
+    pub coarse_source_ms: f64,
+    pub coarse_roof_ms: f64,
+    pub coarse_roofs_skipped: u64,
 }
 /// Small jobs are a cancellation boundary even on the exact mesher path. The
 /// legacy whole-square extraction is deliberately not used here.
@@ -289,7 +292,7 @@ fn build_cached_staged(
         if tile.exact {
             pack_exact_native(&mut tile, &mut cancelled)?;
         } else if coarse {
-            distant_voxels::pack(&mut tile)?;
+            distant_voxels::merge_quads(&mut tile);
         } else {
             compact_vertices(&mut tile);
         }
@@ -1096,6 +1099,7 @@ fn build_surface_with_geometry(
             },
             exposed_native_faces: 0,
         },
+        coarse_quads: vec![],
         empirical_error_m: 0.,
         affine_error: 0.,
         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -1270,6 +1274,26 @@ fn build_surface_with_geometry(
         generator.empirical_error_m,
         false,
     );
+    if coarse {
+        let origin = [
+            key.min[0] as f64 * VOXEL_SIZE,
+            0.,
+            key.min[1] as f64 * VOXEL_SIZE,
+        ];
+        for quad in &generator.coarse_quads {
+            let axis = (quad.axis_sign & 3) as usize;
+            let mut end = quad.anchor;
+            end[(axis + 1) % 3] += quad.extent[0];
+            end[(axis + 2) % 3] += quad.extent[1];
+            for i in 0..3 {
+                tile.bounds[0][i] = tile.bounds[0][i].min(origin[i] + f64::from(quad.anchor[i]));
+                tile.bounds[1][i] = tile.bounds[1][i].max(origin[i] + f64::from(end[i]));
+            }
+        }
+        tile.conservative_surface_bounds = tile.bounds;
+        tile.native_quads = generator.coarse_quads;
+        tile.bytes += tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>();
+    }
     tile.face_profiles = generator.face_profiles;
     tile.gpu_profiles = gpu_profiles;
     tile.face_profile_indices = generator.face_profile_indices;
@@ -1736,6 +1760,7 @@ const SOURCE_SHARDS: usize = 32;
 struct SharedSourcePages {
     shards: [Arc<Mutex<SourceShard>>; SOURCE_SHARDS],
     terrain_bounds: Option<Arc<terrain_bound_pages::Cache>>,
+    coarse_interiors: Option<Arc<distant_voxels::InteriorCache>>,
 }
 #[derive(Clone, Copy, PartialEq)]
 struct BoundKey {
@@ -1786,8 +1811,18 @@ impl SharedSourcePages {
         } else {
             bytes
         };
+        let coarse_interiors = (distant_voxels::enabled()
+            && std::env::var_os("FRONTIER_COARSE_INTERIOR_CACHE").is_none_or(|v| v != "0"))
+        .then(|| distant_voxels::InteriorCache::new((bytes / 32).min(4 * 1024 * 1024)))
+        .flatten()
+        .map(Arc::new);
+        let bytes = bytes
+            - coarse_interiors
+                .as_ref()
+                .map_or(0, |cache| cache.reserved_bytes);
         Self {
             terrain_bounds,
+            coarse_interiors,
             shards: std::array::from_fn(|i| {
                 let budget = bytes / SOURCE_SHARDS + usize::from(i < bytes % SOURCE_SHARDS);
                 // Direct-mapped immutable source bounds reserve at most 1/8 of
@@ -1863,7 +1898,15 @@ impl SharedSourcePages {
             out.source_cache_bytes += stats.bytes;
             out.source_cache_peak_bytes += stats.bytes;
             out.bound_page_batches = stats.batches;
+            out.bound_page_lock_ms = stats.lock_ns as f64 / 1e6;
+            out.bound_page_evaluation_ms = stats.evaluation_ns as f64 / 1e6;
             out.bound_page_evictions = stats.evictions;
+        }
+        if let Some(cache) = &self.coarse_interiors {
+            out.source_cache_bytes += cache.reserved_bytes;
+            out.source_cache_peak_bytes += cache.reserved_bytes;
+            out.coarse_interior_cache_bytes = cache.reserved_bytes;
+            out.coarse_interior_hits = cache.hits.load(Ordering::Relaxed);
         }
         for shard in &self.shards {
             let shard = shard.lock().unwrap();
@@ -1969,6 +2012,9 @@ impl SharedSourcePages {
         if let Some(cache) = &self.terrain_bounds {
             cache.clear();
         }
+        if let Some(cache) = &self.coarse_interiors {
+            cache.clear();
+        }
         for shard in &self.shards {
             let mut shard = shard.lock().unwrap();
             shard.pages.clear();
@@ -2015,6 +2061,8 @@ impl SourceTimings {
     }
 }
 struct SourceSamples {
+    #[cfg(test)]
+    coarse_reference: bool,
     gpu_job_allowed: bool,
     gpu_profiles: GpuProfilePreparationStats,
     profile_enabled: bool,
@@ -2028,6 +2076,8 @@ struct SourceSamples {
 impl SourceSamples {
     fn new(bytes: usize) -> Self {
         Self {
+            #[cfg(test)]
+            coarse_reference: false,
             gpu_job_allowed: false,
             gpu_profiles: GpuProfilePreparationStats {
                 enabled: integrated_profiles::enabled(),
@@ -2044,6 +2094,8 @@ impl SourceSamples {
     }
     fn fork(&self) -> Self {
         Self {
+            #[cfg(test)]
+            coarse_reference: self.coarse_reference,
             gpu_job_allowed: false,
             gpu_profiles: GpuProfilePreparationStats {
                 enabled: self.gpu_profiles.enabled,
@@ -2198,6 +2250,7 @@ struct Generator<'a> {
     key: TileKey,
     heights: LocalColumns,
     mesh: Mesh,
+    coarse_quads: Vec<NativeQuad>,
     empirical_error_m: f64,
     affine_error: f64,
     affine_range: [f64; 2],
@@ -3239,6 +3292,13 @@ pub struct CacheStats {
     pub affine_full_range_fallbacks: u64,
     pub affine_unavailable_quads: u64,
     pub affine_ms: f64,
+    pub coarse_source_bound_ms: f64,
+    pub coarse_roof_bound_ms: f64,
+    pub coarse_roofs_skipped: u64,
+    pub coarse_interior_hits: u64,
+    pub coarse_interior_cache_bytes: usize,
+    pub bound_page_lock_ms: f64,
+    pub bound_page_evaluation_ms: f64,
     /// Coarse CPU stage totals; source queries are included in their calling stage.
     pub appearance_ms: f64,
     pub certificate_ms: f64,
@@ -3659,6 +3719,9 @@ impl GeometryCache {
             self.stats.affine_full_range_fallbacks += tile.affine_stats.full_range_fallbacks;
             self.stats.affine_unavailable_quads += tile.affine_stats.unavailable_quads;
             self.stats.affine_ms += tile.affine_stats.cpu_ms;
+            self.stats.coarse_source_bound_ms += tile.affine_stats.coarse_source_ms;
+            self.stats.coarse_roof_bound_ms += tile.affine_stats.coarse_roof_ms;
+            self.stats.coarse_roofs_skipped += tile.affine_stats.coarse_roofs_skipped;
         }
         let admission_started = std::time::Instant::now();
         if tile.bytes.saturating_add(LRU_ENTRY_BYTES) > self.mesh_budget {
@@ -3770,6 +3833,10 @@ impl GeometryCache {
             affine_cache_misses: source.affine_cache_misses,
             affine_cache_bytes: source.affine_cache_bytes,
             bound_page_batches: source.bound_page_batches,
+            coarse_interior_hits: source.coarse_interior_hits,
+            coarse_interior_cache_bytes: source.coarse_interior_cache_bytes,
+            bound_page_lock_ms: source.bound_page_lock_ms,
+            bound_page_evaluation_ms: source.bound_page_evaluation_ms,
             bound_page_evictions: source.bound_page_evictions,
             appearance_cache_hits: source.appearance_cache_hits,
             appearance_cache_misses: source.appearance_cache_misses,
@@ -3869,6 +3936,7 @@ mod tests {
                     },
                     exposed_native_faces: 0,
                 },
+                coarse_quads: vec![],
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -4000,6 +4068,7 @@ mod tests {
                     origin: Cell::default(),
                     exposed_native_faces: 0,
                 },
+                coarse_quads: vec![],
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -5007,6 +5076,7 @@ mod tests {
                             origin: Cell::default(),
                             exposed_native_faces: 0,
                         },
+                        coarse_quads: vec![],
                         empirical_error_m: 0.0,
                         affine_error: 0.0,
                         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6339,6 +6409,7 @@ mod tests {
                     origin: Cell::default(),
                     exposed_native_faces: 0,
                 },
+                coarse_quads: vec![],
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6650,6 +6721,7 @@ mod tests {
                     origin: Cell::default(),
                     exposed_native_faces: 0,
                 },
+                coarse_quads: vec![],
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6727,6 +6799,7 @@ mod tests {
                 },
                 exposed_native_faces: 0,
             },
+            coarse_quads: vec![],
             empirical_error_m: 0.,
             affine_error: 0.,
             affine_range: [f64::INFINITY, f64::NEG_INFINITY],
