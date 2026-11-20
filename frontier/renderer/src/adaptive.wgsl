@@ -18,7 +18,7 @@ fn terrain_lighting(normal:vec3<f32>, visibility:f32) -> vec3<f32> {
         var sun_color=vec3(0.83,0.75,0.60);
         if (camera.paint_origin.w&4u)!=0u {
             ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
-            sun_color=vec3(2.0,1.7,1.2);
+            sun_color=outdoor_sun_color(camera.sun.y);
         }
         let direct=sun_color*max(dot(n,camera.sun.xyz),0.);
         return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
@@ -441,7 +441,12 @@ fn shade(in: VertexOut) -> vec4<f32> {
     var visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));
     // An opaque raster shadow already proves the sun ray is blocked.
     if visibility>0. {visibility=min(visibility,naadf_mesh_sun_visibility(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz));}
-    let light = terrain_lighting(in.normal,visibility);
+    var indirect=vec3(0.);
+    if camera.sun.w>0.5 {
+        indirect=ground_irradiance(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz,
+            outdoor_sun_color(camera.sun.y),camera.sky.x,visibility);
+    }
+    let light=terrain_lighting(in.normal,visibility)+indirect;
     var tint=vec3<f32>(1.);
     let local_cell=vec3<i32>(floor(in.local*16.-in.normal*0.01));
     if camera.eye.w>0. {
@@ -460,7 +465,7 @@ fn shade(in: VertexOut) -> vec4<f32> {
         let alpha=cover_shell_alpha(p,in.local,in.normal,min(length(dx),length(dy)),coverage);
         let cell=bitcast<vec3<u32>>(vec3<i32>(floor(in.local*16.)))+camera.paint_origin.xyz;
         if paint_hash(vec3(cell.x,991u,cell.z))>=alpha {discard;}
-        return vec4(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*terrain_lighting(in.normal,visibility),visibility),1.);
+        return vec4(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.);
     }
     let xx=dot(dx,dx); let yy=dot(dy,dy); let xy=dot(dx,dy);
     let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
@@ -487,6 +492,14 @@ fn shade(in: VertexOut) -> vec4<f32> {
     if diagnostic==5u {return vec4<f32>(blend,blend,blend,1.);}
     if diagnostic==6u {return vec4<f32>(light,1.);}
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
+    if diagnostic==0u && all(in.color==MATERIAL_COLORS[7]) {
+        let direction=normalize(in.local-camera.eye.xyz);
+        let normal=normalize(in.normal);
+        let reflected=reflect(direction,normal);
+        let above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
+        let below=water_medium(vec3(0.30,0.35,0.25)*light,4.);
+        return vec4(mix(below,above,water_fresnel(-dot(direction,normal))),1.);
+    }
     let resolved=in.color*tint*light;
     if blend<=0. && diagnostic!=8u {return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,resolved,visibility),1.);}
     // All three triangle vertices share this ID. Fetch only for unresolved
@@ -506,7 +519,10 @@ fn shade(in: VertexOut) -> vec4<f32> {
             +w.w*profile.nz.rgb*terrain_lighting(vec3<f32>(0.,0.,-1.),visibility);
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         if diagnostic==8u {return vec4<f32>(filtered/area,1.);}
-        return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,mix(resolved,filtered/area*display_terrain_tint(cell,0.),blend),visibility),1.);
+        let albedo=(top*profile.top.rgb+w.x*profile.px.rgb+w.y*profile.nx.rgb
+            +w.z*profile.pz.rgb+w.w*profile.nz.rgb)/area;
+        let radiance=(filtered/area+albedo*indirect)*display_terrain_tint(cell,0.);
+        return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,mix(resolved,radiance,blend),visibility),1.);
     }
     return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.0);
 }

@@ -8,6 +8,9 @@ struct AtmosphereUniform {
     fog: vec4<f32>, // density, height falloff, exposure, enabled
     weather: vec4<f32>, // coverage, speed, overcast, elapsed seconds
     beauty: vec4<f32>, // contract v2: enabled, shadowed air enabled, debug mode, reserved
+    lighting: vec4<f32>, // shafts, streaming haze, region count, reserved
+    far_shadow: mat4x4<f32>,
+    haze_regions: array<vec4<f32>,8>,
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS
@@ -149,6 +152,24 @@ fn meadow_scattering(uv:vec2<f32>,distance:f32)->vec3<f32> {
     }}
     return light/max(total,.00001);
 }
+// Temporary opacity only at published terrain whose requested refinement is
+// still in flight. World-space regions soften across tile boundaries.
+fn refinement_transmittance(position:vec3<f32>,distance:f32)->f32 {
+    if atmosphere.lighting.y<=0. || atmosphere.lighting.z<0.5 || distance<22. {
+        return 1.;
+    }
+    var amount=0.;
+    for(var i=0u;i<u32(atmosphere.lighting.z);i+=1u) {
+        let region=atmosphere.haze_regions[i];
+        let relative=abs(position.xz-region.xy);
+        let edge=max(relative.x,relative.y);
+        let inside=1.-smoothstep(region.z*.55,region.z+min(35.,region.z*.6),edge);
+        amount=max(amount,inside*region.w);
+    }
+    let range=smoothstep(22.,65.,distance)*(1.-smoothstep(480.,800.,distance));
+    return 1.-clamp(atmosphere.lighting.y*amount*range*.74,0.,.74);
+}
+
 fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
     if atmosphere.fog.w < 0.5 {
         if atmosphere.beauty.x>.5 {return beauty_finish(color);}
@@ -170,7 +191,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         // Clean air includes a weak altitude-independent Rayleigh contribution.
         // The user density scales BOTH terms, so zero fog remains exactly clear.
         let optical_depth = atmosphere.fog.x * (integrated * 0.78 + distance * 0.22);
-        let transmittance = exp(-optical_depth);
+        let transmittance = exp(-optical_depth)*refinement_transmittance(offset,distance);
         let haze = alpine_clear_sky(vec3(ray.x, max(ray.y, 0.04), ray.z));
         return beauty_finish(mix(haze, color, transmittance)+meadow_scattering(uv,distance));
     }

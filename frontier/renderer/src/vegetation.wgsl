@@ -148,7 +148,7 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     let overcast=clamp(lighting.sky.x,0.,1.);
     let sky=0.5+0.5*n.y;
     let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
-    let sunlight=vec3(2.0,1.7,1.2)*(1.-0.72*overcast);
+    let sunlight=outdoor_sun_color(sun.y)*(1.-0.72*overcast);
     let direct=sunlight*max(dot(n,sun),0.)*visibility;
     let view=normalize(camera.eye.xyz-i.local);
     // Forward scattering is strongest when the observer faces the sun through
@@ -158,14 +158,7 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     let back=max(-dot(n,sun),0.);
     let transmitted=sunlight*vec3(0.88,1.,0.44)*0.50*i.transmission
         *(0.25+0.75*forward)*back*(0.08+0.92*visibility)*ao*ao;
-    // Nontransmitting plant material is wood, selected by its explicit material
-    // response rather than pigment. Approximate warm ground irradiance reaches
-    // vertical/down-facing bark in addition to cool sky fill. It follows solar
-    // elevation, overcast and ambient visibility; it is reflected illumination,
-    // independent of the directly shadowed sun term, never added emission.
-    let wood=1.-step(0.001,i.transmission);
-    let ground=0.5-0.5*n.y;
-    let bounce=sunlight*vec3(0.45,0.30,0.12)*max(sun.y,0.)*ground*ao*wood;
+    let bounce=ground_irradiance(i.local-camera.eye.xyz,n,sun,outdoor_sun_color(sun.y),overcast,visibility)*ao;
     return ambient*(1.+overcast*0.3)*ao+direct+transmitted+bounce;
 }
 @fragment fn fs_main(i:Out)->@location(0) vec4<f32> {

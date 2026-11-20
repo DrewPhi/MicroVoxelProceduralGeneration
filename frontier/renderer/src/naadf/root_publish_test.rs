@@ -278,6 +278,7 @@ fn directly_published_roots_match_native_corner_primary_and_shadow() {
             voxels: empty.clone(),
             palette: empty,
             dynamic_water: crate::naadf::dynamic_water::empty(&device),
+            ground_light: crate::terrain_light::buffer(&device),
         };
         let mut entries = binding_layout(0);
         for entry in &mut entries {

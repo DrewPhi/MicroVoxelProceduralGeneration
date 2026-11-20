@@ -20,10 +20,185 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     var sun=normalize(vec3(-0.5,0.8,-0.3));if naadf.sun.w>0.5{sun=naadf.sun.xyz;}
     let sky=0.5+0.5*normal.y;
     let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky)*(1.+naadf.sky.x*0.3);
-    let direct=vec3(2.,1.7,1.2)*max(dot(normal,sun),0.)*(1.-0.72*naadf.sky.x);
+    let direct=outdoor_sun_color(sun.y)*max(dot(normal,sun),0.)*(1.-0.72*naadf.sky.x);
     if naadf.sun.w>0.5{return ambient+direct*visibility;}
     return mix(vec3(0.12,0.105,0.085),vec3(0.28,0.33,0.40),sky)+vec3(0.78,0.70,0.58)*max(dot(normal,sun),0.);
 }
+fn bounce_at(position:vec3<f32>,normal:vec3<f32>,visibility:f32)->vec3<f32> {
+    if naadf.sun.w<0.5 {return vec3(0.);}
+    return ground_irradiance(position-naadf.eye.xyz,normal,naadf.sun.xyz,
+        outdoor_sun_color(naadf.sun.y),naadf.sky.x,visibility);
+}
+fn shade_voxel(hit:vec3<f32>,h:VoxelHit)->vec3<f32> {
+    var visibility=1.;
+    if naadf.sun.w>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
+        if naadf.shadow.y<0.5{visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
+        if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
+    }
+    if naadf.sun.w<0.5 || ground_light.origin_strength.z<=0. {return palette[h.pigment].rgb*light(h.normal,visibility);}
+    let contact=voxel_contact(hit,h.normal);
+    // Contact occlusion affects indirect light; the direct sun uses visibility.
+    let indirect=light(h.normal,0.)+bounce_at(hit,h.normal,visibility);
+    return palette[h.pigment].rgb*(light(h.normal,visibility)-light(h.normal,0.)+indirect*contact);
+}
+
+// Exact occupancy lookup in the published native snapshot. Skip proofs encode
+// traversal distances, so only the solid bit contributes to the slope fit.
+fn footprint_word(cell:vec3<u32>)->u32 {
+    let root=cell/16u;
+    var word=0u;
+    if naadf_sparse() {
+        let side=(naadf.extent.w+3u)/4u;
+        let page=root/4u;
+        let shape=textureDimensions(chunks,0);
+        word=sparse_root_load(page.y+side*(page.x+side*page.z),shape);
+        if (word&0x80000000u)!=0u {
+            let local=root%4u;
+            word=sparse_root_load(side*side*side+(word&0x3fffffffu)+local.y+4u*(local.x+4u*local.z),shape);
+        }
+    } else {
+        let slot=(root+naadf.ring.xyz)%vec3(naadf.extent.w);
+        word=textureLoad(chunks,vec3<i32>(slot.yxz),0).x;
+    }
+    word=root_decode(word,root);
+    if (word&0x80000000u)!=0u {
+        let block=(cell%16u)/4u;
+        word=blocks[(word&0x3fffffffu)+block.x+4u*(block.y+4u*block.z)];
+        if (word&0x80000000u)!=0u {
+            let voxel=cell%4u;
+            word=naadf_leaf_word((word&0x3fffffffu)+voxel.x+4u*(voxel.y+4u*voxel.z));
+        }
+    }
+    return word;
+}
+
+fn contact_solid(cell:vec3<i32>)->f32 {
+    if any(cell<vec3(0)) || any(cell>=vec3<i32>(naadf.extent.xyz)) {return 0.;}
+    let word=footprint_word(vec3<u32>(cell));
+    return select(0.,1.,(word&0x40000000u)!=0u && !water_node(word));
+}
+
+fn voxel_contact(hit:vec3<f32>,normal:vec3<f32>)->f32 {
+    if naadf.sun.w<0.5 || ground_light.origin_strength.z<=0. {return 1.;}
+    let near=1.-smoothstep(2.5,9.,length(hit-naadf.eye.xyz));
+    if near<=0. {return 1.;}
+    let grid=hit*16.;
+    let cell=vec3<i32>(floor(grid+normal*.014));
+    let a=select(vec3(1.,0.,0.),vec3(0.,1.,0.),abs(normal.x)>0.5);
+    let b=abs(cross(normal,a));
+    let edge=vec2(dot(fract(grid),a),dot(fract(grid),b));
+    let side=select(vec2(-1.),vec2(1.),edge>vec2(0.5));
+    let weight=1.-smoothstep(vec2(0.02),vec2(0.44),min(edge,1.-edge));
+    let ao_a=weight.x*contact_solid(cell+vec3<i32>(a*side.x));
+    let ao_b=weight.y*contact_solid(cell+vec3<i32>(b*side.y));
+    return 1.-near*(0.19*(ao_a+ao_b));
+}
+
+fn water_phase_position(p:vec3<f32>)->vec3<f32> {
+    return p+vec3(naadf.water.x,0.,naadf.water.y);
+}
+
+// One bounded bed ray and one bounded shore ray, only on visible water.
+fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec3<f32> {
+    let ripple=water_ripple(water_phase_position(surface),normal,naadf.water.z,0.023*(1.-smoothstep(22.,78.,distance)));
+    let n=select(normal,ripple,dot(d,ripple)<-0.002);
+    let transmitted=refract(d,n,1./1.333);
+    let bed=trace_water_optics(surface*16.-normal*0.012,transmitted,128.);
+    var below=water_medium(vec3(0.03,0.10,0.08),8.);
+    if bed.found {
+        let p=water_phase_position(surface+transmitted*bed.t*0.0625);
+        // Filter the lighting of subpixel bed risers, without moving the hit.
+        let resolve=1.-0.70*smoothstep(3.,18.,distance);
+        let bed_light=mix(light(vec3(0.,1.,0.),0.48),light(bed.normal,0.48),resolve);
+        let color=palette[bed.pigment].rgb*(bed_light+bounce_at(surface+transmitted*bed.t*.0625,bed.normal,0.48));
+        let phase=sin(dot(p.xz,vec2(43.,-35.)*0.049087385)-naadf.water.z)*1.9;
+        let caustic=sin(dot(p.xz,vec2(183.,82.)*0.049087385)+naadf.water.z*1.5+phase);
+        below=water_medium(color*(1.+0.065*caustic),bed.t*0.0625);
+    }
+
+    let mirror=reflect(d,n);
+    var above=water_sky(mirror,naadf.sun.xyz,naadf.sky.x);
+    let reflection_weight=1.-smoothstep(28.,56.,distance);
+    if reflection_weight>0. && dot(mirror,normal)>0. {
+        let bank=trace_water_optics(surface*16.+normal*0.012,mirror,384.);
+        if bank.found {
+            let color=palette[bank.pigment].rgb*(light(bank.normal,0.82)+bounce_at(surface+mirror*bank.t*.0625,bank.normal,0.82));
+            above=mix(above,color,reflection_weight*(1.-smoothstep(256.,384.,bank.t)));
+        }
+    }
+    let fresnel=water_fresnel(-dot(d,n));
+    return mix(below,above,fresnel)+water_glint(d,n,naadf.sun.xyz,naadf.sky.x)*min(1.,3.*fresnel);
+}
+
+// Follow the connected water immediately above the eye. The search is limited
+// to the clear part of the water column. Solid banks terminate the interface.
+fn submerged_exit(o:vec3<f32>,d:vec3<f32>,maximum:f32)->vec4<f32> {
+    let extent=vec3<i32>(naadf.extent.xyz);
+    var cell=forward_cell(o,d);
+    let step=select(vec3(-1),vec3(1),d>vec3(0.));
+    let increment=select(vec3(1e30),abs(1./d),d!=vec3(0.));
+    var next=select(vec3(1e30),(vec3<f32>(cell+max(step,vec3(0)))-o)/d,d!=vec3(0.));
+    var t=0.;
+    var normal=vec3(0.);
+    for(var i=0u;i<160u;i++) {
+        if t>=maximum || any(cell<vec3(0)) || any(cell>=extent) {break;}
+        let state=water_state(cell);
+        let word=footprint_word(vec3<u32>(cell));
+        if state!=2u && !(state!=1u && water_node(word)) {
+            if (word&0x40000000u)==0u || water_node(word) {
+                return vec4(normal,t);
+            }
+            break;
+        }
+        t=min(next.x,min(next.y,next.z));
+        let crossed=next==vec3(t);
+        cell+=select(vec3(0),step,crossed);
+        next+=select(vec3(0.),increment,crossed);
+        normal=vec3<f32>(select(vec3(0),step,crossed));
+    }
+    return vec4(0.,0.,0.,-1.);
+}
+
+fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
+    let limit=192.;
+    let eye=o*0.0625;
+    let ripple=water_ripple(water_phase_position(eye),vec3(0.,1.,0.),naadf.water.z,0.009);
+    let ray=normalize(d+vec3(ripple.x,0.,ripple.z));
+    let bed=trace_water_optics(o,ray,limit);
+    var travel=select(limit,bed.t,bed.found);
+    var color=vec3(0.020,0.095,0.085);
+    if bed.found {
+        color=palette[bed.pigment].rgb*(light(bed.normal,0.55)+bounce_at((o+ray*bed.t)*.0625,bed.normal,0.55));
+    }
+    if ray.y>0.02 {
+        let boundary=submerged_exit(o,ray,travel);
+        if boundary.w>0. {
+            travel=boundary.w;
+            let point=(o+ray*travel)*0.0625;
+            let outward=normalize(boundary.xyz);
+            let n=water_ripple(water_phase_position(point),outward,naadf.water.z,0.025);
+            let outgoing=refract(ray,-n,1.333);
+            if dot(outgoing,outgoing)>0.1 {
+                color=water_sky(outgoing,naadf.sun.xyz,naadf.sky.x);
+                let shore=trace_water_optics(point*16.+outward*0.012,outgoing,256.);
+                if shore.found {
+                    color=palette[shore.pigment].rgb*light(shore.normal,0.85);
+                }
+                color=mix(color,vec3(0.031,0.13,0.12),water_fresnel(dot(outgoing,n)));
+            } else {
+                let reflected=reflect(ray,-n);
+                let floor_hit=trace_water_optics(point*16.-outward*0.012,reflected,128.);
+                color=vec3(0.031,0.13,0.12);
+                if floor_hit.found {
+                    color=water_medium(palette[floor_hit.pigment].rgb*light(floor_hit.normal,0.6),floor_hit.t*0.0625);
+                }
+            }
+        }
+    }
+    let depth=naadf.projection.z+naadf.projection.w/max(naadf.projection.x,travel*0.0625*cosine);
+    return Fragment(vec4(water_medium(color,travel*0.0625),1.),clamp(depth,0.,1.));
+}
+
 @fragment fn fs_main(@builtin(position) pixel:vec4<f32>,@builtin(sample_index) sample:u32)->Fragment {
     let offsets=array<vec2<f32>,4>(vec2(0.375,0.125),vec2(0.875,0.375),vec2(0.125,0.625),vec2(0.625,0.875));
     var point=pixel.xy;if naadf.viewport.z>1.5{point=floor(point)+offsets[min(sample,3u)];}
@@ -34,6 +209,9 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     let d=normalize(naadf.forward.xyz+ndc.x*naadf.right.xyz*naadf.right.w+ndc.y*naadf.up.xyz*naadf.up.w);
     let cosine=dot(d,naadf.forward.xyz);
     let minimum=naadf.projection.x/cosine*16.;
+    if naadf.eye.w>0.5 && naadf.viewport.w<0.5 && naadf.sky.w<0.5 && !traversal_diagnostic {
+        return shade_submerged(o,d,cosine);
+    }
     var prefix=minimum;
     if traversal_beam {
         let steps=textureLoad(beam_prefix,vec2<i32>(vec2<u32>(point)/8u),0).x;
@@ -67,10 +245,8 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     }
     if naadf.viewport.w>0.5{return Fragment(vec4(f32(pigment.material)/255.,0.,0.,1.),depth);}
     if naadf.sky.w>0.5{return Fragment(vec4(vec3(0.8)*(0.3+0.7*max(dot(h.normal,normalize(vec3(-0.5,0.8,-0.3))),0.)),1.),depth);}
-    var visibility=1.;
-    if naadf.sun.w>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
-        if naadf.shadow.y<0.5{visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
-        if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
+    if pigment.material==7u {
+        return Fragment(vec4(shade_water(hit,h.normal,d,h.t*0.0625),1.),depth);
     }
-    return Fragment(vec4(pigment.rgb*light(h.normal,visibility),1.),depth);
+    return Fragment(vec4(shade_voxel(hit,h),1.),depth);
 }

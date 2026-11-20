@@ -695,6 +695,9 @@ impl AdaptiveGpu {
         near.bind = near_sampling_bind(device, &near.view, &near.sampler, &near.uniform, bindings);
         near.naadf_id = id;
     }
+    pub(crate) fn prepare_ground_light(&self, queue: &wgpu::Queue, data: &[u8]) {
+        queue.write_buffer(&self.shadows.near.naadf_empty.ground_light, 0, data);
+    }
     /// Published terrain depth uses the same bounded owner set as surface shadows.
     pub(crate) fn far_shadow_bind(&self) -> &wgpu::BindGroup {
         &self.shadows.sampling_bind

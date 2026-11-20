@@ -281,6 +281,7 @@ fn local_exit_matches_native_events_and_hit_material_shadow() {
             voxels: empty.clone(),
             palette: empty,
             dynamic_water: super::dynamic_water::empty(&device),
+            ground_light: crate::terrain_light::buffer(&device),
         };
         let mut entries = binding_layout(0);
         for entry in &mut entries {

@@ -13,6 +13,10 @@ const SHADER: &str = concat!(
         let ordinary=trace_static_prefixed(origin,direction,0.,0.,false,false);
         results[2u+i]=vec4(select(-1.,ordinary.t,ordinary.found),f32(ordinary.pigment),ordinary.normal.x,ordinary.normal.y);
         results[4u+i]=vec4(select(-1.,h.t,h.found),f32(h.pigment),h.normal.x,h.normal.y);
+        let through_water=trace_water_optics(origin,direction,40.);
+        let short=trace_water_optics(origin,direction,24.);
+        results[6u+i]=vec4(select(-1.,through_water.t,through_water.found),
+            f32(through_water.pigment),select(0.,1.,short.found),through_water.normal.x);
     }
 }
 "#,
@@ -100,6 +104,7 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
             voxels: buffer(&[0; 4], wgpu::BufferUsages::STORAGE),
             palette: buffer(bytemuck::cast_slice(&pigments), wgpu::BufferUsages::STORAGE),
             dynamic_water: dynamic_water::empty(&device),
+            ground_light: crate::terrain_light::buffer(&device),
         };
         let mut entries = binding_layout(0);
         for entry in &mut entries {
@@ -141,7 +146,7 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
         });
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 96,
+            size: 128,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -202,7 +207,7 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
             });
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
-                size: 96,
+                size: 128,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -214,7 +219,7 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
                 pass.set_bind_group(1, &output_bind, &[]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
-            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 96);
+            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 128);
             queue.submit([encoder.finish()]);
             let (tx, rx) = std::sync::mpsc::channel();
             readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -236,6 +241,8 @@ fn dynamic_water_primary_and_shadow_gpu_parity() {
                 assert_eq!(rows[1][0], -1.);
                 assert_eq!(rows[1][2], 0.);
             }
+            assert_eq!(rows[6], [33., 3., 0., -1.], "mode {mode} optical ray");
+            assert_eq!(rows[7][0], -1.);
             if mode == 0 {
                 assert_eq!(rows[2], rows[4]);
                 assert_eq!(rows[3], rows[5]);
