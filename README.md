@@ -1,81 +1,56 @@
-# Frontier Voxel Engine
+# Frontier World Generation Experiment
 
-A Rust voxel-world engine in early development, targeting editable 6.25 cm voxels,
-stable distant terrain, caves and bounded streaming work. Production quality and
-performance gates remain open.
+Astra's starting point is the current Frontier engine at **6.25 cm per
+voxel**, with the Watershed procedural world, adaptive distant terrain, and
+exact NAADF terrain near the player. The experiment brief lives in
+[frontier/AGENTS.md](frontier/AGENTS.md).
 
-## Start a game on Frontier
+## Play the baseline
 
-Use [`frontier-voxel-engine`](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/frontier-voxel-engine)
-for shared engine development. Start a new game from a tagged engine checkpoint
-and merge newer engine checkpoints as needed. The
-[developer guide](guide_for_devs.md#engine-and-game-branches) describes the workflow.
-
-## Build and play
-
-Rust 1.99.1 is pinned in `frontier/rust-toolchain.toml`. Linux requires X11/XWayland,
-a graphics driver and the usual C linker/build tools.
+Build from the repository root, then start the Watershed preset.
 
 ```sh
 cd frontier
-cargo build --release --locked
-./run.sh --preset alpine
+cargo build --release --locked --bin frontier
+./run.sh --preset watershed --seed 997 --voxel-size 0.0625
 ```
 
-`run.sh` launches the existing release binary; rebuild after source changes.
-The default adaptive scene combines exact NAADF voxels within a growing 64 m cube
-radius with distant coarse voxel meshes and compact seed-sampled appearance.
-Startup publishes an 8 m region and expands in 4 m shells while you move.
-Regional terrain, voxel appearance filtering, single-sample rendering and scatter
-uploads are enabled by default.
+**F** toggles walking and flight. **Esc** opens settings. **F12** saves a
+screenshot. The default radius of 1,024 voxels is 64 m at this grid size.
 
-- `--preset alpine`: grounded walking, seeded vegetation and a mountain backdrop.
-- `--preset seeded-world --seed 19`: streamed climate biomes and static waterways,
-  without vegetation. Use `--seed random` to explore another reproducible world.
-- `--terrain-recipe legacy`: the original spiky terrain used by the primary visual check.
-- `--naadf off`: raster-only comparison. Use `--msaa 4` to enable MSAA.
-- `FRONTIER_DISTANT_TERRAIN=surface`: heightfield comparison.
-  `FRONTIER_DISTANT_TERRAIN=voxy` selects the detailed-map voxel comparison.
-
-Press **Esc** for lighting, atmosphere, quality and loading settings. **F** toggles
-flight in walking presets. See the [developer guide](guide_for_devs.md) and
-[visual preview](frontier/VISUAL_PREVIEW.md) for controls and experimental scenes.
-The opt-in [live-water demo](frontier/LIVE_WATER.md) includes bounded local flow,
-editable dams and saved fluid state.
-
-## Development and evidence
-
-Start with the [architecture](frontier/ARCHITECTURE.md),
-[agent instructions](frontier/AGENTS.md) and
-[implementation roadmap](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/issues/24).
-The [documentation index](frontier/DOCUMENTATION.md) separates current entrypoints,
-plans and historical checkpoints.
-
-For rendering changes, run the [primary visual check](frontier/PRIMARY_VISUAL_CHECK.md)
-first. The [independent offline oracle](frontier/reference/README.md) supplies exact
-voxel references; images alone do not establish motion or performance acceptance.
-The [November 14 optimization checkpoint](frontier/OPTIMIZATION_NOV14.md) records
-measured cache/edit improvements, rejected experiments and large-radius limits.
-A fully loaded 256 m run remained below the 30 FPS playtest target on the measured
-laptop; the default stays 64 m. This does not close the broader architecture gates.
+## Play with persistent terrain edits
 
 ```sh
-cd frontier
-cargo fmt --all -- --check
-cargo test --workspace --locked
+./run.sh --preset watershed --seed 997 --voxel-size 0.0625 \
+  --live-water on --water-save output/worlds/watershed-997.save
 ```
 
-Keep generated captures, reports and caches under ignored `frontier/output/`.
-Curated evidence under `frontier/reference/` is versioned and should be preserved.
+Click to capture the mouse. Left click and release to collect terrain.
+Right click places the selected material from inventory. Keys **1–6**
+select materials. Edit within the resident exact region and exit normally
+to flush the save. Reopen with the same seed, recipe, and voxel size.
+The existing save path goes through the local water driver. Distant terrain
+currently derives from the procedural source and can omit edits outside the
+exact region.
 
-## Legacy references
+## Code and checks
 
-Older engines and assets remain on their original branches and in Git history:
+- `frontier/world/` holds procedural terrain, the canonical lattice, edits,
+  vegetation, and simulation.
+- `frontier/renderer/` holds the viewport, NAADF, LODs, streaming, and shaders.
+- `frontier/runtime/` holds frame timing and reproducible camera routes.
+- `frontier/reference/` holds the independent CPU rendering tools.
+- `frontier/tools/` holds benchmarks, the launch binary, and input checks.
 
-- [Desert restoration game (`cellular-automata-game`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/cellular-automata-game)
-- [Previous game engine (`main`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/main)
-- [Analytic experiments (`DrewsAnalyticRendering`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/DrewsAnalyticRendering)
-- [Historical artifact archive](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04)
+From `frontier/`, use `cargo check --locked --workspace --all-targets` and
+`cargo test --locked -p frontier-world` for development checks. To verify
+digging, placing, inventory, and saving on Linux/X11, run the smoke test
+after building the release launcher.
 
-Follow the Frontier reuse policy when consulting them; do not restore whole old
-runtime trees into this branch. [MIT license](LICENSE).
+```sh
+python3 tools/player_edit_check.py --output output/edit-smoke
+```
+
+Generated files go under ignored `frontier/output/`. The current engine
+and historical development context remain available in the
+[Frontier engine branch](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/frontier-voxel-engine).

@@ -1,9 +1,0 @@
-{
-  "scatter-control": {
-    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
-  },
-  "scatter-extrema": {
-    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
-    "FRONTIER_NAADF_COLUMN_EXTREMA": "1"
-  }
-}

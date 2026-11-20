@@ -1,8 +1,0 @@
-{
-  "control": {
-    "FRONTIER_NAADF_SCATTER_UPLOAD": "0"
-  },
-  "scatter": {
-    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
-  }
-}

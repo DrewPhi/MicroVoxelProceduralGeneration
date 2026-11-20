@@ -1,7 +1,0 @@
-
-running 1 test
-M1 hydrostatic motion accepted=true; peak_speed_m_s=3.9013597907811004e-11; peak_com_shift_m=4.482539339711877e-12; peak_drift_voxels=4.590148705574393e-9; final=PhysicalStats { time: 60.00000000000058, liquid_volume: 0.023437499999858537, liquid_mass: 23.437499999858538, volume_error: -1.4146323001895666e-13, volume_error_voxels: -5.794333901576465e-10, roundoff_adjustment_voxels: 4.803000328397428e-14, roundoff_absolute_voxels: 2.5275512902485315e-13, transport_residual_voxels: -5.794814201609304e-10, trace_volume_voxels: 1.614574804151509e-10, centre_of_volume: [0.18749999999907968, 0.1249999999995393, 0.12499999999986681], kinetic_energy: 2.6100795093916913e-22, max_speed: 1.0011352857830502e-11, max_divergence: 3.5024311703446394e-10, rms_divergence: 1.4804090876802641e-10, full_max_divergence: 3.5024311703446394e-10, interface_max_divergence: 2.8871870112227286e-10, boundary_max_normal_speed: 0.0, liquid_cells: 110, interface_cells: 33 }
-test tests::report_long_hydrostatic_acceptance_gate ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 2.26s
-
