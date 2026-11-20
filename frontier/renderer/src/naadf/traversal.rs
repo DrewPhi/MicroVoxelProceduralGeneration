@@ -426,15 +426,23 @@ pub(super) fn beam_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BeamView {
+    eye: [u32; 3],
+    basis: [[u32; 4]; 3],
+}
 struct BeamTarget {
     sample: wgpu::BindGroup,
     write: Option<wgpu::BindGroup>,
     tiles: [u32; 2],
+    published: Option<(BeamView, u64, [u32; 2])>,
 }
 
 pub(super) struct Beam {
     pipeline: Option<wgpu::ComputePipeline>,
     target: RefCell<BeamTarget>,
+    view: Cell<Option<BeamView>>,
+    reuse: bool,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -461,11 +469,25 @@ impl Beam {
                 sample,
                 write: None,
                 tiles: [0; 2],
+                published: None,
             }),
+            view: Cell::new(None),
+            reuse: !options.diagnostics
+                && std::env::var_os("FRONTIER_NAADF_BEAM_REUSE").is_none_or(|v| v != "0"),
             layout,
         }
     }
 
+    // Match the uploaded f32 values consumed by beam_slope. The height texture
+    // is immutable between ownership publications, including reserved growth.
+    pub(super) fn set_view(&self, eye: glam::Vec3, basis: [[f32; 4]; 4]) {
+        if self.pipeline.is_some() && self.reuse {
+            self.view.set(Some(BeamView {
+                eye: eye.to_array().map(f32::to_bits),
+                basis: std::array::from_fn(|a| basis[a].map(f32::to_bits)),
+            }));
+        }
+    }
     pub(super) fn layout(&self) -> &wgpu::BindGroupLayout {
         &self.layout
     }
@@ -477,6 +499,7 @@ impl Beam {
         camera: &wgpu::Buffer,
         heights: &wgpu::TextureView,
         metrics: &wgpu::Buffer,
+        owner: u64,
         viewport: [u32; 2],
         stages: Option<&std::sync::Arc<super::gpu_stages::Profiler>>,
     ) {
@@ -485,6 +508,10 @@ impl Beam {
         };
         let tiles = viewport.map(|n| n.div_ceil(8).max(1));
         let mut target = self.target.borrow_mut();
+        let key = self.view.get().map(|v| (v, owner, viewport));
+        if key.is_some() && key == target.published {
+            return;
+        }
         if target.tiles != tiles {
             let view = uint_texture(device, "NAADF screen beam empty prefix", tiles, true);
             let sample = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -512,8 +539,10 @@ impl Beam {
                 sample,
                 write: Some(write),
                 tiles,
+                published: None,
             };
         }
+        target.published = key;
         let timing = stages.and_then(|p| p.begin(super::gpu_stages::Stage::Beam));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("NAADF beam prepass"),

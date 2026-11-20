@@ -47,6 +47,12 @@ prefixes across 8×8 screen tiles. This brought the ground measurement to
 the control. Native visibility was checked against the independent CPU ray
 oracle during partial residency, shell growth and toroidal shifts.
 
+With GPU stage timing enabled, reusing identical beam results reduced the
+number of beam passes from 611 to 7. This removed redundant work. The
+matched stationary p95 frame time stayed at 21.1 ms in that measurement.
+A 9-second, 3 m/s grounded turn-and-return on the same seed measured
+**21.37 / 25.76 / 29.89 ms**. Sustained 60 FPS on foot remains open.
+
 An empty native volume now keeps its coverage stable while flying. In the
 seed 19 flyover, completed tile builds fell from 1,334 to 145 and visible
 terrain triangles increased from 7,168 to 44,224. Frame p50/p95/p99 were

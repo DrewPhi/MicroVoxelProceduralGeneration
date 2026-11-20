@@ -352,6 +352,7 @@ impl Volume {
                 &self.uniform,
                 &self.resources.height,
                 &self.diagnostics.buffer,
+                self.ownership.id,
                 viewport,
                 gpu.naadf_gpu_stages.as_ref(),
             );
@@ -1648,14 +1649,15 @@ impl Experiment {
         };
         let aspect = width as f32 / height as f32;
         let basis = ray_basis(camera, aspect);
+        let eye = (camera.position - origin).as_vec3();
+        a.beam.set_view(eye, basis);
         gpu.queue.write_buffer(
             &a.uniform,
             0,
             bytemuck::bytes_of(&Uniform {
                 matrix: matrix.to_cols_array_2d(),
                 inverse: matrix.inverse().to_cols_array_2d(),
-                eye: (camera.position - origin)
-                    .as_vec3()
+                eye: eye
                     .extend(if gpu.camera_submerged.get() { 1. } else { 0. })
                     .to_array(),
                 extent: [

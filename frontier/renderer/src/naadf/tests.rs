@@ -477,6 +477,7 @@ fn gpu_matches_canonical_rays_for_source(
                 let inverse = matrix.inverse();
                 let basis = ray_basis(camera, 1.);
                 let local = (eye - DVec3::from_array(bounds[0])).as_vec3();
+                volume.beam.set_view(local, basis);
                 gpu.queue.write_buffer(
                     &volume.uniform,
                     0,
