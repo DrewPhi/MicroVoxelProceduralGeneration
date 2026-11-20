@@ -857,6 +857,8 @@ pub struct Experiment {
     min_camera_margin_m: Option<f64>,
     stream_active_frames: u64,
     stream_outside_frames: u64,
+    sky_frames: u64,
+    sky_clearance: crate::sky_clearance::Airspace,
     pub status: String,
     pub stage: u32,
     pub upload_ms: f64,
@@ -903,6 +905,8 @@ impl Default for Experiment {
             min_camera_margin_m: None,
             stream_active_frames: 0,
             stream_outside_frames: 0,
+            sky_frames: 0,
+            sky_clearance: Default::default(),
             status: "Off".into(),
             stage: 0,
             upload_ms: 0.,
@@ -1251,6 +1255,49 @@ impl Experiment {
                 } else {
                     "Ready · fixed region".into()
                 };
+            }
+        }
+        // An empty published volume owns no visible geometry. Keep it parked
+        // while the complete requested cube and a flight approach margin are
+        // provably above everything at the destination. On descent or edits
+        // the ordinary jump/strip scheduler resumes in this same poll.
+        static PARK_EMPTY_SKY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if s.flight_horizon
+            && r.follow
+            && !r.gpu_distance
+            && !self.shifting
+            && !self.expanding
+            && !self.growth_pending
+            && !self.restoring_raster
+            && self.ready_for_water_source(world)
+            && self.active.as_ref().is_some_and(|v| {
+                v.occupied.is_none()
+                    && !v.may_have_local_edits
+                    && v.dynamic_water_key.is_none()
+                    && !v.diagnostics.enabled
+            })
+            && capture_layer() == CaptureLayer::Scene
+            && *PARK_EMPTY_SKY.get_or_init(|| {
+                std::env::var_os("FRONTIER_FLIGHT_PARK_SKY").is_none_or(|v| v != "0")
+            })
+        {
+            let approach = r.rounded_radius_m() + 128.;
+            if self
+                .sky_clearance
+                .clear_above(world, camera.position, approach, approach)
+            {
+                let v = self.active.as_ref().unwrap();
+                self.camera_margin_m = (0..3)
+                    .map(|a| {
+                        (camera.position[a] - v.bounds[0][a])
+                            .min(v.bounds[1][a] - camera.position[a])
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                self.sky_frames += 1;
+                if self.status != "Ready · clear air" {
+                    self.status = "Ready · clear air".into();
+                }
+                return;
             }
         }
         // A destination jump supersedes the in-flight shift before any
@@ -1794,6 +1841,7 @@ impl Experiment {
             a.is_some_and(|v| v.dry_pipeline.is_some())
         )
         .unwrap();
+        write!(json, ",\"proven_sky_frames\":{}", self.sky_frames).unwrap();
         write!(json, ",\"published_world_revision\":{},\"content_update_pending\":{},\"edited_root_proofs_invalidated\":{}", a.map_or(0,|v|v.revision),self.refresh_world.is_some(),a.is_some_and(|v|v.edited_root_proofs)).unwrap();
         write!(
             json,

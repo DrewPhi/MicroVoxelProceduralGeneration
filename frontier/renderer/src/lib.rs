@@ -41,6 +41,7 @@ mod player_edit;
 mod procedural_water_live;
 mod settings;
 mod settings_ui;
+mod sky_clearance;
 #[cfg(test)]
 mod source_cache_probe;
 mod source_page_cache;

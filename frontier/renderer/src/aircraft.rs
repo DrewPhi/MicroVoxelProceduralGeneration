@@ -4,64 +4,6 @@ use crate::Camera;
 use frontier_world::{voxel_size, World};
 use glam::{DVec3, Mat3, Vec3};
 
-struct SkyClearance {
-    source: World,
-    center: DVec3,
-    ceiling: f64,
-}
-impl SkyClearance {
-    fn new(world: &World, center: DVec3) -> Self {
-        use frontier_world::{
-            affine_bounds::{bound_native_height, BoundBudget, ColumnBox},
-            vegetation::{MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS},
-            voxel_grid,
-        };
-        let ceiling = (|| {
-            let terrain = world.fbm_terrain()?;
-            if world.topology_base_cells().is_some() {
-                return None;
-            }
-            let lo = voxel_grid().checked_cell([center.x - 64., 0., center.z - 64.])?;
-            let hi = voxel_grid().checked_cell([center.x + 64., 0., center.z + 64.])?;
-            let pad = if world.vegetation_enabled() {
-                MAX_PLANT_RADIUS_CELLS + 1
-            } else {
-                1
-            };
-            let lower = [lo.x.checked_sub(pad)?, lo.z.checked_sub(pad)?];
-            let upper = [hi.x.checked_add(pad + 1)?, hi.z.checked_add(pad + 1)?];
-            let bounds = ColumnBox {
-                min: lower,
-                size_cells: [
-                    u32::try_from(upper[0].checked_sub(lower[0])?).ok()?,
-                    u32::try_from(upper[1].checked_sub(lower[1])?).ok()?,
-                ],
-            };
-            let height =
-                bound_native_height(terrain, bounds, BoundBudget::default())?.height_range[1];
-            let vegetation = if world.vegetation_enabled() {
-                MAX_PLANT_HEIGHT_CELLS + 2
-            } else {
-                1
-            };
-            Some(
-                world
-                    .edit_cells_in_columns(lower, upper)
-                    .into_iter()
-                    .fold(height + vegetation as f64 * voxel_size(), |y, c| {
-                        y.max((c.y as f64 + 1.) * voxel_size())
-                    }),
-            )
-        })()
-        .unwrap_or(f64::INFINITY);
-        Self {
-            source: world.clone(),
-            center,
-            ceiling,
-        }
-    }
-}
-
 pub(crate) fn axes(pose: Camera) -> Mat3 {
     let forward = pose.direction().normalize();
     let lateral = pose.view_up().cross(forward).normalize();
@@ -147,7 +89,7 @@ pub(crate) struct Aircraft {
     sink: f32,
     // In chase view the viewer camera follows this physical aircraft pose.
     pilot: Option<Camera>,
-    clearance: Option<SkyClearance>,
+    clearance: crate::sky_clearance::Airspace,
 }
 
 impl Default for Aircraft {
@@ -157,7 +99,7 @@ impl Default for Aircraft {
             grounded: false,
             sink: 0.,
             pilot: None,
-            clearance: None,
+            clearance: Default::default(),
         }
     }
 }
@@ -198,18 +140,7 @@ impl Aircraft {
         camera.roll = 0.;
     }
     fn clear_air(&mut self, world: &World, position: DVec3, reach: f64) -> bool {
-        if reach > 32. {
-            return false;
-        }
-        if self.clearance.as_ref().is_none_or(|old| {
-            old.source.revision() != world.revision()
-                || !old.source.shares_source_lineage(world)
-                || (position.x - old.center.x).abs() > 32.
-                || (position.z - old.center.z).abs() > 32.
-        }) {
-            self.clearance = Some(SkyClearance::new(world, position));
-        }
-        position.y - reach > self.clearance.as_ref().unwrap().ceiling
+        reach <= 32. && self.clearance.clear_above(world, position, 32., reach)
     }
     pub(crate) fn toggle_view(&mut self, camera: &mut Camera, world: &World) {
         if let Some(pilot) = self.pilot.take() {

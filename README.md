@@ -116,6 +116,15 @@ dry and the camera is above water. On a flat, dry regional walking route at
 **8.24 / 10.40 / 10.82 ms**. Watershed seed 997 contained water in the exact
 volume and used the general shader, with walking p95 between 20 and 22 ms.
 
+When the entire exact window and a 128 m approach margin are above the
+certified terrain, vegetation and saved edits, flight can park an empty
+window. On the 9 km mountain route this reduced strip publications from
+1,612 to 727. The parked run measured **6.28 / 10.41 / 16.39 ms** and the
+control (`FRONTIER_FLIGHT_PARK_SKY=0`) **6.08 / 8.89 / 29.70 ms**. Both
+kept coarse coverage throughout. A separate descent from 300 m to 5.5 m
+above sea level resumed native streaming before reaching a saved 3 m deck.
+The final native window covered the deck and the save remained byte-identical.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.
