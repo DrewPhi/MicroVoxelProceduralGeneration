@@ -1,6 +1,6 @@
 //! Four physical pockets and one hand. Swaps/stowing never duplicate contents;
 //! terrain pickup/drop commits as a batch and preserves each loose material.
-use crate::{garden::Garden, Cell, Material, World, VOXEL_SIZE};
+use crate::{bowl::Bowl, garden::Garden, Cell, Material, World, VOXEL_SIZE};
 use std::collections::BTreeMap;
 pub const HANDFUL: usize = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +158,16 @@ impl Pockets {
         start: Cell,
         occupied: &BTreeMap<Cell, Material>,
     ) -> Result<Cell, &'static str> {
+        Self::settle_in_medium(world, start, occupied, false)
+    }
+
+    fn settle_in_medium(
+        world: &World,
+        start: Cell,
+        occupied: &BTreeMap<Cell, Material>,
+        wet_placement: bool,
+    ) -> Result<Cell, &'static str> {
+        let open = |m| m == Material::Air || (wet_placement && m == Material::Water);
         let material = |c| {
             occupied
                 .get(&c)
@@ -166,20 +176,20 @@ impl Pockets {
         };
         let mut c = start;
         for _ in 0..16 {
-            if material(c) == Material::Air {
+            if open(material(c)) {
                 break;
             }
             c = up(c, 1);
         }
-        if material(c) != Material::Air {
+        if !open(material(c)) {
             return Err("No room to drop this here");
         }
         for _ in 0..64 {
             let below = material(up(c, -1));
-            if below == Material::Water {
+            if below == Material::Water && !wet_placement {
                 return Err("Choose dry ground");
             }
-            if below != Material::Air {
+            if !open(below) {
                 return Ok(c);
             }
             c = up(c, -1);
@@ -192,18 +202,31 @@ impl Pockets {
         start: Cell,
         can_place: impl Fn(Cell) -> bool,
     ) -> Result<usize, &'static str> {
+        self.drop_sand_with_water(world, start, can_place, None)
+    }
+
+    pub fn drop_sand_with_water(
+        &mut self,
+        world: &mut World,
+        start: Cell,
+        can_place: impl Fn(Cell) -> bool,
+        water: Option<&mut Bowl>,
+    ) -> Result<usize, &'static str> {
         let Some(Item::Sand(cells)) = &self.hand else {
             return Err("You are not holding a handful");
         };
         let mut changes = BTreeMap::new();
         for &m in cells {
-            let c = Self::settle(world, start, &changes)?;
+            let c = Self::settle_in_medium(world, start, &changes, water.is_some())?;
             if !can_place(c) {
                 return Err("That would place sand inside you");
             }
             changes.insert(c, m);
         }
         let n = cells.len();
+        if let Some(water) = water {
+            water.displace_for_placement(world, &changes)?;
+        }
         world.set_batch(changes.iter().map(|(&c, &m)| (c, m)));
         self.edits.extend(changes);
         self.hand = None;
@@ -410,6 +433,50 @@ mod tests {
             - 1;
         (w, Cell { y, ..c })
     }
+    #[test]
+    fn sand_replaces_water_only_if_the_displaced_voxel_can_move() {
+        let mut world = World::new(23);
+        let bottom = Cell { x: 0, y: 200, z: 0 };
+        let wet = up(bottom, 1);
+        let above = up(wet, 1);
+        world.set_batch([
+            (bottom, Material::Stone),
+            (wet, Material::Water),
+            (above, Material::Stone),
+        ]);
+        let mut pockets = Pockets {
+            hand: Some(Item::Sand(vec![Material::Sand])),
+            legacy: 1,
+            ..Pockets::default()
+        };
+        let mut water = Bowl::default();
+        let before = world.revision();
+        assert!(pockets
+            .drop_sand_with_water(&mut world, wet, |_| true, Some(&mut water))
+            .is_err());
+        assert_eq!(world.revision(), before);
+        assert_eq!(world.material(wet), Material::Water);
+
+        world.set(above, Material::Air);
+        assert_eq!(
+            pockets.drop_sand_with_water(&mut world, wet, |_| true, Some(&mut water)),
+            Ok(1)
+        );
+        assert_eq!(world.material(wet), Material::Sand);
+        assert_eq!(world.material(above), Material::Water);
+        assert!(water.conserved());
+        assert!(pockets.conserved());
+
+        let save = water.snapshot(world.seed());
+        let restored = Bowl::restore(&save, world.seed()).unwrap();
+        let mut world = World::new(world.seed());
+        world.set_batch([(bottom, Material::Stone), (wet, Material::Water)]);
+        pockets.apply(&mut world);
+        restored.apply_occupancy(&mut world);
+        assert_eq!(world.material(wet), Material::Sand);
+        assert_eq!(world.material(above), Material::Water);
+    }
+
     #[test]
     fn failed_stow_or_partial_placement_does_not_lose_the_handful() {
         let (mut w, c) = source();

@@ -23,20 +23,33 @@ Failed/corrupt saves report an error instead of silently resetting water.
 
 ## Model and boundaries
 
-`world/src/bowl.rs` owns the finite mass ledger and native-grid droplets. Source
-pond water is removed, never implicitly refilled. Numerical velocity/credits
-advance whole voxel positions with swept face collision. Sand absorbs deposited
-water into an integer moisture store; a small surrounding damp footprint provides
-visual feedback. Pouring back into a waterbody or onto an impermeable floor
-returns whole water units to the world. This is a small local bowl transport model,
-not integration of a worldwide pressure solver. Stationary deposited water has
-no lateral pressure flow yet. Internal bowl sloshing is not simulated.
+`world/src/bowl.rs` owns the finite mass ledger and native-grid droplets. Scoops take
+whole units from connected water and spread the resulting small surface deficit over neighboring columns. A bounded local settling queue wakes
+on scooping, pouring, and terrain edits. Dig through a shallow bank and water
+can fall into the opening. Sand placed below the surface displaces the same
+number of water voxels upward, and placement is rejected if they have nowhere
+to go. Use empty hands to target solid terrain through water and the bowl to
+target the liquid.
 
-The ledger is now `scooped = held + airborne + soil moisture + deposited + plant transfer`.
+Poured droplets travel on the native grid with swept collision. Sand absorbs
+whole units into its moisture store. Fluid entering another opening can flow
+there while the intact pond sleeps. This is local gravity and leveling on the
+voxel grid. It does not simulate a whole watershed or wave dynamics.
+
+The hybrid renderer uses a bounded ray into the bed for refraction and a
+short reflected ray for nearby banks. Sky reflection takes over at distance,
+and distant coarse water uses an approximate tint. Ripple normals move with
+time while the water's geometry stays on the voxel grid. When the camera enters
+water, visibility falls with distance and the surface refracts or reflects
+the view back into the pond. Toggle **F** for free flight to inspect the
+waterline and underwater view. [Dielectric reflection and refraction](https://pbr-book.org/4ed/Reflection_Models/Specular_Reflection_and_Transmission) · [Exponential transmittance](https://pbr-book.org/4ed/Volume_Scattering/Transmittance)
+
+The ledger is `source units removed = held + airborne + soil moisture + deposited + plant transfer`.
 [Planting and seedling growth](PLANTING.md) accounts for plant storage and
 transpiration. Legacy bowl-only saves migrate with zero plant transfer. Returning and
 recollecting water preserves it. The serialized state includes droplets in flight,
-source-removal tombstones, moisture, damp footprints, emission phase and counters.
+source-removal tombstones, moisture, damp footprints, emission phase, settling
+queue and counters.
 A size/identity/finite-value/duplicate/ledger check guards restore; writes use a
 temporary sibling followed by rename. This is a single-player checkpoint file,
 not a synchronized multi-writer save service.

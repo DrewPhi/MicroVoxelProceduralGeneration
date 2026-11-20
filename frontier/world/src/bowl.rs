@@ -1,7 +1,19 @@
 //! Finite bowl and local whole-cell droplets. No fluid source is manufactured.
 //! Sand absorption stores water units separately from the visual damp footprint.
 use crate::{raycast, Cell, Material, World, VOXEL_SIZE};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+const FLOW_CELLS_PER_TICK: usize = 64;
+const SIDES: [[i64; 3]; 4] = [[1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 0, -1]];
+const UP: [i64; 3] = [0, 1, 0];
+const DOWN: [i64; 3] = [0, -1, 0];
+
+fn offset(c: Cell, [x, y, z]: [i64; 3]) -> Cell {
+    Cell {
+        x: c.x + x,
+        y: c.y + y,
+        z: c.z + z,
+    }
+}
 pub const CAPACITY: u32 = 8; // 1.953125 litres at the native resolution.
 #[derive(Clone, Debug)]
 pub struct Drop {
@@ -24,6 +36,8 @@ pub struct Bowl {
     pub drops: Vec<Drop>,
     phase: f64,
     pub simulated: f64,
+    flow: VecDeque<Cell>,
+    queued_flow: BTreeSet<Cell>,
 }
 impl Bowl {
     pub fn conserved(&self) -> bool {
@@ -48,20 +62,20 @@ impl Bowl {
             return Err("Bowl is full");
         }
         let mut picked = Vec::new();
-        // Take visible neighbors first, then the layer beneath. Every unit is real.
-        for y in [0, -1, -2] {
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    let c = Cell {
-                        x: hit.cell.x + dx,
-                        y: hit.cell.y + y,
-                        z: hit.cell.z + dz,
-                    };
-                    if picked.len() < (CAPACITY - self.units) as usize
-                        && world.material(c) == Material::Water
-                    {
-                        picked.push(c);
-                    }
+        let mut frontier = VecDeque::from([hit.cell]);
+        let mut visited = BTreeSet::from([hit.cell]);
+        while let Some(cell) = frontier.pop_front() {
+            if world.material(cell) != Material::Water {
+                continue;
+            }
+            picked.push(cell);
+            if picked.len() == (CAPACITY - self.units) as usize {
+                break;
+            }
+            for delta in SIDES.into_iter().chain([DOWN, UP]) {
+                let neighbor = offset(cell, delta);
+                if visited.insert(neighbor) {
+                    frontier.push_back(neighbor);
                 }
             }
         }
@@ -71,13 +85,178 @@ impl Bowl {
             }
         }
         world.set_fluid_occupancy(picked.iter().map(|&c| (c, false)));
-        // A previously deposited unit can be picked up again without new source mass.
-        let recycled = picked.len() as u32;
-        self.units += recycled;
+        let units = picked.len() as u32;
+        self.units += units;
         self.scooped = self.removed.len() as u64;
+        for cell in picked.into_iter().rev() {
+            self.relax_scoop(world, cell);
+            self.wake_water_near(cell);
+        }
         debug_assert!(self.conserved());
-        Ok(recycled)
+        Ok(units)
     }
+
+    /// Spread each scoop vacancy over the connected surface. A same-level
+    /// transfer across an occupied path is a local pressure adjustment. Its
+    /// donor is one whole surface voxel and the net deficit is saved.
+    fn relax_scoop(&mut self, world: &mut World, cell: Cell) {
+        if world.material(cell) != Material::Air {
+            return;
+        }
+        let above = offset(cell, UP);
+        if world.material(above) == Material::Water {
+            self.transfer(world, above, cell);
+            return;
+        }
+        let turn = ((cell.x ^ cell.z) as usize) & 3;
+        let mut visited = BTreeSet::from([cell]);
+        let mut frontier = VecDeque::from([(cell, 0)]);
+        let mut donor = None;
+        while let Some((current, distance)) = frontier.pop_front() {
+            if distance > 0 && world.material(offset(current, UP)) == Material::Air {
+                donor = Some(current);
+                if distance >= 5 {
+                    break;
+                }
+            }
+            for side in 0..4 {
+                let next = offset(current, SIDES[(side + turn) & 3]);
+                if visited.insert(next) && world.material(next) == Material::Water {
+                    frontier.push_back((next, distance + 1));
+                }
+            }
+            if visited.len() >= 96 {
+                break;
+            }
+        }
+        if let Some(from) = donor {
+            self.transfer(world, from, cell);
+        }
+    }
+
+    pub fn terrain_changed(&mut self, world: &mut World, cell: Cell) {
+        // The newly exposed cell may be level with shallow water. Let the same
+        // connected pressure adjustment fill it, then step the local flow.
+        self.relax_scoop(world, cell);
+        self.wake_water_near(cell);
+    }
+
+    pub fn wake_water_near(&mut self, cell: Cell) {
+        self.enqueue_flow(cell);
+        for delta in SIDES.into_iter().chain([UP, DOWN]) {
+            self.enqueue_flow(offset(cell, delta));
+        }
+    }
+
+    fn enqueue_flow(&mut self, cell: Cell) {
+        if self.queued_flow.insert(cell) {
+            self.flow.push_back(cell);
+        }
+    }
+
+    /// The queue contains vacancies. Water may fall into one, spill into a
+    /// lower opening, or refill it under a column of water. Level open surfaces
+    /// sleep; there is no continual scan of the procedural pond.
+    fn settle_water(&mut self, world: &mut World) {
+        let mut changes = BTreeMap::new();
+        for _ in 0..self.flow.len().min(FLOW_CELLS_PER_TICK) {
+            let Some(to) = self.flow.pop_front() else {
+                break;
+            };
+            self.queued_flow.remove(&to);
+            let material = |cell| match changes.get(&cell) {
+                Some(true) => Material::Water,
+                Some(false) => Material::Air,
+                None => world.material(cell),
+            };
+            if material(to) != Material::Air {
+                continue;
+            }
+            let above = offset(to, UP);
+            let below = material(offset(to, DOWN));
+            let from = if material(above) == Material::Water {
+                Some(above)
+            } else {
+                SIDES.iter().copied().map(|d| offset(to, d)).find(|&side| {
+                    material(side) == Material::Water
+                        && (below == Material::Air
+                            || (below == Material::Water
+                                && material(offset(side, UP)) == Material::Water))
+                })
+            };
+            if let Some(from) = from {
+                self.record_transfer(world, from, to);
+                changes.extend([(from, false), (to, true)]);
+                self.wake_water_near(from);
+                self.wake_water_near(to);
+            }
+        }
+        world.set_fluid_occupancy(changes);
+    }
+
+    fn transfer(&mut self, world: &mut World, from: Cell, to: Cell) {
+        self.record_transfer(world, from, to);
+        world.set_fluid_occupancy([(from, false), (to, true)]);
+    }
+
+    fn record_transfer(&mut self, world: &World, from: Cell, to: Cell) {
+        if !self.deposited.remove(&from) {
+            self.removed.insert(from);
+        }
+        // A wet override is still needed if the player has excavated away
+        // the original source at this address.
+        if world.material_without_fluid(to) != Material::Water || !self.removed.remove(&to) {
+            self.deposited.insert(to);
+        }
+        self.scooped = self.removed.len() as u64;
+    }
+    /// Reserve a landing cell for each displaced whole unit before changing
+    /// either the terrain or the liquid. A blocked placement is atomic.
+    pub(crate) fn displace_for_placement(
+        &mut self,
+        world: &mut World,
+        solids: &BTreeMap<Cell, Material>,
+    ) -> Result<(), &'static str> {
+        let mut displaced = Vec::new();
+        let mut reserved = BTreeSet::new();
+        for &from in solids.keys() {
+            if world.material(from) != Material::Water {
+                continue;
+            }
+            let mut to = from;
+            let mut destination = None;
+            for _ in 0..96 {
+                to = offset(to, UP);
+                if solids.contains_key(&to) || reserved.contains(&to) {
+                    continue;
+                }
+                match world.material(to) {
+                    Material::Air => {
+                        destination = Some(to);
+                        break;
+                    }
+                    Material::Water => (),
+                    _ => break,
+                }
+            }
+            let to = destination.ok_or("There is no open space for the displaced water")?;
+            reserved.insert(to);
+            displaced.push((from, to));
+        }
+        for &(from, to) in &displaced {
+            self.record_transfer(world, from, to);
+            self.wake_water_near(from);
+            self.wake_water_near(to);
+        }
+        world.set_fluid_occupancy(
+            displaced
+                .into_iter()
+                .flat_map(|(from, to)| [(from, false), (to, true)]),
+        );
+        debug_assert!(self.conserved());
+        Ok(())
+    }
+
     pub fn emit(
         &mut self,
         world: &World,
@@ -210,6 +389,7 @@ impl Bowl {
                             if found {
                                 world.set_fluid_occupancy([(top, true)]);
                                 self.deposited.insert(top);
+                                self.wake_water_near(top);
                                 finished = true;
                             } else {
                                 d.credit[a] = 0.;
@@ -221,6 +401,7 @@ impl Bowl {
                             if a == 1 && step < 0 && world.material(d.cell) == Material::Air {
                                 world.set_fluid_occupancy([(d.cell, true)]);
                                 self.deposited.insert(d.cell);
+                                self.wake_water_near(d.cell);
                                 finished = true;
                                 break;
                             }
@@ -238,18 +419,26 @@ impl Bowl {
                 self.drops.push(d);
             }
         }
+        self.settle_water(world);
         debug_assert!(self.conserved());
     }
     pub fn apply(&self, world: &mut World) {
+        self.apply_damp(world);
+        self.apply_occupancy(world);
+    }
+
+    pub fn apply_damp(&self, world: &mut World) {
+        world.set_batch(self.damp.iter().map(|&cell| (cell, Material::Soil)));
+    }
+
+    pub fn apply_occupancy(&self, world: &mut World) {
         world.set_fluid_occupancy(
             self.removed
                 .iter()
+                .filter(|c| !self.deposited.contains(c))
                 .map(|&c| (c, false))
                 .chain(self.deposited.iter().map(|&c| (c, true))),
         );
-        for &c in &self.damp {
-            world.set(c, Material::Soil);
-        }
     }
     pub fn snapshot(&self, seed: u64) -> String {
         let mut s = format!(
@@ -273,6 +462,9 @@ impl Bowl {
         }
         for (c, n) in &self.moisture {
             s += &format!("M {} {} {} {n}\n", c.x, c.y, c.z);
+        }
+        for &c in &self.flow {
+            s += &format!("F {} {} {}\n", c.x, c.y, c.z);
         }
         for d in &self.drops {
             s += &format!(
@@ -349,6 +541,10 @@ impl Bowl {
                 "R" if v.len() == 4 => b.removed.insert(cell),
                 "W" if v.len() == 4 => b.deposited.insert(cell),
                 "D" if v.len() == 4 => b.damp.insert(cell),
+                "F" if v.len() == 4 && !b.queued_flow.contains(&cell) => {
+                    b.enqueue_flow(cell);
+                    true
+                }
                 "M" if v.len() == 5 => {
                     let n = u32::try_from(number(v[4])?).map_err(|_| "moisture overflow")?;
                     n > 0 && b.moisture.insert(cell, n).is_none()
@@ -412,14 +608,20 @@ mod tests {
             b.advance(&mut w, 0.025);
         }
         assert!(b.drops.is_empty());
-        assert_eq!(b.deposited.len(), CAPACITY as usize);
+        assert_eq!(b.units, 0);
+        assert_eq!(b.emitted, u64::from(CAPACITY));
+        assert!(b.moisture.is_empty());
+        assert_eq!(b.removed.len(), b.deposited.len());
         assert!(b.conserved());
         let s = b.snapshot(19);
         let mut restored = Bowl::restore(&s, 19).unwrap();
         let n = restored.scoop(&mut w, eye, dir).unwrap();
         assert!(n > 0 && n <= CAPACITY);
         assert!(restored.conserved());
-        assert_eq!(restored.scooped, CAPACITY as u64);
+        assert_eq!(
+            restored.removed.len() - restored.deposited.len(),
+            n as usize
+        );
     }
     #[test]
     fn scoop_is_finite_and_pour_becomes_saved_moisture() {
@@ -452,6 +654,59 @@ mod tests {
         assert!(Bowl::restore(&s, 20).is_err());
         assert!(Bowl::restore(&s.replace("BOWL2 19 0", "BOWL2 19 8"), 19).is_err());
     }
+    #[test]
+    fn scoop_refills_the_visible_hole_with_finite_water() {
+        let (mut world, eye, dir) = fixture();
+        let mut bowl = Bowl::default();
+        let hit = raycast(&world, eye, dir, 2.2).unwrap().cell;
+        assert_eq!(bowl.scoop(&mut world, eye, dir), Ok(CAPACITY));
+        assert_eq!(world.material(hit), Material::Water);
+        assert_eq!(bowl.removed.len() - bowl.deposited.len(), CAPACITY as usize);
+        assert!(bowl.conserved());
+    }
+
+    #[test]
+    fn breaking_a_bank_moves_whole_water_into_lower_ground_and_survives_reload() {
+        let mut world = World::new(44);
+        let bank = Cell { x: 1, y: 201, z: 0 };
+        let below = offset(bank, DOWN);
+        let source = Cell { x: 0, ..bank };
+        let mut scaffold = vec![
+            (bank, Material::Stone),
+            (offset(below, DOWN), Material::Stone),
+            (source, Material::Water),
+            (offset(source, UP), Material::Water),
+            (offset(source, DOWN), Material::Stone),
+        ];
+        for side in SIDES {
+            scaffold.push((offset(below, side), Material::Stone));
+            if side != SIDES[0] {
+                scaffold.push((offset(source, side), Material::Stone));
+                scaffold.push((offset(offset(source, UP), side), Material::Stone));
+            }
+        }
+        world.set_batch(scaffold.iter().copied());
+        let mut bowl = Bowl::default();
+        assert_eq!(world.material(below), Material::Air);
+        world.set(bank, Material::Air);
+        bowl.terrain_changed(&mut world, bank);
+        for _ in 0..4 {
+            bowl.advance(&mut world, 0.025);
+        }
+        assert_eq!(world.material(below), Material::Water);
+        assert_eq!(bowl.removed.len(), bowl.deposited.len());
+        assert!(bowl.conserved());
+
+        let saved = bowl.snapshot(world.seed());
+        let restored = Bowl::restore(&saved, world.seed()).unwrap();
+        let mut reloaded = World::new(world.seed());
+        reloaded.set_batch(scaffold);
+        reloaded.set(bank, Material::Air);
+        restored.apply(&mut reloaded);
+        assert_eq!(reloaded.material(below), Material::Water);
+        assert_eq!(restored.snapshot(world.seed()), saved);
+    }
+
     #[test]
     fn blocked_or_distant_scoop_never_creates_water() {
         let (mut w, mut eye, dir) = fixture();

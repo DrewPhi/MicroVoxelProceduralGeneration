@@ -73,14 +73,16 @@ impl BowlLive {
             if garden.water_accounted() != state.plant_transferred {
                 return Err("plant/water save ledger mismatch".into());
             }
-            state.apply(world);
+            state.apply_damp(world);
             if let Some(text) = pocket_text {
                 let pockets = Pockets::restore(text, garden.seeds)?;
                 pockets.apply(world);
+                state.apply_occupancy(world);
                 garden.apply_tissue(world);
                 return Ok(Self::with_state(state, garden, pockets, path, identity));
             }
             garden.apply(world);
+            state.apply_occupancy(world);
         }
         let pockets = Pockets::migrate(world, &garden)?;
         garden.sand = 0;
@@ -201,7 +203,7 @@ impl BowlLive {
             return;
         }
         if left && pressed && self.pockets.hand.is_none() {
-            if let Some(hit) = frontier_world::raycast(
+            if let Some(hit) = frontier_world::raycast_solid(
                 world,
                 camera.position.to_array(),
                 camera.direction().as_dvec3().to_array(),
@@ -223,7 +225,7 @@ impl BowlLive {
             }
         } else if left && !pressed {
             if let Some(g) = self.gesture.take() {
-                let hit = frontier_world::raycast(
+                let hit = frontier_world::raycast_solid(
                     world,
                     camera.position.to_array(),
                     camera.direction().as_dvec3().to_array(),
@@ -249,6 +251,9 @@ impl BowlLive {
                 }
                 self.message = match self.pockets.pickup(world, &g.cells[..n]) {
                     Ok(()) => {
+                        for &(cell, _) in &g.cells[..n] {
+                            self.state.terrain_changed(world, cell);
+                        }
                         eprintln!(
                             "pockets pickup count={n} conserved={}",
                             self.pockets.conserved()
@@ -260,7 +265,7 @@ impl BowlLive {
             }
         } else if !left && pressed {
             self.gesture = None;
-            let Some(hit) = frontier_world::raycast(
+            let Some(hit) = frontier_world::raycast_solid(
                 world,
                 camera.position.to_array(),
                 camera.direction().as_dvec3().to_array(),
@@ -289,16 +294,27 @@ impl BowlLive {
                         Err(e) => e.into(),
                     }
                 }
-                Some(Item::Sand(_)) => match self.pockets.drop_sand(world, start, can_place) {
-                    Ok(n) => {
-                        eprintln!(
-                            "pockets drop count={n} conserved={}",
-                            self.pockets.conserved()
-                        );
-                        format!("Dropped {n} sand voxels onto the ground")
+                Some(Item::Sand(_)) => {
+                    let before = world.clone();
+                    match self.pockets.drop_sand_with_water(
+                        world,
+                        start,
+                        can_place,
+                        Some(&mut self.state),
+                    ) {
+                        Ok(n) => {
+                            for cell in world.changed_edit_cells(&before) {
+                                self.state.terrain_changed(world, cell);
+                            }
+                            eprintln!(
+                                "pockets drop count={n} conserved={}",
+                                self.pockets.conserved()
+                            );
+                            format!("Dropped {n} sand voxels onto the ground")
+                        }
+                        Err(e) => e.into(),
                     }
-                    Err(e) => e.into(),
-                },
+                }
                 _ => "Your hands are empty — select a pocket".into(),
             };
         }
@@ -318,7 +334,7 @@ impl BowlLive {
             self.gesture = None;
             return;
         }
-        self.debt += elapsed;
+        self.debt = (self.debt + elapsed).min(0.4);
         let pouring = self.pockets.bowl() && self.pouring;
         let spill = self.pockets.bowl() && spill;
         let target = if spill {
@@ -506,7 +522,7 @@ impl BowlLive {
             let delta = center - camera.position;
             let distance = delta.length();
             if distance > 0.
-                && frontier_world::raycast(
+                && frontier_world::raycast_solid(
                     world,
                     camera.position.to_array(),
                     delta.to_array(),
