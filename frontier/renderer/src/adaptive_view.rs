@@ -1022,6 +1022,12 @@ impl AdaptiveView {
             self.stats.coarse_projection_visible_fallback_tiles,
         ));
         json.pop();
+        json.push_str(&format!(
+            ",\"coarse_compaction\":{{\"enabled\":{},\"regions\":{},\"dispatches\":{},\"bytes\":{}}}}}",
+            self.stats.coarse_compaction_enabled, self.stats.coarse_compaction_regions,
+            self.stats.coarse_compaction_dispatches, self.stats.coarse_compaction_bytes,
+        ));
+        json.pop();
         json.push_str(&format!(",\"native_bins_enabled\":{},\"native_bin_tests\":{},\"native_bin_skipped_quads\":{},\"draw_calls\":{},\"no_voxel_shadow_clusters\":{}}}",self.native_bins,self.stats.native_bin_tests,self.stats.native_bin_skipped_quads,self.stats.draw_calls,self.stats.no_voxel_shadow_clusters));
         json.pop();
         json.push_str(&format!(",\"vertex_pages_coalescing_enabled\":{},\"vertex_page_binds_eligible\":{},\"vertex_page_binds_avoided\":{}}}", self.stats.vertex_pages_coalescing_enabled, self.stats.vertex_page_binds_eligible, self.stats.vertex_page_binds_avoided));

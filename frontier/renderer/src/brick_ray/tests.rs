@@ -1,6 +1,9 @@
 use super::*;
 use glam::DVec3;
 
+#[path = "edit_cost.rs"]
+mod edit_cost;
+
 /// CPU f64 model of the WGSL's region-exit traversal, deliberately separate
 /// from the authoritative world's unit-cell DDA and from mesh triangles.
 fn trace(

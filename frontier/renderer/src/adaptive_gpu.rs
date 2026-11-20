@@ -26,6 +26,8 @@ use wgpu::util::DeviceExt;
 pub(crate) mod adaptive_shadow;
 #[path = "coarse_batch.rs"]
 pub(crate) mod coarse_batch;
+#[path = "coarse_compaction.rs"]
+mod coarse_compaction;
 #[path = "coarse_projection.rs"]
 mod coarse_projection;
 #[path = "proxy_indexed.rs"]
@@ -216,7 +218,21 @@ impl Cluster {
 }
 
 fn projection_upload_size(input: &crate::adaptive_geometry::distant_voxels::ProjectionInput) -> u64 {
-    size_of_val(input.columns.as_slice()) as u64 + size_of_val(input.seams.as_slice()) as u64
+    size_of_val(input.columns.as_slice()) as u64
+        + size_of_val(input.seams.as_slice()) as u64
+        + size_of_val(input.regions.as_slice()) as u64
+}
+
+fn projection_vertex_usage() -> wgpu::BufferUsages {
+    use wgpu::BufferUsages as U;
+    let mut usage = U::VERTEX;
+    if coarse_projection::visibility_probe_requested() {
+        usage |= U::COPY_SRC;
+    }
+    if crate::adaptive_geometry::distant_voxels::compaction_requested() {
+        usage |= U::STORAGE;
+    }
+    usage
 }
 /// Bounded current-draw diagnostic; None projected error means unbounded.
 #[derive(Clone, Copy, Debug)]
@@ -315,6 +331,10 @@ pub struct DrawStats {
     pub coarse_projection_visible_columns: u64,
     pub coarse_projection_visible_seams: u64,
     pub coarse_projection_visible_fallback_tiles: u64,
+    pub coarse_compaction_enabled: bool,
+    pub coarse_compaction_regions: u64,
+    pub coarse_compaction_dispatches: usize,
+    pub coarse_compaction_bytes: u64,
     pub current_local_certified_clusters: usize,
     pub current_affine_bound_clusters: usize,
     pub current_global_bound_clusters: usize,
@@ -390,14 +410,30 @@ macro_rules! encode_cluster_draws {
                         );
                         pass.draw_indexed(0..6, 0, 0..resident.seams);
                     }
-                    let pipeline = if item.no_voxel_shadow {
-                        projection.far.as_ref().unwrap_or(&projection.normal)
+                    if let Some((compaction, draw)) = renderer.coarse_compaction.as_ref().and_then(|compaction| {
+                        compaction.draw(draw_index).map(|draw| (compaction, draw))
+                    }) {
+                        pass.set_bind_group(
+                            0,
+                            compaction.render_bind(resident.allocation.page, profile.table.page),
+                            &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
+                        );
+                        pass.set_pipeline(compaction.raster_pipeline(item.no_voxel_shadow));
+                        pass.set_vertex_buffer(0, compaction.compacted.slice(draw.range.clone()));
+                        pass.draw_indirect(
+                            &compaction.indirect,
+                            coarse_compaction::Compaction::indirect_offset(draw_index),
+                        );
                     } else {
-                        &projection.normal
-                    };
-                    pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, page.buffer.slice(resident.column_range()));
-                    pass.draw(projection.vertices(), 0..resident.columns);
+                        let pipeline = if item.no_voxel_shadow {
+                            projection.far.as_ref().unwrap_or(&projection.normal)
+                        } else {
+                            &projection.normal
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, page.buffer.slice(resident.column_range()));
+                        pass.draw(projection.vertices(), 0..resident.columns);
+                    }
                     bound_vertex_page = None;
                     continue;
                 }
@@ -604,6 +640,7 @@ pub struct AdaptiveGpu {
     bundle: Option<wgpu::RenderBundle>,
     coarse_batch: Option<coarse_batch::Batch>,
     coarse_projection: Option<coarse_projection::Pass>,
+    coarse_compaction: Option<coarse_compaction::Compaction>,
     projection_pressure_fallback: bool,
     bundle_signature: Vec<DrawItem>,
     bundle_stable_frames: u8,
@@ -692,7 +729,13 @@ impl AdaptiveGpu {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("adaptive pooled camera uniforms"),
             size: CAMERA_UNIFORM_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | if crate::adaptive_geometry::distant_voxels::compaction_requested() {
+                    wgpu::BufferUsages::STORAGE
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
             mapped_at_creation: false,
         });
         let zero_table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -932,6 +975,18 @@ impl AdaptiveGpu {
                 &naadf_constants,
                 far_pipelines.as_ref().map(|_| &far_constants),
             ));
+        let coarse_compaction = coarse_projection
+            .as_ref()
+            .filter(|_| crate::adaptive_geometry::distant_voxels::compaction_requested())
+            .and_then(|projection| coarse_compaction::Compaction::new(
+                device,
+                format,
+                &pipeline_layout,
+                &shader,
+                projection.mode,
+                &naadf_constants,
+                far_pipelines.as_ref().map(|_| &far_constants),
+            ));
         let shadow_pipelines = [
             make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false, false),
             make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false, false),
@@ -995,6 +1050,7 @@ impl AdaptiveGpu {
             bundle: None,
             coarse_batch,
             coarse_projection,
+            coarse_compaction,
             projection_pressure_fallback: false,
             bundle_signature: vec![],
             bundle_stable_frames: 0,
@@ -1062,6 +1118,7 @@ impl AdaptiveGpu {
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
         self.coarse_projection = fresh.coarse_projection;
+        self.coarse_compaction = fresh.coarse_compaction;
         if let (Some(current), Some(updated)) = (&mut self.coarse_batch, fresh.coarse_batch) {
             current.raster = updated.raster;
         }
@@ -1181,6 +1238,10 @@ impl AdaptiveGpu {
                 .as_ref()
                 .map_or(0, |_| coarse_batch::Batch::bytes())
             + self
+                .coarse_compaction
+                .as_ref()
+                .map_or(0, |_| coarse_compaction::Compaction::bytes())
+            + self
                 .gpu_profiles
                 .as_ref()
                 .map_or(0, |builder| builder.resident_bytes())
@@ -1230,6 +1291,12 @@ impl AdaptiveGpu {
         if total.saturating_add(size) > self.resource_budget_bytes
             || size > device.limits().max_buffer_size
         {
+            if size <= device.limits().max_buffer_size && self.coarse_compaction.take().is_some() {
+                self.resident_stats = None;
+                self.prepared_view = None;
+                self.invalidate_bundle();
+                return self.allocate(device, bytes, kind);
+            }
             if kind != PROJECTION_VERTEX_POOL
                 && size <= device.limits().max_buffer_size
                 && !self.projection_vertices.is_empty()
@@ -1245,9 +1312,7 @@ impl AdaptiveGpu {
             match kind {
                 1 => wgpu::BufferUsages::INDEX,
                 3 => wgpu::BufferUsages::STORAGE,
-                PROJECTION_VERTEX_POOL if coarse_projection::visibility_probe_requested() => {
-                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC
-                }
+                PROJECTION_VERTEX_POOL => projection_vertex_usage(),
                 _ => wgpu::BufferUsages::VERTEX,
             },
         );
@@ -1259,6 +1324,7 @@ impl AdaptiveGpu {
     fn release_experimental_projection(&mut self) {
         // Optional experiment resources never take budget from coherent cover.
         self.projection_pressure_fallback = true;
+        self.coarse_compaction = None;
         self.projection_vertices.clear();
         for (key, cluster) in &mut self.clusters {
             if let Some(projection) = cluster.projection.take() {
@@ -1981,6 +2047,7 @@ impl AdaptiveGpu {
             queue.write_buffer(&self.uniform, 0, &self.camera_upload);
         }
         coarse_batch::Batch::prepare(self, queue);
+        coarse_compaction::Compaction::prepare(self, device, queue);
         stats.prepare_upload_ms = upload_started.elapsed().as_secs_f64() * 1000.;
         let bundle_started = std::time::Instant::now();
         self.prepare_bundle(device);
@@ -2020,6 +2087,11 @@ impl AdaptiveGpu {
             .as_ref()
             .map_or("off", |projection| projection.mode.label());
         stats.coarse_projection_pressure_fallback = self.projection_pressure_fallback;
+        if let Some(compaction) = &self.coarse_compaction {
+            stats.coarse_compaction_enabled = true;
+            (stats.coarse_compaction_regions, stats.coarse_compaction_dispatches) = compaction.stats();
+            stats.coarse_compaction_bytes = coarse_compaction::Compaction::bytes();
+        }
         stats.bundle_enabled = self.bundles_enabled;
         stats.vertex_pages_coalescing_enabled = self.coalesce_vertex_pages;
         stats.bundle_active = self.bundle.is_some();
@@ -2033,6 +2105,21 @@ impl AdaptiveGpu {
         if let Some(batch) = &self.coarse_batch {
             batch.encode_cull(encoder);
         }
+        if let Some(compaction) = &self.coarse_compaction {
+            compaction.encode(encoder);
+        }
+    }
+
+    pub(crate) fn capture_coarse_compaction(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<String>, String> {
+        if let (Some(compaction), Some(projection)) = (&self.coarse_compaction, &self.coarse_projection) {
+            let vertices = projection.vertices().end;
+            return compaction.capture(device, queue, vertices).map(Some);
+        }
+        Ok(None)
     }
 
     /// Read the exact submitted column records and their tile-relative cameras
@@ -2289,6 +2376,7 @@ impl AdaptiveGpu {
             allocation,
             columns: input.columns.len() as u32,
             seams: input.seams.len() as u32,
+            regions: input.regions.len() as u32,
         };
         let buffer = &self.projection_vertices[resident.allocation.page].buffer;
         let mut columns = input.columns.clone();
@@ -2302,6 +2390,9 @@ impl AdaptiveGpu {
                 seam.profile_index += profile_base;
             }
             queue.write_buffer(buffer, resident.seam_range().start, bytemuck::cast_slice(&seams));
+        }
+        if !input.regions.is_empty() {
+            queue.write_buffer(buffer, resident.region_range().start, bytemuck::cast_slice(&input.regions));
         }
         Some(resident)
     }
@@ -2613,6 +2704,16 @@ fn profile_bind(
     uniform: &wgpu::Buffer,
     table: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
+    profile_bind_source(device, layout, uniform, table, table)
+}
+
+fn profile_bind_source(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    table: &wgpu::Buffer,
+    source: &wgpu::Buffer,
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pooled canonical profile page"),
         layout,
@@ -2631,7 +2732,7 @@ fn profile_bind(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: table.as_entire_binding(),
+                resource: source.as_entire_binding(),
             },
         ],
     })

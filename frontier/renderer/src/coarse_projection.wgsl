@@ -9,6 +9,11 @@ fn coarse_triangle_corner(vertex: u32) -> u32 {
 fn vs_coarse_generated(@builtin(vertex_index) vertex: u32,
     @location(0) xz: vec4<f32>, @location(1) levels: vec2<f32>,
     @location(2) floors: vec4<f32>, @location(3) style: vec3<u32>) -> VertexOut {
+    return coarse_generated_vertex(vertex, xz, levels, floors, style);
+}
+
+fn coarse_generated_vertex(vertex: u32, xz: vec4<f32>, levels: vec2<f32>,
+                           floors: vec4<f32>, style: vec3<u32>) -> VertexOut {
     camera = draw_camera;
     let face = vertex / 6u;
     let corner = coarse_triangle_corner(vertex);
@@ -93,6 +98,11 @@ fn coarse_projected_bounds(origin: vec4<f32>, dx: vec4<f32>, dy: vec4<f32>, dz: 
 fn vs_coarse_splat(@builtin(vertex_index) vertex: u32,
     @location(0) xz: vec4<f32>, @location(1) levels: vec2<f32>,
     @location(2) floors: vec4<f32>, @location(3) style: vec3<u32>) -> CoarseSplatVertex {
+    return coarse_splat_vertex(vertex, xz, levels, floors, style);
+}
+
+fn coarse_splat_vertex(vertex: u32, xz: vec4<f32>, levels: vec2<f32>,
+                       floors: vec4<f32>, style: vec3<u32>) -> CoarseSplatVertex {
     let eye = draw_camera.eye.xyz;
     let top = levels.x;
     let eye_facing = eye.y > top
@@ -129,6 +139,39 @@ fn vs_coarse_splat(@builtin(vertex_index) vertex: u32,
     let corner = vec2<f32>(f32(vertex & 1u), f32(vertex >> 1u));
     let ndc = mix(lo, hi, corner);
     return CoarseSplatVertex(vec4<f32>(ndc, 0., 1.), xz, levels, floors, style);
+}
+
+struct CompactedCoarseColumn {
+    xz: vec4<f32>,
+    levels: vec2<f32>,
+    floors: vec4<f32>,
+    style: vec3<u32>,
+};
+
+fn read_coarse_column(word: u32) -> CompactedCoarseColumn {
+    // The ordinary adaptive position binding is the source projection page
+    // for this pipeline. Word offsets come from the GPU compact selector.
+    let xz = vec4<f32>(proxy_positions[word], proxy_positions[word + 1u],
+                       proxy_positions[word + 2u], proxy_positions[word + 3u]);
+    let levels = vec2<f32>(proxy_positions[word + 4u], proxy_positions[word + 5u]);
+    let floors = vec4<f32>(proxy_positions[word + 6u], proxy_positions[word + 7u],
+                           proxy_positions[word + 8u], proxy_positions[word + 9u]);
+    let style = vec3<u32>(bitcast<u32>(proxy_positions[word + 10u]),
+                         bitcast<u32>(proxy_positions[word + 11u]),
+                         bitcast<u32>(proxy_positions[word + 12u]));
+    return CompactedCoarseColumn(xz, levels, floors, style);
+}
+
+@vertex
+fn vs_coarse_generated_indexed(@builtin(vertex_index) vertex: u32, @location(0) word: u32) -> VertexOut {
+    let column = read_coarse_column(word);
+    return coarse_generated_vertex(vertex, column.xz, column.levels, column.floors, column.style);
+}
+
+@vertex
+fn vs_coarse_splat_indexed(@builtin(vertex_index) vertex: u32, @location(0) word: u32) -> CoarseSplatVertex {
+    let column = read_coarse_column(word);
+    return coarse_splat_vertex(vertex, column.xz, column.levels, column.floors, column.style);
 }
 
 struct CoarseSplatFragment {

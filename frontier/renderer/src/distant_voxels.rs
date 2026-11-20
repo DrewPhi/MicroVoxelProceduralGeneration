@@ -82,6 +82,13 @@ pub(crate) fn projection_requested() -> bool {
     })
 }
 
+pub(crate) fn compaction_requested() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("FRONTIER_COARSE_COMPACTION").is_some_and(|v| v == "1")
+    })
+}
+
 pub(super) fn projection_grid(key: TileKey) -> bool {
     key.step_cells > 1
         && key.width_cells > MAX_CERTIFICATE_WIDTH
@@ -99,15 +106,51 @@ pub(crate) struct ProjectionColumn {
     pub style: [u32; 3],
 }
 
+/// Conservative union of the rasterizable bounds of up to 16 adjacent
+/// seed-sampled columns. The GPU can reject this region before reading leaves.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct ProjectionRegion {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+fn projection_regions(columns: &[ProjectionColumn]) -> Vec<ProjectionRegion> {
+    columns
+        .chunks(16)
+        .map(|chunk| {
+            let mut region = ProjectionRegion {
+                min: [f32::INFINITY; 3],
+                max: [f32::NEG_INFINITY; 3],
+            };
+            for column in chunk {
+                let [x0, z0, x1, z1] = column.xz;
+                let top = column.levels[0];
+                let bottom = column
+                    .floors
+                    .into_iter()
+                    .fold(top - VOXEL_SIZE as f32, f32::min);
+                for (axis, (lo, hi)) in [x0, bottom, z0].into_iter().zip([x1, top, z1]).enumerate() {
+                    region.min[axis] = region.min[axis].min(lo);
+                    region.max[axis] = region.max[axis].max(hi);
+                }
+            }
+            region
+        })
+        .collect()
+}
+
 pub(crate) struct ProjectionInput {
     pub columns: Vec<ProjectionColumn>,
     pub seams: Vec<NativeQuad>,
+    pub regions: Vec<ProjectionRegion>,
 }
 
 impl ProjectionInput {
     pub(super) fn bytes(&self) -> usize {
         self.columns.capacity() * size_of::<ProjectionColumn>()
             + self.seams.capacity() * size_of::<NativeQuad>()
+            + self.regions.capacity() * size_of::<ProjectionRegion>()
     }
 }
 
@@ -879,9 +922,16 @@ impl Generator<'_> {
         }
         if let (Some(interior), Some(mut seams)) = (interior, projection_seams) {
             seams.extend_from_slice(&self.coarse_quads[first_seam_wall..]);
+            let columns = interior.projection_columns(width, pitch, grid as usize, &profiles);
+            let regions = if compaction_requested() {
+                projection_regions(&columns)
+            } else {
+                Vec::new()
+            };
             self.coarse_projection = Some(ProjectionInput {
-                columns: interior.projection_columns(width, pitch, grid as usize, &profiles),
+                columns,
                 seams,
+                regions,
             });
         }
         Ok(())
@@ -1038,6 +1088,10 @@ mod tests {
         assert_eq!(columns[2].floors, [15, 11, 12, 15].map(meters));
         assert_eq!(columns[2].levels, [15, 13].map(meters));
         assert_eq!(columns[2].style, [7, 3, 12]);
+        let regions = projection_regions(&columns);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].min, [1, 9, 1].map(meters));
+        assert_eq!(regions[0].max, [7, 15, 7].map(meters));
     }
 
     fn mixed_tile(

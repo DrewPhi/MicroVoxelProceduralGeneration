@@ -1381,6 +1381,14 @@ impl Gpu {
             metadata.pop();
             metadata.push_str(&format!(",\"box_splat\":{}}}", splats.json()));
         }
+        if let Some(adaptive) = &self.adaptive {
+            if let Some(counts) = adaptive.capture_coarse_compaction(&self.device, &self.queue)
+                .map_err(std::io::Error::other)?
+            {
+                metadata.pop();
+                metadata.push_str(&format!(",\"coarse_compaction_capture\":{counts}}}"));
+            }
+        }
         if let Some(n) = &self.naadf {
             metadata.pop();
             metadata.push_str(&format!(",\"naadf\":{}}}", n.json()));
@@ -2006,6 +2014,16 @@ impl Viewer {
     }
     fn queue_edit(&mut self, snapshot: World, label: &str, input: Instant) {
         let revision = snapshot.revision();
+        let started = Instant::now();
+        if let Some(gpu) = &mut self.gpu {
+            if gpu.box_splat.as_mut().is_some_and(|splats| {
+                splats.try_apply_edit(&gpu.queue, &self.world, &snapshot)
+            }) {
+                self.world = snapshot;
+                self.record_edit_publication(revision, started.elapsed(), input, "splat_delta");
+                return;
+            }
+        }
         let mut pending = if self.world.topology_base_cells().is_some() {
             PendingEdit::start_volume(snapshot)
         } else {
@@ -2020,6 +2038,36 @@ impl Viewer {
         pending.started = input;
         self.pending_edit = Some(pending);
         eprintln!("edit {label}: revision {revision} rebuilding; further edits wait");
+    }
+    fn record_edit_publication(
+        &mut self,
+        revision: u64,
+        build: std::time::Duration,
+        input: Instant,
+        path: &str,
+    ) {
+        self.edit_published_count += 1;
+        self.edit_build_ms = build.as_secs_f64() * 1000.;
+        self.edit_input_to_publish_ms = input.elapsed().as_secs_f64() * 1000.;
+        self.edit_records.push(format!(
+            "{{\"revision\":{revision},\"build_ms\":{},\"input_to_publish_ms\":{},\"path\":{path:?}}}",
+            self.edit_build_ms, self.edit_input_to_publish_ms
+        ));
+        if let Some(test) = &mut self.edit_test {
+            if test.phase == 1 && !test.next_seconds.is_finite() {
+                // Capture the live addition at the same camera pose in the
+                // delta and rebuild paths, without a wall-clock timing race.
+                if std::env::var_os("FRONTIER_FIXTURE_HOLD_EDIT").is_none_or(|v| v != "1") {
+                    test.next_seconds = self.route_started.elapsed().as_secs_f64() + 2.;
+                }
+            } else if test.phase == 2 {
+                test.phase = 3;
+            }
+        }
+        eprintln!(
+            "published edit revision {revision} ({path}): build {:.3}s, input-to-publish {:.3}s",
+            build.as_secs_f64(), self.edit_input_to_publish_ms * 0.001
+        );
     }
     fn drive_edit_test(&mut self) {
         if self.pending_edit.is_some() {
@@ -2080,26 +2128,7 @@ impl Viewer {
                             view.publish_volume_revision(&self.world);
                         }
                     }
-                    self.edit_published_count += 1;
-                    self.edit_build_ms = build_time.as_secs_f64() * 1000.;
-                    self.edit_input_to_publish_ms = pending.started.elapsed().as_secs_f64() * 1000.;
-                    self.edit_records.push(format!(
-                        "{{\"revision\":{},\"build_ms\":{},\"input_to_publish_ms\":{}}}",
-                        revision, self.edit_build_ms, self.edit_input_to_publish_ms
-                    ));
-                    if let Some(test) = &mut self.edit_test {
-                        if test.phase == 1 && !test.next_seconds.is_finite() {
-                            test.next_seconds = self.route_started.elapsed().as_secs_f64() + 2.;
-                        } else if test.phase == 2 {
-                            test.phase = 3;
-                        }
-                    }
-                    eprintln!(
-                        "published edit revision {}: build {:.3}s, input-to-publish {:.3}s",
-                        revision,
-                        build_time.as_secs_f64(),
-                        pending.started.elapsed().as_secs_f64()
-                    );
+                    self.record_edit_publication(revision, build_time, pending.started, "snapshot_rebuild");
                 } else {
                     eprintln!("discarded obsolete edit mesh revision {}", revision);
                 }

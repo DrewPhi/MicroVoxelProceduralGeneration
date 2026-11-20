@@ -16,7 +16,7 @@ mod directional;
 
 const BRICK: usize = 8;
 const DENSE: u32 = 1 << 31;
-const EXPOSED_FACE_MASK: u32 = 0x3f00;
+pub(crate) const EXPOSED_FACE_MASK: u32 = 0x3f00;
 pub const SHADER: &str = include_str!("brick_ray.wgsl");
 
 #[derive(Clone, Debug)]
@@ -35,7 +35,7 @@ pub struct BrickSnapshot {
     /// Peak temporary summed-occupancy buffer bytes (not GPU residency).
     pub directional_scratch_bytes: usize,
 }
-fn material_id(m: Material) -> u16 {
+pub(crate) fn material_id(m: Material) -> u16 {
     match m {
         Material::Air => 0,
         Material::Grass => 1,

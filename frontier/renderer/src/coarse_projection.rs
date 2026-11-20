@@ -4,10 +4,13 @@ use std::{collections::HashMap, ops::Range, sync::OnceLock};
 
 pub(super) const COLUMN_BYTES: u64 = 52;
 pub(super) const SEAM_BYTES: u64 = 32;
+const REGION_BYTES: u64 = 24;
 
 pub(super) fn visibility_probe_requested() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("FRONTIER_COARSE_VISIBILITY_PROBE").is_some_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("FRONTIER_COARSE_VISIBILITY_PROBE").is_some_and(|v| v == "1")
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -51,6 +54,7 @@ pub(super) struct Resident {
     pub allocation: Allocation,
     pub columns: u32,
     pub seams: u32,
+    pub regions: u32,
 }
 
 impl Resident {
@@ -66,6 +70,11 @@ impl Resident {
     pub(super) fn seam_range(&self) -> Range<u64> {
         let start = self.column_range().end;
         start..start + u64::from(self.seams) * SEAM_BYTES
+    }
+
+    pub(super) fn region_range(&self) -> Range<u64> {
+        let start = self.seam_range().end;
+        start..start + u64::from(self.regions) * REGION_BYTES
     }
 }
 

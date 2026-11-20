@@ -755,3 +755,79 @@ terrain shadows for the same depth capture.
 python3 tools/coarse_visibility_probe.py output/probe.png --exact-rectangles \
   --output output/probe-rejection.json
 ```
+
+### Live GPU region rejection and compaction
+
+`FRONTIER_COARSE_COMPACTION=1` enables GPU selection for either experimental
+coarse draw mode. Within each published tile the compute shader tests bounds
+covering groups of 16 seed-sampled columns. It tests facing and the frustum
+for surviving columns and writes a stable compact list plus indirect draw
+commands. Both raster pipelines consume that list. It is reused when the
+prepared view is identical. The experiment keeps Frontier's existing CPU
+source sampling, LOD authority, seam geometry and shadow path. It uses 5.25
+MiB of fixed GPU scratch, plus the packed region bounds.
+
+Same release binary for all rows. Radeon 760M, 1080p, MSAA1, Alpine seed 7,
+the controlled 15-second walk and turn, and the stationary 6 km horizon.
+The full GPU span includes the selection dispatches when issued.
+
+| View | Path | Frame p50 / p95 / p99, ms | Opaque GPU p95, ms | Full GPU p95, ms |
+| --- | --- | ---: | ---: | ---: |
+| Walk and turn | Packed quads | 24.589 / 32.378 / 42.710 | 23.873 | 27.790 |
+| Walk and turn | Compacted GPU-expanded quads | 24.555 / 38.969 / 47.016 | 22.145 | 25.732 |
+| Walk and turn | Compacted boxes | 24.874 / 41.545 / 46.757 | 22.619 | 26.034 |
+| 6 km horizon | Packed quads | 19.633 / 22.637 / 23.999 | 14.970 | 18.856 |
+| 6 km horizon | Compacted GPU-expanded quads | 26.648 / 28.241 / 28.527 | 21.653 | 25.543 |
+| 6 km horizon | Compacted boxes | 28.308 / 30.476 / 31.114 | 23.460 | 27.342 |
+
+The horizon capture verified both compacted draws submitted 236,894 of the
+same 450,176 source columns, a 47.4% reduction. The fixed horizon captures
+with atmosphere and shadows off matched the PNG, float32 RGB and depth of
+their respective uncompacted modes byte for byte. All 189 measured horizon
+frames held the 6 px reserve. Every measured walking frame had published
+coverage. The 3 px walk quality target remained
+unmet in all three runs. This confirms that column rejection alone is
+insufficient for replacing the packed terrain path on this workload. Local
+raw reports are under `output/coarse-compaction-*`.
+
+### Local updates to native box splats
+
+`FRONTIER_BOX_SPLAT_INCREMENTAL=1` enables in-place edits for the bounded
+native fixture. The renderer tracks surface cells in a sparse index and
+updates the exposed-face records for the modified cells and their six face
+neighbors. It uploads the affected GPU ranges and falls back to a snapshot
+rebuild if the source lineage or reserved capacity changes. The terrain
+projection modes use a separate representation.
+
+On the same GPU at 1080p, the moving cave-and-bridge fixture measured 0.91 ms
+opaque GPU p95 for whole-snapshot boxes and 1.13 ms for greedy meshes. Their
+frame p95 values were 2.32 ms and 2.55 ms. The box snapshot took longer than
+the mesh to rebuild on both the placement and removal of a 16³ block.
+
+The separate fixed-camera runs measured the time from input to publication
+on the CPU, including queueing any GPU writes.
+
+| Fixture playback | Snapshot rebuild | Sparse box update |
+| --- | ---: | ---: |
+| Place 4,096 cells and hold | 467.1 ms | 6.8 ms |
+| Place 4,096 cells, then restore | 537.6 ms placement / 959.0 ms restoration | 13.7 ms placement / 12.6 ms restoration |
+
+Placement uploaded 21,632 bytes of box records. Restoration of this isolated
+block shrank the active range with zero record bytes written. The held and
+restored captures each matched the corresponding full rebuild byte for byte
+in PNG, float32 RGB, depth and coverage. These runs compare sparse box
+updates with full box snapshots. With the fly route active, sparse updates
+published placement in 6.8 ms and restoration in 6.1 ms. The moving sparse
+run measured 0.89 ms opaque GPU p95 and 2.56 ms frame p95. The separate CPU
+dirty-page benchmark also
+checks greedy mesh, whole-page splat and delta splat results against the same
+oriented material faces. For edits to 32³ pages it measured 1.87–20.94 μs
+p95 for the splat deltas and 1.28–10.25 ms for greedy page rebuilds. That test
+used a dense CPU index and excluded GPU work. Raw reports are in
+`output/coarse-adoption-native-motion`, `output/box-splat-live-edit` and
+`output/native-edit-cost`.
+
+Keep the packed terrain and exact near-field NAADF renderer as defaults.
+Keep box splats opt-in for bounded, frequently edited voxel volumes. A
+fully GPU-generated terrain hierarchy and an end-to-end comparison with
+incremental mesh updates remain outside these measurements.
