@@ -36,6 +36,39 @@ Reports include live tile payload retained by external Arc owners as well as
 cache residency. Allocator metadata, process overhead, GPU attachments and driver
 allocations are not a single enforced process RSS budget.
 
+## Seed terrain pages and turns
+
+Voxy-style coarse tiles request conservative affine source bounds in batches of
+up to eight. The cache partitions the world into 8 × 8 bound pages at each sample
+pitch. Different tile footprints and seam variants share bounds where their
+canonical source regions coincide. Slots are computed on demand, and the source
+cache owns the pages for the lifetime of its immutable world snapshot. Pages
+reserve up to one eighth of the existing source budget, capped at 16 MiB.
+Different pitches have independent certificates.
+
+The November 19 Alpine seed 7 runs used a Ryzen 5 7640U and Radeon 760M at
+1920 × 1080, MSAA1, a 950 m clip, 32 m NAADF radius and a 3 px error target. With
+turn preloading active in both versions, two cold, 15-second walk-and-turn runs
+per mode averaged 15.90 s → 12.83 s summed bound CPU time and 151 → 110 MiB
+terrain uploads. Whole-frame p50/p95/p99 averaged 24.9/36.6/47.0 ms with page
+caching disabled and 24.6/40.7/49.9 ms enabled. Coarse coverage held throughout.
+The 3 px target remained unmet throughout this route.
+
+For the page comparison, run the following from this directory with
+`FRONTIER_TERRAIN_BOUND_PAGES` set to 0 and 1. The separate
+`FRONTIER_TURN_PRELOAD=0` control disables the turn policy.
+
+```sh
+FRONTIER_PROFILE_SOURCE=1 ./run.sh --preset alpine --seed 7 --msaa 1 \
+  --width 1920 --height 1080 --capture-far 950 --naadf-radius 32 --pixel-error 3 \
+  --plant-cpu-mib 512 --plant-gpu-mib 384 --triangle-budget 2400000 \
+  --sun-elevation 13 --sun-azimuth 23 --cloud-coverage 0.12 \
+  --eye -43.625,31.0625,-289.5625 --target -43.625,31.04,-288.5625 \
+  --route walk-turn-return --route-speed 2.8 --route-clock realtime \
+  --benchmark-input-lock --seconds 15 --warmup 10 --no-adaptive-disk-cache \
+  --report output/alpine-bound-pages.json
+```
+
 ## Reproduction
 
 Build with the pinned toolchain:

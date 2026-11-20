@@ -7,7 +7,7 @@ and historical measurements. Checkpoint-specific defaults are not launch default
 
 | Branch or tag | Role |
 | --- | --- |
-| `frontier-voxel-engine` | Shared engine crates, sample scenes and reproducible benchmarks |
+| `frontier-voxel-engine` | Default branch for the shared engine, sample scenes and reproducible benchmarks |
 | `frontier-v0.1.0` | First versioned engine checkpoint with the compact coarse voxel renderer |
 | `cellular-automata-game` | Desert restoration game built on Frontier |
 | `main` | Historical engine line |
@@ -33,6 +33,9 @@ The opt-in [seeded world checkpoint](frontier/SEEDED_WORLD.md) adds globally add
 
 The default preview uses exact NAADF voxels inside a growing 64 m cube
 radius and coarse voxel meshes with compact seed-sampled appearance beyond it.
+The distant terrain workers batch conservative height analysis into reusable
+world-aligned pages. Turns keep recent visible detail and reuse inactive GPU
+payloads within the terrain budget. See the [loading measurements](frontier/LOADING_OPTIMIZATION.md#seed-terrain-pages-and-turns).
 Set `FRONTIER_DISTANT_TERRAIN=surface` for the heightfield comparison or
 `FRONTIER_DISTANT_TERRAIN=voxy` for the detailed-map voxel comparison.
 `FRONTIER_VOXY_GPU_BATCH=1` enables experimental GPU direction culling and indirect draws
