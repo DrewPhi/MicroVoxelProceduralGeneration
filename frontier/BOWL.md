@@ -11,9 +11,9 @@ The desert starts with empty hands. Press **2** or **B** to equip the bowl and *
 to switch between first and third person during play.
 
 - Walk to the pond with **WASD**. **Ctrl** crouches, slows each step, and gives your
-  boots more clearance over rocks. A fast step into low stone can make you stumble.
+  boots more clearance over obstacles. A blocked swing can disturb your balance.
 - At the shoreline, hold **Ctrl**, look down, and hold the **left mouse button**
-  until the rim touches water. The bowl holds twenty native water units (4.88 L).
+  until water reaches the opening. The bowl holds twenty native water units (4.88 L).
   Release the mouse button and raise your view to carry it away.
 - Water responds to changes in speed, turns, and bowl tilt. Hold **right mouse**
   or **R** to pour, or **Q** to tip it farther.
@@ -65,13 +65,24 @@ Soil color/material palette. Their original desert sand source is unchanged and
 the separate moisture record is authoritative; a dedicated wetness appearance
 channel remains a later rendering improvement. There is no standalone soil evaporation; the plant update separately counts transpiration.
 
-The desert avatar places feet on canonical terrain through two-bone leg and arm
-posing. Its hands follow the same bowl transform in both views. Low stone
-contact creates a forward balance impulse that decays under player control.
-The bowl's damped free surface tilts with acceleration and spills when its
-volume exceeds what the lowest part of the rim can retain. The renderer draws
-the avatar, bowl, water surface, and airborne voxel drops in world space using
-scene depth. Wet patches and settled pond water still use native world edits.
+The avatar sweeps oriented boots against canonical terrain cells. The capsule
+uses the available step support from the gait, and blocked foot motion can
+disturb balance depending on the incoming motion and the planted foot. Player
+motion, grip, and water share a 120 Hz gameplay step. First and third person
+read that state through independent camera transforms.
+
+The avatar, bowl, held water, and airborne water are rendered on the terrain's
+6.25 cm integer lattice. Continuous pose and bowl containment give the model
+subcell motion between the cells that it occupies. The grip follows the
+animated torso with translational and rotational compliance. A small
+pressure-corrected parcel solver carries exactly one native unit per parcel.
+The bowl's wall and floor constrain parcels, and crossing the opening transfers
+a parcel into the existing world or droplet ledger. Current saves restore the
+held amount into a settled bowl.
+
+`--pond-test` places a short stone ledge on a level patch of the seeded desert bank for
+repeatable playtests. The contact solver queries that ledge like ordinary world
+geometry. The default desert launch uses the seeded terrain.
 
 ## Verification
 
@@ -85,13 +96,13 @@ is the integration compile gate. The release binary is rebuilt for the playtest.
 Record separate runs driven through the game window on a Vulkan-capable X11 desktop:
 
 ```sh
-python3 tools/record_pond_trip.py first-person --output output/pond-trip
-python3 tools/record_pond_trip.py third-person --output output/pond-trip
+python3 tools/record_pond_trip.py first-person --width 1920 --height 1080 --output output/pond-attempt-2-demo
+python3 tools/record_pond_trip.py third-person --width 1920 --height 1080 --output output/pond-attempt-2-demo
 ```
 
 The tool uses ordinary keyboard and mouse input, checks slow passage over the
-rocks, captures a full bowl at the pond, and verifies that the return stumble
-empties it while conserving the water ledger. It keeps both runs in separate
+rocks, captures a full bowl at the pond, and records the actual obstructed footstep
+and resulting spill. It verifies the water ledger. It keeps both runs in separate
 save files alongside the recordings and reports.
 
 The game restart check caught and fixed an initial integration error: restored
@@ -108,9 +119,9 @@ recorded in `bowl-checkpoint.json`. The recording's median/p95/p99 frame interva
 are saved there with recording overhead disclosed. This is not a general engine
 performance or whole-world hydrodynamics acceptance claim.
 
-## Pond and stumble playtest
+## Attempt 1 pond and stumble playtest
 
-The 1080p runs in `output/pond-trip-recordings/` use desert seed 19, source
+The archived 1080p runs use desert seed 19, source
 version 2, 6.25 cm voxels, a 16 m NAADF radius and Voxy-seed distance geometry
 with a 300 m clip. The route crosses the rocks slowly toward the pond and hits
 them at normal walking speed on the way back. Each view fills to 4.88 L, carries
@@ -122,8 +133,27 @@ intervals include live terrain work and X11 presentation and capture overhead.
 
 | View | Video | Spill | Frame p50 / p95 / p99 | End resident / pending terrain clusters |
 | --- | --- | --- | --- | --- |
-| First person | `first-person/take.mp4` | 16.4 s | 35.0 / 46.5 / 49.7 ms | 2152 / 0 |
-| Third person | `third-person/take.mp4` | 17.0 s | 35.2 / 49.9 / 55.1 ms | 2422 / 22 |
+| First person | `pond-trip-attempt-1-first-person.mp4` | 16.4 s | 35.0 / 46.5 / 49.7 ms | 2152 / 0 |
+| Third person | `pond-trip-attempt-1-third-person.mp4` | 17.0 s | 35.2 / 49.9 / 55.1 ms | 2422 / 22 |
 
 End-of-run GPU terrain allocations were 164 MiB and 172 MiB, respectively.
 Both reports recorded zero pending CPU terrain selection bytes at exit.
+The videos are available in the [generated test archive](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/frontier-generated-archive-2026-11-19).
+
+
+## Attempt 2 playtest
+
+The two 1080p takes under `output/pond-attempt-2/` use desert seed 19, source
+version 2, a 300 m clip, Voxy-seed distance geometry, a 16 m NAADF radius,
+and the level shoreline fixture. Each take transferred twenty native units
+into the bowl, spilled one during the turn, and spilled the remaining
+nineteen after the boot caught the fixture stone. Both saves account for all
+twenty units. The movies use standard keyboard and mouse inputs.
+
+| View | Contact | Frame p50 / p95 / p99 | Resident / pending terrain clusters |
+| --- | --- | --- | --- |
+| First person | 21.4 s | 35.6 / 47.8 / 51.6 ms | 1735 / 0 |
+| Third person | 21.3 s | 44.6 / 53.9 / 68.3 ms | 2581 / 0 |
+
+AMD Ryzen 5 7640U, Radeon 760M Vulkan. GPU terrain allocations ended at
+156 MiB and 172 MiB. Frame durations include recording and presentation overhead.

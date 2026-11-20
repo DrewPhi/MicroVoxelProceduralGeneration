@@ -334,6 +334,47 @@ impl Bowl {
         });
         true
     }
+    /// Commit an escaped unit at the cell it actually reached, including when
+    /// the vessel is still over the pond or pours directly into nearby sand.
+    pub fn release_at(
+        &mut self,
+        world: &mut World,
+        cell: Cell,
+        velocity: [f64; 3],
+        accidental: bool,
+    ) -> bool {
+        if self.units == 0 {
+            return false;
+        }
+        match world.material(cell) {
+            Material::Air => return self.emit_at(world, cell, velocity, accidental),
+            Material::Sand | Material::Soil => self.absorb(world, cell),
+            Material::Water => {
+                let mut top = offset(cell, UP);
+                for _ in 0..128 {
+                    match world.material(top) {
+                        Material::Air if !self.drops.iter().any(|d| d.cell == top) => {
+                            world.set_fluid_occupancy([(top, true)]);
+                            self.deposited.insert(top);
+                            self.wake_water_near(top);
+                            self.units -= 1;
+                            self.emitted += 1;
+                            self.spilled += u64::from(accidental);
+                            return true;
+                        }
+                        Material::Water => top = offset(top, UP),
+                        _ => return false,
+                    }
+                }
+                return false;
+            }
+            _ => return false,
+        }
+        self.units -= 1;
+        self.emitted += 1;
+        self.spilled += u64::from(accidental);
+        true
+    }
     fn absorb(&mut self, world: &mut World, at: Cell) {
         *self.moisture.entry(at).or_default() += 1;
         // Wet color is a temporary Soil-palette override, NOT fertility. Moisture is

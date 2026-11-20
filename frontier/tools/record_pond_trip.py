@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -18,12 +19,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--return-sprint", action="store_true")
     args = parser.parse_args()
     out = args.output.resolve() / args.view
     out.mkdir(parents=True, exist_ok=False)
     width, height = args.width, args.height
     command = [
-        str(ROOT / "target/release/frontier"), "--preset", "desert", "--seed", "19",
+        str(ROOT / "target/release/frontier"), "--preset", "desert", "--seed", "19", "--pond-test",
         "--width", str(width), "--height", str(height),
         "--naadf-radius", "16", "--capture-far", "300", "--pixel-error", "6",
         "--msaa", "1", "--no-adaptive-disk-cache", "--sun-elevation", "28",
@@ -94,18 +96,27 @@ def main():
                 time.sleep(0.16)
             raise RuntimeError("Could not aim with relative mouse input")
 
-        def walk_to(target, tolerance, careful=False):
+        def walk_to(target, tolerance, careful=False, stop=None):
             current = pose()
-            aim(math.atan2(target[0] - current[0], target[1] - current[2]), current[4])
+            dx, dz = target[0] - current[0], target[1] - current[2]
+            length = math.hypot(dx, dz)
+            if length <= tolerance:
+                return current
+            fx, fz = dx / length, dz / length
+            aim(math.atan2(dx, dz), current[4])
+
+            def passed_waypoint():
+                p = latest("player ")
+                if p and ((stop is not None and stop())
+                          or (target[0] - p[0]) * fx + (target[1] - p[2]) * fz < tolerance):
+                    return p
+                return None
+
             if careful:
                 x.key("Control_L", True)
             try:
                 x.key("w", True)
-                return wait_for(
-                    lambda: (p if math.hypot(p[0] - target[0], p[2] - target[1]) < tolerance else None)
-                    if (p := latest("player ")) else None,
-                    22, f"Did not reach {target}",
-                )
+                return wait_for(passed_waypoint, 22, f"Did not reach {target}")
             finally:
                 x.key("w", False)
                 if careful:
@@ -157,19 +168,23 @@ def main():
             walk_to(inland(4.3), 0.28)
             note("slow_down_for_rocks")
             walk_to(inland(0.78), 0.18, careful=True)
-            if any(line.startswith("player toe contact") for line in lines()):
-                raise RuntimeError("Careful rock crossing should not trip")
+            if any(json.loads(line[7:])[5] > 0.28 for line in lines() if line.startswith("player [")):
+                raise RuntimeError("Careful crossing lost balance")
             x.key("Control_L", True)
             aim(inbound, -1.04)
             note("dip_rim")
             button(True)
             try:
-                for _ in range(6):
+                for _ in range(14):
                     time.sleep(0.34)
-                    if pose()[-2] == 20:
+                    water = pose()[-2]
+                    if water == 20:
+                        break
+                    if water > 0:
+                        wait_for(lambda: pose()[-2] == 20, 3, "Bowl stopped filling in contact with the pond")
                         break
                     x.key("w", True)
-                    time.sleep(0.13)
+                    time.sleep(0.155)
                     x.key("w", False)
                 wait_for(lambda: pose()[-2] == 20, 2, "Rim did not fill the bowl at the pond")
                 note("water_in_bowl")
@@ -177,27 +192,52 @@ def main():
             finally:
                 button(False)
             aim(inbound, -0.43, per_step=8)
-            time.sleep(0.48)
-            x.key("Control_L", False)
-            time.sleep(0.52)
+            time.sleep(1.2)
             current = pose()
             return_yaw = math.atan2(rx - current[0], rz - current[2])
             aim(return_yaw, -0.41, per_step=9)
             time.sleep(0.45)
-            before_trip = pose()
-            if before_trip[-2:] != [20, 0]:
-                raise RuntimeError("The bowl should stay full until the rock contact")
             note("carry_toward_rock")
-            x.key("w", True)
-            try:
-                wait_for(lambda: any(line.startswith("player toe contact") for line in lines()), 7,
-                         "The return step did not hit the rock")
-                note("toe_hits_rock")
-                time.sleep(0.48)
-            finally:
-                x.key("w", False)
-            wait_for(lambda: pose()[-2] == 0, 3, "The stumble did not empty the bowl")
-            note("bowl_empty")
+
+            def contacts():
+                result = []
+                for line in lines():
+                    match = re.match(r"player boot contact Cell \{ x: (-?\d+), y: (-?\d+), z: (-?\d+)", line)
+                    if match:
+                        hx, _, hz = (int(value) * 0.0625 for value in match.groups())
+                        near_rock = math.hypot(hx - rx, hz - rz) < 0.65
+                        if "recovery false" in line or near_rock:
+                            result.append(line)
+                return result
+
+            before_hits = len(contacts())
+            def caught_boot():
+                hits = contacts()
+                return hits[before_hits] if len(hits) > before_hits else None
+
+            walk_to(inland(2.72), 0.085, careful=True, stop=caught_boot)
+            if not caught_boot():
+                time.sleep(0.63)
+                current = pose()
+                aim(math.atan2(rx - current[0], rz - current[2]), -0.41)
+                if pose()[-2] == 0:
+                    raise RuntimeError("The player reached the test obstacle with an empty bowl")
+                note("approach_obstacle")
+                if args.return_sprint:
+                    x.key("Shift_L", True)
+                x.key("w", True)
+                try:
+                    wait_for(caught_boot, 9, "No obstructed step on the return path")
+                    time.sleep(0.34)
+                finally:
+                    x.key("w", False)
+                    if args.return_sprint:
+                        x.key("Shift_L", False)
+            note("boot_contact")
+            events[-1]["contact"] = caught_boot()
+            time.sleep(1.2)
+            after_trip = pose()
+            note("after_contact")
             time.sleep(2.)
             if recorder.poll() is not None:
                 raise RuntimeError("Recording process exited early")
@@ -208,7 +248,7 @@ def main():
                 raise RuntimeError("Game failed on save")
             report = json.loads((out / "game.json").read_text())
             bowl = report["bowl"]
-            if not bowl["conserved"] or bowl["spilled_units"] != 20 or bowl["units"]:
+            if not bowl["conserved"] or bowl["spilled_units"] < after_trip[-1]:
                 raise RuntimeError(f"Trip or conservation check failed: {bowl}")
         finally:
             x.release_all()

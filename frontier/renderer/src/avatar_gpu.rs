@@ -1,13 +1,15 @@
 //! Small camera-relative mesh for the articulated player, bowl, and droplets.
 use crate::{
-    avatar::{heading, Avatar, BASE_RADIUS, DEPTH, RIM},
+    avatar::{heading, Avatar, BOOT_FORWARD, BOOT_HALF},
     bowl_live::BowlLive,
     mesh::Vertex,
     vessel, Camera, Gpu,
 };
-use glam::{DQuat, DVec2, DVec3, Vec3};
+use frontier_world::{Cell, VOXEL_SIZE};
+use glam::{DQuat, DVec3, Vec3};
+use std::collections::BTreeMap;
 
-const VERTICES: u64 = 8_192;
+const VERTICES: u64 = 64_000;
 
 pub struct AvatarGpu {
     pipeline: wgpu::RenderPipeline,
@@ -106,7 +108,8 @@ impl AvatarGpu {
             *cache = Some(Self::new(gpu));
         }
         let pass = cache.as_ref().unwrap();
-        let model = build(avatar, show_body, bowl, aim, view.position);
+        let mut model = build(avatar, show_body, bowl, aim, view.position);
+        model.exposed_faces();
         if model.data.is_empty() {
             return;
         }
@@ -154,6 +157,7 @@ impl AvatarGpu {
 struct Model {
     origin: DVec3,
     data: Vec<Vertex>,
+    cells: BTreeMap<Cell, [f32; 3]>,
 }
 
 impl Model {
@@ -171,23 +175,65 @@ impl Model {
     }
 
     fn cuboid(&mut self, center: DVec3, rotation: DQuat, size: DVec3, color: [f32; 3]) {
-        let corners: [DVec3; 8] = std::array::from_fn(|i| {
-            let p = DVec3::new(
-                (i & 1) as f64 - 0.5,
-                ((i >> 1) & 1) as f64 - 0.5,
-                ((i >> 2) & 1) as f64 - 0.5,
-            );
-            center + rotation * (size * p)
+        let half = size * 0.5;
+        let bounds = (rotation * DVec3::X).abs() * half.x
+            + (rotation * DVec3::Y).abs() * half.y
+            + (rotation * DVec3::Z).abs() * half.z;
+        let inverse = rotation.inverse();
+        self.sample(center, bounds, |point| {
+            let local = (inverse * (point - center)).abs();
+            local.cmple(half).all().then_some(color)
         });
-        for (face, normal) in [
-            ([0, 2, 6, 4], -DVec3::X),
-            ([1, 5, 7, 3], DVec3::X),
-            ([0, 4, 5, 1], -DVec3::Y),
-            ([2, 3, 7, 6], DVec3::Y),
-            ([0, 1, 3, 2], -DVec3::Z),
-            ([4, 6, 7, 5], DVec3::Z),
-        ] {
-            self.quad(face.map(|i| corners[i]), rotation * normal, color);
+    }
+
+    fn sample(&mut self, center: DVec3, half: DVec3, color: impl Fn(DVec3) -> Option<[f32; 3]>) {
+        let min = Cell::from_meters((center - half).to_array());
+        let max = Cell::from_meters((center + half).to_array());
+        for z in min.z..=max.z {
+            for y in min.y..=max.y {
+                for x in min.x..=max.x {
+                    let cell = Cell { x, y, z };
+                    if let Some(color) = color(DVec3::from_array(cell.center_m())) {
+                        self.cells.insert(cell, color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn exposed_faces(&mut self) {
+        let cells = std::mem::take(&mut self.cells);
+        for (&cell, &color) in &cells {
+            let center = DVec3::from_array(cell.center_m());
+            for axis in 0..3 {
+                for sign in [-1, 1] {
+                    let mut adjacent = [cell.x, cell.y, cell.z];
+                    adjacent[axis] += sign;
+                    if cells.contains_key(&Cell {
+                        x: adjacent[0],
+                        y: adjacent[1],
+                        z: adjacent[2],
+                    }) {
+                        continue;
+                    }
+                    let mut normal = DVec3::ZERO;
+                    normal[axis] = sign as f64;
+                    let mut u = DVec3::ZERO;
+                    u[(axis + 1) % 3] = 1.;
+                    let v = normal.cross(u);
+                    let half = VOXEL_SIZE * 0.5;
+                    self.quad(
+                        [
+                            center + (normal - u - v) * half,
+                            center + (normal + u - v) * half,
+                            center + (normal + u + v) * half,
+                            center + (normal - u + v) * half,
+                        ],
+                        normal,
+                        color,
+                    );
+                }
+            }
         }
     }
 
@@ -217,13 +263,14 @@ fn joint(a: DVec3, b: DVec3, bone: f64, pole: DVec3) -> DVec3 {
 fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin: DVec3) -> Model {
     let mut mesh = Model {
         origin,
-        data: Vec::with_capacity(1800),
+        data: Vec::with_capacity(16_000),
+        cells: BTreeMap::new(),
     };
     let hands = avatar.hands(aim);
     let forward = heading(aim.yaw);
     let right = forward.cross(DVec3::Y);
     let yaw = DQuat::from_rotation_y(aim.yaw as f64);
-    let tilt = yaw * DQuat::from_rotation_x(hands.lean * 0.78);
+    let tilt = hands.torso();
     let down = DVec3::Y * hands.crouch;
     let shirt = [0.056, 0.24, 0.21];
     let sleeve = [0.085, 0.37, 0.30];
@@ -231,8 +278,7 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
     let pants = [0.12, 0.16, 0.23];
     let boots = [0.087, 0.046, 0.026];
     let hat = [0.65, 0.42, 0.19];
-    let chest = aim.position - DVec3::Y * (0.43 + hands.lean * 0.31) - down * 0.51
-        + forward * (hands.lean * 0.36);
+    let chest = hands.chest();
     let hip = aim.position
         - DVec3::Y * 0.82
         - down * 0.45
@@ -250,7 +296,7 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
         mesh.cuboid(
             chest - forward * 0.24 + DVec3::Y * 0.047,
             tilt,
-            DVec3::new(0.23, 0.18, 0.025),
+            DVec3::new(0.23, 0.18, 0.0625),
             [0.53, 0.31, 0.13],
         );
         let head = chest + tilt * DVec3::new(0., 0.317, 0.028);
@@ -258,7 +304,7 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
         mesh.cuboid(
             head + tilt * DVec3::Y * 0.106,
             tilt,
-            DVec3::new(0.381, 0.030, 0.335),
+            DVec3::new(0.381, 0.0625, 0.335),
             [0.42, 0.24, 0.078],
         );
         mesh.cuboid(
@@ -275,15 +321,15 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
             mesh.limb(socket, knee, 0.153, pants);
             mesh.limb(knee, ankle, 0.132, [0.16, 0.21, 0.28]);
             mesh.cuboid(
-                boot + DVec3::Y * 0.065 + forward * 0.042,
+                boot + DVec3::Y * BOOT_HALF.y + forward * BOOT_FORWARD,
                 yaw,
-                DVec3::new(0.153, 0.121, 0.277),
+                BOOT_HALF * 2.,
                 boots,
             );
             mesh.cuboid(
-                boot + DVec3::Y * 0.019 + forward * 0.045,
+                boot + DVec3::Y * 0.03125 + forward * BOOT_FORWARD,
                 yaw,
-                DVec3::new(0.166, 0.032, 0.292),
+                DVec3::new(0.166, 0.0625, 0.292),
                 [0.031, 0.024, 0.017],
             );
         }
@@ -294,7 +340,7 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
             let shoulder = chest + right * (0.238 * side) + DVec3::Y * 0.125;
             let hand = pose.map_or(
                 shoulder - DVec3::Y * 0.51 + forward * (0.11 + hands.lean * 0.16),
-                |p| p.point(DVec3::new(-side * (RIM + 0.006), -0.031, -0.10)),
+                |p| p.point(vessel::grip(side)),
             );
             let elbow = joint(shoulder, hand, 0.345, -DVec3::Y + right * (side * 0.6));
             mesh.limb(shoulder, elbow, 0.131, sleeve);
@@ -308,100 +354,24 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
         }
     }
     if let Some(pose) = pose {
-        let polygon: [DVec2; 14] = std::array::from_fn(|i| {
-            let (s, c) = (i as f64 * std::f64::consts::TAU / 14.).sin_cos();
-            DVec2::new(c, s)
+        let radius = DVec3::splat(vessel::RIM + 0.075);
+        mesh.sample(pose.center, radius, |point| {
+            let local = pose.local(point);
+            vessel::wood(local).then_some(if local.y > -VOXEL_SIZE {
+                [0.52, 0.238, 0.074]
+            } else {
+                [0.37, 0.145, 0.042]
+            })
         });
-        let ring = |p: DVec2, r, y| pose.point(DVec3::new(p.x * r, y, p.y * r));
-        let inner = RIM - 0.015;
-        let bottom = RIM * BASE_RADIUS;
-        for i in 0..polygon.len() {
-            let a = polygon[i];
-            let b = polygon[(i + 1) % polygon.len()];
-            let normal = pose.rotation * DVec3::new(a.x + b.x, -0.9, a.y + b.y).normalize();
-            let [ra, rb, ia, ib] = [
-                ring(a, RIM, 0.),
-                ring(b, RIM, 0.),
-                ring(a, inner, 0.),
-                ring(b, inner, 0.),
-            ];
-            let wood = match i % 3 {
-                0 => [0.43, 0.19, 0.062],
-                1 => [0.37, 0.15, 0.042],
-                _ => [0.40, 0.17, 0.054],
-            };
-            mesh.quad(
-                [
-                    ra,
-                    rb,
-                    ring(b, bottom, -DEPTH - 0.024),
-                    ring(a, bottom, -DEPTH - 0.024),
-                ],
-                normal,
-                wood,
-            );
-            mesh.quad(
-                [
-                    ia,
-                    ib,
-                    ring(b, bottom - 0.013, -DEPTH),
-                    ring(a, bottom - 0.013, -DEPTH),
-                ],
-                -normal,
-                [0.32, 0.123, 0.035],
-            );
-            mesh.quad(
-                [ra, rb, ib, ia],
-                pose.rotation * DVec3::Y,
-                [0.59, 0.29, 0.095],
-            );
-            mesh.tri(
-                [
-                    pose.point(-DVec3::Y * DEPTH),
-                    ring(a, bottom, -DEPTH),
-                    ring(b, bottom, -DEPTH),
-                ],
-                pose.rotation * DVec3::Y,
-                [0.36, 0.15, 0.044],
-            );
-            mesh.tri(
-                [
-                    pose.point(-DVec3::Y * (DEPTH + 0.024)),
-                    ring(a, bottom, -DEPTH - 0.024),
-                    ring(b, bottom, -DEPTH - 0.024),
-                ],
-                pose.rotation * -DVec3::Y,
-                wood,
-            );
-        }
-        if bowl.state.units > 0 {
-            let shape = vessel::surface(bowl.vessel.slope, bowl.vessel.level, &polygon);
-            let normal = pose.rotation
-                * DVec3::new(-bowl.vessel.slope.x, 1., -bowl.vessel.slope.y).normalize();
-            for i in 1..shape.len().saturating_sub(1) {
-                mesh.tri(
-                    [shape[0], shape[i], shape[i + 1]].map(|p| pose.point(p)),
-                    normal,
-                    [0.042, 0.39, 0.57],
-                );
-            }
+        for cell in bowl
+            .vessel
+            .display_cells(|cell| mesh.cells.contains_key(&cell))
+        {
+            mesh.cells.insert(cell, [0.043, 0.41, 0.57]);
         }
     }
     for drop in &bowl.state.drops {
-        let cell = DVec3::from_array(drop.cell.center_m());
-        let velocity = DVec3::from_array(drop.velocity);
-        let axis = velocity.normalize_or_zero();
-        let turn = if axis == DVec3::ZERO {
-            DQuat::IDENTITY
-        } else {
-            DQuat::from_rotation_arc(DVec3::Y, axis)
-        };
-        mesh.cuboid(
-            cell,
-            turn,
-            DVec3::new(0.052, 0.074, 0.052),
-            [0.066, 0.48, 0.67],
-        );
+        mesh.cells.entry(drop.cell).or_insert([0.066, 0.48, 0.67]);
     }
     mesh
 }

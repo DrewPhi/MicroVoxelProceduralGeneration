@@ -1627,6 +1627,7 @@ struct Viewer {
     walking: walking::WalkingCamera,
     avatar: avatar::Avatar,
     avatar_gpu: Option<avatar_gpu::AvatarGpu>,
+    player_tick_debt: f64,
     frame_trace: playability::FrameTrace,
     shadow_trace: playability::ShadowTrace,
     keys: HashSet<KeyCode>,
@@ -2231,36 +2232,58 @@ impl Viewer {
                     3.
                 }
             };
-            if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
-                let mut horizontal = (Vec3::new(movement.x, 0., movement.z).normalize_or_zero()
-                    * speed.min(6.))
-                .as_dvec3();
-                if walking_avatar {
-                    let eye = self
-                        .walking
-                        .physical_eye()
-                        .map_or(self.camera.position, DVec3::from_array);
-                    horizontal = self.avatar.move_intent(
-                        &self.world,
-                        eye,
-                        horizontal,
-                        movement.y < 0.,
-                        self.walking.grounded(),
-                        f64::from(dt),
+            let horizontal = (Vec3::new(movement.x, 0., movement.z).normalize_or_zero()
+                * speed.min(6.))
+            .as_dvec3();
+            let jump = self.keys.contains(&KeyCode::Space);
+            if let Some(bowl) = &mut self.bowl {
+                self.player_tick_debt = (self.player_tick_debt + f64::from(dt)).min(0.15);
+                while self.player_tick_debt + 1e-9 >= avatar::TICK {
+                    self.player_tick_debt -= avatar::TICK;
+                    if walking_avatar {
+                        self.camera.position = self.avatar.walk_tick(
+                            &self.world,
+                            &mut self.walking,
+                            self.camera,
+                            horizontal,
+                            movement.y < 0.,
+                            jump,
+                            self.visual_settings.step_smoothing,
+                        );
+                    } else {
+                        self.camera.position += movement.normalize_or_zero().as_dvec3()
+                            * f64::from(speed)
+                            * avatar::TICK;
+                    }
+                    let aim = if walking_avatar {
+                        self.avatar.body_aim(self.camera)
+                    } else {
+                        self.camera
+                    };
+                    bowl.tick(
+                        &mut self.world,
+                        self.avatar.hands(aim),
+                        self.keys.contains(&KeyCode::KeyQ),
+                        sun.as_dvec3().to_array(),
+                        avatar::TICK,
                     );
                 }
+            } else if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
                 self.camera.position = DVec3::from_array(self.walking.advance_presented(
                     &self.world,
                     self.camera.position.to_array(),
                     [horizontal.x, horizontal.z],
-                    self.keys.contains(&KeyCode::Space),
-                    dt as f64,
+                    jump,
+                    f64::from(dt),
                     self.visual_settings.step_smoothing,
                 ));
             } else {
                 self.camera.position +=
-                    movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+                    movement.normalize_or_zero().as_dvec3() * f64::from(dt * speed);
             }
+        } else if let Some(bowl) = &mut self.bowl {
+            bowl.pause();
+            self.player_tick_debt = 0.;
         }
         let pose = self.route.pose_at(
             if !self.adaptive_route_started {
@@ -2320,34 +2343,17 @@ impl Viewer {
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
         }
-        if walking_avatar {
-            let eye = self
-                .walking
-                .physical_eye()
-                .map_or(self.camera.position, DVec3::from_array);
-            self.avatar.advance_pose(
-                &self.world,
-                eye,
-                self.camera.yaw,
-                self.walking.grounded(),
-                f64::from(dt),
-            );
-        }
+        let body_aim = if walking_avatar {
+            self.avatar.body_aim(self.camera)
+        } else {
+            self.camera
+        };
         let view_camera = if walking_avatar {
-            self.avatar.view(&self.world, self.camera)
+            self.avatar.view(&self.world, body_aim)
         } else {
             self.camera
         };
         if let Some(bowl) = &mut self.bowl {
-            let hands = self.avatar.hands(self.camera);
-            let interacting = self.grabbed && self.pending_teleport.is_none();
-            bowl.update(
-                &mut self.world,
-                hands,
-                self.keys.contains(&KeyCode::KeyQ),
-                interacting,
-                sun.as_dvec3().to_array(),
-            );
             self.avatar.trace(
                 self.camera,
                 bowl.state.units,
@@ -2747,7 +2753,7 @@ impl Viewer {
                 &self.avatar,
                 walking_avatar && self.avatar.third_person,
                 bowl,
-                self.camera,
+                body_aim,
                 view_camera,
                 scene_width as f32 / scene_height as f32,
                 sun,
@@ -3236,6 +3242,7 @@ pub fn run() -> Result<()> {
     adaptive_geometry::distant_voxels::Mode::initialize_application();
     let Some(options::Options {
         bowl_save,
+        pond_test,
         live_water: live_water_enabled,
         discrete_water,
         procedural_water,
@@ -3343,7 +3350,9 @@ pub fn run() -> Result<()> {
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
     let bowl = if params.recipe == frontier_world::FbmRecipe::Desert && !live_water_enabled {
-        avatar::rocks(&mut world, start_xz);
+        if pond_test {
+            avatar::pond_fixture(&mut world, start_xz);
+        }
         Some(bowl_live::BowlLive::new(&mut world, bowl_save)?)
     } else {
         None
@@ -4026,6 +4035,7 @@ pub fn run() -> Result<()> {
         walking: Default::default(),
         avatar: avatar::Avatar::new(),
         avatar_gpu: None,
+        player_tick_debt: 0.,
         frame_trace: Default::default(),
         shadow_trace: Default::default(),
         terrain_data,

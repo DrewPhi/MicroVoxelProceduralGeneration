@@ -33,7 +33,6 @@ pub struct BowlLive {
     path: PathBuf,
     identity: String,
     debt: f64,
-    clock: Instant,
     pub saves: u64,
 }
 impl BowlLive {
@@ -115,7 +114,6 @@ impl BowlLive {
             path,
             identity,
             debt: 0.,
-            clock: Instant::now(),
             saves: 0,
         }
     }
@@ -309,23 +307,21 @@ impl BowlLive {
             };
         }
     }
-    pub fn update(
+    pub fn pause(&mut self) {
+        self.pouring = false;
+        self.scooping = false;
+        self.gesture = None;
+    }
+
+    pub fn tick(
         &mut self,
         world: &mut World,
         hands: Hands,
         spill: bool,
-        active: bool,
         sun: [f64; 3],
+        elapsed: f64,
     ) {
-        let elapsed = self.clock.elapsed().as_secs_f64();
-        self.clock = Instant::now();
-        if !active {
-            self.pouring = false;
-            self.scooping = false;
-            self.gesture = None;
-            return;
-        }
-        self.debt = (self.debt + elapsed).min(0.4);
+        self.debt += elapsed;
         let equipped = self.pockets.bowl();
         let pouring = equipped && self.pouring;
         let scoop = equipped && self.scooping && !pouring && !spill;
@@ -336,19 +332,24 @@ impl BowlLive {
         } else {
             0.
         };
-        let response = (elapsed * 11.).min(1.);
+        let response = 1. - (-elapsed * 11.).exp();
         self.tilt += (target - self.tilt) * response;
-        self.dip += (f64::from(scoop) - self.dip) * response;
-        if equipped {
-            self.vessel.update(
+        let dip_response = 1. - (-elapsed * if scoop { 6.5 } else { 3.4 }).exp();
+        self.dip += (f64::from(scoop) - self.dip) * dip_response;
+        let spilling_before = self.state.spilled;
+        let filled = if equipped {
+            self.vessel.step(
+                world,
+                &mut self.state,
                 hands.vessel(self.dip, self.tilt),
-                elapsed.clamp(0.001, 0.12),
-            );
+                scoop,
+                !pouring,
+                elapsed,
+            )
         } else {
             self.vessel = Vessel::default();
-        }
-        let spilling_before = self.state.spilled;
-        let mut filled = 0;
+            0
+        };
         let before = self.garden.cells();
         let instant = self.growth_controls.is_instant();
         let mut water_stepped = false;
@@ -357,9 +358,6 @@ impl BowlLive {
                 break;
             }
             self.debt -= 0.025;
-            filled += self
-                .vessel
-                .step(world, &mut self.state, scoop, !pouring, 0.025);
             self.state.advance(world, 0.025);
             water_stepped = true;
             if !instant {
@@ -395,11 +393,13 @@ impl BowlLive {
             );
         }
         if filled > 0 {
-            eprintln!(
-                "bowl scoop accepted units={filled} held={} conserved={}",
-                self.state.units,
-                self.state.conserved()
-            );
+            if self.state.units == CAPACITY {
+                eprintln!(
+                    "bowl scoop accepted units={filled} held={} conserved={}",
+                    self.state.units,
+                    self.state.conserved()
+                );
+            }
             self.message = "Water scooped from the pond".into();
         } else if scoop && self.state.units == 0 {
             self.message = "Hold Ctrl and look down to dip the rim into the pond".into();

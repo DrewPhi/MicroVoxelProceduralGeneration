@@ -17,6 +17,7 @@ pub struct WalkingCamera {
     last_eye: Option<[f64; 3]>,
     samples: HashMap<Cell, bool>,
     presented_eye: Option<[f64; 3]>,
+    avatar_step_cells: Option<u32>,
 }
 impl WalkingCamera {
     pub fn reset(&mut self) {
@@ -26,6 +27,7 @@ impl WalkingCamera {
         self.last_eye = None;
         self.samples.clear();
         self.presented_eye = None;
+        self.avatar_step_cells = None;
     }
     /// Render-only upward step easing. Collision and gravity continue from
     /// last_eye, never from the eased presentation. External camera changes
@@ -43,6 +45,22 @@ impl WalkingCamera {
             world.blocking_material(c)
         })
     }
+    pub fn advance_avatar(
+        &mut self,
+        world: &World,
+        eye: [f64; 3],
+        velocity: [f64; 2],
+        jump: bool,
+        dt: f64,
+        smooth: bool,
+        supported_step_cells: u32,
+    ) -> [f64; 3] {
+        self.avatar_step_cells = Some(supported_step_cells);
+        let next = self.advance_presented(world, eye, velocity, jump, dt, smooth);
+        self.avatar_step_cells = None;
+        next
+    }
+
     fn advance_presented_sampled(
         &mut self,
         eye: [f64; 3],
@@ -152,7 +170,7 @@ impl WalkingCamera {
                 let allowed = sweep(eye, axis, delta, &mut solid);
                 if (allowed - delta).abs() > EPS && self.grounded {
                     let mut stepped = false;
-                    for cells in 1..=3 {
+                    for cells in 1..=self.avatar_step_cells.unwrap_or(3) {
                         let rise = cells as f64 * VOXEL_SIZE;
                         if (sweep(eye, 1, rise, &mut solid) - rise).abs() > EPS {
                             break;
