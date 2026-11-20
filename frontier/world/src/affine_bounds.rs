@@ -66,7 +66,9 @@ impl HeightBound {
             .max(I::point(hi).sub(I::point(self.height_range[0])).hi)
     }
 
-    fn vertex_error(&self, vertices: &[[f64; 3]]) -> Option<f64> {
+    /// Bound a piecewise planar surface using every distinct triangle vertex.
+    /// The caller supplies the complete vertex set inside this bound.
+    pub fn vertex_error(&self, vertices: &[[f64; 3]]) -> Option<f64> {
         let mut error = 0.0_f64;
         for &v in vertices {
             if !v.iter().all(|v| v.is_finite()) {

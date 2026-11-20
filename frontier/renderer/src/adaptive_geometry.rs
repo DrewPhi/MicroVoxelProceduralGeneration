@@ -1102,6 +1102,7 @@ fn build_surface_with_geometry(
         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
         affine_complete: true,
         affine_stats: AffineStats::default(),
+        bound_row: [None; 16],
         face_profiles: vec![[[0.; 4]; 5]],
         spatial_nodes: HashMap::new(),
         face_profile_indices: vec![],
@@ -2290,6 +2291,7 @@ struct Generator<'a> {
     affine_range: [f64; 2],
     affine_complete: bool,
     affine_stats: AffineStats,
+    bound_row: [Option<HeightBound>; 16],
     face_profiles: Vec<[[f32; 4]; 5]>,
     spatial_nodes: HashMap<(i64, i64, i64), u32>,
     face_profile_indices: Vec<u32>,
@@ -2507,11 +2509,7 @@ impl Generator<'_> {
             }
         }
         self.record_affine(x, z, s, start_index);
-        let index = if self
-            .world
-            .fbm_terrain()
-            .is_some_and(|t| landscape_paint(t, s))
-        {
+        let index = if coast {
             // Mountain proxies share a world-space vertex albedo across patches.
             // Slot zero selects that interpolated albedo in the terrain shader.
             0
@@ -2942,7 +2940,9 @@ impl Generator<'_> {
         }
         // Dense Highlands grids share a conservative source enclosure across
         // adjacent quads. Evaluate each actual triangle against that enclosure.
-        let group = if self.key.width_cells as i64 > 16 * s
+        let rows = self.key.width_cells as i64 / s;
+        let group = if rows > 16
+            && rows % 16 == 0
             && self
                 .world
                 .fbm_terrain()
@@ -2960,17 +2960,24 @@ impl Generator<'_> {
         }
         self.affine_stats.quad_bounds += u64::from(first);
         let started = std::time::Instant::now();
-        let bound = self.samples.pages.bound(
-            self.world,
-            ColumnBox {
-                min: [
-                    self.key.min[0] + x / group * group,
-                    self.key.min[1] + z / group * group,
-                ],
-                size_cells: [group as u32; 2],
-            },
-            BoundBudget::default(),
-        );
+        // Patches are emitted in grid order. Each group starts at its lower
+        // corner before the remaining patches consume the same bound.
+        let bound = if group > s && !first {
+            self.bound_row[(x / group) as usize]
+        } else {
+            let bound = self.samples.pages.bound(
+                self.world,
+                ColumnBox {
+                    min: [self.key.min[0] + x, self.key.min[1] + z],
+                    size_cells: [group as u32; 2],
+                },
+                BoundBudget::default(),
+            );
+            if group > s {
+                self.bound_row[(x / group) as usize] = bound;
+            }
+            bound
+        };
         let Some(bound) = bound else {
             self.affine_stats.cpu_ms += started.elapsed().as_secs_f64() * 1000.;
             self.affine_complete = false;
@@ -2983,23 +2990,38 @@ impl Generator<'_> {
         }
         self.affine_range[0] = self.affine_range[0].min(bound.height_range[0]);
         self.affine_range[1] = self.affine_range[1].max(bound.height_range[1]);
-        for tri in self.mesh.indices[start_index..].chunks_exact(3) {
-            let vertices = std::array::from_fn(|a| {
-                let p = self.mesh.vertices[tri[a] as usize].position;
-                [
-                    self.key.min[0] as f64 * voxel_size() + p[0] as f64,
-                    p[1] as f64,
-                    self.key.min[1] as f64 * voxel_size() + p[2] as f64,
-                ]
+        let indices = &self.mesh.indices[start_index..];
+        let position = |i: usize| self.mesh.vertices[indices[i] as usize].position;
+        let origin = self.key.min.map(|v| v as f64 * voxel_size());
+        let world_position = |p: [f32; 3]| {
+            [
+                origin[0] + p[0] as f64,
+                p[1] as f64,
+                origin[1] + p[2] as f64,
+            ]
+        };
+        // The usual four-triangle fan has five distinct positions. Validate
+        // the actual emitted edges so stitched stairs and cut beaches keep
+        // their full triangle certificate.
+        let closed_fan = indices.len() == 12
+            && (0..4).all(|i| {
+                position(3 * i) == position(0)
+                    && position(3 * i + 2) == position(3 * ((i + 1) % 4) + 1)
             });
-            if let Some(e) = bound
-                .triangle_error(vertices)
-                .filter(|e| e.is_finite() && *e >= 0.)
-            {
-                self.affine_error = self.affine_error.max(e);
-            } else {
-                self.affine_complete = false;
-            }
+        let error = if closed_fan {
+            bound.vertex_error(&[0, 1, 4, 7, 10].map(|i| world_position(position(i))))
+        } else {
+            indices.chunks_exact(3).try_fold(0_f64, |max, tri| {
+                let vertices = std::array::from_fn(|i| {
+                    world_position(self.mesh.vertices[tri[i] as usize].position)
+                });
+                bound.triangle_error(vertices).map(|e| max.max(e))
+            })
+        };
+        if let Some(e) = error.filter(|e| e.is_finite() && *e >= 0.) {
+            self.affine_error = self.affine_error.max(e);
+        } else {
+            self.affine_complete = false;
         }
         self.affine_stats.cpu_ms += started.elapsed().as_secs_f64() * 1000.;
     }
@@ -4074,6 +4096,7 @@ mod tests {
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
                 affine_complete: true,
                 affine_stats: AffineStats::default(),
+                bound_row: [None; 16],
                 face_profiles: vec![[[0.; 4]; 5]],
                 spatial_nodes: HashMap::new(),
                 face_profile_indices: vec![],
@@ -4204,6 +4227,7 @@ mod tests {
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
                 affine_complete: true,
                 affine_stats: AffineStats::default(),
+                bound_row: [None; 16],
                 face_profiles: vec![[[0.; 4]; 5]],
                 spatial_nodes: HashMap::new(),
                 face_profile_indices: vec![],
@@ -5324,6 +5348,7 @@ mod tests {
                         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
                         affine_complete: true,
                         affine_stats: AffineStats::default(),
+                        bound_row: [None; 16],
                         face_profiles: vec![[[0.; 4]; 5]],
                         spatial_nodes: HashMap::new(),
                         face_profile_indices: vec![],
@@ -6585,6 +6610,58 @@ mod tests {
         }
     }
     #[test]
+    fn grouped_fan_error_matches_every_emitted_triangle_on_a_stitched_coast() {
+        let world = World::fbm(
+            40961,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let terrain = world.fbm_terrain().unwrap();
+        let key = TileKey {
+            min: [20480, -4096],
+            width_cells: 4096,
+            step_cells: 128,
+            edge_steps: [64, 128, 64, 32],
+            source_revision: 0,
+        };
+        let tile = build(&world, key, || false).unwrap();
+        let width = key.width_cells / 16;
+        let mut bounds = HashMap::new();
+        let mut error = 0_f64;
+        for tri in tile.mesh.indices.chunks_exact(3) {
+            let vertices: [[f64; 3]; 3] = std::array::from_fn(|i| {
+                let p = tile.mesh.vertices[tri[i] as usize].position;
+                [
+                    key.min[0] as f64 * voxel_size() + p[0] as f64,
+                    p[1] as f64,
+                    key.min[1] as f64 * voxel_size() + p[2] as f64,
+                ]
+            });
+            let min = [0, 2].map(|axis| {
+                let center = vertices.iter().map(|p| p[axis]).sum::<f64>() / 3.;
+                (center / (voxel_size() * width as f64)).floor() as i64 * width as i64
+            });
+            let bound = bounds.entry(min).or_insert_with(|| {
+                bound_native_height(
+                    terrain,
+                    ColumnBox {
+                        min,
+                        size_cells: [width; 2],
+                    },
+                    BoundBudget::default(),
+                )
+                .unwrap()
+            });
+            error = error.max(bound.triangle_error(vertices).unwrap());
+        }
+        assert_eq!(bounds.len(), 256);
+        assert_eq!(Some(error), tile.affine_error_m);
+    }
+
+    #[test]
     fn incomplete_affine_budget_is_discarded_in_favor_of_full_global_certificate() {
         let world = World::fbm(7, FbmParams::default()).unwrap();
         let tile = build(
@@ -6665,6 +6742,7 @@ mod tests {
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
                 affine_complete: true,
                 affine_stats: AffineStats::default(),
+                bound_row: [None; 16],
                 face_profiles: vec![[[0.; 4]; 5]],
                 spatial_nodes: HashMap::new(),
                 face_profile_indices: vec![],
@@ -6977,6 +7055,7 @@ mod tests {
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
                 affine_complete: true,
                 affine_stats: AffineStats::default(),
+                bound_row: [None; 16],
                 face_profiles: vec![[[0.; 4]; 5]],
                 spatial_nodes: HashMap::new(),
                 face_profile_indices: vec![],
@@ -7055,6 +7134,7 @@ mod tests {
             affine_range: [f64::INFINITY, f64::NEG_INFINITY],
             affine_complete: true,
             affine_stats: AffineStats::default(),
+            bound_row: [None; 16],
             face_profiles: vec![[[0.; 4]; 5]],
             spatial_nodes: HashMap::new(),
             face_profile_indices: vec![],
