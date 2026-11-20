@@ -729,6 +729,11 @@ impl Gpu {
                 self.format
             },
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if depth && self.sample_count == 1 {
+                    wgpu::TextureUsages::TEXTURE_BINDING
+                } else {
+                    wgpu::TextureUsages::empty()
+                }
                 | if depth && self.sample_count > 1 {
                     wgpu::TextureUsages::empty()
                 } else {
@@ -1122,6 +1127,11 @@ impl Gpu {
                 || self.scene_format != self.format)
                 && !floating
         });
+        // Reuse the capture depth as the atmosphere's sampled attachment when
+        // output and scene pixels align. The readback measures opaque terrain
+        // and objects before sky, clouds and the 35 km horizon composite.
+        let capture_scene_depth =
+            self.sample_count == 1 && post_settings.is_none_or(|s| s.render_scale == 1.);
         let mut post_attachment_bytes = 0u64;
         if let Some(settings) = post_settings {
             let mut atmosphere = atmosphere::Atmosphere::new_with_scene_format(
@@ -1133,8 +1143,14 @@ impl Gpu {
                 self.sample_count,
                 self.scene_format,
                 settings.flight_horizon,
+                capture_scene_depth.then(|| depth.create_view(&Default::default())),
             );
-            post_attachment_bytes = atmosphere.attachment_bytes();
+            post_attachment_bytes = atmosphere.attachment_bytes()
+                - if capture_scene_depth {
+                    u64::from(width) * u64::from(height) * 4
+                } else {
+                    0
+                };
             let (rw, rh) = atmosphere.dimensions();
             atmosphere.prepare_horizon(&self.queue, world, *camera, settings, true);
             atmosphere.set_medium_ground_height(self.medium_ground_height);
@@ -1202,7 +1218,7 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
-        let depth_buffer = (self.sample_count == 1 && post_settings.is_none()).then(|| {
+        let depth_buffer = capture_scene_depth.then(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("depth capture readback"),
                 size: depth_row as u64 * height as u64,
@@ -1359,7 +1375,7 @@ impl Gpu {
         let native_voxel_m = voxel_size();
         let roll_degrees = camera.roll.to_degrees();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"depth_source\":\"opaque_scene_before_atmosphere_and_horizon\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -2964,6 +2980,7 @@ impl ApplicationHandler for Viewer {
                     gpu.sample_count,
                     gpu.scene_format,
                     self.visual_settings.flight_horizon,
+                    None,
                 ));
             }
             self.config = Some(config);

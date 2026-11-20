@@ -34,6 +34,14 @@ world-aligned landscape horizon fading out to 35 km. The horizon samples the
 procedural source. A sparse mesh carries saved terrain edits beyond the resident native
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
 
+A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
+finished image. To measure a level, unbanked flight over the unedited default
+Highlands, use `cargo run --release -p frontier-reference --bin flight_skyline -- --help`
+from `frontier/`. Turn vegetation off for this measurement. The tool reports
+ridgeline displacement in screen pixels against a sampled procedural reference.
+On seed 19, halving the reference spacing from 0.5 m to 0.25 m changed the
+median by 0.09 px and left p95 unchanged across 240 screen columns.
+
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover
 measured **13.65 / 16.20 / 17.95 ms** frame intervals at p50/p95/p99. This
 10-second, 80 m/s scripted pass used a 32 m native radius, disabled disk cache

@@ -280,6 +280,7 @@ impl Atmosphere {
             sample_count,
             format,
             false,
+            None,
         )
     }
     pub(crate) fn new_with_scene_format(
@@ -291,6 +292,7 @@ impl Atmosphere {
         sample_count: u32,
         scene_format: wgpu::TextureFormat,
         flight_horizon: bool,
+        depth_override: Option<wgpu::TextureView>,
     ) -> Self {
         let scale = scale.clamp(0.5, 1.0);
         let width = ((width as f32 * scale).round() as u32).max(1);
@@ -307,14 +309,16 @@ impl Atmosphere {
                 sample_count,
             )
         });
-        let depth = texture(
-            device,
-            "atmosphere scene depth",
-            wgpu::TextureFormat::Depth32Float,
-            width,
-            height,
-            sample_count,
-        );
+        let depth = depth_override.unwrap_or_else(|| {
+            texture(
+                device,
+                "atmosphere scene depth",
+                wgpu::TextureFormat::Depth32Float,
+                width,
+                height,
+                sample_count,
+            )
+        });
         let sky = texture(
             device,
             "quarter resolution volumetric clouds",
@@ -641,6 +645,7 @@ impl Atmosphere {
             sample_count,
             self.scene_format,
             self.horizon.is_some(),
+            None,
         );
     }
     pub(crate) fn scene_view(&self) -> &wgpu::TextureView {
