@@ -801,10 +801,8 @@ fn build_region_options(
                 Some(samples)
             } else {
                 columns.as_ref().map(|columns| {
-                    let heights =
-                        std::array::from_fn(|i| columns[i].height_cells());
-                    let ground_heights =
-                        std::array::from_fn(|i| columns[i].ground_height_cells());
+                    let heights = std::array::from_fn(|i| columns[i].height_cells());
+                    let ground_heights = std::array::from_fn(|i| columns[i].ground_height_cells());
                     let bands = std::array::from_fn(|i| {
                         let h = ground_heights[i];
                         [

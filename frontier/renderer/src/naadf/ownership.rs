@@ -15,8 +15,10 @@ pub(crate) struct Retirement {
 }
 impl Retirement {
     pub fn touches(self, bounds: [[f64; 3]; 2]) -> bool {
-        let lo: [f64; 3] = std::array::from_fn(|a| (self.old[0][a] + voxel_size()).max(bounds[0][a]));
-        let hi: [f64; 3] = std::array::from_fn(|a| (self.old[1][a] - voxel_size()).min(bounds[1][a]));
+        let lo: [f64; 3] =
+            std::array::from_fn(|a| (self.old[0][a] + voxel_size()).max(bounds[0][a]));
+        let hi: [f64; 3] =
+            std::array::from_fn(|a| (self.old[1][a] - voxel_size()).min(bounds[1][a]));
         (0..3).all(|a| lo[a] < hi[a])
             && (0..3).any(|a| {
                 lo[a] < self.kept[0][a] + voxel_size() || hi[a] > self.kept[1][a] - voxel_size()
@@ -75,7 +77,9 @@ impl Ownership {
         let mut lo = [0usize; 2];
         let mut hi = lo;
         for a in 0..2 {
-            if min[a] - root_m < self.bounds[0][a * 2] || min[a] + width + root_m > self.bounds[1][a * 2] {
+            if min[a] - root_m < self.bounds[0][a * 2]
+                || min[a] + width + root_m > self.bounds[1][a * 2]
+            {
                 return false;
             }
             let origin = self.grid_origin[a];

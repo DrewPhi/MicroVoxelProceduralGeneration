@@ -56,7 +56,7 @@ mod viewer_visual;
 pub mod volume;
 mod walking;
 
-use frontier_world::{Cell, Material, World, voxel_size};
+use frontier_world::{voxel_size, Cell, Material, World};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,
@@ -2679,10 +2679,14 @@ impl Viewer {
             terrain_pending: self.adaptive_view.as_ref().map_or(0, |v| v.pending_count),
             terrain_ready: self.adaptive_view.as_ref().is_none_or(|v| v.quality_ready),
             terrain_coverage: self.adaptive_view.as_ref().is_none_or(|v| v.coverage_ready),
-            terrain_error_px: self.adaptive_view.as_ref()
+            terrain_error_px: self
+                .adaptive_view
+                .as_ref()
                 .filter(|v| v.coverage_ready)
                 .and_then(|v| v.stats.current_max_error_px),
-            terrain_unresolved: self.adaptive_view.as_ref()
+            terrain_unresolved: self
+                .adaptive_view
+                .as_ref()
                 .map_or(0, |v| v.stats.current_unresolved_clusters),
             terrain_epoch: self.adaptive_view.as_ref().map_or(0, |v| v.published_epoch),
             native_clusters: self.adaptive_view.as_ref().map_or(0, |v| v.native_clusters),
@@ -3258,9 +3262,10 @@ pub fn run() -> Result<()> {
         if camera_preset == "aerial" {
             camera.position.y += 300.;
             camera.pitch = -0.3;
-            if let Some(source) = world.fbm_terrain().filter(|t| {
-                t.params().recipe == frontier_world::FbmRecipe::Watershed
-            }) {
+            if let Some(source) = world
+                .fbm_terrain()
+                .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Watershed)
+            {
                 camera.yaw = terrain::seeded_world_heading(source, start_x, start_z).0;
             }
         }
@@ -4458,8 +4463,8 @@ mod tests {
         let mut world = World::fbm(SEED, Default::default()).unwrap();
         let x = -4097;
         let z = -8193;
-        let y = (world.ground_height_m(x as f64 * voxel_size(), z as f64 * voxel_size()) / voxel_size())
-            as i64
+        let y = (world.ground_height_m(x as f64 * voxel_size(), z as f64 * voxel_size())
+            / voxel_size()) as i64
             + 32;
         let target = Cell { x, y, z };
         let neighbor = Cell { x: x - 1, ..target };

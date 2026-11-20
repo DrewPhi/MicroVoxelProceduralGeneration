@@ -3,7 +3,7 @@
 use frontier_reference::{
     landscape::Landscape, normalized, srgb, vegetation::Vegetation, Camera, Hit,
 };
-use frontier_world::{FbmParams, FbmRecipe, World, voxel_size};
+use frontier_world::{voxel_size, FbmParams, FbmRecipe, World};
 use std::{
     error::Error,
     fs::File,

@@ -1,6 +1,6 @@
 //! Native gameplay edits. Inventory and expected-cell validation precede the
 //! single canonical batch; renderer residency remains an explicit caller gate.
-use crate::{Cell, Material, World, voxel_size};
+use crate::{voxel_size, Cell, Material, World};
 use std::collections::{BTreeSet, VecDeque};
 
 pub const MATERIALS: [Material; 10] = [

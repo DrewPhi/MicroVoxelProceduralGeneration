@@ -4,7 +4,7 @@ use crate::{
     affine_bounds::{
         bound_native_height, bound_proxy_residual, BoundBudget, ColumnBox, ProxyPlane,
     },
-    FbmParams, FbmRecipe, FbmTerrain, voxel_size,
+    voxel_size, FbmParams, FbmRecipe, FbmTerrain,
 };
 
 fn params() -> FbmParams {
@@ -42,7 +42,10 @@ fn verify(terrain: &FbmTerrain, region: ColumnBox, budget: BoundBudget) -> usize
             assert!(actual >= bound.height_range[0] && actual <= bound.height_range[1],
                 "seed={} params={:?} region={region:?} column=({x},{z}) visible={actual} bound={bound:?}",
                 terrain.seed(), terrain.params());
-            let position = [(x as f64 + 0.5) * voxel_size(), (z as f64 + 0.5) * voxel_size()];
+            let position = [
+                (x as f64 + 0.5) * voxel_size(),
+                (z as f64 + 0.5) * voxel_size(),
+            ];
             let proxy = plane.height_at_center
                 + plane.dx * (position[0] - center[0])
                 + plane.dz * (position[1] - center[1]);

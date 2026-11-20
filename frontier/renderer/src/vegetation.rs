@@ -2,7 +2,7 @@
 //! automatically derived display meshes never change gameplay voxel identity.
 use frontier_world::{
     vegetation::{self, PlantRecord, Species},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -14,10 +14,10 @@ use std::{
     thread,
     time::Instant,
 };
-#[path = "ground_detail.rs"]
-pub(crate) mod ground_detail;
 #[path = "distant_vegetation.rs"]
 mod distant_vegetation;
+#[path = "ground_detail.rs"]
+pub(crate) mod ground_detail;
 #[path = "shadow_lifecycle.rs"]
 mod shadow_lifecycle;
 use distant_vegetation::{
@@ -1214,15 +1214,19 @@ impl VegetationStream {
                 // Ground details depend on the terrain and fluid in their own
                 // columns. Keep ready tiles that the edit did not touch.
                 let edge = ground_detail::tile_cells();
-                let dirty: BTreeSet<_> = changed.iter()
+                let dirty: BTreeSet<_> = changed
+                    .iter()
                     .map(|cell| [cell.x.div_euclid(edge), cell.z.div_euclid(edge)])
                     .collect();
                 self.tiles.retain(|tile, _| {
-                    tile.species != ground_detail::TILE_SPECIES || !dirty.contains(&[tile.x, tile.z])
+                    tile.species != ground_detail::TILE_SPECIES
+                        || !dirty.contains(&[tile.x, tile.z])
                 });
                 // In-flight decorative tiles carry their source revision.
-                self.pending_tiles.retain(|tile| tile.species != ground_detail::TILE_SPECIES);
-                self.tile_started.retain(|tile, _| tile.species != ground_detail::TILE_SPECIES);
+                self.pending_tiles
+                    .retain(|tile| tile.species != ground_detail::TILE_SPECIES);
+                self.tile_started
+                    .retain(|tile, _| tile.species != ground_detail::TILE_SPECIES);
             }
             self.local_edit_reused_tiles += self.tiles.len() as u64;
             // Canonical placement and ecological shade are defined by the immutable
@@ -1361,7 +1365,8 @@ impl VegetationStream {
             self.stable_frame = None;
             match done {
                 Done::Tile(t, revision, p) => {
-                    if t.species == ground_detail::TILE_SPECIES && revision != self.world.revision() {
+                    if t.species == ground_detail::TILE_SPECIES && revision != self.world.revision()
+                    {
                         continue;
                     }
                     if t.species < 2 {
@@ -1460,8 +1465,11 @@ impl VegetationStream {
         for s in species_range {
             let (radius, span, tile_center) = if s == ground_detail::TILE_SPECIES {
                 let edge = ground_detail::tile_cells();
-                (radii[0].max(radii[1]).min(56.), edge as f64 * voxel_size(),
-                 [c.x.div_euclid(edge), c.z.div_euclid(edge)])
+                (
+                    radii[0].max(radii[1]).min(56.),
+                    edge as f64 * voxel_size(),
+                    [c.x.div_euclid(edge), c.z.div_euclid(edge)],
+                )
             } else {
                 (radii[s as usize].clamp(0., 1024.), native_tile_m, center)
             };
@@ -2621,7 +2629,10 @@ impl VegetationStream {
             camera,
             view.as_ref(),
             [radii[0].min(28.), radii[1].min(56.)],
-            [selection_config.max_instances, selection_config.max_triangles],
+            [
+                selection_config.max_instances,
+                selection_config.max_triangles,
+            ],
             &mut batches,
             &mut stats,
         );

@@ -4,7 +4,7 @@ use crate::{live_water::LiveWater, Camera, Result};
 use frontier_world::{
     discrete_water::{DiscreteWater, StepStats},
     edit::{EditTransaction, Inventory, MATERIALS},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::{
     collections::BTreeSet,

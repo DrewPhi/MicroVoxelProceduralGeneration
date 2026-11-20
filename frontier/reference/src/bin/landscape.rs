@@ -2,7 +2,7 @@ use frontier_reference::{
     landscape::{Landscape, MultiScaleLandscape},
     material, shade, srgb, Camera, Hit, SKY,
 };
-use frontier_world::{FbmParams, FbmRecipe, FbmTerrain, voxel_size};
+use frontier_world::{voxel_size, FbmParams, FbmRecipe, FbmTerrain};
 use std::{
     error::Error,
     fs::{self, File},
@@ -360,7 +360,11 @@ fn main() -> Result<()> {
                     "alpine" => FbmRecipe::Alpine,
                     "seeded-world" | "world" => FbmRecipe::SeededWorld,
                     "watershed" => FbmRecipe::Watershed,
-                    _ => return Err("recipe must be legacy|regional|alpine|seeded-world|watershed".into()),
+                    _ => {
+                        return Err(
+                            "recipe must be legacy|regional|alpine|seeded-world|watershed".into(),
+                        )
+                    }
                 }
             }
             "--sample-seed" => sample_seed = v.parse()?,

@@ -1,5 +1,5 @@
 //! Camera-independent certificates for canonical terrain. No sampled estimate is a proof.
-use crate::{FbmRecipe, FbmTerrain, Material, World, voxel_size};
+use crate::{voxel_size, FbmRecipe, FbmTerrain, Material, World};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GeometryError {

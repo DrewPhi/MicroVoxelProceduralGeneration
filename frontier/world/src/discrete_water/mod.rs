@@ -13,7 +13,7 @@ pub mod regional;
 use boundary::BoundaryState;
 pub use boundary::{BoundaryGhost, BoundaryTransfer, OpenBoundary};
 
-use crate::{Cell, voxel_size};
+use crate::{voxel_size, Cell};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_CELLS: usize = 2_000_000;

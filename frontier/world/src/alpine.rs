@@ -140,7 +140,7 @@ pub(crate) fn elevation<V: Value>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cell, FbmRecipe, FbmTerrain, Material, World, voxel_size};
+    use crate::{voxel_size, Cell, FbmRecipe, FbmTerrain, Material, World};
     fn terrain(seed: u64) -> FbmTerrain {
         FbmTerrain::new(
             seed,

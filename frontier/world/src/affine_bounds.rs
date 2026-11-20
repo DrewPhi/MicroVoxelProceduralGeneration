@@ -1,7 +1,7 @@
 //! Bounded reduced affine arithmetic over the unchanged canonical FBM source.
 //! Two shared world-coordinate symbols survive; nonlinear/roundoff uncertainty
 //! is an independent radius. Multiple noise-cell polynomials share those symbols.
-use crate::{terrain::hash, FbmRecipe, FbmTerrain, voxel_size};
+use crate::{terrain::hash, voxel_size, FbmRecipe, FbmTerrain};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ColumnBox {

@@ -1,5 +1,5 @@
 //! Small axis-swept canonical-cell walking controller, independent of display LOD.
-use frontier_world::{Cell, Material, World, voxel_size};
+use frontier_world::{voxel_size, Cell, Material, World};
 use std::collections::HashMap;
 
 pub const EYE_HEIGHT: f64 = 1.6875;

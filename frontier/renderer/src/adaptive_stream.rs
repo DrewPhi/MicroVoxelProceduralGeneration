@@ -9,7 +9,7 @@ use frontier_runtime::{
     occlusion::{Aabb, OcclusionSet},
     representation::{Projection, ViewBounds},
 };
-use frontier_world::{World, voxel_size};
+use frontier_world::{voxel_size, World};
 use glam::DVec3;
 use std::{
     collections::{HashMap, HashSet, VecDeque},

@@ -29,7 +29,9 @@ pub fn radius_roots(radius_voxels: u32) -> Result<u32, String> {
     if (1..=MAX_RADIUS_VOXELS).contains(&radius_voxels) {
         Ok(radius_voxels.div_ceil(ROOT_EDGE_VOXELS))
     } else {
-        Err(format!("NAADF radius must be 1..={MAX_RADIUS_VOXELS} native voxels"))
+        Err(format!(
+            "NAADF radius must be 1..={MAX_RADIUS_VOXELS} native voxels"
+        ))
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

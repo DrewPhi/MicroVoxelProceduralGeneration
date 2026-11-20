@@ -2,7 +2,7 @@
 //! Work and storage depend on column count and exposed spans, never a vertical prism.
 //! Caves, bridges and edits require the volume path and are rejected here.
 use crate::mesh::{Mesh, Vertex};
-use frontier_world::{Cell, Material, World, voxel_size};
+use frontier_world::{voxel_size, Cell, Material, World};
 
 const MAX_HALO_COLUMNS: usize = 4_200_000;
 const MAX_QUADS: usize = 4_000_000;
@@ -634,8 +634,8 @@ mod tests {
     }
 
     fn ray(m: &Mesh, o: glam::DVec3, d: glam::DVec3) -> Option<(f64, [f32; 3], [f32; 3])> {
-        let shift =
-            glam::DVec3::new(m.origin.x as f64, m.origin.y as f64, m.origin.z as f64) * voxel_size();
+        let shift = glam::DVec3::new(m.origin.x as f64, m.origin.y as f64, m.origin.z as f64)
+            * voxel_size();
         let mut best = None;
         for t in m.indices.chunks_exact(3) {
             let a = &m.vertices[t[0] as usize];

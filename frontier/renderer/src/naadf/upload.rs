@@ -488,8 +488,8 @@ impl PendingShift {
         for (r, t) in self.change.roots.iter().zip(&self.textures) {
             let dims = r.region.dims();
             let parts: [Vec<(usize, usize, usize)>; 3] = std::array::from_fn(|a| {
-                let dst = (r.region.lo[a] - v.region.lo[a] + v.ring[a] as i64)
-                    .rem_euclid(n as i64) as usize;
+                let dst = (r.region.lo[a] - v.region.lo[a] + v.ring[a] as i64).rem_euclid(n as i64)
+                    as usize;
                 split(dst, dims[a], n)
             });
             for &(sx, dx, nx) in &parts[0] {

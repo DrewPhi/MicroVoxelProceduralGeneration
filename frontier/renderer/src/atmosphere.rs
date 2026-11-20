@@ -850,7 +850,8 @@ mod tests {
     fn atmosphere_uniform_contract() {
         assert_eq!(std::mem::size_of::<super::Uniform>(), 368);
         assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
-        let module = naga::front::wgsl::parse_str(&crate::voxel_shader(super::shader_source(1))).unwrap();
+        let module =
+            naga::front::wgsl::parse_str(&crate::voxel_shader(super::shader_source(1))).unwrap();
         let (_, uniform) = module
             .types
             .iter()

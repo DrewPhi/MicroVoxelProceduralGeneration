@@ -100,7 +100,9 @@ impl Batch {
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("coarse voxel direction culling"),
-            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(include_str!("coarse_batch.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(include_str!(
+                "coarse_batch.wgsl"
+            ))),
         });
         let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("coarse voxel direction culling"),
@@ -277,7 +279,9 @@ mod tests {
         assert_eq!(size_of::<super::Candidate>(), 32);
         assert_eq!(super::INDIRECT_STRIDE, 20);
         assert_eq!(super::UNIFORM_STRIDE, 256);
-        let shader = naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("coarse_batch.wgsl"))).unwrap();
+        let shader =
+            naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("coarse_batch.wgsl")))
+                .unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

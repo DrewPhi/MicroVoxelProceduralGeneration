@@ -6,7 +6,7 @@ use crate::{
     column_mesh,
     mesh::{Mesh, Vertex},
 };
-use frontier_world::{Cell, FbmTerrain, World, voxel_size};
+use frontier_world::{voxel_size, Cell, FbmTerrain, World};
 
 const INNER: f64 = 32.;
 const OUTER: f64 = 34.;
@@ -424,14 +424,14 @@ mod tests {
                     let x = ((center[0] + a.position[0] as f64
                         - a.normal[0] as f64 * voxel_size() * 0.25)
                         / voxel_size())
-                        .floor()
-                        .clamp(min[0] as f64, (min[0] + 1023) as f64)
+                    .floor()
+                    .clamp(min[0] as f64, (min[0] + 1023) as f64)
                         as i64;
                     let z = ((center[1] + a.position[2] as f64
                         - a.normal[2] as f64 * voxel_size() * 0.25)
                         / voxel_size())
-                        .floor()
-                        .clamp(min[1] as f64, (min[1] + 1023) as f64)
+                    .floor()
+                    .clamp(min[1] as f64, (min[1] + 1023) as f64)
                         as i64;
                     let y = (((a.position[1] + b.position[1]) as f64 * 0.5) / voxel_size()).floor()
                         as i64;

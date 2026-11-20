@@ -1,6 +1,6 @@
 //! CPU-canonical, seeded mountain heightfield, independent of renderer spacing.
 //! Greenfield gradient noise/FBM composition; no external implementation copied.
-use crate::{Cell, Material, voxel_size};
+use crate::{voxel_size, Cell, Material};
 #[path = "seeded_world.rs"]
 pub(crate) mod seeded_world;
 pub use seeded_world::{

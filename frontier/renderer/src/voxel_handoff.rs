@@ -1,7 +1,7 @@
 //! Offline dry-heightfield representation experiment for #83. This is not a
 //! live LOD path or a screen-space certificate. Integer macrocolumn tops and
 //! every exposed unit side face are compared with the original native surface.
-use frontier_world::{World, voxel_size};
+use frontier_world::{voxel_size, World};
 const MAX_WIDTH: usize = 128;
 const MAX_FACES: usize = 300_000;
 #[derive(Clone)]

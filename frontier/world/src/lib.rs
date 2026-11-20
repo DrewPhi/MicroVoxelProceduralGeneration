@@ -188,7 +188,8 @@ impl WorldColumn<'_> {
         self.height
     }
     pub fn ground_height_cells(&self) -> i64 {
-        self.terrain_column.map_or(self.height, |column| column.ground_top)
+        self.terrain_column
+            .map_or(self.height, |column| column.ground_top)
     }
     pub fn height_m(&self) -> f64 {
         self.height_cells() as f64 * voxel_size()
@@ -1339,7 +1340,13 @@ mod tests {
             z: 0,
         };
         w.set(p, Material::Wood);
-        let hit = raycast(&w, [-voxel_size(), 100.03125, 0.03125], [2.0, 0.0, 0.0], 1.0).unwrap();
+        let hit = raycast(
+            &w,
+            [-voxel_size(), 100.03125, 0.03125],
+            [2.0, 0.0, 0.0],
+            1.0,
+        )
+        .unwrap();
         assert_eq!(hit.cell, p);
         assert_eq!(hit.normal, [-1, 0, 0]);
         assert_eq!(hit.distance, voxel_size());

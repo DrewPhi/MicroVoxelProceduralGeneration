@@ -3,7 +3,7 @@
 //! silhouettes or grid interpolation. They are ideal arithmetic bounds plus native
 //! quantization; floating point enclosure is NOT certified. No render quality pass
 //! follows from producing a page. Native queries and volume ownership are unchanged.
-use crate::{FbmParams, FbmRecipe, FbmTerrain, World, voxel_size};
+use crate::{voxel_size, FbmParams, FbmRecipe, FbmTerrain, World};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VisualRequest {

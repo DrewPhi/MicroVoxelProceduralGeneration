@@ -9,7 +9,7 @@ use crate::{
         StepStats,
     },
     procedural_water::{ProceduralWater, ReachKey, TileKey},
-    Cell, World, voxel_size,
+    voxel_size, Cell, World,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},

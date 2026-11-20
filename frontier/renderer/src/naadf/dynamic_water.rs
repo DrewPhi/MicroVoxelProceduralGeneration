@@ -113,7 +113,9 @@ impl Experiment {
 /// publishes a shifted static window. This also runs while newer solids/water
 /// are withheld, so an old valid snapshot never moves with the native window.
 pub(super) fn rebase_relative(relative: Cell, old: [f64; 3], new: [f64; 3]) -> Cell {
-    let delta = std::array::from_fn::<_, 3, _>(|a| ((old[a] - new[a]) / frontier_world::voxel_size()).round() as i64);
+    let delta = std::array::from_fn::<_, 3, _>(|a| {
+        ((old[a] - new[a]) / frontier_world::voxel_size()).round() as i64
+    });
     Cell {
         x: relative.x + delta[0],
         y: relative.y + delta[1],

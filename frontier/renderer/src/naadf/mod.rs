@@ -29,7 +29,7 @@ mod upload;
 use super::{Camera, Gpu};
 use bytemuck::{Pod, Zeroable};
 use data::Snapshot;
-use frontier_world::{World, voxel_size};
+use frontier_world::{voxel_size, World};
 use glam::DVec3;
 use std::{
     sync::{
@@ -1337,7 +1337,12 @@ impl Experiment {
         // continuous travel each receive a bounded share of idle turns.
         let following_target = if r.follow && !self.growth_pending {
             self.active.as_ref().and_then(|v| {
-                stream::target(v.region, camera.position.to_array(), self.eye_velocity.to_array(), stream_lead_seconds())
+                stream::target(
+                    v.region,
+                    camera.position.to_array(),
+                    self.eye_velocity.to_array(),
+                    stream_lead_seconds(),
+                )
             })
         } else {
             None
@@ -1477,9 +1482,9 @@ impl Experiment {
             && !self.expanding
             && !self.growth_pending
             && self.request.is_some_and(|r| {
-                self.active.as_ref().is_some_and(|volume| {
-                    volume.region.dims()[0] == r.radius_roots() as usize * 2
-                })
+                self.active
+                    .as_ref()
+                    .is_some_and(|volume| volume.region.dims()[0] == r.radius_roots() as usize * 2)
             })
             && (!root_distance::settle_capture()
                 || self
@@ -1731,8 +1736,10 @@ impl Experiment {
             json,
             ",\"requested_radius_voxels\":{},\"resident_radius_voxels\":{}",
             self.request.map_or(0, |r| r.radius_voxels),
-            a.map_or(0, |v| v.region.dims()[0] as u32 / 2 * stream::ROOT_EDGE_VOXELS)
-        ).unwrap();
+            a.map_or(0, |v| v.region.dims()[0] as u32 / 2
+                * stream::ROOT_EDGE_VOXELS)
+        )
+        .unwrap();
         write!(json, ",\"published_world_revision\":{},\"content_update_pending\":{},\"edited_root_proofs_invalidated\":{}", a.map_or(0,|v|v.revision),self.refresh_world.is_some(),a.is_some_and(|v|v.edited_root_proofs)).unwrap();
         write!(
             json,

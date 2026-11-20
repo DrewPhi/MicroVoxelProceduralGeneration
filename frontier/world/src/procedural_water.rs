@@ -5,7 +5,7 @@
 //! tile's stored volume into the head of an entire river or lake.
 use crate::{
     discrete_water::regional::{RegionalWater, ReservoirId},
-    Cell, FbmRecipe, FbmTerrain, Material, World, voxel_size,
+    voxel_size, Cell, FbmRecipe, FbmTerrain, Material, World,
 };
 use std::collections::{BTreeMap, BTreeSet};
 

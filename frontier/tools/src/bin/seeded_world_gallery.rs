@@ -1,5 +1,5 @@
 //! Canonical CPU field samples, not engine renders or frame-rate measurements.
-use frontier_world::{Cell, FbmParams, FbmRecipe, FbmTerrain, voxel_size};
+use frontier_world::{voxel_size, Cell, FbmParams, FbmRecipe, FbmTerrain};
 use std::{
     collections::BTreeMap,
     fs::{self, File},

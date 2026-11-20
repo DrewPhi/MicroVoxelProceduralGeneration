@@ -1,6 +1,6 @@
 //! Exact native-cell surface extraction. The bounded fixture is deliberately not a LOD.
 use bytemuck::{Pod, Zeroable};
-use frontier_world::{Cell, Material, voxel_size};
+use frontier_world::{voxel_size, Cell, Material};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -163,7 +163,9 @@ mod tests {
                 cross.length() / 2.
             })
             .sum();
-        assert!((area - m.exposed_native_faces as f32 * (voxel_size() as f32).powi(2)).abs() < 1e-6);
+        assert!(
+            (area - m.exposed_native_faces as f32 * (voxel_size() as f32).powi(2)).abs() < 1e-6
+        );
     }
     #[test]
     fn halo_does_not_cap_a_solid_crop() {

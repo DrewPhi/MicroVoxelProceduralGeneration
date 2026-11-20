@@ -1,6 +1,6 @@
 //! Explicit prescribed-head ports on a fixed detailed domain. Quotas must be
 //! reserved by the caller before stepping and reconciled with accepted reports.
-use super::{Cell, DiscreteWater, voxel_size};
+use super::{voxel_size, Cell, DiscreteWater};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OpenBoundary {

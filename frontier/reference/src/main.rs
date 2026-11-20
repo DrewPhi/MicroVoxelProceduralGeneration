@@ -1,5 +1,5 @@
 use frontier_reference::*;
-use frontier_world::{World, SOURCE_VERSION, voxel_size};
+use frontier_world::{voxel_size, World, SOURCE_VERSION};
 use std::{
     error::Error,
     fs::{self, File},

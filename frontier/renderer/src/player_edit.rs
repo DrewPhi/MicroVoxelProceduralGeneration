@@ -3,7 +3,7 @@
 use crate::{naadf, Camera};
 use frontier_world::{
     edit::{self, EditTransaction, HandSettings, Inventory},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::time::Instant;
 
@@ -227,7 +227,8 @@ pub fn intersects_player(cell: Cell, eye: [f64; 3]) -> bool {
     ];
     let high = [eye[0] + 0.225, low[1] + 1.75, eye[2] + 0.225];
     let p = [cell.x, cell.y, cell.z];
-    (0..3).all(|a| p[a] as f64 * voxel_size() < high[a] && (p[a] as f64 + 1.) * voxel_size() > low[a])
+    (0..3)
+        .all(|a| p[a] as f64 * voxel_size() < high[a] && (p[a] as f64 + 1.) * voxel_size() > low[a])
 }
 #[cfg(test)]
 mod tests {

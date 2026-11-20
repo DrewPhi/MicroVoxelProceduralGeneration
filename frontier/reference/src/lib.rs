@@ -1,6 +1,6 @@
 //! Independent f64 native-cell offline oracle. No renderer/world ray traversal is used.
 //! Exact canonical material snapshots and halo face ownership; no display LOD.
-use frontier_world::{Material, World, voxel_size};
+use frontier_world::{voxel_size, Material, World};
 pub mod landscape;
 pub mod vegetation;
 

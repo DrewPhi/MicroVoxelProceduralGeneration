@@ -98,8 +98,11 @@ impl Gpu {
             let stream = self.vegetation_stream.as_mut().unwrap();
             stream.set_visibility_benchmark(
                 settings.visibility_benchmark,
-                f64::from(settings.naadf_radius_voxels.div_ceil(crate::naadf::stream::ROOT_EDGE_VOXELS))
-                    * crate::naadf::stream::root_size_m(),
+                f64::from(
+                    settings
+                        .naadf_radius_voxels
+                        .div_ceil(crate::naadf::stream::ROOT_EDGE_VOXELS),
+                ) * crate::naadf::stream::root_size_m(),
                 camera.position.to_array(),
             );
             stream.set_shadows_enabled(

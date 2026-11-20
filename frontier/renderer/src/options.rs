@@ -823,11 +823,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         return Err("--vegetation on currently requires --scene adaptive".into());
     }
     params.validate()?;
-    if seeded_preset
-        && !explicit_start
-        && eye.is_none()
-        && params.recipe.has_static_water()
-    {
+    if seeded_preset && !explicit_start && eye.is_none() && params.recipe.has_static_water() {
         start_xz = seeded_spawn(seed, params)?;
         eprintln!(
             "Seeded world seed={seed}, dry spawn=({:.1},{:.1})m",
@@ -1038,7 +1034,8 @@ fn seeded_spawn(seed: u64, params: frontier_world::FbmParams) -> Result<[f64; 2]
                                 let p = frontier_world::Cell::from_meters([x + dx, 0., z + dz]);
                                 let c = terrain.column_cells(p.x, p.z);
                                 c.visible_top == c.ground_top
-                                    && (c.ground_top as f64 * frontier_world::voxel_size() - h).abs()
+                                    && (c.ground_top as f64 * frontier_world::voxel_size() - h)
+                                        .abs()
                                         <= 1.5
                             });
                     if safe {

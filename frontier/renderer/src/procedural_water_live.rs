@@ -5,7 +5,7 @@ use frontier_world::{
     discrete_water::{coupled::CoupledWater, DiscreteWater, OpenBoundary, StepStats},
     edit::{EditTransaction, Inventory, MATERIALS},
     procedural_water::{ProceduralWater, TileGeometry, TileKey},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::{
     collections::BTreeSet,

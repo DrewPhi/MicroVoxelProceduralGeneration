@@ -1022,7 +1022,8 @@ mod tests {
     }
     #[test]
     fn shader_valid() {
-        let m = naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("terrain.wgsl"))).unwrap();
+        let m = naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("terrain.wgsl")))
+            .unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),

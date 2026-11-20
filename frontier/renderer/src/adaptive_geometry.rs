@@ -14,7 +14,7 @@ use crate::{
 use frontier_runtime::occlusion::Aabb;
 use frontier_world::{
     affine_bounds::{bound_native_height, BoundBudget, ColumnBox, HeightBound},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -856,7 +856,7 @@ fn remove_native_volume_boundary_faces(tile: &mut GeometryTile) {
         face_count += (((q[2].position[u] - q[0].position[u]) as f64
             * (q[2].position[v] - q[0].position[v]) as f64)
             / (voxel_size() * voxel_size()))
-            .round() as usize;
+        .round() as usize;
         vertices.extend_from_slice(q);
         indices.extend(
             if q[0].normal[axis] > 0. {
@@ -1580,15 +1580,14 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
             if TRACK_EXTREMA {
                 note([x, z], h);
             }
-            let water_column = (terrain.params().recipe.has_static_water())
-                .then(|| {
-                    let c = terrain.column_cells(x, z);
-                    NativeColumn {
-                        height: c.visible_top,
-                        ground_height: c.ground_top,
-                        bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
-                    }
-                });
+            let water_column = (terrain.params().recipe.has_static_water()).then(|| {
+                let c = terrain.column_cells(x, z);
+                NativeColumn {
+                    height: c.visible_top,
+                    ground_height: c.ground_top,
+                    bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
+                }
+            });
             let top = if let Some(c) = water_column {
                 c.material(h - 1)
             } else if reuse_top {
@@ -2602,7 +2601,8 @@ impl Generator<'_> {
         for value in values {
             for (p, a) in [(0, 0), (1, 2), (2, 1), (3, 4), (4, 3)] {
                 self.appearance.area_m2[a] +=
-                    value[p][3] as f64 * area_scale * voxel_size() * voxel_size() / values.len() as f64;
+                    value[p][3] as f64 * area_scale * voxel_size() * voxel_size()
+                        / values.len() as f64;
                 for c in 0..3 {
                     self.appearance.color_area[a][c] +=
                         value[p][c] as f64 * area_scale * voxel_size() * voxel_size()
@@ -2651,7 +2651,10 @@ impl Generator<'_> {
         let at = self.face_profiles.len() as u32;
         self.face_profiles
             .push(crate::spatial_appearance::visibility_spatial_header(
-                [x as f32 * voxel_size() as f32, z as f32 * voxel_size() as f32],
+                [
+                    x as f32 * voxel_size() as f32,
+                    z as f32 * voxel_size() as f32,
+                ],
                 s as f32 * voxel_size() as f32,
                 nodes,
                 at,
@@ -4504,11 +4507,13 @@ mod tests {
                         let mut pair = [
                             (
                                 a[1].to_bits(),
-                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + a[2]).to_bits(),
+                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + a[2])
+                                    .to_bits(),
                             ),
                             (
                                 b[1].to_bits(),
-                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + b[2]).to_bits(),
+                                ((tile.mesh.origin.z as f64 * voxel_size()) as f32 + b[2])
+                                    .to_bits(),
                             ),
                         ];
                         pair.sort();
@@ -4856,7 +4861,11 @@ mod tests {
             };
             for (o, d) in [
                 (
-                    glam::DVec3::new(127.5 * voxel_size(), -0.5 * voxel_size(), 0.37 * voxel_size()),
+                    glam::DVec3::new(
+                        127.5 * voxel_size(),
+                        -0.5 * voxel_size(),
+                        0.37 * voxel_size(),
+                    ),
                     glam::DVec3::X,
                 ),
                 (

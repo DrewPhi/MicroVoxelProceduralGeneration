@@ -327,7 +327,10 @@ mod tests {
             let hi = point(q[2].position, voxel_size()).unwrap();
             for a in lo[u]..hi[u] {
                 for b in lo[v]..hi[v] {
-                    let p = [(a as f64 + 0.5) * voxel_size(), (b as f64 + 0.5) * voxel_size()];
+                    let p = [
+                        (a as f64 + 0.5) * voxel_size(),
+                        (b as f64 + 0.5) * voxel_size(),
+                    ];
                     let mut covered = false;
                     for t in &triangles {
                         if t.normal != q[0].normal

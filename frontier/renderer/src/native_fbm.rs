@@ -1,7 +1,7 @@
 //! Bounded exact-native comparator for the same FBM field as the surface proxy.
 //! Startup-only extraction; neither streaming nor a native/surface handoff.
 use crate::mesh;
-use frontier_world::{Cell, World, voxel_size};
+use frontier_world::{voxel_size, Cell, World};
 
 const MIN_XZ: i64 = -64;
 const WIDTH: usize = 128;
@@ -105,13 +105,14 @@ mod tests {
         let mut expected = 0;
         for z in MIN_XZ..MIN_XZ + WIDTH as i64 {
             for x in MIN_XZ..MIN_XZ + WIDTH as i64 {
-                let h = (world.height_m(x as f64 * voxel_size(), z as f64 * voxel_size()) / voxel_size())
-                    as i64;
+                let h = (world.height_m(x as f64 * voxel_size(), z as f64 * voxel_size())
+                    / voxel_size()) as i64;
                 expected += 1; // one horizontal top face per native column
                 for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    let neighbor = (world
-                        .height_m((x + dx) as f64 * voxel_size(), (z + dz) as f64 * voxel_size())
-                        / voxel_size()) as i64;
+                    let neighbor = (world.height_m(
+                        (x + dx) as f64 * voxel_size(),
+                        (z + dz) as f64 * voxel_size(),
+                    ) / voxel_size()) as i64;
                     expected += (h - neighbor).max(0) as usize;
                 }
             }

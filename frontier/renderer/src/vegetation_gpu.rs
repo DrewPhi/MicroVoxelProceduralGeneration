@@ -1,6 +1,8 @@
 //! Reusable opaque voxel template geometry, one instanced draw per model/LOD.
 //! Canonical roots remain integers until after origin subtraction.
-use crate::vegetation::{ground_detail, MeshKey, VegetationFrame, VegetationInstance, VegetationVertex};
+use crate::vegetation::{
+    ground_detail, MeshKey, VegetationFrame, VegetationInstance, VegetationVertex,
+};
 use bytemuck::{Pod, Zeroable};
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
@@ -135,7 +137,8 @@ struct Instance {
 }
 fn pack(instance: &VegetationInstance, origin: [i64; 3]) -> Instance {
     let root = std::array::from_fn(|i| {
-        ((instance.root_cell[i] as i128 - origin[i] as i128) as f64 * frontier_world::voxel_size()) as f32
+        ((instance.root_cell[i] as i128 - origin[i] as i128) as f64 * frontier_world::voxel_size())
+            as f32
     });
     let mut seed = 0x9e3779b9u32;
     for coordinate in instance.root_cell {
@@ -218,10 +221,7 @@ struct Quad {
     ao: f32,
     transmission: f32,
 }
-fn pack_quads(
-    mesh: &crate::vegetation::VegetationMesh,
-    voxel_m: f32,
-) -> Result<Vec<Quad>, String> {
+fn pack_quads(mesh: &crate::vegetation::VegetationMesh, voxel_m: f32) -> Result<Vec<Quad>, String> {
     if mesh.vertices.len() % 4 != 0 || mesh.indices.len() != mesh.vertices.len() / 4 * 6 {
         return Err("vegetation mesh is not a complete quad stream".into());
     }

@@ -1,7 +1,7 @@
 //! Bounded prototype: exact volume stays resident at every distance. This is
 //! deliberately a finite smoke fixture, not scalable distant-volume streaming.
 use crate::mesh::{self, Mesh};
-use frontier_world::{Cell, World, voxel_size};
+use frontier_world::{voxel_size, Cell, World};
 
 pub const HALF_CELLS: i64 = 128;
 pub fn bounds(world: &World) -> Result<(Cell, [usize; 3]), String> {

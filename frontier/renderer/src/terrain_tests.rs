@@ -173,7 +173,8 @@ fn view_distance_is_bounded_and_only_adds_coarser_levels() {
 
 #[test]
 fn hybrid_appearance_shader_validates_with_derivative_footprints() {
-    let module = naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("voxel.wgsl"))).unwrap();
+    let module =
+        naga::front::wgsl::parse_str(&crate::voxel_shader(include_str!("voxel.wgsl"))).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),

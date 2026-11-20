@@ -4,7 +4,7 @@
 use crate::{adaptive_geometry::GeometryTile, spatial_appearance::Profile};
 use frontier_world::{
     vegetation::{self, Species},
-    Material, World, voxel_size,
+    voxel_size, Material, World,
 };
 use std::{
     collections::{HashMap, HashSet},

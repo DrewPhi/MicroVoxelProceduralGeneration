@@ -3,7 +3,7 @@
 use crate::{forward_index, material_id, Hit};
 use frontier_world::{
     vegetation::{model_for, PlantRecord, PlantVoxel, Species},
-    Cell, World, voxel_size,
+    voxel_size, Cell, World,
 };
 
 #[derive(Clone, Copy, Debug)]

@@ -1093,7 +1093,10 @@ impl World {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if (species != Species::Rowan && uses_decorative_ground_cover()) || min[0] >= max[0] || min[1] >= max[1] {
+        if (species != Species::Rowan && uses_decorative_ground_cover())
+            || min[0] >= max[0]
+            || min[1] >= max[1]
+        {
             return out;
         }
         for tx in min[0].div_euclid(256)..=(max[0] - 1).div_euclid(256) {
@@ -1125,7 +1128,11 @@ impl World {
         if species == Species::Rowan {
             return self.vegetation_records_species(min, max, species);
         }
-        if uses_decorative_ground_cover() || self.vegetation.is_none() || min[0] >= max[0] || min[1] >= max[1] {
+        if uses_decorative_ground_cover()
+            || self.vegetation.is_none()
+            || min[0] >= max[0]
+            || min[1] >= max[1]
+        {
             return Vec::new();
         }
         let mut records = Vec::new();

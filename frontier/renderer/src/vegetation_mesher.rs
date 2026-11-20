@@ -5,7 +5,7 @@
 //! Input-order sums, material-order reduction, face order, and greedy rectangle
 //! order deliberately match the reference, including its floating-point math.
 use crate::vegetation::{VegetationMesh, VegetationVertex};
-use frontier_world::{Cell, Material, voxel_size};
+use frontier_world::{voxel_size, Cell, Material};
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},

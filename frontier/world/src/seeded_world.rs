@@ -5,7 +5,7 @@
 //! and cache order never changes the world-space descriptors.
 use super::{noise, FbmParams, FbmRecipe, TerrainColumn};
 use crate::alpine::Value;
-use crate::{Material, voxel_size};
+use crate::{voxel_size, Material};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},

@@ -1,7 +1,7 @@
 //! Exact heightfield-only native voxel oracle. Every 6.25cm column is sampled;
 //! the max pyramid only rejects empty space and never substitutes coarse geometry.
 use crate::{forward_index, material_id, Hit};
-use frontier_world::{FbmTerrain, Material, voxel_size};
+use frontier_world::{voxel_size, FbmTerrain, Material};
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
@@ -110,7 +110,8 @@ impl Landscape {
                             let z = min[1] + (part * rows + i / size) as i64;
                             *v = (terrain
                                 .height_m((x as f64 + 0.5) * spacing, (z as f64 + 0.5) * spacing)
-                                / voxel_size()).round() as i32;
+                                / voxel_size())
+                            .round() as i32;
                         }
                     });
                 }
@@ -181,7 +182,8 @@ impl Landscape {
             (self.terrain.height_m(
                 (x as f64 + 0.5) * self.spacing(),
                 (z as f64 + 0.5) * self.spacing(),
-            ) / voxel_size()).round() as i64
+            ) / voxel_size())
+            .round() as i64
         }
     }
     fn hit(&self, x: i64, z: i64, y: i64, t: f64, face: usize, h: i64) -> Hit {
@@ -751,7 +753,8 @@ mod tests {
                 let h = (terrain.height_m(
                     (cx as f64 + 0.5) * voxel_size(),
                     (cz as f64 + 0.5) * voxel_size(),
-                ) / voxel_size()).round() as i64;
+                ) / voxel_size())
+                .round() as i64;
                 let material = terrain.surface_material(
                     (cx as f64 + 0.5) * voxel_size(),
                     (cz as f64 + 0.5) * voxel_size(),

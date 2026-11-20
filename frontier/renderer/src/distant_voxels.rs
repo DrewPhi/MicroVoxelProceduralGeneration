@@ -9,7 +9,7 @@ use super::{
 use crate::spatial_appearance::Profile;
 use frontier_world::{
     affine_bounds::{BoundBudget, ColumnBox},
-    FbmRecipe, Material, World, voxel_size,
+    voxel_size, FbmRecipe, Material, World,
 };
 use std::{
     collections::BTreeMap,

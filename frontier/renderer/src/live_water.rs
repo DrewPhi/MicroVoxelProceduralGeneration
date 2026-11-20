@@ -3,7 +3,7 @@ use crate::{Camera, Result};
 use frontier_world::{
     edit::{EditTransaction, Inventory},
     fluid::{FluidConfig, FluidRegion, FluidWorld, FLUID_CAPACITY},
-    Cell, Material, World, voxel_size,
+    voxel_size, Cell, Material, World,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
