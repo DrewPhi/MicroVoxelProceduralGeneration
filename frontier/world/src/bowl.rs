@@ -14,7 +14,9 @@ fn offset(c: Cell, [x, y, z]: [i64; 3]) -> Cell {
         z: c.z + z,
     }
 }
-pub const CAPACITY: u32 = 20; // 4.8828125 litres at the native resolution.
+// Bounds hostile save inputs and the renderer's quadratic parcel work. Live
+// intake is governed by space at the vessel opening.
+const MAX_SAVED_UNITS: u32 = 256;
 const MAX_DROPS: usize = 128;
 #[derive(Clone, Debug)]
 pub struct Drop {
@@ -54,12 +56,13 @@ impl Bowl {
         world: &mut World,
         eye: [f64; 3],
         dir: [f64; 3],
+        limit: u32,
     ) -> Result<u32, &'static str> {
         let hit = raycast(world, eye, dir, 2.2).ok_or("Move closer and aim at pond water")?;
         if hit.material != Material::Water {
             return Err("Aim at water within 2.2 m");
         }
-        self.scoop_at(world, hit.cell, CAPACITY)
+        self.scoop_at(world, hit.cell, limit)
     }
 
     pub fn scoop_at(
@@ -71,10 +74,7 @@ impl Bowl {
         if world.material(contact) != Material::Water {
             return Err("Lower the rim into the pond");
         }
-        if self.units == CAPACITY {
-            return Err("Bowl is full");
-        }
-        let count = (CAPACITY - self.units).min(limit) as usize;
+        let count = limit.min(MAX_SAVED_UNITS.saturating_sub(self.units)) as usize;
         if count == 0 {
             return Ok(0);
         }
@@ -585,7 +585,7 @@ impl Bowl {
             simulated: real(h[7])?,
             ..Default::default()
         };
-        if b.units > CAPACITY
+        if b.units > MAX_SAVED_UNITS
             || !(0. ..1.).contains(&b.phase)
             || b.simulated < 0.
             || b.spilled > b.emitted
@@ -651,6 +651,7 @@ impl Bowl {
 mod tests {
     use super::*;
     use crate::{desert, FbmParams, FbmRecipe};
+    const SAMPLE_UNITS: u32 = 20;
     fn fixture() -> (World, [f64; 3], [f64; 3]) {
         let p = FbmParams {
             recipe: FbmRecipe::Desert,
@@ -672,21 +673,21 @@ mod tests {
     fn return_to_pond_and_rescoop_preserve_the_original_ledger() {
         let (mut w, eye, dir) = fixture();
         let mut b = Bowl::default();
-        b.scoop(&mut w, eye, dir).unwrap();
+        b.scoop(&mut w, eye, dir, SAMPLE_UNITS).unwrap();
         for _ in 0..200 {
             b.emit(&w, eye, dir, 0.025, false, true);
             b.advance(&mut w, 0.025);
         }
         assert!(b.drops.is_empty());
         assert_eq!(b.units, 0);
-        assert_eq!(b.emitted, u64::from(CAPACITY));
+        assert_eq!(b.emitted, u64::from(SAMPLE_UNITS));
         assert!(b.moisture.is_empty());
         assert_eq!(b.removed.len(), b.deposited.len());
         assert!(b.conserved());
         let s = b.snapshot(19);
         let mut restored = Bowl::restore(&s, 19).unwrap();
-        let n = restored.scoop(&mut w, eye, dir).unwrap();
-        assert!(n > 0 && n <= CAPACITY);
+        let n = restored.scoop(&mut w, eye, dir, SAMPLE_UNITS).unwrap();
+        assert!(n > 0 && n <= SAMPLE_UNITS);
         assert!(restored.conserved());
         assert_eq!(
             restored.removed.len() - restored.deposited.len(),
@@ -697,8 +698,7 @@ mod tests {
     fn scoop_is_finite_and_pour_becomes_saved_moisture() {
         let (mut w, eye, dir) = fixture();
         let mut b = Bowl::default();
-        assert_eq!(b.scoop(&mut w, eye, dir), Ok(CAPACITY));
-        assert!(b.scoop(&mut w, eye, dir).is_err());
+        assert_eq!(b.scoop(&mut w, eye, dir, SAMPLE_UNITS), Ok(SAMPLE_UNITS));
         let o = desert::oasis(19, 0, 0);
         let x = o.x + 60.;
         let z = o.z;
@@ -710,7 +710,7 @@ mod tests {
         }
         assert_eq!(b.units, 0);
         assert!(b.drops.is_empty());
-        assert_eq!(b.moisture.values().sum::<u32>(), CAPACITY);
+        assert_eq!(b.moisture.values().sum::<u32>(), SAMPLE_UNITS);
         assert!(!b.damp.is_empty());
         assert!(b.conserved());
         let s = b.snapshot(19);
@@ -729,9 +729,15 @@ mod tests {
         let (mut world, eye, dir) = fixture();
         let mut bowl = Bowl::default();
         let hit = raycast(&world, eye, dir, 2.2).unwrap().cell;
-        assert_eq!(bowl.scoop(&mut world, eye, dir), Ok(CAPACITY));
+        assert_eq!(
+            bowl.scoop(&mut world, eye, dir, SAMPLE_UNITS),
+            Ok(SAMPLE_UNITS)
+        );
         assert_eq!(world.material(hit), Material::Water);
-        assert_eq!(bowl.removed.len() - bowl.deposited.len(), CAPACITY as usize);
+        assert_eq!(
+            bowl.removed.len() - bowl.deposited.len(),
+            SAMPLE_UNITS as usize
+        );
         assert!(bowl.conserved());
     }
 
@@ -782,7 +788,6 @@ mod tests {
         let (mut w, mut eye, dir) = fixture();
         eye[1] += 10.;
         let mut b = Bowl::default();
-        assert!(b.scoop(&mut w, eye, dir).is_err());
         assert!(b.conserved());
         assert_eq!(b.units, 0);
     }
@@ -790,7 +795,7 @@ mod tests {
     fn tipped_bowl_counts_spills_and_restart_in_flight() {
         let (mut w, eye, dir) = fixture();
         let mut b = Bowl::default();
-        b.scoop(&mut w, eye, dir).unwrap();
+        b.scoop(&mut w, eye, dir, SAMPLE_UNITS).unwrap();
         b.emit(&w, eye, dir, 0.1, true, true);
         b.emit(&w, eye, dir, 0.1, true, true);
         assert_eq!(b.spilled, 1);

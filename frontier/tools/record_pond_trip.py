@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--return-sprint", action="store_true")
+    parser.add_argument("--scoop-only", action="store_true", help="Record the scoop and turn without the return obstacle")
     args = parser.parse_args()
     out = args.output.resolve() / args.view
     out.mkdir(parents=True, exist_ok=False)
@@ -48,7 +49,7 @@ def main():
 
         def latest(prefix):
             for line in reversed(lines()):
-                if line.startswith(prefix) and line.endswith("]"):
+                if line.startswith(prefix + "[") and line.endswith("]"):
                     return json.loads(line[len(prefix):])
             return None
 
@@ -175,18 +176,24 @@ def main():
             note("dip_rim")
             button(True)
             try:
-                for _ in range(14):
+                for _ in range(16):
                     time.sleep(0.34)
-                    water = pose()[-2]
-                    if water == 20:
-                        break
-                    if water > 0:
-                        wait_for(lambda: pose()[-2] == 20, 3, "Bowl stopped filling in contact with the pond")
+                    if pose()[-2] > 0:
                         break
                     x.key("w", True)
                     time.sleep(0.155)
                     x.key("w", False)
-                wait_for(lambda: pose()[-2] == 20, 2, "Rim did not fill the bowl at the pond")
+                wait_for(lambda: pose()[-2] > 0, 2, "Water did not enter the opening")
+                last, stable_since = -1, time.monotonic()
+
+                def settled_fill():
+                    nonlocal last, stable_since
+                    water = pose()[-2]
+                    if water != last:
+                        last, stable_since = water, time.monotonic()
+                    return water > 0 and time.monotonic() - stable_since > 1.4
+
+                wait_for(settled_fill, 9, "Water in the submerged bowl did not settle")
                 note("water_in_bowl")
                 time.sleep(0.45)
             finally:
@@ -199,45 +206,51 @@ def main():
             time.sleep(0.45)
             note("carry_toward_rock")
 
-            def contacts():
-                result = []
-                for line in lines():
-                    match = re.match(r"player boot contact Cell \{ x: (-?\d+), y: (-?\d+), z: (-?\d+)", line)
-                    if match:
-                        hx, _, hz = (int(value) * 0.0625 for value in match.groups())
-                        near_rock = math.hypot(hx - rx, hz - rz) < 0.65
-                        if "recovery false" in line or near_rock:
-                            result.append(line)
-                return result
+            if args.scoop_only:
+                x.key("Control_L", False)
+                time.sleep(0.7)
+                after_trip = pose()
+                note("after_slow_turn")
+            else:
+                def contacts():
+                    result = []
+                    for line in lines():
+                        match = re.match(r"player boot contact Cell \{ x: (-?\d+), y: (-?\d+), z: (-?\d+)", line)
+                        if match:
+                            hx, _, hz = (int(value) * 0.0625 for value in match.groups())
+                            near_rock = math.hypot(hx - rx, hz - rz) < 0.65
+                            if "recovery false" in line or near_rock:
+                                result.append(line)
+                    return result
 
-            before_hits = len(contacts())
-            def caught_boot():
-                hits = contacts()
-                return hits[before_hits] if len(hits) > before_hits else None
+                before_hits = len(contacts())
+                def caught_boot():
+                    hits = contacts()
+                    return hits[before_hits] if len(hits) > before_hits else None
 
-            walk_to(inland(2.72), 0.085, careful=True, stop=caught_boot)
-            if not caught_boot():
-                time.sleep(0.63)
-                current = pose()
-                aim(math.atan2(rx - current[0], rz - current[2]), -0.41)
-                if pose()[-2] == 0:
-                    raise RuntimeError("The player reached the test obstacle with an empty bowl")
-                note("approach_obstacle")
-                if args.return_sprint:
-                    x.key("Shift_L", True)
-                x.key("w", True)
-                try:
-                    wait_for(caught_boot, 9, "No obstructed step on the return path")
-                    time.sleep(0.34)
-                finally:
-                    x.key("w", False)
+                walk_to(inland(2.72), 0.085, careful=True, stop=caught_boot)
+                if not caught_boot():
+                    time.sleep(0.63)
+                    current = pose()
+                    aim(math.atan2(rx - current[0], rz - current[2]), -0.41)
+                    if pose()[-2] == 0:
+                        raise RuntimeError("The player reached the test obstacle with an empty bowl")
+                    note("approach_obstacle")
                     if args.return_sprint:
-                        x.key("Shift_L", False)
-            note("boot_contact")
-            events[-1]["contact"] = caught_boot()
-            time.sleep(1.2)
-            after_trip = pose()
-            note("after_contact")
+                        x.key("Shift_L", True)
+                    x.key("w", True)
+                    try:
+                        wait_for(caught_boot, 9, "No obstructed step on the return path")
+                        time.sleep(0.34)
+                    finally:
+                        x.key("w", False)
+                        if args.return_sprint:
+                            x.key("Shift_L", False)
+                note("boot_contact")
+                events[-1]["contact"] = caught_boot()
+                time.sleep(1.2)
+                after_trip = pose()
+                note("after_contact")
             time.sleep(2.)
             if recorder.poll() is not None:
                 raise RuntimeError("Recording process exited early")

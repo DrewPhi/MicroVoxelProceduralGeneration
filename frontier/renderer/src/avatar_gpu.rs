@@ -2,14 +2,30 @@
 use crate::{
     avatar::{heading, Avatar, BOOT_FORWARD, BOOT_HALF},
     bowl_live::BowlLive,
-    mesh::Vertex,
     vessel, Camera, Gpu,
 };
 use frontier_world::{Cell, VOXEL_SIZE};
 use glam::{DQuat, DVec3, Vec3};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const VERTICES: u64 = 64_000;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    color: [f32; 3],
+    normal: [f32; 3],
+    water_depth: f32,
+}
+
+#[derive(Clone, Copy)]
+struct WaterFace {
+    corners: [DVec3; 4],
+    normal: DVec3,
+    depth: f32,
+    distance_squared: f64,
+}
 
 pub struct AvatarGpu {
     pipeline: wgpu::RenderPipeline,
@@ -23,7 +39,17 @@ pub struct AvatarGpu {
 impl AvatarGpu {
     fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
-        let shader = device.create_shader_module(wgpu::include_wgsl!("avatar.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("player and shared water optics"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("water.wgsl"),
+                    "\n",
+                    include_str!("avatar.wgsl")
+                )
+                .into(),
+            ),
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("world-space player and held bowl"),
             layout: None,
@@ -34,14 +60,18 @@ impl AvatarGpu {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(gpu.scene_format.into())],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.scene_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -100,6 +130,7 @@ impl AvatarGpu {
         view: Camera,
         aspect: f32,
         sun: Vec3,
+        overcast: f32,
     ) {
         if cache
             .as_ref()
@@ -124,7 +155,7 @@ impl AvatarGpu {
         gpu.queue.write_buffer(
             &pass.uniform,
             64,
-            bytemuck::cast_slice(&sun.extend(0.).to_array()),
+            bytemuck::cast_slice(&sun.extend(overcast).to_array()),
         );
         let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("player geometry after terrain"),
@@ -158,20 +189,22 @@ struct Model {
     origin: DVec3,
     data: Vec<Vertex>,
     cells: BTreeMap<Cell, [f32; 3]>,
+    water: BTreeSet<Cell>,
 }
 
 impl Model {
-    fn tri(&mut self, face: [DVec3; 3], normal: DVec3, color: [f32; 3]) {
+    fn tri(&mut self, face: [DVec3; 3], normal: DVec3, color: [f32; 3], water_depth: f32) {
         self.data.extend(face.map(|p| Vertex {
             position: (p - self.origin).as_vec3().into(),
             color,
             normal: normal.as_vec3().into(),
+            water_depth,
         }));
     }
 
-    fn quad(&mut self, [a, b, c, d]: [DVec3; 4], normal: DVec3, color: [f32; 3]) {
-        self.tri([a, b, c], normal, color);
-        self.tri([a, c, d], normal, color);
+    fn quad(&mut self, [a, b, c, d]: [DVec3; 4], normal: DVec3, color: [f32; 3], water_depth: f32) {
+        self.tri([a, b, c], normal, color, water_depth);
+        self.tri([a, c, d], normal, color, water_depth);
     }
 
     fn cuboid(&mut self, center: DVec3, rotation: DQuat, size: DVec3, color: [f32; 3]) {
@@ -203,17 +236,19 @@ impl Model {
 
     fn exposed_faces(&mut self) {
         let cells = std::mem::take(&mut self.cells);
-        for (&cell, &color) in &cells {
+        let water = std::mem::take(&mut self.water);
+        let mut liquid = Vec::new();
+        for (cell, color) in cells
+            .iter()
+            .map(|(&cell, &color)| (cell, Some(color)))
+            .chain(water.iter().map(|&cell| (cell, None)))
+        {
             let center = DVec3::from_array(cell.center_m());
             for axis in 0..3 {
                 for sign in [-1, 1] {
-                    let mut adjacent = [cell.x, cell.y, cell.z];
-                    adjacent[axis] += sign;
-                    if cells.contains_key(&Cell {
-                        x: adjacent[0],
-                        y: adjacent[1],
-                        z: adjacent[2],
-                    }) {
+                    let outward = offset(cell, axis, sign);
+                    if cells.contains_key(&outward) || (color.is_none() && water.contains(&outward))
+                    {
                         continue;
                     }
                     let mut normal = DVec3::ZERO;
@@ -222,18 +257,38 @@ impl Model {
                     u[(axis + 1) % 3] = 1.;
                     let v = normal.cross(u);
                     let half = VOXEL_SIZE * 0.5;
-                    self.quad(
-                        [
-                            center + (normal - u - v) * half,
-                            center + (normal + u - v) * half,
-                            center + (normal + u + v) * half,
-                            center + (normal - u + v) * half,
-                        ],
-                        normal,
-                        color,
-                    );
+                    let corners = [
+                        center + (normal - u - v) * half,
+                        center + (normal + u - v) * half,
+                        center + (normal + u + v) * half,
+                        center + (normal - u + v) * half,
+                    ];
+                    if let Some(color) = color {
+                        self.quad(corners, normal, color, 0.);
+                    } else {
+                        let face_center = center + normal * half;
+                        if (self.origin - face_center).dot(normal) <= 0. {
+                            continue;
+                        }
+                        let mut count = 1;
+                        while water.contains(&offset(cell, axis, -sign * count)) {
+                            count += 1;
+                        }
+                        liquid.push(WaterFace {
+                            corners,
+                            normal,
+                            depth: count as f32 * VOXEL_SIZE as f32,
+                            distance_squared: self.origin.distance_squared(face_center),
+                        });
+                    }
                 }
             }
+        }
+        // Solid depth and color are present before the volumetric attenuation
+        // is composited, including interior wood faces behind the water.
+        liquid.sort_by(|a, b| b.distance_squared.total_cmp(&a.distance_squared));
+        for face in liquid {
+            self.quad(face.corners, face.normal, [0.; 3], face.depth);
         }
     }
 
@@ -251,6 +306,16 @@ impl Model {
     }
 }
 
+fn offset(cell: Cell, axis: usize, by: i64) -> Cell {
+    let mut xyz = [cell.x, cell.y, cell.z];
+    xyz[axis] += by;
+    Cell {
+        x: xyz[0],
+        y: xyz[1],
+        z: xyz[2],
+    }
+}
+
 /// Equal-length two-bone chain. The pole controls which way the joint bends.
 fn joint(a: DVec3, b: DVec3, bone: f64, pole: DVec3) -> DVec3 {
     let delta = b - a;
@@ -265,6 +330,7 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
         origin,
         data: Vec::with_capacity(16_000),
         cells: BTreeMap::new(),
+        water: BTreeSet::new(),
     };
     let hands = avatar.hands(aim);
     let forward = heading(aim.yaw);
@@ -367,11 +433,13 @@ fn build(avatar: &Avatar, show_body: bool, bowl: &BowlLive, aim: Camera, origin:
             .vessel
             .display_cells(|cell| mesh.cells.contains_key(&cell))
         {
-            mesh.cells.insert(cell, [0.043, 0.41, 0.57]);
+            mesh.water.insert(cell);
         }
     }
     for drop in &bowl.state.drops {
-        mesh.cells.entry(drop.cell).or_insert([0.066, 0.48, 0.67]);
+        if !mesh.cells.contains_key(&drop.cell) {
+            mesh.water.insert(drop.cell);
+        }
     }
     mesh
 }

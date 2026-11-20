@@ -13,8 +13,9 @@ to switch between first and third person during play.
 - Walk to the pond with **WASD**. **Ctrl** crouches, slows each step, and gives your
   boots more clearance over obstacles. A blocked swing can disturb your balance.
 - At the shoreline, hold **Ctrl**, look down, and hold the **left mouse button**
-  until water reaches the opening. The bowl holds twenty native water units (4.88 L).
-  Release the mouse button and raise your view to carry it away.
+  to lower the bowl. Water flows in whenever the opening is submerged and there
+  is space for it. The chamber volume and rim position govern the fill. Release
+  the mouse button and raise the bowl gently to carry it away.
 - Water responds to changes in speed, turns, and bowl tilt. Hold **right mouse**
   or **R** to pour, or **Q** to tip it farther.
 - **E** stows your item and **1–4** swap pockets. **Escape** opens settings and
@@ -76,9 +77,16 @@ The avatar, bowl, held water, and airborne water are rendered on the terrain's
 subcell motion between the cells that it occupies. The grip follows the
 animated torso with translational and rotational compliance. A small
 pressure-corrected parcel solver carries exactly one native unit per parcel.
-The bowl's wall and floor constrain parcels, and crossing the opening transfers
-a parcel into the existing world or droplet ledger. Current saves restore the
-held amount into a settled bowl.
+The bowl's wall and floor constrain parcels. The local water head at the low
+rim drives drainage as the bowl leaves the pond. Crossing the opening transfers
+a unit into the existing world or droplet ledger. Current saves restore the
+held amount into a settled bowl. The HUD uses the upright geometric brim
+volume as a reference and reports the actual water amount.
+
+The bowl and airborne droplets share the pond's Fresnel reflection, sky
+reflection, absorption, and sun glint. A bounded thickness estimate from
+connected water cells blends transmitted scene color, including the bowl's
+inner wood, through the visible water faces.
 
 `--pond-test` places a short stone ledge on a level patch of the seeded desert bank for
 repeatable playtests. The contact solver queries that ledge like ordinary world
@@ -101,7 +109,7 @@ python3 tools/record_pond_trip.py third-person --width 1920 --height 1080 --outp
 ```
 
 The tool uses ordinary keyboard and mouse input, checks slow passage over the
-rocks, captures a full bowl at the pond, and records the actual obstructed footstep
+rocks, holds the submerged opening until the fill settles, and records the actual obstructed footstep
 and resulting spill. It verifies the water ledger. It keeps both runs in separate
 save files alongside the recordings and reports.
 
@@ -157,3 +165,13 @@ twenty units. The movies use standard keyboard and mouse inputs.
 
 AMD Ryzen 5 7640U, Radeon 760M Vulkan. GPU terrain allocations ended at
 156 MiB and 172 MiB. Frame durations include recording and presentation overhead.
+
+Use `--scoop-only` with the recorder for a pond-to-bowl material comparison
+and a slow turn. The upright chamber estimates about 17.5 L at the rim.
+An upright submerged test lifts roughly 17 L intact. A tilt lowers the
+effective rim and drains excess water using the same conserving ledger.
+
+The 1080p comparison in `output/brim-water-demo/first-person/take.mp4`
+records the seed 19 shoreline fixture. The player takes the bowl out of the
+pond at about 16 seconds, with 15.6 L held after the turn. The report and
+recorded save verify that the water ledger balances.

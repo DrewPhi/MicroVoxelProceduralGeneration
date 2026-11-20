@@ -2757,6 +2757,7 @@ impl Viewer {
                 view_camera,
                 scene_width as f32 / scene_height as f32,
                 sun,
+                self.visual_settings.overcast,
             );
         }
         if let Some(atmosphere) = &self.atmosphere {

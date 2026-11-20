@@ -1,7 +1,7 @@
 //! Desert inventory, physical bowl interaction, and garden updates.
 use crate::{avatar::Hands, vessel::Vessel, Camera, Result};
 use frontier_world::{
-    bowl::{Bowl, CAPACITY},
+    bowl::Bowl,
     garden::{Garden, GrowthControls, Tissue},
     pockets::{Item, Pockets, HANDFUL},
     Cell, Material, World, VOXEL_SIZE,
@@ -27,6 +27,7 @@ pub struct BowlLive {
     pub pouring: bool,
     scooping: bool,
     dip: f64,
+    dip_speed: f64,
     tilt: f64,
     pub vessel: Vessel,
     pub message: String,
@@ -108,6 +109,7 @@ impl BowlLive {
             pouring: false,
             scooping: false,
             dip: 0.,
+            dip_speed: 0.,
             tilt: 0.,
             vessel: Vessel::default(),
             message: "Find the shoreline and scoop some water".into(),
@@ -334,15 +336,14 @@ impl BowlLive {
         };
         let response = 1. - (-elapsed * 11.).exp();
         self.tilt += (target - self.tilt) * response;
-        let dip_response = 1. - (-elapsed * if scoop { 6.5 } else { 3.4 }).exp();
-        self.dip += (f64::from(scoop) - self.dip) * dip_response;
+        self.dip_speed += ((f64::from(scoop) - self.dip) * 20. - self.dip_speed * 10.) * elapsed;
+        self.dip = (self.dip + self.dip_speed * elapsed).clamp(0., 1.);
         let spilling_before = self.state.spilled;
         let filled = if equipped {
             self.vessel.step(
                 world,
                 &mut self.state,
                 hands.vessel(self.dip, self.tilt),
-                scoop,
                 !pouring,
                 elapsed,
             )
@@ -393,14 +394,14 @@ impl BowlLive {
             );
         }
         if filled > 0 {
-            if self.state.units == CAPACITY {
+            if self.state.units == filled {
                 eprintln!(
                     "bowl scoop accepted units={filled} held={} conserved={}",
                     self.state.units,
                     self.state.conserved()
                 );
             }
-            self.message = "Water scooped from the pond".into();
+            self.message = "Water flowing through the opening".into();
         } else if scoop && self.state.units == 0 {
             self.message = "Hold Ctrl and look down to dip the rim into the pond".into();
         }
@@ -447,7 +448,7 @@ impl BowlLive {
         Ok(())
     }
     pub fn json(&self) -> String {
-        let mut out=format!("{{\"units\":{},\"capacity\":{},\"litres\":{},\"scooped_units\":{},\"emitted_units\":{},\"spilled_units\":{},\"airborne\":{},\"absorbed_units\":{},\"damp_cells\":{},\"deposited_units\":{},\"conserved\":{},\"simulation_debt\":{},\"save_count\":{}}}",self.state.units,CAPACITY,self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.state.scooped,self.state.emitted,self.state.spilled,self.state.drops.len(),self.state.moisture.values().sum::<u32>(),self.state.damp.len(),self.state.deposited.len(),self.state.conserved(),self.debt,self.saves);
+        let mut out=format!("{{\"units\":{},\"capacity\":{},\"litres\":{},\"scooped_units\":{},\"emitted_units\":{},\"spilled_units\":{},\"airborne\":{},\"absorbed_units\":{},\"damp_cells\":{},\"deposited_units\":{},\"conserved\":{},\"simulation_debt\":{},\"save_count\":{}}}",self.state.units,crate::vessel::brim_units(),self.state.units as f64*VOXEL_SIZE.powi(3)*1000.,self.state.scooped,self.state.emitted,self.state.spilled,self.state.drops.len(),self.state.moisture.values().sum::<u32>(),self.state.damp.len(),self.state.deposited.len(),self.state.conserved(),self.debt,self.saves);
         out.pop();
         out.push_str(&format!(
             ",\"growth_controls\":{{\"infinite_energy\":{infinite},\"infinite_water\":{infinite},\"speed_step\":{}}}}}",
@@ -462,7 +463,7 @@ impl BowlLive {
     }
     pub fn overlay(&self, camera: Camera, aspect: f32) -> Overlay {
         let mut out = Overlay {
-            fill: self.state.units as f32 / CAPACITY as f32,
+            fill: (f64::from(self.state.units) / crate::vessel::brim_units()).min(1.) as f32,
             ..Default::default()
         };
         let pockets = self
@@ -695,7 +696,7 @@ mod garden_save_tests {
         live.pockets.pickup(&mut world, &cells).unwrap();
         live.pockets.drop_sand(&mut world, top, |_| true).unwrap();
         live.state
-            .scoop(&mut world, [o.x, o.stage + 1., o.z], [0., -1., 0.])
+            .scoop(&mut world, [o.x, o.stage + 1., o.z], [0., -1., 0.], 20)
             .unwrap();
         let eye = [x, world.ground_height_m(x, z) + 1.7, z];
         for _ in 0..960 {

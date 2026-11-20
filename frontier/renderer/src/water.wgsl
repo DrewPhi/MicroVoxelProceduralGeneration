@@ -18,9 +18,12 @@ fn water_fresnel(cosine:f32)->f32 {
     return 0.0204+0.9796*square*square*edge;
 }
 
+fn water_transmittance(distance:f32)->vec3<f32> {
+    return exp(-vec3(0.88,0.43,0.39)*distance);
+}
+
 fn water_medium(color:vec3<f32>,distance:f32)->vec3<f32> {
-    let transmission=exp(-vec3(0.88,0.43,0.39)*distance);
-    return mix(vec3(0.013,0.063,0.056),color,transmission);
+    return mix(vec3(0.013,0.063,0.056),color,water_transmittance(distance));
 }
 
 fn water_sky(ray:vec3<f32>,sun:vec3<f32>,overcast:f32)->vec3<f32> {
