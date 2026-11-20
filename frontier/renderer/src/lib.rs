@@ -892,6 +892,7 @@ impl Gpu {
                 self.visual_settings
                     .as_ref()
                     .is_some_and(|s| s.visibility_benchmark),
+                self.water_time.get(),
             );
         }
         let capture_layer = naadf::capture_layer();
@@ -3087,7 +3088,8 @@ impl ApplicationHandler for Viewer {
                                 plane.exit(&mut self.camera);
                             } else {
                                 self.player_edit.cancel();
-                                self.aircraft = Some(aircraft::Aircraft::default());
+                                self.aircraft =
+                                    Some(aircraft::Aircraft::enter(&self.world, &mut self.camera));
                                 self.visual_settings.walking = false;
                                 self.walking.reset();
                                 if let Some(ui) = &mut self.settings_ui {
@@ -3923,7 +3925,7 @@ pub fn run() -> Result<()> {
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
         aircraft: (visual_settings.flight_horizon && !visual_settings.walking)
-            .then(aircraft::Aircraft::default),
+            .then(|| aircraft::Aircraft::enter(&world, &mut camera)),
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -4131,6 +4133,11 @@ pub fn run() -> Result<()> {
             committed_memory_bytes: None,
         };
         let mut json = report.to_json();
+        if let Some(plane) = &viewer.aircraft {
+            let pose = plane.exterior_pose().unwrap_or(viewer.camera);
+            json.pop();
+            json.push_str(&format!(",\"aircraft\":{{\"on_ground\":{},\"speed_mps\":{},\"position_m\":{:?},\"pitch_degrees\":{},\"chase_view\":{}}}}}",plane.on_ground(),plane.airspeed_mps(),pose.position.to_array(),pose.pitch.to_degrees(),plane.exterior_pose().is_some()));
+        }
         json.pop();
         json.push_str(&format!(
             ",\"shadow_inspector\":{}}}",

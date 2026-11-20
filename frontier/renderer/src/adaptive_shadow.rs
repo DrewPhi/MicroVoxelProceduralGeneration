@@ -294,8 +294,15 @@ impl AdaptiveGpu {
         bounds: Option<[[f64; 3]; 2]>,
         eye: [f64; 3],
         comparison: bool,
+        water_time: f32,
     ) {
-        let mut params = [0f32; 10];
+        let mut params = [0f32; 14];
+        params[10..].copy_from_slice(&[
+            eye[0].rem_euclid(2048.) as f32,
+            eye[2].rem_euclid(2048.) as f32,
+            water_time,
+            0.,
+        ]);
         params[..2].copy_from_slice(&self.landscape_offset(eye));
         let values = &mut params[2..];
         if let Some(b) = bounds {
@@ -595,7 +602,7 @@ pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: std::num::NonZeroU64::new(112),
+                        min_binding_size: std::num::NonZeroU64::new(128),
                     },
                     count: None,
                 },
@@ -675,7 +682,7 @@ impl NearShadowResources {
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("eye-relative close plant shadow transform"),
-            contents: &[0u8; 112],
+            contents: &[0u8; 128],
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let naadf_empty = crate::naadf::Bindings::empty(device);

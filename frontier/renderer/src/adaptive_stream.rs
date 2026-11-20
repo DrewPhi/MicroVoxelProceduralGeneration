@@ -2066,7 +2066,11 @@ impl AdaptiveStream {
         let mut reserved = evicted;
         let mut keys = Vec::with_capacity(limit);
         for &key in self.pending.iter().take(limit) {
-            let Some(bytes) = build_memory::reservation(key) else {
+            let highlands = self
+                .world
+                .fbm_terrain()
+                .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands);
+            let Some(bytes) = build_memory::terrain_reservation(key, highlands) else {
                 if self.build_refused.insert(key) {
                     self.build_memory.refused_jobs += 1;
                 }

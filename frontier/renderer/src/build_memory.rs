@@ -15,6 +15,10 @@ pub(crate) struct BuildMemoryStats {
 }
 
 pub(crate) fn reservation(key: TileKey) -> Option<usize> {
+    terrain_reservation(key, true)
+}
+
+pub(crate) fn terrain_reservation(key: TileKey, highlands: bool) -> Option<usize> {
     let w = key.width_cells as u128;
     let step = key.step_cells as u128;
     if w == 0 || w > 1 << 20 || step == 0 || step > w || w % step != 0 {
@@ -58,8 +62,15 @@ pub(crate) fn reservation(key: TileKey) -> Option<usize> {
         let native_edges = key.edge_steps.iter().filter(|&&e| e == 1).count() as u128;
         // Interior fans, subdivided perimeter fans (including native stair
         // jumps), then <=3 two-triangle material spans per native boundary cell.
-        let vertices =
-            (3 * (4 * g * g + 2 * perimeter + 4 * g + 6 * native_edges * w)).min(1_000_000);
+        // A Highland fan crossing sea level can split each coarse roof
+        // triangle into three triangles along the waterline.
+        let shoreline = if highlands && step as f64 * frontier_world::voxel_size() >= 4. {
+            2 * (4 * g * g + perimeter)
+        } else {
+            0
+        };
+        let vertices = (3 * (4 * g * g + 2 * perimeter + 4 * g + 6 * native_edges * w + shoreline))
+            .min(1_000_000);
         // Base vectors double on growth. Compaction can coexist with original
         // vertices, a preallocated hash table, remap, and old/new shrink buffers.
         let compact = vertices.min(500_000) * 252;

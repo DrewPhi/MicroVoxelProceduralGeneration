@@ -36,3 +36,18 @@ fn water_glint(direction:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>,overcast:f32)-
     let glint=pow(alignment,95.)*0.17+pow(alignment,420.)*0.37;
     return vec3(1.,0.82,0.57)*glint*(1.-0.9*overcast);
 }
+
+// Metre-scale slope bands for distant water. All harmonics repeat at 2048 m
+// so a rebased camera retains phase. Unresolved slopes fade with the footprint.
+fn water_swell(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32)->vec3<f32> {
+    let phase=p*(6.283185307/2048.);
+    let warp=sin(dot(phase,vec2(8.,-11.))+.18*time)*1.4
+        +.65*sin(dot(phase,vec2(5.,14.))-.12*time);
+    let packet=.59+.23*sin(dot(phase,vec2(9.,4.))+.16*time)
+        +.18*sin(dot(phase,vec2(-4.,13.))-.23*time);
+    let a=sin(dot(phase,vec2(38.,17.))+.9*time+warp)*(1.-smoothstep(7.,22.,pixel));
+    let b=sin(dot(phase,vec2(-31.,69.))-.74*time-warp)*(1.-smoothstep(4.,12.,pixel));
+    let c=sin(dot(phase,vec2(99.,-71.))+1.22*time+.6*warp)*(1.-smoothstep(2.,7.,pixel));
+    let slope=packet*vec2(.024*a-.016*b+.009*c,.011*a+.027*b-.007*c);
+    return normalize(normal+vec3(slope.x,0.,slope.y)*normal.y);
+}

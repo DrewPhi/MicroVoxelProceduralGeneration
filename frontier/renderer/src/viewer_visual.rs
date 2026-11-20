@@ -31,7 +31,12 @@ impl Viewer {
         let mut stats = SettingsStats {
             flight: self.aircraft.as_ref().map(|p| {
                 let pose = p.exterior_pose().unwrap_or(self.camera);
-                (p.airspeed_mps(), pose.position.y, pose.roll.to_degrees())
+                (
+                    p.airspeed_mps(),
+                    pose.position.y,
+                    pose.roll.to_degrees(),
+                    p.on_ground(),
+                )
             }),
             frame_ms: self.display_frame_ms,
             process_mib: self.resource_process_mib,

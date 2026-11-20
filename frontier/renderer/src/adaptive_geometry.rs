@@ -1273,7 +1273,15 @@ fn build_surface_with_geometry(
         let radius = (12. / voxel_size()).round().max(1.) as i64;
         let mut painted = HashMap::new();
         for vertex in &mut generator.mesh.vertices {
-            if vertex.normal[1] <= 0. || vertex.color == Material::Water.color() {
+            if vertex.normal[1] <= 0. {
+                continue;
+            }
+            if vertex.color == Material::Water.color() {
+                // Coarse shoreline triangles interpolate the visible top from
+                // sea to beach. Their water portion reflects the level sea.
+                if vertex.normal[1] > 0.85 {
+                    vertex.normal = [0., 1., 0.];
+                }
                 continue;
             }
             let x = key.min[0] + (vertex.position[0] as f64 / voxel_size()).round() as i64;
@@ -2292,6 +2300,18 @@ fn landscape_paint(terrain: &frontier_world::FbmTerrain, step: i64) -> bool {
         && step as f64 * voxel_size() >= 4.
 }
 
+fn coastline_crossing(a: [f32; 3], bed_a: i64, b: [f32; 3], bed_b: i64) -> [f32; 3] {
+    let (wet, below, dry, above) = if bed_a < 0 {
+        (a, bed_a, b, bed_b)
+    } else {
+        (b, bed_b, a, bed_a)
+    };
+    // Integer bed tops below zero are submerged. The midpoint between the
+    // last wet level and the first dry level is the classification boundary.
+    let fraction = (-0.5 - below as f64) / (above as f64 - below as f64);
+    std::array::from_fn(|i| (wet[i] as f64 + (dry[i] as f64 - wet[i] as f64) * fraction) as f32)
+}
+
 impl Generator<'_> {
     fn height(&mut self, x: i64, z: i64) -> Result<i64, String> {
         Ok(self.column([x, z])?.height)
@@ -2348,6 +2368,55 @@ impl Generator<'_> {
         self.mesh.indices.extend([base, base + 1, base + 2]);
         Ok(())
     }
+    /// Cut the material boundary on the existing proxy triangle. Shared edges
+    /// interpolate from the wet end in both tiles, including stitched fans.
+    fn landscape_triangle(
+        &mut self,
+        points: [[f32; 3]; 3],
+        material: Material,
+        coast: bool,
+    ) -> Result<(), String> {
+        let [a, b, c] = points;
+        if !coast || points.iter().all(|p| p[1] != 0.) {
+            return self.triangle(a, b, c, material);
+        }
+        let mut bed = [0; 3];
+        let mut land = material;
+        for (i, p) in points.iter().enumerate() {
+            let x = (p[0] as f64 / voxel_size()).round() as i64;
+            let z = (p[2] as f64 / voxel_size()).round() as i64;
+            let col = self.column([x, z])?;
+            if col.height != 0 && col.height != col.ground_height {
+                return self.triangle(a, b, c, material); // inland water at a different stage
+            }
+            bed[i] = col.ground_height;
+            if bed[i] >= 0 {
+                land = col.bands[0];
+            }
+        }
+        let wet = bed.map(|depth| depth < 0);
+        let count = wet.iter().filter(|v| **v).count();
+        match count {
+            0 => self.triangle(a, b, c, land),
+            3 => self.triangle(a, b, c, Material::Water),
+            _ => {
+                let lone_is_wet = count == 1;
+                let i = wet.iter().position(|v| *v == lone_is_wet).unwrap();
+                let j = (i + 1) % 3;
+                let k = (i + 2) % 3;
+                let ab = coastline_crossing(points[i], bed[i], points[j], bed[j]);
+                let ac = coastline_crossing(points[i], bed[i], points[k], bed[k]);
+                let (lone, pair) = if lone_is_wet {
+                    (Material::Water, land)
+                } else {
+                    (land, Material::Water)
+                };
+                self.triangle(points[i], ab, ac, lone)?;
+                self.triangle(ab, points[j], points[k], pair)?;
+                self.triangle(ab, points[k], ac, pair)
+            }
+        }
+    }
     fn patch(&mut self, x: i64, z: i64, s: i64) -> Result<(), String> {
         let start_vertex = self.mesh.vertices.len();
         let start_index = self.mesh.indices.len();
@@ -2365,6 +2434,10 @@ impl Generator<'_> {
         let h = self.height(x + s / 2, z + s / 2)?;
         let material = self.material(x + s / 2, z + s / 2, h - 1)?;
         let width = self.key.width_cells as i64;
+        let coast = self
+            .world
+            .fbm_terrain()
+            .is_some_and(|t| landscape_paint(t, s));
         // Clockwise in x/z is upward in x/y/z. At exterior edges duplicate
         // native horizontal intervals plus their height jumps deliberately.
         for edge in 0..4 {
@@ -2375,7 +2448,11 @@ impl Generator<'_> {
                 _ => z == 0,
             };
             if !outside {
-                self.triangle(center, corners[edge], corners[(edge + 1) % 4], material)?;
+                self.landscape_triangle(
+                    [center, corners[edge], corners[(edge + 1) % 4]],
+                    material,
+                    coast,
+                )?;
                 continue;
             }
             let stride = self.key.edge_steps[edge] as i64;
@@ -2389,7 +2466,7 @@ impl Generator<'_> {
                     };
                     let a = self.point(ax, az)?;
                     let b = self.point(bx, bz)?;
-                    self.triangle(center, a, b, material)?;
+                    self.landscape_triangle([center, a, b], material, coast)?;
                 }
                 continue;
             }
@@ -4484,6 +4561,60 @@ mod tests {
         assert_eq!(sa, sb);
         assert!(sa.len() >= 32);
     }
+    #[test]
+    fn sea_and_beach_share_cut_edges_without_changing_projected_coverage() {
+        let world = World::fbm(
+            40961,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tile = build(
+            &world,
+            TileKey {
+                min: [20480, -4096],
+                width_cells: 4096,
+                step_cells: 256,
+                edge_steps: [256; 4],
+                source_revision: 0,
+            },
+            || false,
+        )
+        .unwrap();
+        let mut water = HashSet::new();
+        let mut land = HashSet::new();
+        let mut area = 0.;
+        for triangle in tile.mesh.indices.chunks_exact(3) {
+            let vertices: [Vertex; 3] =
+                std::array::from_fn(|i| tile.mesh.vertices[triangle[i] as usize]);
+            let points = vertices.map(|v| [v.position[0] as f64, v.position[2] as f64]);
+            let [a, b, c] = points;
+            let twice_area = (b[1] - a[1]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[1] - a[1]);
+            assert!(twice_area >= 0.);
+            area += twice_area * 0.5;
+            let wet = vertices[0].color == Material::Water.color();
+            for v in vertices {
+                assert_eq!(v.color == Material::Water.color(), wet);
+                let set = if wet { &mut water } else { &mut land };
+                set.insert(v.position.map(f32::to_bits));
+            }
+        }
+        let side = tile.key.width_cells as f64 * voxel_size();
+        assert!((area - side * side).abs() < 1e-4 * side);
+        let cuts = water
+            .intersection(&land)
+            .filter(|p| {
+                let [x, _, z] = p.map(f32::from_bits);
+                [x, z]
+                    .into_iter()
+                    .any(|v| (v as f64 / voxel_size()).fract().abs() > 0.001)
+            })
+            .count();
+        assert!(cuts >= 8, "expected shared subcell coastline, found {cuts}");
+    }
+
     #[test]
     fn highland_landscape_vertices_match_across_two_lod_levels() {
         let world = World::fbm(

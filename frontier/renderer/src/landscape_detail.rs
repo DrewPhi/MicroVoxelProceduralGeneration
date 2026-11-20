@@ -51,19 +51,20 @@ impl Grid {
                 let sample = reusable.and_then(|g| g.get(x, z)).unwrap_or_else(|| {
                     let c = Cell::from_meters([x as f64 * STEP_M, 0., z as f64 * STEP_M]);
                     let (col, rgb) = terrain.landscape_column(c.x, c.z, source.vegetation);
-                    let [r, g, b] = rgb.map(unorm);
+                    let wet = col.top_material() == Material::Water;
+                    let [r, g, b] = if wet { col.ground_surface.color() } else { rgb }.map(unorm);
+                    let depth =
+                        ((col.visible_top - col.ground_top) as f64 * source.edge).clamp(0., 12.);
+                    // Keep 255 for dry land. Both texture layers can then be
+                    // constructed from the same compact canonical sample.
+                    let code = if wet {
+                        (depth * (254. / 12.)).round() as u8
+                    } else {
+                        255
+                    };
                     Sample {
                         height: (col.visible_top as f64 * source.edge) as f32,
-                        albedo: [
-                            r,
-                            g,
-                            b,
-                            if col.top_material() == Material::Water {
-                                0
-                            } else {
-                                255
-                            },
-                        ],
+                        albedo: [r, g, b, code],
                     }
                 });
                 samples.push(sample);
@@ -82,8 +83,15 @@ impl Grid {
                 .normalize();
                 let at = (v * SIDE + u) * 4;
                 let [x, y, z] = n.to_array().map(|v| unorm(0.5 + v * 0.5));
-                pixels[at..at + 4].copy_from_slice(&[x, y, z, samples[j].albedo[3]]);
-                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&samples[j].albedo);
+                let [r, g, b, depth] = samples[j].albedo;
+                let dry = depth == 255;
+                pixels[at..at + 4].copy_from_slice(&[x, y, z, if dry { 255 } else { 0 }]);
+                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[
+                    r,
+                    g,
+                    b,
+                    if dry { 0 } else { depth },
+                ]);
             }
         }
         (

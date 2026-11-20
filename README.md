@@ -22,6 +22,12 @@ between the aircraft and free camera. **F** switches to walking from the
 aircraft. The fuselage, wingtips and wheels check swept paths against the
 edited voxels. The chase camera also checks the space behind the aircraft.
 
+To land, bring the wings level, slow below 48 m/s and descend at less than
+3.5 m/s onto a firm, nearly level strip. On the ground, **A/D** steer and
+**S** brakes. Hold **W** to accelerate, then **Down** to lift the nose once
+you reach 29 m/s. Both wheels need support. You can build a runway from
+placed voxels or enter the aircraft with **V** while standing on level ground.
+
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. The preset renders a 6 km active terrain view with a
 world-aligned landscape horizon fading out to 35 km. The horizon samples the
@@ -93,6 +99,15 @@ once it contains only unmodified air. A regional flyover 160 m above a saved
 excavation and deck measured **4.79 / 6.05 / 6.52 ms**. The same route with
 an empty save measured **4.67 / 6.02 / 6.35 ms**. Both ended with 16,712
 visible triangles and no native terrain ownership at altitude.
+
+Highlands coastlines intersect the sampled seabed inside each terrain triangle.
+Nearby shallows show bed color and the offshore surface reflects animated,
+filtered swells. A seed 40961 coastal pass measured **4.13 / 5.63 / 6.55 ms**
+at 1080p MSAA 1. A separate 90-second seed 19 route flew 9 km at 100 m/s
+with complete coarse coverage in all 10,587 measured frames. It measured
+**7.95 / 11.94 / 29.82 ms** and peaked at 537 MiB process RSS. No measured
+frame met the five-pixel refinement target. A concurrent build makes the
+long route's tail timings less comparable to the isolated 10-second passes.
 
 ## Play the baseline
 

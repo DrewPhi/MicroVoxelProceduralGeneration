@@ -67,7 +67,7 @@ var<private> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
-struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32> };
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32>, water_phase:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
@@ -375,6 +375,7 @@ struct VertexOut {
     @location(2) local:vec3<f32>,
     @location(3) @interpolate(flat) profile_index:u32,
     @location(4) @interpolate(flat) camera_slot:u32,
+    @location(5) @interpolate(flat) water:u32,
 };
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) color: vec3<f32>, @location(2) normal: vec3<f32>,
     @location(3) profile_index:u32) -> VertexOut {
@@ -391,6 +392,7 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     out.position=camera.view_projection*vec4<f32>(p,1.);
     out.color=color;out.normal=normal;out.local=p;
     out.profile_index=profile_index;out.camera_slot=0u;
+    out.water=u32(all(color==MATERIAL_COLORS[7]));
     return out;
 }
 // Lossless triangle records retain the original indexed vertex sequence.
@@ -486,7 +488,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
     // The flight field is aligned to canonical 8 m samples. Fine meshes and
     // native stairs retain their own material and face response.
     if near_shadow.parameters.z > -1e10 && (camera.paint_origin.w & 26u) == 0u
-        && in.normal.y > 0. && any(in.color != MATERIAL_COLORS[7]) {
+        && in.normal.y > 0. && in.water == 0u {
         let spacing = f32(1u << (u32(camera.paint.w) & 31u)) * NATIVE_VOXEL_METERS;
         let cell = (in.local.xz - camera.eye.xz + near_shadow.parameters.zw) / 8.;
         let side = vec2<f32>(textureDimensions(flight_detail));
@@ -556,13 +558,33 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if diagnostic==5u {return vec4<f32>(blend,blend,blend,1.);}
     if diagnostic==6u {return vec4<f32>(light,1.);}
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
-    if diagnostic==0u && all(in.color==MATERIAL_COLORS[7]) {
+    if diagnostic==0u && in.water!=0u {
         let direction=normalize(in.local-camera.eye.xyz);
-        let normal=normalize(in.normal);
+        var normal=normalize(in.normal);
+        var bed=vec3(.30,.35,.25);
+        var depth=4.;
+        let phase=near_shadow.water_phase;
+        if (camera.paint_origin.w & 26u)==0u && normal.y>.5 {
+            let p=in.local.xz-camera.eye.xz+phase.xy;
+            let pixel=max(length(dx.xz),length(dy.xz));
+            normal=water_swell(p,normal,phase.z,pixel);
+            if near_shadow.parameters.z > -1e10 {
+                let cell=(in.local.xz-camera.eye.xz+near_shadow.parameters.zw)/8.;
+                let side=vec2<f32>(textureDimensions(flight_detail));
+                let edge=min(cell,side-1.-cell);
+                let w=smoothstep(1.,15.,min(edge.x,edge.y));
+                if w>0. {
+                    let paint=textureSampleLevel(flight_detail,flight_sampler,(cell+.5)/side,1,0.);
+                    bed=mix(bed,paint.rgb,w);
+                    depth=mix(depth,paint.a*(12.*255./254.),w);
+                }
+            }
+        }
         let reflected=reflect(direction,normal);
         let above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
-        let below=water_medium(vec3(0.30,0.35,0.25)*light,4.);
-        return vec4(mix(below,above,water_fresnel(-dot(direction,normal))),1.);
+        let below=water_medium(bed*light,depth);
+        let color=mix(below,above,water_fresnel(-dot(direction,normal)));
+        return vec4(color+visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x),1.);
     }
     let resolved=in.color*tint*light;
     if blend<=0. && diagnostic!=8u {return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,resolved,visibility),1.);}

@@ -171,9 +171,9 @@ impl SettingsUi {
                             ))
                             .strong(),
                         );
-                        if let Some((speed, altitude, bank)) = stats.flight {
+                        if let Some((speed, altitude, bank, grounded)) = stats.flight {
                             ui.label(format!("{:.0} km/h   ·   {altitude:.0} m ASL   ·   bank {bank:+.0}°", speed * 3.6));
-                            ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");
+                            if grounded {ui.small("W accelerate  ·  S brake  ·  A/D steer  ·  ↓ lift off above 105 km/h");} else {ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");}
                         }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {
