@@ -25,7 +25,7 @@ edited voxels. The chase camera also checks the space behind the aircraft.
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. The preset renders a 6 km active terrain view with a
 world-aligned landscape horizon fading out to 35 km. The horizon samples the
-procedural source. Edits remain visible and interactive in the resident native
+procedural source. A sparse mesh carries saved terrain edits beyond the resident native
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
 
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover
@@ -87,9 +87,11 @@ Right click places the selected material from inventory. Keys **1–6**
 select materials. Edit within the resident exact region and exit normally
 to flush the save. Reopen with the same seed, recipe, and voxel size.
 Use `--world-save PATH` to edit and save without advancing water simulation.
-Distant terrain
-currently derives from the procedural source and can omit edits outside the
-exact region.
+The adaptive renderer reconstructs edited columns and their exposed walls
+outside the native region. This preserves excavations, suspended blocks and
+openings in the active terrain view. Large edit sets can exceed the distant
+mesh budget, which reduces the area reconstructed around the camera. The
+35 km horizon still samples the unedited procedural source.
 
 ## Code and checks
 
@@ -108,6 +110,8 @@ after building the release launcher.
 ```sh
 python3 tools/player_edit_check.py --output output/edit-smoke
 python3 tools/player_edit_check.py --terrain-only --output output/edit-static-smoke
+python3 tools/edit_distance_check.py --checkpoint output/edit-static-smoke/world.save \
+  --output output/edit-distance-smoke
 ```
 
 Generated files go under ignored `frontier/output/`. The current engine

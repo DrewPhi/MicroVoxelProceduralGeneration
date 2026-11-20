@@ -62,6 +62,9 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        if let Some(adaptive) = &mut self.adaptive {
+            adaptive.update_edit_surface(&self.device, &self.queue, world, camera);
+        }
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
             self.vegetation.take();
@@ -183,7 +186,11 @@ impl Gpu {
         let started = Instant::now();
         loop {
             self.update_vegetation(world, camera, width, height)?;
-            if self.vegetation_stats.pending_jobs == 0
+            if self
+                .adaptive
+                .as_ref()
+                .is_none_or(|a| !a.edit_surface_pending())
+                && self.vegetation_stats.pending_jobs == 0
                 && self.vegetation_stats.shadow_transition_pairs == 0
                 && self.vegetation_stats.shadow_fading_casters == 0
             {

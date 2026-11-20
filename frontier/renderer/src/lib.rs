@@ -844,6 +844,7 @@ impl Gpu {
             plants.encode_culling(encoder, &self.bind_group);
         }
         if let Some(adaptive) = &self.adaptive {
+            adaptive.prepare_edit_draw(&self.queue, *camera, width as f32 / height as f32);
             adaptive.encode_coarse_cull(encoder);
             adaptive.draw_shadows(encoder);
             if adaptive.shadow_cascades_active() {
@@ -1362,9 +1363,15 @@ impl Gpu {
             let metadata_path = path.with_extension("capture.json");
             let mut metadata = std::fs::read_to_string(&metadata_path)?;
             metadata.pop();
+            if let Some(adaptive) = &self.adaptive {
+                metadata.push_str(&format!(
+                    r#","edit_surface":{}"#,
+                    adaptive.edit_surface_json()
+                ));
+            }
             let shadows_active = self.adaptive.as_ref().is_some_and(|a| a.shadows_active());
             metadata.push_str(&format!(
-                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\"}}}}",
+                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_and_edit_surfaces\",\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\"}}}}",
                 settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some(),
                 settings.atmosphere, settings.render_scale, settings.exposure,
                 settings.fog_density, settings.fog_height_falloff, settings.sun_elevation,
@@ -3413,8 +3420,8 @@ pub fn run() -> Result<()> {
                 live.position_demo_camera(&mut camera);
             }
         }
-        // Far surface pages remain immutable. Live terrain/fluid overrides are
-        // presented by the canonical native volume and its ownership mask.
+        // Immutable pages share one cache across edit revisions. Persistent
+        // edit columns and the moving native volume own their raster fragments.
         let surface_world = if live_water.is_some() {
             live_water::immutable_surface_world(&world)?
         } else {
@@ -4061,6 +4068,14 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
+            if let Some(adaptive) = &mut gpu.adaptive {
+                adaptive.settle_edit_surface(
+                    &gpu.device,
+                    &gpu.queue,
+                    &viewer.world,
+                    viewer.camera,
+                )?;
+            }
             gpu.capture(
                 &viewer.world,
                 &viewer.camera,
@@ -4158,6 +4173,12 @@ pub fn run() -> Result<()> {
             if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
             json.pop();
+            if let Some(adaptive) = &gpu.adaptive {
+                json.push_str(&format!(
+                    r#","edit_surface":{}"#,
+                    adaptive.edit_surface_json()
+                ));
+            }
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));
         }
         if scene == "hybrid" || scene == "hybrid-topology" {
@@ -4196,7 +4217,7 @@ pub fn run() -> Result<()> {
         let visual = &viewer.visual_settings;
         json.pop();
         json.push_str(&format!(
-            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_owners_only\",\"menu_enabled\":{},\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
+            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_and_edit_surfaces\",\"menu_enabled\":{},\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,

@@ -25,6 +25,8 @@ use wgpu::util::DeviceExt;
 pub(crate) mod adaptive_shadow;
 #[path = "coarse_batch.rs"]
 pub(crate) mod coarse_batch;
+#[path = "edit_landscape.rs"]
+pub(crate) mod edit_landscape;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
 use adaptive_shadow::ShadowResources;
@@ -530,6 +532,7 @@ impl PreparedView {
     }
 }
 pub struct AdaptiveGpu {
+    edits: edit_landscape::Surface,
     resource_budget_bytes: u64,
     gpu_profiles: Option<GpuOrderedProfiles>,
     gpu_profile_stats: GpuProfileStats,
@@ -898,6 +901,7 @@ impl AdaptiveGpu {
         });
         Self {
             resource_budget_bytes: MAX_BYTES,
+            edits: edit_landscape::Surface::default(),
             gpu_profiles: None,
             gpu_profile_stats: GpuProfileStats {
                 enabled: std::env::var("FRONTIER_GPU_PROFILES").as_deref() == Ok("1"),
@@ -1116,7 +1120,7 @@ impl AdaptiveGpu {
         self.clusters.contains_key(key)
     }
     fn allocated_bytes(&self) -> u64 {
-        (self.shadows.allocated_bytes() + CAMERA_UNIFORM_BYTES)
+        (self.shadows.allocated_bytes() + CAMERA_UNIFORM_BYTES + self.edit_bytes())
             + self
                 .coarse_batch
                 .as_ref()
@@ -1903,6 +1907,7 @@ impl AdaptiveGpu {
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(1, &self.shadows.sampling_bind, &[]);
         pass.set_bind_group(2, &self.shadows.near.bind, &[]);
+        self.draw_edits(pass);
         if let Some(bundle) = &self.bundle {
             pass.execute_bundles(std::iter::once(bundle));
         } else {

@@ -387,6 +387,13 @@ impl World {
             .collect()
     }
 
+    /// Authored material at an address, independent of simulation and source.
+    pub fn terrain_override(&self, cell: Cell) -> Option<Material> {
+        self.edits.get(&cell).copied()
+    }
+    pub fn shares_terrain_edits(&self, other: &Self) -> bool {
+        self.shares_source_lineage(other) && Arc::ptr_eq(&self.edits, &other.edits)
+    }
     /// Terrain edits only, for an atomic terrain/fluid save transaction.
     pub fn terrain_edits(&self) -> impl Iterator<Item = (Cell, Material)> + '_ {
         self.edits.iter().map(|(&c, &m)| (c, m))

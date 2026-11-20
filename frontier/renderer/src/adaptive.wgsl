@@ -71,6 +71,25 @@ struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
+@group(2) @binding(13) var edited_columns: texture_2d<u32>;
+fn edit_owns_column(cell: vec2<u32>) -> bool {
+    let dims = textureDimensions(edited_columns);
+    if dims.y == 1u { return false; }
+    let capacity = dims.x * (dims.y - 1u);
+    let bounds = textureLoad(edited_columns, vec2<i32>(0, i32(dims.y-1u)), 0);
+    if any(cell - bounds.xy > bounds.zw) { return false; }
+    let key = cell >> vec2(3u);
+    let h = key.x*0x9e3779b1u ^ key.y*0x85ebca77u;
+    var bucket = (h^(h>>16u)) & (capacity-1u);
+    let bit = (cell.x&7u) + (cell.y&7u)*8u;
+    for (var probe=0u; probe<capacity; probe++) {
+        let word = textureLoad(edited_columns,vec2<i32>(i32(bucket%dims.x),i32(bucket/dims.x)),0);
+        if (word.z | word.w)==0u {return false;}
+        if all(key==word.xy) {return (select(word.z, word.w, bit>=32u) & (1u << (bit&31u))) != 0u;}
+        bucket = (bucket+1u) & (capacity-1u);
+    }
+    return false;
+}
 fn plant_shadow(local:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
     if near_shadow.parameters.x<0.5 { return 1.; }
     // Bounded receiver normal/light bias in metres; avoid the broad normal
@@ -443,6 +462,8 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     return shade(in);
 }
 fn shade(in: VertexOut) -> vec4<f32> {
+    let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
+    if near_shadow.parameters.y > 0.5 && (camera.paint_origin.w & 16u)==0u && edit_owns_column(bitcast<vec2<u32>>(local_cell.xz)+camera.paint_origin.xz) { discard; }
     // Ownership follows the occupied native cell, including faces on box edges.
     if near_shadow.naadf_hi.w>0.5 {
         let point=(floor(in.local*VOXELS_PER_METER-in.normal*0.01)+0.5)/VOXELS_PER_METER-camera.eye.xyz;
@@ -466,7 +487,6 @@ fn shade(in: VertexOut) -> vec4<f32> {
     }
     let light=terrain_lighting(in.normal,visibility)+indirect;
     var tint=vec3<f32>(1.);
-    let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         let distance=length((vec3<f32>(local_cell)+0.5)/VOXELS_PER_METER-camera.eye.xyz);

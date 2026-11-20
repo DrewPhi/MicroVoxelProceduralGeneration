@@ -953,7 +953,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     if needs_native_driver && (visual.naadf_gpu_distance || !visual.naadf_follow) {
         return Err("live water requires --naadf-follow on --naadf-gpu-distance off".into());
     }
-    if needs_native_driver && capture.is_some() {
+    if live_water && capture.is_some() {
         return Err(
             "live water uses window ticks; use --frames/--seconds with --capture-on-exit".into(),
         );
