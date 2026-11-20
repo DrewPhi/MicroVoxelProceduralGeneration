@@ -674,3 +674,53 @@ python3 tools/phasea_volume_check.py --output output/box-splat-visual \
 python3 tools/phasea_volume_check.py --output output/box-splat-timing \
   --backends mesh brick box-splat --views overview cave bridge --edits --edit-seconds 17
 ```
+
+## Live Alpine coarse projection
+
+`FRONTIER_COARSE_PROJECTION=quads|boxes` enables the comparison on the
+seed-sampled coarse terrain path at MSAA1. Omit the variable for the ordinary
+packed-quad control. Both candidates read the same trimmed column records.
+The vertex shader derives roof and wall quads in `quads` mode. In `boxes` mode
+it rejects back-facing columns and draws one projected rectangle per candidate.
+The fragment shader resolves the actual exposed plane, depth and material.
+Both modes bind the existing appearance profiles and use the same independently
+merged raster seam strips. Exact NAADF terrain and the shadow path retain their
+current representations. If optional GPU memory would prevent normal terrain
+publication, the experiment falls back to the retained packed quads.
+
+The experiment still builds the source runs and the original packed quads on
+the CPU. Keeping those quads supplies the existing shadow and fallback paths.
+This measures GPU-side primitive expansion and drawing in the live stream.
+Fully GPU-resident source generation and compacted indirect emission are
+separate experiments.
+
+Measured on the Radeon 760M at 1920×1080, seed 7 and MSAA1. The modes use the
+same release binary, the 15-second Alpine walk above, and the stationary 6 km
+horizon with the 6 px refinement reserve. Disk caching was disabled.
+
+| View | Mode | Frame p50 / p95 / p99, ms | Opaque GPU p50 / p95 / p99, ms |
+| --- | --- | ---: | ---: |
+| Walk and turn | Packed quads | 25.159 / 31.553 / 39.430 | 20.346 / 21.818 / 24.557 |
+| Walk and turn | GPU-expanded quads | 24.726 / 32.450 / 45.276 | 20.652 / 22.382 / 34.539 |
+| Walk and turn | Projected boxes | 25.332 / 39.835 / 46.838 | 21.366 / 23.073 / 33.997 |
+| 6 km horizon | Packed quads | 20.046 / 22.936 / 24.084 | 15.235 / 15.354 / 15.383 |
+| 6 km horizon | GPU-expanded quads | 29.501 / 31.280 / 31.680 | 24.065 / 24.212 / 24.242 |
+| 6 km horizon | Projected boxes | 29.514 / 30.757 / 31.733 | 23.948 / 24.055 / 24.114 |
+
+All modes reached the horizon reserve in 20.1–20.3 s and held it for all 189
+frames. The walk had published coverage in every measured frame. No mode met
+its 3 px error target on the walk. At the settled horizon, each candidate drew
+450,176 columns and 762,461 seam quads across 1,958 visible tiles. The extra
+resident payload was about 66 MiB and total upload volume grew from 168 MiB to
+about 307 MiB. The packed-quad color path remains the default.
+
+At the matched fixed 6 km pose with atmosphere and shadows off, the packed
+control covered 1,285,782 pixels. The quads lost four pixels inside that
+coverage and gained 33 pixels in total. The boxes lost 12 interior pixels and
+gained 39 pixels in total. With unmerged strips and interpolated box-rectangle
+rays the earlier box pass lost 243 interior pixels. The fixed spiky reference
+exercised the retained raster path at this experiment's current tile limits.
+
+Local evidence is under `output/coarse-projection-refined-*` and
+`output/coarse-projection-comparison`. Repeat the walk and horizon commands in
+this file with `FRONTIER_COARSE_PROJECTION=quads` and then `=boxes` to compare.

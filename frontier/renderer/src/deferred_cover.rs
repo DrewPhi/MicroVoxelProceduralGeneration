@@ -160,6 +160,7 @@ fn clone_geometry(tile: &GeometryTile) -> Result<GeometryTile, String> {
             exposed_native_faces: tile.mesh.exposed_native_faces,
         },
         native_quads: tile.native_quads.clone(),
+        coarse_projection: None,
         proxy_triangles: tile.proxy_triangles.clone(),
         native_bins: tile.native_bins.clone(),
         bounds: tile.bounds,

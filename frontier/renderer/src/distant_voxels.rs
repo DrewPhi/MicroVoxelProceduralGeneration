@@ -70,6 +70,47 @@ pub(crate) fn enabled() -> bool {
     Mode::current() != Mode::Surface
 }
 
+pub(crate) fn projection_requested() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        Mode::current() == Mode::Seed
+            && matches!(
+                std::env::var("FRONTIER_COARSE_PROJECTION").as_deref(),
+                Ok("quads" | "boxes")
+            )
+            && !crate::ground_cover::shell_enabled()
+    })
+}
+
+pub(super) fn projection_grid(key: TileKey) -> bool {
+    key.step_cells > 1
+        && key.width_cells > MAX_CERTIFICATE_WIDTH
+        && (u64::from(key.width_cells) / u64::from(key.step_cells)).pow(2) <= MAX_AFFINE_QUADS
+}
+
+/// A trimmed regular column and the four adjacent heights. The outer native
+/// edge strip uses its exact prepared faces instead of a single neighbor height.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct ProjectionColumn {
+    pub xz: [f32; 4],
+    pub levels: [f32; 2],
+    pub floors: [f32; 4],
+    pub style: [u32; 3],
+}
+
+pub(crate) struct ProjectionInput {
+    pub columns: Vec<ProjectionColumn>,
+    pub seams: Vec<NativeQuad>,
+}
+
+impl ProjectionInput {
+    pub(super) fn bytes(&self) -> usize {
+        self.columns.capacity() * size_of::<ProjectionColumn>()
+            + self.seams.capacity() * size_of::<NativeQuad>()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Run {
     top: i64,
@@ -99,6 +140,53 @@ struct InteriorPatch {
 struct Interior {
     patches: Vec<InteriorPatch>,
     walls: Vec<NativeQuad>,
+}
+
+impl Interior {
+    fn projection_columns(
+        &self,
+        width: i64,
+        pitch: i64,
+        grid: usize,
+        profiles: &[u32],
+    ) -> Vec<ProjectionColumn> {
+        let mut columns = Vec::with_capacity(self.patches.len());
+        let meters = |cell: i64| (cell as f64 * VOXEL_SIZE) as f32;
+        for (index, patch) in self.patches.iter().enumerate() {
+            if patch.roof.is_none() {
+                continue;
+            }
+            let col = index % grid;
+            let row = index / grid;
+            let x = col as i64 * pitch;
+            let z = row as i64 * pitch;
+            let top = patch.run.top;
+            let floor = |neighbor: Option<usize>| {
+                meters(neighbor.map_or(top, |i| self.patches[i].run.top.min(top)))
+            };
+            columns.push(ProjectionColumn {
+                xz: [
+                    meters(x.max(1)),
+                    meters(z.max(1)),
+                    meters((x + pitch).min(width - 1)),
+                    meters((z + pitch).min(width - 1)),
+                ],
+                levels: [meters(top), meters(patch.run.ground)],
+                floors: [
+                    floor((col > 0).then(|| index - 1)),
+                    floor((col + 1 < grid).then(|| index + 1)),
+                    floor((row > 0).then(|| index - grid)),
+                    floor((row + 1 < grid).then(|| index + grid)),
+                ],
+                style: [
+                    material_id(patch.run.top_material),
+                    material_id(patch.run.deep_material),
+                    profiles[index],
+                ],
+            });
+        }
+        columns
+    }
 }
 
 type InteriorEntry = Option<(TileKey, Arc<Interior>)>;
@@ -148,19 +236,22 @@ fn packed_quad(
 ) -> NativeQuad {
     let meters = |c: i64| (c as f64 * VOXEL_SIZE) as f32;
     let axes = [(axis + 1) % 3, (axis + 2) % 3];
-    let material = TERRAIN_PALETTE
-        .iter()
-        .position(|&entry| entry == material)
-        .expect("all terrain materials have a palette entry");
     NativeQuad {
         anchor: anchor.map(meters),
         extent: std::array::from_fn(|i| {
             meters(anchor[axes[i]] + extent[i]) - meters(anchor[axes[i]])
         }),
         axis_sign: axis as u32 | if positive { 0 } else { 4 },
-        material: material as u32,
+        material: material_id(material),
         profile_index: profile,
     }
+}
+
+fn material_id(material: Material) -> u32 {
+    TERRAIN_PALETTE
+        .iter()
+        .position(|&entry| entry == material)
+        .expect("all terrain materials have a palette entry") as u32
 }
 
 fn wall_quads(
@@ -597,6 +688,7 @@ impl Generator<'_> {
         let interior = use_interior
             .then(|| self.interior(width, pitch, grid as usize, cancelled))
             .transpose()?;
+        let mut projection_seams = (interior.is_some() && projection_requested()).then(Vec::new);
         let mut profiles = Vec::with_capacity(interior.as_ref().map_or(0, |i| i.patches.len()));
         let mut edges = Edges::new();
         for z in (0..width).step_by(pitch as usize) {
@@ -640,6 +732,7 @@ impl Generator<'_> {
                     rect_edges(&mut edges, xx, zz, run, cached.map(|_| width));
                 }
 
+                let first_seam = self.coarse_quads.len();
                 for (edge, on_border) in on_border.into_iter().enumerate() {
                     if !on_border {
                         continue;
@@ -683,6 +776,9 @@ impl Generator<'_> {
                         }
                     }
                 }
+                if let Some(seams) = &mut projection_seams {
+                    seams.extend_from_slice(&self.coarse_quads[first_seam..]);
+                }
                 self.empirical_error_m = self.empirical_error_m.max(
                     (center - top_range[0])
                         .abs()
@@ -702,12 +798,13 @@ impl Generator<'_> {
                 }
             }
         }
-        if let Some(interior) = interior {
+        if let Some(interior) = &interior {
             self.append_quads(interior.walls.iter().map(|&q| NativeQuad {
                 profile_index: profiles[q.profile_index as usize],
                 ..q
             }))?;
         }
+        let first_seam_wall = self.coarse_quads.len();
         for ((axis, plane), mut sides) in edges {
             if cancelled() {
                 return Err("adaptive geometry cancelled".into());
@@ -780,6 +877,13 @@ impl Generator<'_> {
                 }
             }
         }
+        if let (Some(interior), Some(mut seams)) = (interior, projection_seams) {
+            seams.extend_from_slice(&self.coarse_quads[first_seam_wall..]);
+            self.coarse_projection = Some(ProjectionInput {
+                columns: interior.projection_columns(width, pitch, grid as usize, &profiles),
+                seams,
+            });
+        }
         Ok(())
     }
 }
@@ -830,7 +934,39 @@ pub(crate) const TERRAIN_PALETTE: [Material; 10] = [
 /// Use the existing instanced axis-face layout, without re-tessellating coarse
 /// faces into native cells. Profiles have already been decorated at this point.
 pub(super) fn merge_quads(tile: &mut GeometryTile) {
+    merge_face_quads(&mut tile.native_quads);
+    if let Some(projection) = &mut tile.coarse_projection {
+        // Apply the same lossless merge to the raster strips in both GPU paths.
+        merge_face_quads(&mut projection.seams);
+    }
     let quads = &mut tile.native_quads;
+    for (index, quad) in quads.iter().enumerate() {
+        let plane = quad.anchor[(quad.axis_sign & 3) as usize];
+        if let Some(bin) = tile
+            .native_bins
+            .last_mut()
+            .filter(|bin| bin.axis_sign == quad.axis_sign)
+        {
+            bin.quad_count += 1;
+            bin.min_plane = bin.min_plane.min(plane);
+            bin.max_plane = bin.max_plane.max(plane);
+        } else {
+            tile.native_bins.push(NativeBin {
+                axis_sign: quad.axis_sign,
+                first_quad: index as u32,
+                quad_count: 1,
+                min_plane: plane,
+                max_plane: plane,
+            });
+        }
+    }
+    tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
+        + tile.native_bins.capacity() * std::mem::size_of::<NativeBin>()
+        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>()
+        + tile.coarse_projection.as_ref().map_or(0, ProjectionInput::bytes);
+}
+
+fn merge_face_quads(quads: &mut Vec<NativeQuad>) {
     for merge in [0, 1] {
         let order = |q: &NativeQuad| {
             let axis = (q.axis_sign & 3) as usize;
@@ -863,29 +999,6 @@ pub(super) fn merge_quads(tile: &mut GeometryTile) {
         });
     }
     quads.shrink_to_fit();
-    for (index, quad) in quads.iter().enumerate() {
-        let plane = quad.anchor[(quad.axis_sign & 3) as usize];
-        if let Some(bin) = tile
-            .native_bins
-            .last_mut()
-            .filter(|bin| bin.axis_sign == quad.axis_sign)
-        {
-            bin.quad_count += 1;
-            bin.min_plane = bin.min_plane.min(plane);
-            bin.max_plane = bin.max_plane.max(plane);
-        } else {
-            tile.native_bins.push(NativeBin {
-                axis_sign: quad.axis_sign,
-                first_quad: index as u32,
-                quad_count: 1,
-                min_plane: plane,
-                max_plane: plane,
-            });
-        }
-    }
-    tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
-        + tile.native_bins.capacity() * std::mem::size_of::<NativeBin>()
-        + tile.face_profiles.capacity() * std::mem::size_of::<[[f32; 4]; 5]>();
 }
 
 #[cfg(test)]
@@ -893,6 +1006,39 @@ mod tests {
     use super::*;
     use crate::adaptive_geometry::{build_surface_with_geometry, SourceSamples, TileKey};
     use frontier_world::{FbmParams, World};
+
+    #[test]
+    fn projection_columns_keep_trimmed_roofs_and_exposed_wall_intervals() {
+        let patches = [12, 10, 15, 11]
+            .into_iter()
+            .map(|top| {
+                let run = Run {
+                    top,
+                    ground: top - 2,
+                    top_material: Material::Water,
+                    deep_material: Material::Stone,
+                    profile: 0,
+                };
+                InteriorPatch {
+                    run,
+                    center_height: top,
+                    roof: Some(roof_quad(&(1..4), &(1..4), run)),
+                }
+            })
+            .collect();
+        let interior = Interior {
+            patches,
+            walls: Vec::new(),
+        };
+        let columns = interior.projection_columns(8, 4, 2, &[10, 11, 12, 13]);
+        let meters = |n: i32| n as f32 * VOXEL_SIZE as f32;
+        assert_eq!(columns[0].xz, [1, 1, 4, 4].map(meters));
+        assert_eq!(columns[0].floors, [12, 10, 12, 12].map(meters));
+        assert_eq!(columns[2].xz, [1, 4, 4, 7].map(meters));
+        assert_eq!(columns[2].floors, [15, 11, 12, 15].map(meters));
+        assert_eq!(columns[2].levels, [15, 13].map(meters));
+        assert_eq!(columns[2].style, [7, 3, 12]);
+    }
 
     fn mixed_tile(
         world: &World,

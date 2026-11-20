@@ -50,7 +50,7 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
                      1.+broad*0.15+local*0.08+speckle,
                      1.+broad*0.07+local*0.06+speckle);
 }
-struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32> };
+struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32>, viewport:vec4<f32> };
 // Optional grain is a display override, independent of canonical tint parity.
 fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
     let original=terrain_tint(cell,grain);
@@ -61,7 +61,7 @@ fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
     return original+vec3<f32>(brightness-old_grain+hue,brightness-old_grain,brightness-old_grain-hue);
 }
 @group(0) @binding(0) var<uniform> draw_camera: Camera;
-struct CameraSlot { value: Camera, padding: array<vec4<f32>, 3> };
+struct CameraSlot { value: Camera, padding: array<vec4<f32>, 2> };
 @group(0) @binding(3) var<storage, read> batch_cameras: array<CameraSlot>;
 var<private> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;

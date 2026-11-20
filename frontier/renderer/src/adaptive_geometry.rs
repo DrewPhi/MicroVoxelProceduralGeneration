@@ -142,6 +142,7 @@ pub struct GeometryTile {
     pub key: TileKey,
     pub mesh: Mesh,
     pub native_quads: Vec<NativeQuad>,
+    pub(crate) coarse_projection: Option<distant_voxels::ProjectionInput>,
     pub proxy_triangles: Vec<ProxyTriangle>,
     pub native_bins: Vec<NativeBin>,
     /// World meter bounds of actual generated vertices (not unsampled terrain).
@@ -367,6 +368,7 @@ fn build_cached_staged(
 /// as generation. Persisted payloads cannot bypass unsupported source edits.
 pub(crate) fn disk_cache_key_supported(world: &World, key: TileKey) -> bool {
     if world.fbm_terrain().is_none()
+        || (distant_voxels::projection_requested() && distant_voxels::projection_grid(key))
         || key.source_revision != world.revision()
         || key.width_cells == 0
         || key.width_cells > MAX_WIDTH
@@ -1097,6 +1099,7 @@ fn build_surface_with_geometry(
             exposed_native_faces: 0,
         },
         coarse_quads: vec![],
+        coarse_projection: None,
         empirical_error_m: 0.,
         affine_error: 0.,
         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -1289,7 +1292,9 @@ fn build_surface_with_geometry(
         }
         tile.conservative_surface_bounds = tile.bounds;
         tile.native_quads = generator.coarse_quads;
+        tile.coarse_projection = generator.coarse_projection;
         tile.bytes += tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>();
+        tile.bytes += tile.coarse_projection.as_ref().map_or(0, distant_voxels::ProjectionInput::bytes);
     }
     tile.face_profiles = generator.face_profiles;
     tile.gpu_profiles = gpu_profiles;
@@ -1334,6 +1339,7 @@ fn finish(
         key,
         mesh,
         native_quads: vec![],
+        coarse_projection: None,
         proxy_triangles: vec![],
         native_bins: vec![],
         conservative_surface_bounds: bounds,
@@ -2245,6 +2251,7 @@ struct Generator<'a> {
     heights: LocalColumns,
     mesh: Mesh,
     coarse_quads: Vec<NativeQuad>,
+    coarse_projection: Option<distant_voxels::ProjectionInput>,
     empirical_error_m: f64,
     affine_error: f64,
     affine_range: [f64; 2],
@@ -3923,6 +3930,7 @@ mod tests {
                     exposed_native_faces: 0,
                 },
                 coarse_quads: vec![],
+                coarse_projection: None,
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -4053,6 +4061,7 @@ mod tests {
                     exposed_native_faces: 0,
                 },
                 coarse_quads: vec![],
+                coarse_projection: None,
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -5061,6 +5070,7 @@ mod tests {
                             exposed_native_faces: 0,
                         },
                         coarse_quads: vec![],
+                        coarse_projection: None,
                         empirical_error_m: 0.0,
                         affine_error: 0.0,
                         affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6394,6 +6404,7 @@ mod tests {
                     exposed_native_faces: 0,
                 },
                 coarse_quads: vec![],
+                coarse_projection: None,
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6706,6 +6717,7 @@ mod tests {
                     exposed_native_faces: 0,
                 },
                 coarse_quads: vec![],
+                coarse_projection: None,
                 empirical_error_m: 0.,
                 affine_error: 0.,
                 affine_range: [f64::INFINITY, f64::NEG_INFINITY],
@@ -6784,6 +6796,7 @@ mod tests {
                 exposed_native_faces: 0,
             },
             coarse_quads: vec![],
+            coarse_projection: None,
             empirical_error_m: 0.,
             affine_error: 0.,
             affine_range: [f64::INFINITY, f64::NEG_INFINITY],

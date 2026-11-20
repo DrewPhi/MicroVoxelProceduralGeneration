@@ -635,7 +635,8 @@ impl AdaptiveView {
                     as u64;
                 // One bounded cluster is the upload quantum. A cluster larger
                 // than the frame budget is disclosed by max_upload_frame_bytes.
-                if uploaded > 0 && uploaded + bytes > self.upload_budget {
+                let estimated_bytes = bytes + adaptive.expected_projection_upload_bytes(tile);
+                if uploaded > 0 && uploaded + estimated_bytes > self.upload_budget {
                     break;
                 }
                 let upload_started = Instant::now();
@@ -656,7 +657,7 @@ impl AdaptiveView {
                     }
                     return Err(error);
                 }
-                uploaded += bytes;
+                uploaded += bytes + adaptive.projection_upload_bytes(&tile.key);
                 if uploaded >= self.upload_budget {
                     break;
                 }
@@ -1011,6 +1012,14 @@ impl AdaptiveView {
         json.push_str(&format!(
             ",\"coarse_batch_groups\":{},\"coarse_batch_candidates\":{}}}",
             self.stats.coarse_batch_groups, self.stats.coarse_batch_candidates
+        ));
+        json.pop();
+        json.push_str(&format!(
+            ",\"coarse_projection\":{{\"mode\":{:?},\"pressure_fallback\":{},\"resident_bytes\":{},\"visible_tiles\":{},\"visible_columns\":{},\"visible_seam_quads\":{},\"visible_fallback_tiles\":{}}}}}",
+            self.stats.coarse_projection_mode, self.stats.coarse_projection_pressure_fallback,
+            self.stats.coarse_projection_resident_bytes, self.stats.coarse_projection_visible_tiles,
+            self.stats.coarse_projection_visible_columns, self.stats.coarse_projection_visible_seams,
+            self.stats.coarse_projection_visible_fallback_tiles,
         ));
         json.pop();
         json.push_str(&format!(",\"native_bins_enabled\":{},\"native_bin_tests\":{},\"native_bin_skipped_quads\":{},\"draw_calls\":{},\"no_voxel_shadow_clusters\":{}}}",self.native_bins,self.stats.native_bin_tests,self.stats.native_bin_skipped_quads,self.stats.draw_calls,self.stats.no_voxel_shadow_clusters));

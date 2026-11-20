@@ -923,6 +923,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
             exposed_native_faces,
         },
         native_quads,
+        coarse_projection: None,
         proxy_triangles,
         native_bins,
         bounds,

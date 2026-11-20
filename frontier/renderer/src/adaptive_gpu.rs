@@ -5,7 +5,8 @@ const ADAPTIVE_SHADER: &str = concat!(
     include_str!("naadf/trace.wgsl"),
     include_str!("ground_light.wgsl"),
     include_str!("water.wgsl"),
-    include_str!("adaptive.wgsl")
+    include_str!("adaptive.wgsl"),
+    include_str!("coarse_projection.wgsl")
 );
 
 use crate::{
@@ -25,6 +26,8 @@ use wgpu::util::DeviceExt;
 pub(crate) mod adaptive_shadow;
 #[path = "coarse_batch.rs"]
 pub(crate) mod coarse_batch;
+#[path = "coarse_projection.rs"]
+mod coarse_projection;
 #[path = "proxy_indexed.rs"]
 mod proxy_indexed;
 use adaptive_shadow::ShadowResources;
@@ -36,9 +39,11 @@ const WARM_CACHE_MAX_CLUSTERS: usize = 1024;
 const WARM_CACHE_TTL: Duration = Duration::from_secs(12);
 pub(crate) const MAX_CLUSTERS: usize = 16384;
 const UNIFORM_STRIDE: u64 = 256;
+const CAMERA_BYTES: usize = 224;
 pub(crate) const CAMERA_UNIFORM_BYTES: u64 = UNIFORM_STRIDE * MAX_CLUSTERS as u64;
 const CLUSTER_CAPACITY_ERROR: &str = "adaptive cluster count budget exhausted";
 const POOL_CAPACITY_ERROR: &str = "adaptive GPU pool budget exhausted";
+const PROJECTION_VERTEX_POOL: u8 = 5;
 /// Only resource refusal may preserve the old coherent cover. Invalid geometry
 /// and other upload failures must remain visible to the caller.
 pub(crate) fn resource_capacity_error(error: &str) -> bool {
@@ -180,6 +185,7 @@ struct Cluster {
     exact: bool,
     profile: Option<ProfileAllocation>,
     vertices: Allocation,
+    projection: Option<coarse_projection::Resident>,
     indices: Option<Allocation>,
     count: u32,
     origin: DVec3,
@@ -195,6 +201,7 @@ struct Cluster {
 impl Cluster {
     fn payload_bytes(&self) -> u64 {
         self.vertices.range.end - self.vertices.range.start
+            + self.projection.as_ref().map_or(0, coarse_projection::Resident::bytes)
             + self
                 .indices
                 .as_ref()
@@ -206,6 +213,10 @@ impl Cluster {
                         .map_or(0, |i| i.range.end - i.range.start)
             })
     }
+}
+
+fn projection_upload_size(input: &crate::adaptive_geometry::distant_voxels::ProjectionInput) -> u64 {
+    size_of_val(input.columns.as_slice()) as u64 + size_of_val(input.seams.as_slice()) as u64
 }
 /// Bounded current-draw diagnostic; None projected error means unbounded.
 #[derive(Clone, Copy, Debug)]
@@ -297,6 +308,13 @@ pub struct DrawStats {
     pub no_voxel_shadow_clusters: usize,
     pub coarse_batch_groups: usize,
     pub coarse_batch_candidates: usize,
+    pub coarse_projection_mode: &'static str,
+    pub coarse_projection_pressure_fallback: bool,
+    pub coarse_projection_resident_bytes: u64,
+    pub coarse_projection_visible_tiles: u64,
+    pub coarse_projection_visible_columns: u64,
+    pub coarse_projection_visible_seams: u64,
+    pub coarse_projection_visible_fallback_tiles: u64,
     pub current_local_certified_clusters: usize,
     pub current_affine_bound_clusters: usize,
     pub current_global_bound_clusters: usize,
@@ -351,6 +369,38 @@ macro_rules! encode_cluster_draws {
             }
             if $shell && (c.exact || !c.cover) {
                 continue;
+            }
+            if !$shell {
+                if let (Some(projection), Some(resident)) =
+                    (&renderer.coarse_projection, &c.projection)
+                {
+                    let page = &renderer.projection_vertices[resident.allocation.page];
+                    let profile = c.profile.as_ref().unwrap();
+                    pass.set_bind_group(
+                        0,
+                        &renderer.profile_binds[profile.table.page],
+                        &[(draw_index as u64 * UNIFORM_STRIDE) as u32],
+                    );
+                    if resident.seams > 0 {
+                        pass.set_pipeline(far.map_or(&renderer.native_pipeline, |p| &p[2]));
+                        pass.set_vertex_buffer(0, page.buffer.slice(resident.seam_range()));
+                        pass.set_index_buffer(
+                            renderer.quad_indices.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..6, 0, 0..resident.seams);
+                    }
+                    let pipeline = if item.no_voxel_shadow {
+                        projection.far.as_ref().unwrap_or(&projection.normal)
+                    } else {
+                        &projection.normal
+                    };
+                    pass.set_pipeline(pipeline);
+                    pass.set_vertex_buffer(0, page.buffer.slice(resident.column_range()));
+                    pass.draw(projection.vertices(), 0..resident.columns);
+                    bound_vertex_page = None;
+                    continue;
+                }
             }
             if c.native_quads {
                 pass.set_pipeline(far.map_or(&renderer.native_pipeline, |p| &p[2]));
@@ -553,6 +603,8 @@ pub struct AdaptiveGpu {
     sample_count: u32,
     bundle: Option<wgpu::RenderBundle>,
     coarse_batch: Option<coarse_batch::Batch>,
+    coarse_projection: Option<coarse_projection::Pass>,
+    projection_pressure_fallback: bool,
     bundle_signature: Vec<DrawItem>,
     bundle_stable_frames: u8,
     bundle_builds: u64,
@@ -584,6 +636,7 @@ pub struct AdaptiveGpu {
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     vertices: Vec<Arena>,
+    projection_vertices: Vec<Arena>,
     indices: Vec<Arena>,
     clusters: HashMap<TileKey, Cluster>,
     warm_enabled: bool,
@@ -610,7 +663,7 @@ impl AdaptiveGpu {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(208),
+                        min_binding_size: std::num::NonZeroU64::new(CAMERA_BYTES as u64),
                     },
                     count: None,
                 },
@@ -668,7 +721,10 @@ impl AdaptiveGpu {
             ],
             push_constant_ranges: &[],
         });
-        let batch_layout = coarse_batch::supported(device).then(|| coarse_batch::layout(device));
+        let projection_mode = coarse_projection::Mode::requested()
+            .filter(|_| crate::adaptive_geometry::distant_voxels::projection_requested());
+        let batch_layout = (projection_mode.is_none() && coarse_batch::supported(device))
+            .then(|| coarse_batch::layout(device));
         let batch_pipeline_layout = batch_layout.as_ref().map(|layout| {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("coarse voxel batch pipeline"),
@@ -865,6 +921,17 @@ impl AdaptiveGpu {
                 make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false, true),
             ]
         });
+        let coarse_projection = projection_mode
+            .filter(|_| sample_count == 1 && cover_pipelines.is_none())
+            .map(|mode| coarse_projection::Pass::new(
+                device,
+                format,
+                &pipeline_layout,
+                &shader,
+                mode,
+                &naadf_constants,
+                far_pipelines.as_ref().map(|_| &far_constants),
+            ));
         let shadow_pipelines = [
             make_pipeline(wgpu::VertexStepMode::Instance, 0, true, false, false),
             make_pipeline(wgpu::VertexStepMode::Vertex, 0, true, false, false),
@@ -927,6 +994,8 @@ impl AdaptiveGpu {
             sample_count,
             bundle: None,
             coarse_batch,
+            coarse_projection,
+            projection_pressure_fallback: false,
             bundle_signature: vec![],
             bundle_stable_frames: 0,
             bundle_builds: 0,
@@ -958,6 +1027,7 @@ impl AdaptiveGpu {
             uniform,
             bind,
             vertices: vec![],
+            projection_vertices: vec![],
             indices: vec![],
             clusters: HashMap::new(),
             warm_enabled: crate::adaptive_stream::turn_preload_enabled()
@@ -991,6 +1061,7 @@ impl AdaptiveGpu {
         self.pipeline = fresh.pipeline;
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
+        self.coarse_projection = fresh.coarse_projection;
         if let (Some(current), Some(updated)) = (&mut self.coarse_batch, fresh.coarse_batch) {
             current.raster = updated.raster;
         }
@@ -1116,6 +1187,7 @@ impl AdaptiveGpu {
             + self
                 .vertices
                 .iter()
+                .chain(self.projection_vertices.iter())
                 .chain(self.indices.iter())
                 .chain(self.profiles.iter())
                 .chain(self.profile_tables.iter())
@@ -1146,6 +1218,7 @@ impl AdaptiveGpu {
             0 | 4 => &mut self.vertices,
             1 => &mut self.indices,
             2 => &mut self.profiles,
+            PROJECTION_VERTEX_POOL => &mut self.projection_vertices,
             _ => &mut self.profile_tables,
         };
         for (page, arena) in pages.iter_mut().enumerate() {
@@ -1157,6 +1230,13 @@ impl AdaptiveGpu {
         if total.saturating_add(size) > self.resource_budget_bytes
             || size > device.limits().max_buffer_size
         {
+            if kind != PROJECTION_VERTEX_POOL
+                && size <= device.limits().max_buffer_size
+                && !self.projection_vertices.is_empty()
+            {
+                self.release_experimental_projection();
+                return self.allocate(device, bytes, kind);
+            }
             return Err(POOL_CAPACITY_ERROR.into());
         }
         let mut arena = Arena::new(
@@ -1172,6 +1252,38 @@ impl AdaptiveGpu {
         let page = pages.len();
         pages.push(arena);
         Ok(Allocation { page, range })
+    }
+    fn release_experimental_projection(&mut self) {
+        // Optional experiment resources never take budget from coherent cover.
+        self.projection_pressure_fallback = true;
+        self.projection_vertices.clear();
+        for (key, cluster) in &mut self.clusters {
+            if let Some(projection) = cluster.projection.take() {
+                if let Some((_, bytes)) = self.warm.get_mut(key) {
+                    *bytes -= projection.bytes();
+                    self.warm_bytes -= projection.bytes();
+                }
+            }
+        }
+        self.residency_revision = self.residency_revision.wrapping_add(1);
+        self.resident_stats = None;
+        self.prepared_view = None;
+        self.invalidate_bundle();
+    }
+
+    pub(super) fn expected_projection_upload_bytes(&self, tile: &GeometryTile) -> u64 {
+        if self.coarse_projection.is_none() || self.projection_pressure_fallback {
+            return 0;
+        }
+        tile.coarse_projection
+            .as_ref()
+            .map_or(0, projection_upload_size)
+    }
+
+    pub(super) fn projection_upload_bytes(&self, key: &TileKey) -> u64 {
+        self.clusters.get(key)
+            .and_then(|cluster| cluster.projection.as_ref())
+            .map_or(0, coarse_projection::Resident::bytes)
     }
     /// Upload immutable geometry once. Calling again with a resident key is free.
     pub fn upload(
@@ -1306,6 +1418,7 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
+                projection: None,
                 proxy_triangles: false,
                 indexed_proxy: false,
                 derived_proxy: false,
@@ -1377,9 +1490,13 @@ impl AdaptiveGpu {
         {
             return Err("appearance promotion changed geometry certificate".into());
         }
-        let old = self.clusters.remove(&tile.key).unwrap();
+        let mut old = self.clusters.remove(&tile.key).unwrap();
         self.slots.push(old.slot);
-        if let Err(error) = self.upload(device, queue, tile) {
+        let result = self.upload(device, queue, tile);
+        if self.projection_pressure_fallback {
+            old.projection = None;
+        }
+        if let Err(error) = result {
             let restored_slot = self.slots.pop();
             debug_assert_eq!(restored_slot, Some(old.slot));
             self.clusters.insert(tile.key, old);
@@ -1398,6 +1515,9 @@ impl AdaptiveGpu {
             self.profile_tables[profile.table.page].release(profile.table.range);
         }
         self.vertices[old.vertices.page].release(old.vertices.range);
+        if let Some(projection) = old.projection {
+            self.projection_vertices[projection.allocation.page].release(projection.allocation.range);
+        }
         if let Some(indices) = old.indices {
             self.indices[indices.page].release(indices.range);
         }
@@ -1489,6 +1609,9 @@ impl AdaptiveGpu {
                 self.profile_tables[p.table.page].release(p.table.range);
             }
             self.vertices[c.vertices.page].release(c.vertices.range);
+            if let Some(projection) = c.projection {
+                self.projection_vertices[projection.allocation.page].release(projection.allocation.range);
+            }
             if let Some(indices) = c.indices {
                 self.indices[indices.page].release(indices.range);
             }
@@ -1556,6 +1679,8 @@ impl AdaptiveGpu {
                 ..Default::default()
             };
             for c in self.clusters.values() {
+                stats.coarse_projection_resident_bytes +=
+                    c.projection.as_ref().map_or(0, coarse_projection::Resident::bytes);
                 let profile_bytes = c.profile.as_ref().map_or(0, |p| {
                     p.indices
                         .as_ref()
@@ -1747,7 +1872,7 @@ impl AdaptiveGpu {
                 } else {
                     Mat4::look_to_rh(local_eye, direction, Vec3::Y)
                 };
-            let mut bytes = [0u8; 208];
+            let mut bytes = [0u8; CAMERA_BYTES];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(&local_eye.extend(1.).to_array()));
             let paint = [
@@ -1766,10 +1891,12 @@ impl AdaptiveGpu {
             bytes[144..208].copy_from_slice(bytemuck::cast_slice(
                 &light_frame.matrix(c.origin).to_cols_array(),
             ));
+            let viewport = [width as f32, height as f32, 0., 0.];
+            bytes[208..].copy_from_slice(bytemuck::cast_slice(&viewport));
             let offset = self.camera_upload.len();
             self.camera_upload
                 .resize(offset + UNIFORM_STRIDE as usize, 0);
-            self.camera_upload[offset..offset + 208].copy_from_slice(&bytes);
+            self.camera_upload[offset..offset + CAMERA_BYTES].copy_from_slice(&bytes);
             // A receiver box swept towards the sun can be rejected only if
             // every possible ray misses the full exact volume. Use actual
             // resident vertex bounds, not a sampled terrain height estimate.
@@ -1787,6 +1914,23 @@ impl AdaptiveGpu {
                 bin_mask,
                 no_voxel_shadow,
             });
+            stats.visible_clusters += 1;
+            if let Some(projection) = &self.coarse_projection {
+                if let Some(resident) = &c.projection {
+                    let columns = u64::from(resident.columns);
+                    let seams = u64::from(resident.seams);
+                    stats.coarse_projection_visible_tiles += 1;
+                    stats.coarse_projection_visible_columns += columns;
+                    stats.coarse_projection_visible_seams += seams;
+                    stats.draw_calls += 1 + u64::from(seams > 0);
+                    stats.triangles += 2 * seams + columns * projection.mode.triangles_per_column();
+                    bound_vertex_page = None;
+                    continue;
+                }
+                if c.native_quads && !c.exact {
+                    stats.coarse_projection_visible_fallback_tiles += 1;
+                }
+            }
             if packed_first_instance_stride(
                 self.coalesce_vertex_pages,
                 c.native_quads,
@@ -1814,7 +1958,6 @@ impl AdaptiveGpu {
             } else {
                 bound_vertex_page = None;
             }
-            stats.visible_clusters += 1;
             stats.draw_calls += bin_mask.map_or(1, |m| m.count_ones() as u64);
             if c.native_quads {
                 stats.visible_native_quads += native_count as u64;
@@ -1869,6 +2012,11 @@ impl AdaptiveGpu {
         if let Some(batch) = &self.coarse_batch {
             (stats.coarse_batch_groups, stats.coarse_batch_candidates) = batch.stats();
         }
+        stats.coarse_projection_mode = self
+            .coarse_projection
+            .as_ref()
+            .map_or("off", |projection| projection.mode.label());
+        stats.coarse_projection_pressure_fallback = self.projection_pressure_fallback;
         stats.bundle_enabled = self.bundles_enabled;
         stats.vertex_pages_coalescing_enabled = self.coalesce_vertex_pages;
         stats.bundle_active = self.bundle.is_some();
@@ -1956,6 +2104,12 @@ impl AdaptiveGpu {
         {
             return Err("native quad profile index outside table".into());
         }
+        if tile.coarse_projection.as_ref().is_some_and(|projection| {
+            projection.columns.iter().any(|column| column.style[2] as usize >= tile.face_profiles.len())
+                || projection.seams.iter().any(|quad| quad.profile_index as usize >= tile.face_profiles.len())
+        }) {
+            return Err("coarse column or seam profile index outside table".into());
+        }
         let vertices = self.allocate(device, (tile.native_quads.len() * 32) as u64, 0)?;
         let table_bytes = bytemuck::cast_slice(&tile.face_profiles);
         let table = match self.allocate(device, table_bytes.len() as u64, 3) {
@@ -1986,6 +2140,12 @@ impl AdaptiveGpu {
             quad.profile_index += (table.range.start / 80) as u32;
             quad.axis_sign |= slot << 3;
         }
+        let projection = self.upload_projection(
+            device,
+            queue,
+            tile,
+            (table.range.start / 80) as u32,
+        );
         queue.write_buffer(
             &self.vertices[vertices.page].buffer,
             vertices.range.start,
@@ -2015,6 +2175,7 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: true,
+                projection,
                 proxy_triangles: false,
                 indexed_proxy: false,
                 derived_proxy: false,
@@ -2046,6 +2207,38 @@ impl AdaptiveGpu {
             },
         );
         Ok(())
+    }
+    fn upload_projection(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tile: &GeometryTile,
+        profile_base: u32,
+    ) -> Option<coarse_projection::Resident> {
+        if self.coarse_projection.is_none() || self.projection_pressure_fallback || tile.exact {
+            return None;
+        }
+        let input = tile.coarse_projection.as_ref().filter(|p| !p.columns.is_empty())?;
+        let allocation = self.allocate(device, projection_upload_size(input), PROJECTION_VERTEX_POOL).ok()?;
+        let resident = coarse_projection::Resident {
+            allocation,
+            columns: input.columns.len() as u32,
+            seams: input.seams.len() as u32,
+        };
+        let buffer = &self.projection_vertices[resident.allocation.page].buffer;
+        let mut columns = input.columns.clone();
+        for column in &mut columns {
+            column.style[2] += profile_base;
+        }
+        queue.write_buffer(buffer, resident.column_range().start, bytemuck::cast_slice(&columns));
+        if !input.seams.is_empty() {
+            let mut seams = input.seams.clone();
+            for seam in &mut seams {
+                seam.profile_index += profile_base;
+            }
+            queue.write_buffer(buffer, resident.seam_range().start, bytemuck::cast_slice(&seams));
+        }
+        Some(resident)
     }
     fn upload_proxy(
         &mut self,
@@ -2252,6 +2445,7 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
+                projection: None,
                 proxy_triangles: true,
                 indexed_proxy: indexed.is_some(),
                 derived_proxy: derived,
@@ -2363,7 +2557,7 @@ fn profile_bind(
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: uniform,
                     offset: 0,
-                    size: std::num::NonZeroU64::new(208),
+                    size: std::num::NonZeroU64::new(CAMERA_BYTES as u64),
                 }),
             },
             wgpu::BindGroupEntry {
@@ -2537,7 +2731,7 @@ mod tests {
         for i in [0, super::MAX_CLUSTERS - 1] {
             let offset = i as u64 * super::UNIFORM_STRIDE;
             assert_eq!(offset % 256, 0);
-            assert!(offset + 208 <= super::CAMERA_UNIFORM_BYTES);
+            assert!(offset + super::CAMERA_BYTES as u64 <= super::CAMERA_UNIFORM_BYTES);
             assert!(offset <= u32::MAX as u64);
         }
         assert_eq!(super::MAX_BYTES, 512 * 1024 * 1024);
