@@ -29,6 +29,13 @@ impl Viewer {
             self.display_frame_ms * 0.9 + frame_ms * 0.1
         };
         let mut stats = SettingsStats {
+            flight: self.aircraft.as_ref().map(|p| {
+                (
+                    p.airspeed_mps(),
+                    self.camera.position.y,
+                    self.camera.roll.to_degrees(),
+                )
+            }),
             frame_ms: self.display_frame_ms,
             process_mib: self.resource_process_mib,
             available_mib: self.resource_available_mib,

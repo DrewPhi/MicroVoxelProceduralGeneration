@@ -32,6 +32,14 @@ measured **13.65 / 16.20 / 17.95 ms** frame intervals at p50/p95/p99. This
 and uncapped presentation. Coarse coverage was ready when timing started.
 Detail refinement was still in progress at capture.
 
+With conservative occupied-root bounds used for the native draw, the same
+flyover reached **9.07 / 11.41 / 12.84 ms** across 1,071 measured frames.
+An airborne turn-return run on seed 8123 with 12.5 cm voxels measured
+**7.15 / 10.46 / 12.44 ms**. At ground level the separate stationary
+Watershed seed 997 test (1.5 km view, 32 m native radius) measured
+**20.29 / 23.86 / 25.05 ms**. Enabling the existing 4-root height tiles
+and traversal gate gave **17.83 / 20.27 / 20.96 ms** on that ground test.
+
 ## Play the baseline
 
 Build from the repository root, then start the Watershed preset.

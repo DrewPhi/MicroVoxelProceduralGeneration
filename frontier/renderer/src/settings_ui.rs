@@ -138,7 +138,7 @@ impl SettingsUi {
             .native_pixels_per_point = Some(native_scale);
         let input = raw.take();
         let output = self.context.run(input, |ctx| {
-            if !self.player_overlay.text.is_empty() && !self.open {
+            if stats.flight.is_none() && !self.player_overlay.text.is_empty() && !self.open {
                 egui::Area::new(egui::Id::new("player inventory"))
                     .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {
                         egui::Frame::popup(ui.style()).show(ui,|ui| {
@@ -171,6 +171,10 @@ impl SettingsUi {
                             ))
                             .strong(),
                         );
+                        if let Some((speed, altitude, bank)) = stats.flight {
+                            ui.label(format!("{:.0} km/h   ·   {altitude:.0} m ASL   ·   bank {bank:+.0}°", speed * 3.6));
+                            ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  V free camera");
+                        }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {
                                 ui.label(format!("Render GPU {ms:.1} ms  ·"));

@@ -40,6 +40,12 @@ pub struct Region {
     pub hi: Point,
 }
 impl Region {
+    fn enclosing(self, other: Self) -> Self {
+        Self {
+            lo: std::array::from_fn(|a| self.lo[a].min(other.lo[a])),
+            hi: std::array::from_fn(|a| self.hi[a].max(other.hi[a])),
+        }
+    }
     pub fn dims(self) -> [usize; 3] {
         std::array::from_fn(|a| (self.hi[a] - self.lo[a]) as usize)
     }
@@ -52,6 +58,28 @@ impl Region {
             hi: std::array::from_fn(|a| self.hi[a].min(other.hi[a])),
         }
     }
+}
+/// Tight root-space bounds before sparse packing or toroidal addressing.
+/// Ordinary empty nodes may contain distance bits in their low 30 bits.
+pub(super) fn occupied_bounds(region: Region, nodes: &[u32]) -> Option<Region> {
+    let [nx, ny, nz] = region.dims();
+    debug_assert_eq!(nodes.len(), nx * ny * nz);
+    let occupied = |word: &u32| *word & (FULL | CHILD) != 0;
+    let mut bounds: Option<Region> = None;
+    for (index, column) in nodes.chunks_exact(ny).enumerate() {
+        let Some(bottom) = column.iter().position(occupied) else {
+            continue;
+        };
+        let top = column.iter().rposition(occupied).unwrap();
+        let x = region.lo[0] + (index % nx) as i64;
+        let z = region.lo[2] + (index / nx) as i64;
+        let strip = Region {
+            lo: [x, region.lo[1] + bottom as i64, z],
+            hi: [x + 1, region.lo[1] + top as i64 + 1, z + 1],
+        };
+        bounds = Some(bounds.map_or(strip, |current| current.enclosing(strip)));
+    }
+    bounds
 }
 pub fn difference(a: Region, b: Region) -> Vec<Region> {
     let mut core = a;
@@ -174,6 +202,7 @@ pub struct Roots {
     pub nodes: Vec<u32>,
 }
 pub struct Change {
+    pub(super) incoming_occupied: Option<Region>,
     pub region: Region,
     pub ring: [u32; 3],
     pub roots: Vec<Roots>,
@@ -192,6 +221,17 @@ pub struct Change {
     leaf_slots: Vec<usize>,
     block_slots: Vec<usize>,
     columns: HashMap<(i64, i64), ColumnSummary>,
+}
+impl Change {
+    pub(super) fn occupied_after_publish(&self, old: Option<Region>) -> Option<Region> {
+        let retained = old
+            .map(|r| r.intersection(self.region))
+            .filter(|r| (0..3).all(|a| r.lo[a] < r.hi[a]));
+        match (retained, self.incoming_occupied) {
+            (Some(a), Some(b)) => Some(a.enclosing(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 pub struct State {
     pub region: Region,
@@ -667,7 +707,12 @@ impl State {
                     .map(|w| w.data.capacity() * std::mem::size_of::<u32>())
                     .sum::<usize>() as u64;
             }
+            let incoming_occupied = roots
+                .iter()
+                .filter_map(|r| occupied_bounds(r.region, &r.nodes))
+                .reduce(Region::enclosing);
             Ok(Change {
+                incoming_occupied,
                 region: next,
                 ring,
                 roots,
@@ -803,6 +848,24 @@ impl State {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn occupied_box_uses_y_fast_roots_and_ignores_empty_distance_words() {
+        let region = super::Region {
+            lo: [-8, 3, 11],
+            hi: [-5, 8, 13],
+        };
+        let mut nodes = vec![0x3fff_ffff; 30];
+        assert_eq!(super::occupied_bounds(region, &nodes), None);
+        nodes[5 + 4] = super::FULL;
+        nodes[15 + 10 + 2] = super::CHILD;
+        assert_eq!(
+            super::occupied_bounds(region, &nodes),
+            Some(super::Region {
+                lo: [-7, 5, 11],
+                hi: [-5, 8, 13]
+            })
+        );
+    }
     use super::*;
     #[test]
     fn difference_is_disjoint_and_toroidal_window_follows_negative_coordinates() {

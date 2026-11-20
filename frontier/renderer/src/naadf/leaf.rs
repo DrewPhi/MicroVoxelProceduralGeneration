@@ -76,6 +76,7 @@ fn compact(value: u32) -> Option<u32> {
 }
 
 pub(super) struct Prepared {
+    pub occupied: Option<super::stream::Region>,
     pub snapshot: Snapshot,
     pub encoding: Encoding,
     pub wide_bytes: usize,
@@ -102,6 +103,7 @@ impl Prepared {
         profile.end(Stage::LeafEncoding, phase);
         snapshot.cpu_profile = profile.metrics;
         Self {
+            occupied: super::stream::occupied_bounds(snapshot.region(), &snapshot.chunks),
             snapshot,
             encoding,
             wide_bytes,

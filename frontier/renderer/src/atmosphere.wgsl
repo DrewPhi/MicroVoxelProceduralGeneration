@@ -180,7 +180,7 @@ fn horizon_air(landscape:vec4<f32>, ray:vec3<f32>) -> vec3<f32> {
     let integrated = bounded_height_integral(atmosphere.world_eye.y, atmosphere.world_eye.y+range*ray.y, range, atmosphere.fog.y);
     let air = exp(-atmosphere.fog.x*(.78*integrated+.22*range));
     let haze = alpine_clear_sky(vec3(ray.x,max(ray.y,.04),ray.z));
-    return mix(haze,landscape.rgb,air*(1.-smoothstep(24000.,35000.,range)));
+    return mix(mix(haze,landscape.rgb,air),alpine_clear_sky(ray),smoothstep(24000.,35000.,range));
 }
 
 fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {

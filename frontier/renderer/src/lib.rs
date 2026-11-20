@@ -932,6 +932,7 @@ impl Gpu {
                     *camera,
                     width,
                     height,
+                    self.camera_submerged.get(),
                 );
             }
         }
@@ -2165,7 +2166,7 @@ impl Viewer {
         }
         let dt = interval.as_secs_f32().min(0.1);
         self.last_frame = now;
-        if self.player_edit.enabled {
+        if self.player_edit.enabled && self.aircraft.is_none() {
             self.retry_queued_player_action();
             if !self.grabbed || self.pending_teleport.is_some() {
                 self.player_edit.cancel();
@@ -2969,7 +2970,9 @@ impl ApplicationHandler for Viewer {
                     if state == ElementState::Pressed {
                         self.grab(true);
                     }
-                } else if button == MouseButton::Left || button == MouseButton::Right {
+                } else if self.aircraft.is_none()
+                    && (button == MouseButton::Left || button == MouseButton::Right)
+                {
                     if self.player_edit.enabled {
                         self.player_mouse(button, state);
                     } else if state == ElementState::Pressed {
@@ -3022,6 +3025,7 @@ impl ApplicationHandler for Viewer {
                         {
                             self.camera.roll = 0.;
                             if self.aircraft.take().is_none() {
+                                self.player_edit.cancel();
                                 self.aircraft = Some(aircraft::Aircraft::default());
                                 self.visual_settings.walking = false;
                                 self.walking.reset();
@@ -3323,7 +3327,11 @@ pub fn run() -> Result<()> {
         }
         if camera_preset == "aerial" {
             camera.position.y += 300.;
-            camera.pitch = -0.3;
+            camera.pitch = if visual_settings.flight_horizon {
+                0.
+            } else {
+                -0.3
+            };
             if let Some(source) = world
                 .fbm_terrain()
                 .filter(|t| t.params().recipe.uses_watersheds())

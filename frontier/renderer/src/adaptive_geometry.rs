@@ -1264,6 +1264,32 @@ fn build_surface_with_geometry(
     };
     let affine_stats = generator.affine_stats;
     let appearance = generator.appearance;
+    if !coarse
+        && step as f64 * voxel_size() >= 4.
+        && world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+    {
+        // A normal at a shared world coordinate uses the same stencil in
+        // every LOD. Leave explicit native stairs and water faces untouched.
+        let radius = (12. / voxel_size()).round().max(1.) as i64;
+        let mut normals = HashMap::new();
+        for vertex in &mut generator.mesh.vertices {
+            if vertex.normal[1] <= 0. || vertex.color == Material::Water.color() {
+                continue;
+            }
+            let x = key.min[0] + (vertex.position[0] as f64 / voxel_size()).round() as i64;
+            let z = key.min[1] + (vertex.position[2] as f64 / voxel_size()).round() as i64;
+            vertex.normal = *normals.entry([x, z]).or_insert_with(|| {
+                let mut height = |x, z| generator.samples.column(world, [x, z]).height;
+                let dx = height(x - radius, z) - height(x + radius, z);
+                let dz = height(x, z - radius) - height(x, z + radius);
+                glam::Vec3::new(dx as f32, (2 * radius) as f32, dz as f32)
+                    .normalize()
+                    .to_array()
+            });
+        }
+    }
     let mut tile = finish(
         key,
         generator.mesh,

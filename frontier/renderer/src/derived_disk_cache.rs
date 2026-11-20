@@ -515,6 +515,11 @@ fn source_identity_with_mode(
 fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::Result<Vec<u8>> {
     let mut b = vec![];
     put(&mut b, REPRESENTATION_VERSION);
+    if w.fbm_terrain()
+        .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+    {
+        put(&mut b, 1); // shared world-space slope normals on mountain proxies
+    }
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {
         Mode::Surface => {}

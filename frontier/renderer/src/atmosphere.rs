@@ -72,6 +72,19 @@ struct LightingContext {
     region_count: usize,
 }
 
+// Inputs read by the cloud shader. Ground shadows and the terrain refinement
+// state change independently and do not invalidate the cloud texture.
+#[derive(Clone, Copy, PartialEq)]
+struct CloudView {
+    inverse: [[f32; 4]; 4],
+    relative_eye: Vec3,
+    world_eye: Vec3,
+    sun: Vec3,
+    coverage: f32,
+    overcast: f32,
+    wind: f32,
+}
+
 pub(crate) struct Atmosphere {
     scene: wgpu::TextureView,
     depth: wgpu::TextureView,
@@ -90,6 +103,8 @@ pub(crate) struct Atmosphere {
     sky: wgpu::TextureView,
     sky_bind: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
+    cloud_view: std::cell::Cell<Option<CloudView>>,
+    drawn_cloud_view: std::cell::Cell<Option<CloudView>>,
     air: wgpu::TextureView,
     air_bind: wgpu::BindGroup,
     air_pipeline: wgpu::RenderPipeline,
@@ -570,6 +585,8 @@ impl Atmosphere {
             sky,
             sky_bind,
             sky_pipeline,
+            cloud_view: Default::default(),
+            drawn_cloud_view: Default::default(),
             air,
             air_bind,
             air_pipeline,
@@ -808,6 +825,15 @@ impl Atmosphere {
             haze_regions: context.regions,
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        self.cloud_view.set(Some(CloudView {
+            inverse: uniform.inverse_view_projection,
+            relative_eye,
+            world_eye: world_eye.as_vec3(),
+            sun,
+            coverage: uniform.weather[0],
+            overcast: uniform.weather[2],
+            wind: time_seconds * uniform.weather[1],
+        }));
     }
     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
         self.encode_with_shadows(encoder, output, None);
@@ -822,7 +848,7 @@ impl Atmosphere {
             if let Some(horizon) = &self.horizon {
                 horizon.draw(encoder);
             }
-            {
+            if self.drawn_cloud_view.replace(self.cloud_view.get()) != self.cloud_view.get() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("quarter resolution volumetric clouds"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {

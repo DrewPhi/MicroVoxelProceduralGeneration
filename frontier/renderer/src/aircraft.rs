@@ -14,6 +14,10 @@ impl Default for Aircraft {
 }
 
 impl Aircraft {
+    pub(crate) fn airspeed_mps(&self) -> f32 {
+        self.speed
+    }
+
     /// Return false when the swept flight path meets a blocking native cell.
     pub(crate) fn advance(
         &mut self,

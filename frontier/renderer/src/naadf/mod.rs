@@ -255,6 +255,7 @@ struct Uniform {
     water: [f32; 4],
 }
 struct Volume {
+    occupied: Option<stream::Region>,
     resources: Bindings,
     dynamic_water_key: Option<(frontier_world::Cell, [u32; 3], u64)>,
     dynamic_water_binding: u64,
@@ -389,6 +390,7 @@ impl Pending {
         edge: u32,
     ) -> Result<Self, String> {
         let leaf::Prepared {
+            occupied,
             snapshot,
             encoding,
             wide_bytes,
@@ -601,6 +603,7 @@ impl Pending {
             scatter
         });
         let volume = Volume {
+            occupied,
             resources,
             dynamic_water_key: None,
             dynamic_water_binding: 0,
@@ -1570,9 +1573,20 @@ impl Experiment {
         camera: Camera,
         width: u32,
         height: u32,
+        submerged: bool,
     ) {
         if let Some(a) = &self.active {
-            let Some([x, y, w, h]) = ray_scissor(camera, a.bounds, width, height) else {
+            let bounds = if a.dynamic_water_key.is_none()
+                && !submerged
+                && !a.diagnostics.enabled
+                && capture_layer() == CaptureLayer::Scene
+            {
+                let Some(occupied) = a.occupied else { return };
+                occupied.bounds()
+            } else {
+                a.bounds
+            };
+            let Some([x, y, w, h]) = ray_scissor(camera, bounds, width, height) else {
                 return;
             };
             pass.set_scissor_rect(x, y, w, h);
