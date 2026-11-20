@@ -831,7 +831,7 @@ fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
     use crate::terrain::SeededBiome;
     let Some(terrain) = world
         .fbm_terrain()
-        .filter(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+        .filter(|t| t.params().recipe.uses_watersheds())
     else {
         return true;
     };
@@ -916,7 +916,7 @@ fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option
 fn tree_supported(w: &World, x: i64, z: i64) -> Option<i64> {
     let max_grade = if w
         .fbm_terrain()
-        .is_some_and(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+        .is_some_and(|t| t.params().recipe.uses_watersheds())
     {
         4
     } else {

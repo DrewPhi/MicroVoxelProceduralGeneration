@@ -452,9 +452,9 @@ struct LocalViewTransform {
     up: Vec3,
 }
 impl LocalViewTransform {
-    fn new(direction: Vec3) -> Self {
+    fn new(direction: Vec3, view_up: Vec3) -> Self {
         let forward = direction.normalize();
-        let right = forward.cross(Vec3::Y).normalize();
+        let right = forward.cross(view_up).normalize();
         Self {
             forward,
             right,
@@ -1556,7 +1556,7 @@ impl AdaptiveGpu {
             camera.far,
         );
         let direction = camera.direction();
-        let view_transform = LocalViewTransform::new(direction);
+        let view_transform = LocalViewTransform::new(direction, camera.view_up());
         let queries = crate::adaptive_stream::CameraQueries::new(
             camera,
             width,
@@ -2974,7 +2974,7 @@ mod tests {
                 camera.yaw = yaw;
                 camera.pitch = pitch;
                 let direction = camera.direction();
-                let reusable = super::LocalViewTransform::new(direction);
+                let reusable = super::LocalViewTransform::new(direction, camera.view_up());
                 for eye in [
                     Vec3::ZERO,
                     Vec3::new(-0.0625, 2., 55.),

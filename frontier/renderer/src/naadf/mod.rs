@@ -2161,6 +2161,7 @@ fn ray_scissor(camera: Camera, bounds: [[f64; 3]; 2], w: u32, h: u32) -> Option<
 #[test]
 fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
     let camera = Camera {
+        roll: 0.,
         position: DVec3::ZERO,
         yaw: 0.,
         pitch: 0.,
@@ -2182,7 +2183,7 @@ fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
 
 fn ray_basis(camera: Camera, aspect: f32) -> [[f32; 4]; 4] {
     let forward = camera.direction().normalize();
-    let right = forward.cross(glam::Vec3::Y).normalize();
+    let right = forward.cross(camera.view_up()).normalize();
     let up = right.cross(forward);
     let p = glam::Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 0.025, camera.far);
     [

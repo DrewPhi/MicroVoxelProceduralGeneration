@@ -391,6 +391,29 @@ impl World {
     pub fn terrain_edits(&self) -> impl Iterator<Item = (Cell, Material)> + '_ {
         self.edits.iter().map(|(&c, &m)| (c, m))
     }
+    /// Restore the complete overlay, including a placed cell whose material
+    /// matches the generator. Such cells still participate in edit ownership.
+    pub fn restore_terrain_edits(&mut self, values: impl IntoIterator<Item = (Cell, Material)>) {
+        let edits: BTreeMap<_, _> = values.into_iter().collect();
+        if edits == *self.edits {
+            return;
+        }
+        let changed = self
+            .edits
+            .keys()
+            .filter(|c| !edits.contains_key(c))
+            .chain(
+                edits
+                    .iter()
+                    .filter(|(c, m)| self.edits.get(c) != Some(m))
+                    .map(|(c, _)| c),
+            )
+            .copied()
+            .collect();
+        self.record_changes(changed);
+        self.edits = Arc::new(edits);
+        self.bump_revision();
+    }
     /// Physical terrain/vegetation before live water composition. Air edits open
     /// a cell to fluid; solid edits always take precedence over fluid occupancy.
     pub fn material_without_fluid(&self, c: Cell) -> Material {
@@ -1169,6 +1192,24 @@ mod tests {
         assert_eq!(
             world.changed_edit_cells(&before),
             full_edit_diff(&world, &before)
+        );
+    }
+
+    #[test]
+    fn restored_overlay_keeps_placed_source_material_and_removes_stale_edits() {
+        let mut world = World::new(19);
+        let soil = Cell { x: 0, y: -40, z: 0 };
+        let stale = Cell { x: 1, ..soil };
+        let original = world.material(soil);
+        world.set(stale, Material::Air);
+        world.restore_terrain_edits([(soil, original)]);
+        assert_eq!(
+            world.terrain_edits().collect::<Vec<_>>(),
+            [(soil, original)]
+        );
+        assert_eq!(
+            world.edit_cells_in_bounds(soil, Cell { x: 2, y: -39, z: 1 }),
+            [soil]
         );
     }
 

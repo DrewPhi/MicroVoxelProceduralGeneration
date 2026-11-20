@@ -135,6 +135,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(build(&steep).err().unwrap().contains("limit is 64m"));
+        assert!(build(&steep).err().unwrap().contains(&format!(
+            "{MAX_HEIGHT_CELLS}-cell limit is {:.2} m",
+            MAX_HEIGHT_CELLS as f64 * voxel_size()
+        )));
     }
 }

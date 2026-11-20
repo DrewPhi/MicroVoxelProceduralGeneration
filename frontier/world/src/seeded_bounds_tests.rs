@@ -207,38 +207,33 @@ fn seeded_certificates_survive_extreme_parameters_and_budget_fallbacks() {
 
 #[test]
 fn watershed_certificates_cover_banks_and_region_edges() {
-    let mut wet = 0;
-    for seed in [19, 997, 40961] {
-        let terrain = FbmTerrain::new(
-            seed,
-            FbmParams {
-                recipe: FbmRecipe::Watershed,
-                ..params()
-            },
-        )
-        .unwrap();
-        let mut anchors = vec![[0., 0.], [-9600., 0.], [0., 9600.]];
-        for r in terrain
-            .seeded_reaches([-4500.; 2], [4500.; 2])
-            .iter()
-            .step_by(13)
-        {
-            let mid = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
-            anchors.extend([mid, [mid[0] + r.width, mid[1]]]);
+    for recipe in [FbmRecipe::Watershed, FbmRecipe::Highlands] {
+        let mut wet = 0;
+        for seed in [19, 997, 40961] {
+            let terrain = FbmTerrain::new(seed, FbmParams { recipe, ..params() }).unwrap();
+            let mut anchors = vec![[0., 0.], [-9600., 0.], [0., 9600.]];
+            for r in terrain
+                .seeded_reaches([-4500.; 2], [4500.; 2])
+                .iter()
+                .step_by(13)
+            {
+                let mid = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
+                anchors.extend([mid, [mid[0] + r.width, mid[1]]]);
+            }
+            for m in anchors {
+                let c = m.map(|v| (v / voxel_size()).floor() as i64);
+                wet += verify(
+                    &terrain,
+                    ColumnBox {
+                        min: c.map(|v| v - 64),
+                        size_cells: [129; 2],
+                    },
+                    BoundBudget::default(),
+                );
+            }
         }
-        for m in anchors {
-            let c = m.map(|v| (v / voxel_size()).floor() as i64);
-            wet += verify(
-                &terrain,
-                ColumnBox {
-                    min: c.map(|v| v - 64),
-                    size_cells: [129; 2],
-                },
-                BoundBudget::default(),
-            );
-        }
+        assert!(wet > 100, "wet samples {wet}");
     }
-    assert!(wet > 100, "wet samples {wet}");
 }
 
 #[test]

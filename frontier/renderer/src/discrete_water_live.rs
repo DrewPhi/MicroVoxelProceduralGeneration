@@ -194,6 +194,7 @@ impl WaterDriver {
         match self {
             Self::Moving(v) => v.diagnostics_json(),
             Self::Procedural(v) => v.diagnostics_json(),
+            Self::Ca(v) if !v.simulate => r#"{"model":"static","tick":0}"#.into(),
             Self::Ca(v) => {
                 let d = v.fluid.diagnostics();
                 format!("{{\"model\":\"ca\",\"tick\":{},\"tick_seconds\":0.1,\"last_step_ms\":{},\"loaded_cells\":{},\"stored_cells\":{},\"initial_mass\":{},\"additions\":{},\"removals\":{},\"resident_mass\":{},\"dormant_mass\":{},\"displaced_mass\":{},\"conserved\":{},\"activation_error\":{:?}}}",d.tick,v.last_step_ms,d.loaded_cells,d.stored_cells,d.initial_mass,d.additions,d.removals,d.resident_mass,d.dormant_mass,d.displaced_mass,d.conserved(),v.activation_error.as_deref().unwrap_or(""))
@@ -656,7 +657,7 @@ impl DiscreteWaterLive {
         self.wall_elapsed = wall_elapsed;
         self.started = wall_elapsed > 0. || simtime > 0.;
         let sim = DiscreteWater::restore(&b[p..])?;
-        w.set_batch(edits);
+        w.restore_terrain_edits(edits);
         let o = sim.origin();
         let d = sim.dimensions();
         for z in 0..d[2] {

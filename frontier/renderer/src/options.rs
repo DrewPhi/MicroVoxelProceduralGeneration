@@ -215,6 +215,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--pickup-full-ms" => hand.full_seconds=args.next().ok_or("full charge requires milliseconds")?.parse::<f64>()?/1000.,
             "--inventory-capacity" => inventory_capacity=args.next().ok_or("inventory requires voxel capacity")?.parse()?,
             "--live-water" => live_water = parse_on_off(&mut args, &arg)?,
+            "--world-save" => {
+                player_edit = Some(true);
+                water_save = Some(PathBuf::from(args.next().ok_or("--world-save requires PATH")?));
+            }
             "--water-save" => {
                 water_save = Some(PathBuf::from(args.next().ok_or("--water-save requires PATH")?));
             }
@@ -279,12 +283,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 resource_overrides.push((arg, value));
             }
             "--preset" => {
-                let preset = args.next().ok_or("--preset requires alpine|seeded-world|watershed")?;
-                let watershed = preset == "watershed";
+                let preset = args.next().ok_or("--preset requires alpine|seeded-world|watershed|flight")?;
+                let flight = preset == "flight";
+                let watershed = flight || preset == "watershed";
+                visual.flight_horizon = flight;
                 seeded_preset = watershed || matches!(preset.as_str(), "seeded-world" | "world");
                 if seeded_preset {
                     params = frontier_world::FbmParams {
-                        recipe: if watershed {
+                        recipe: if flight { frontier_world::FbmRecipe::Highlands } else if watershed {
                             frontier_world::FbmRecipe::Watershed
                         } else {
                             frontier_world::FbmRecipe::SeededWorld
@@ -292,7 +298,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                         ..Default::default()
                     };
                     scene = "adaptive".into();
-                    camera_preset = "seeded-world".into();
+                    camera_preset = if flight { "aerial" } else { "seeded-world" }.into();
                     if !explicit_start { start_xz = [0., 0.]; }
                     capture_far = Some(6000.);
                     view_levels = 11;
@@ -309,11 +315,18 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     visual.terrain_shadows = true;
                     visual.beauty = true;
                     visual.vegetation = watershed;
-                    visual.walking = true;
+                    visual.walking = !flight;
+                    if flight {
+                        visual.exposure = 1.04;
+                        visual.sun_elevation = 20.;
+                        visual.sun_azimuth = 310.;
+                        visual.fog_density = 0.000075;
+                        visual.cloud_coverage = 0.32;
+                    }
                     continue;
                 }
                 if preset != "alpine" {
-                    return Err("--preset requires alpine|seeded-world|watershed".into());
+                    return Err("--preset requires alpine|seeded-world|watershed|flight".into());
                 }
                 params = frontier_world::FbmParams {
                     recipe: frontier_world::FbmRecipe::Alpine,
@@ -533,11 +546,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                         Some("legacy") => frontier_world::FbmRecipe::Legacy,
                         Some("alpine") => frontier_world::FbmRecipe::Alpine,
                         Some("seeded-world" | "world") => frontier_world::FbmRecipe::SeededWorld,
+                        Some("highlands") => frontier_world::FbmRecipe::Highlands,
                         Some("watershed") => frontier_world::FbmRecipe::Watershed,
                         Some("regional") => frontier_world::FbmRecipe::Regional,
                         Some("regional-unwarped") => frontier_world::FbmRecipe::RegionalUnwarped,
                         _ => return Err(
-                            "--terrain-recipe requires legacy|regional|regional-unwarped|alpine|seeded-world|watershed"
+                            "--terrain-recipe requires legacy|regional|regional-unwarped|alpine|seeded-world|watershed|highlands"
                                 .into(),
                         ),
                     }
@@ -670,11 +684,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             }
             "--help" | "-h" => {
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius-voxels 1..4096 (native voxel half-extent, enables NAADF); --naadf-radius 1..256 (legacy meters) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
-                println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
-                println!("Water models (opt-in): --water-model ca|discrete|procedural|moving.\n  ca: original local cellular automaton; --live-water on selects this path.\n  discrete: supplied whole-voxel waterfall/basin/outlet demo on a worker.\n  procedural: fixed 1 m generated river-bank tile with finite coarse neighbors and open boundaries.\n  moving: connected 2 m detailed window following the player, a 4 m local footprint and exact dormant history.\nMoving river flow: --water-river-rate 0..1000000 attempts native cells per simulated second at each eligible upstream/downstream continuation (default 128 for new runs; 0 selects finite water). A saved rate persists unless explicitly overridden. With positive input/output, downstream removal may lead accepted supply by at most 16 cells per channel. Blocked supply can stall accepted flow. Lakes remain finite.\nLive saves: --water-save PATH atomically saves terrain, inventory and model-specific water state on clean exit; reload with the same model/source/seed. Requires --scene adaptive, --naadf on, --naadf-follow on and --naadf-gpu-distance off.\nCA controls: --water-demo builds a two-chamber basin; G opens its dam early, P adds one counted water cell in creative mode. --water-active-radius 1|2 selects a 3 m|5 m active cube (default 1); --water-history-cells 32768..16777216 sets persistent capacity (default 1048576, at least the active cube). Unloaded CA borders are sealed.\nComparison renderer settings: --naadf-radius 8 --width 1920 --height 1080 selects an 8 m radius/16 m cube at 1080p. Ordinary NAADF radius defaults remain 64 m; water physics dimensions are independent. See LIVE_WATER.md for launch examples and experimental limits.");
+                println!("Persistent terrain editing: --world-save PATH. Pickup defaults on in flight and with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
+                println!("Water models (opt-in): --water-model ca|discrete|procedural|moving.\n  ca: original local cellular automaton; --live-water on selects this path.\n  discrete: supplied whole-voxel waterfall/basin/outlet demo on a worker.\n  procedural: fixed 1 m generated river-bank tile with finite coarse neighbors and open boundaries.\n  moving: connected 2 m detailed window following the player, a 4 m local footprint and exact dormant history.\nMoving river flow: --water-river-rate 0..1000000 attempts native cells per simulated second at each eligible upstream/downstream continuation (default 128 for new runs; 0 selects finite water). A saved rate persists unless explicitly overridden. With positive input/output, downstream removal may lead accepted supply by at most 16 cells per channel. Blocked supply can stall accepted flow. Lakes remain finite.\n--world-save PATH enables persistent native terrain editing and inventory without starting a fluid simulation. V toggles plane controls; W/S throttle, A/D bank, Down/Up raise/lower the nose. Live saves: --water-save PATH atomically saves terrain, inventory and model-specific water state on clean exit; reload with the same model/source/seed. Requires --scene adaptive, --naadf on, --naadf-follow on and --naadf-gpu-distance off.\nCA controls: --water-demo builds a two-chamber basin; G opens its dam early, P adds one counted water cell in creative mode. --water-active-radius 1|2 selects a 3 m|5 m active cube (default 1); --water-history-cells 32768..16777216 sets persistent capacity (default 1048576, at least the active cube). Unloaded CA borders are sealed.\nComparison renderer settings: --naadf-radius 8 --width 1920 --height 1080 selects an 8 m radius/16 m cube at 1080p. Ordinary NAADF radius defaults remain 64 m; water physics dimensions are independent. See LIVE_WATER.md for launch examples and experimental limits.");
                 println!("Distant terrain defaults to coarse voxels with compact seed appearance. Set FRONTIER_DISTANT_TERRAIN=surface for the heightfield comparison or =voxy for the detailed-map voxel comparison. Set FRONTIER_VOXY_GPU_BATCH=1 to test optional GPU batching.");
-                println!("World grid: --voxel-size METERS selects the native cube edge length for this launch (default 0.0625).\nVisual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables the new watershed terrain and vegetation. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world|watershed|watershed (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("World grid: --voxel-size METERS selects the native cube edge length for this launch (default 0.0625).\nVisual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables the new watershed terrain and vegetation. --preset flight starts airborne above Highlands with a 35 km landscape horizon. W/S throttle, A/D bank, Down/Up pitch up/down. V toggles aircraft/free camera. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world|watershed|highlands (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -888,10 +902,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     adaptive_build_mib = visual.build_mib;
     adaptive_workers = visual.workers;
     adaptive_refinements = visual.refinements;
-    let player_edit = player_edit.unwrap_or(live_water);
-    if player_edit && !live_water {
-        return Err("--player-edit on currently requires --live-water on for atomic terrain/fluid/inventory saves".into());
-    }
+    let editable_flight = visual.flight_horizon
+        && scene == "adaptive"
+        && capture.is_none()
+        && !benchmark_input_lock
+        && visual.naadf_enabled
+        && visual.naadf_follow
+        && !visual.naadf_gpu_distance;
+    let player_edit = player_edit.unwrap_or(live_water || editable_flight);
+    let needs_native_driver = live_water || player_edit;
     if !hand.reach_m.is_finite()
         || !(0.0625..=8.).contains(&hand.reach_m)
         || !hand.volume_liters.is_finite()
@@ -921,16 +940,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     {
         return Err("--water-model procedural|moving requires Seeded World terrain; use --preset seeded-world".into());
     }
-    if live_water && (scene != "adaptive" || !visual.naadf_enabled) {
+    if needs_native_driver && (scene != "adaptive" || !visual.naadf_enabled) {
         return Err("live water requires --scene adaptive and --naadf on".into());
     }
-    if water_save.is_some() && !live_water {
+    if water_save.is_some() && !needs_native_driver {
         return Err("--water-save requires --live-water on".into());
     }
-    if live_water && (visual.naadf_gpu_distance || !visual.naadf_follow) {
+    if needs_native_driver && (visual.naadf_gpu_distance || !visual.naadf_follow) {
         return Err("live water requires --naadf-follow on --naadf-gpu-distance off".into());
     }
-    if live_water && capture.is_some() {
+    if needs_native_driver && capture.is_some() {
         return Err(
             "live water uses window ticks; use --frames/--seconds with --capture-on-exit".into(),
         );

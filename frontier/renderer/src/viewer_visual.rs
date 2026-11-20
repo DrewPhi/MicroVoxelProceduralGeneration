@@ -93,6 +93,10 @@ impl Viewer {
             self.walking.reset();
         }
         let previous = self.visual_settings.clone();
+        if settings.walking {
+            self.aircraft = None;
+            self.camera.roll = 0.;
+        }
         self.visual_settings = settings;
         if changes.loading_applied {
             if let Err(error) = self.apply_visual_quality() {
@@ -206,6 +210,7 @@ impl Viewer {
                 s.render_scale,
                 s.msaa,
                 gpu.scene_format,
+                s.flight_horizon,
             ));
             self.depth = Some(gpu.texture(self.width, self.height, true));
             self.multisample = gpu.multisample_texture(self.width, self.height);
@@ -221,7 +226,7 @@ impl Gpu {
         self.terrain_shadow_appearance = self.alpine_appearance
             || world
                 .fbm_terrain()
-                .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Watershed);
+                .is_some_and(|s| s.params().recipe.uses_watersheds());
         self.regional_appearance = world
             .fbm_terrain()
             .is_some_and(|s| s.params().recipe != frontier_world::FbmRecipe::Legacy);

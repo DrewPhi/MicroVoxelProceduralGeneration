@@ -122,12 +122,13 @@ impl Gpu {
             .as_mut()
             .unwrap()
             .set_background_paused(self.vegetation_background_paused);
-        let frame = self.vegetation_stream.as_mut().unwrap().update_view(
+        let frame = self.vegetation_stream.as_mut().unwrap().update_camera(
             camera.position.to_array(),
             height,
             camera.fov_y.to_radians(),
             world.revision(),
             camera.direction().as_dvec3().to_array(),
+            camera.roll,
             width as f32 / height.max(1) as f32,
         );
         self.vegetation_stats = frame.stats;

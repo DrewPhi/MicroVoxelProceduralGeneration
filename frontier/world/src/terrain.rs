@@ -63,10 +63,15 @@ pub enum FbmRecipe {
     SeededWorld,
     /// Accumulated watershed drainage, varied relief and biome cover.
     Watershed,
+    /// Fluted alpine massifs and open foothills drained by the watershed graph.
+    Highlands,
 }
 impl FbmRecipe {
     pub fn has_static_water(self) -> bool {
-        matches!(self, Self::SeededWorld | Self::Watershed)
+        self == Self::SeededWorld || self.uses_watersheds()
+    }
+    pub fn uses_watersheds(self) -> bool {
+        matches!(self, Self::Watershed | Self::Highlands)
     }
 }
 
@@ -153,7 +158,7 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
-            FbmRecipe::Watershed => 1,
+            FbmRecipe::Watershed | FbmRecipe::Highlands => 1,
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
@@ -162,6 +167,7 @@ impl FbmTerrain {
     pub fn appearance_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
+            FbmRecipe::Highlands => 1,
             FbmRecipe::Watershed => 2,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
@@ -187,7 +193,7 @@ impl FbmTerrain {
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
-            FbmRecipe::SeededWorld | FbmRecipe::Watershed => {
+            FbmRecipe::SeededWorld | FbmRecipe::Watershed | FbmRecipe::Highlands => {
                 seeded_world::fields(
                     self.seed,
                     self.params,

@@ -76,7 +76,7 @@ pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
             (-402.0 * p.amplitude / 1000.0).next_down() - voxel_size(),
             (1663.0 * p.amplitude / 1000.0).next_up(),
         ],
-        FbmRecipe::Watershed => {
+        FbmRecipe::Watershed | FbmRecipe::Highlands => {
             let [lo, hi] = crate::terrain::seeded_world::global_height_range(p);
             [lo.next_down() - voxel_size(), hi.next_up()]
         }
@@ -119,7 +119,7 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
     let n = 16.0;
     match p.recipe {
         // Local river banks are bounded through the source-specific affine path.
-        FbmRecipe::SeededWorld | FbmRecipe::Watershed => f64::INFINITY,
+        FbmRecipe::SeededWorld | FbmRecipe::Watershed | FbmRecipe::Highlands => f64::INFINITY,
         FbmRecipe::Alpine => {
             // Work in authored scene meters then scale to physical meters.
             // smooth(1-d²) has |gradient|<=3|gradient d| on its active support.

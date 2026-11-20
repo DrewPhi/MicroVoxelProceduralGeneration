@@ -982,7 +982,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let p = t.params();
     let sx = x.scale(1800.).div_scalar(p.horizontal_scale);
     let sz = z.scale(1800.).div_scalar(p.horizontal_scale);
-    let mut band = |wavelength: f64, count: u32, gain: f64, salt: u64| {
+    let mut offset_band = |sx: Aa, sz: Aa, wavelength: f64, count: u32, gain: f64, salt: u64| {
         let (mut weight, mut frequency, mut sum, mut norm) =
             (1., 1. / wavelength, Aa::point(0.), 0.);
         for octave in 0..count {
@@ -999,6 +999,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         }
         sum.div_scalar(norm)
     };
+    let mut band = |w, n, gain, salt| offset_band(sx, sz, w, n, gain, salt);
     let continent = band(48_000., 3, 0.45, 0x5101);
     let province = band(22_000., 3, 0.45, 0x5102);
     let m = province.add(Aa::point(0.08)).div_scalar(0.48).clamp(0., 1.);
@@ -1006,7 +1007,20 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let ridge = Aa::point(1.).sub(band(3600., 4, 0.48, 0x5105).abs());
     let hills = band(1800., 3, 0.45, 0x5106);
     let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let authored = if p.recipe == FbmRecipe::Highlands {
+        let spur = Aa::point(1.).sub(
+            offset_band(
+                sx.add(hills.scale(410.)),
+                sz.sub(hills.scale(260.)),
+                960.,
+                4,
+                0.52,
+                0x5174,
+            )
+            .abs(),
+        );
+        crate::terrain::seeded_world::highland_relief(continent, mountain, ridge, hills, fine, spur)
+    } else if p.recipe.uses_watersheds() {
         let strata = band(1050., 3, 0.45, 0x5121);
         crate::terrain::seeded_world::watershed_relief(
             continent, mountain, ridge, hills, fine, strata,
@@ -1121,7 +1135,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
                 hi: a.hi.max(b.hi),
             }
         };
-        if p.recipe == FbmRecipe::Watershed {
+        if p.recipe.uses_watersheds() {
             profile.lo = profile.lo.min(base_range.lo);
             profile.hi = profile.hi.min(base_range.hi);
         } else if stage.lo == 0. && base_range.lo < 0. {
@@ -1213,7 +1227,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     ground.lo = (ground.lo.max(hull.lo) - roundoff).next_down();
     ground.hi = (ground.hi.min(hull.hi) + roundoff).next_up();
     let bounded_stage = |stage: I, ground: I| {
-        if p.recipe != FbmRecipe::Watershed {
+        if !p.recipe.uses_watersheds() {
             return stage;
         }
         use crate::terrain::seeded_world::{WATERSHED_MAX_WATER_DEPTH, WATERSHED_WATER_ABOVE_LAND};

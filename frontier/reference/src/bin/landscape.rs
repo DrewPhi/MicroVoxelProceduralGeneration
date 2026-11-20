@@ -320,7 +320,7 @@ fn main() -> Result<()> {
     let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
+            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed|highlands --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
             return Ok(());
         }
         if a == "--shadows" {
@@ -359,12 +359,12 @@ fn main() -> Result<()> {
                     "regional" => FbmRecipe::Regional,
                     "alpine" => FbmRecipe::Alpine,
                     "seeded-world" | "world" => FbmRecipe::SeededWorld,
+                    "highlands" => FbmRecipe::Highlands,
                     "watershed" => FbmRecipe::Watershed,
-                    _ => {
-                        return Err(
-                            "recipe must be legacy|regional|alpine|seeded-world|watershed".into(),
-                        )
-                    }
+                    _ => return Err(
+                        "recipe must be legacy|regional|alpine|seeded-world|watershed|highlands"
+                            .into(),
+                    ),
                 }
             }
             "--sample-seed" => sample_seed = v.parse()?,

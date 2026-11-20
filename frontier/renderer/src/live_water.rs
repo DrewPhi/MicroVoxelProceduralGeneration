@@ -33,6 +33,7 @@ pub fn immutable_surface_world(world: &World) -> Result<World> {
 
 pub struct LiveWater {
     pub fluid: FluidWorld,
+    pub simulate: bool,
     pub inventory: Inventory,
     path: Option<PathBuf>,
     active_radius: i64,
@@ -73,6 +74,7 @@ impl LiveWater {
     ) -> Result<Self> {
         let now = Instant::now();
         let mut live = Self {
+            simulate: true,
             fluid: FluidWorld::new(FluidConfig {
                 max_loaded_cells: active_cell_capacity(active_radius),
                 max_stored_cells: history_cells,
@@ -169,6 +171,9 @@ impl LiveWater {
         self.debt = 0.;
     }
     pub fn update(&mut self, world: &mut World, camera: Camera) -> Result<()> {
+        if !self.simulate {
+            return Ok(());
+        }
         let elapsed = self.clock.elapsed().as_secs_f64();
         self.clock = Instant::now();
         self.debt = (self.debt + elapsed).min(0.5);
@@ -460,7 +465,7 @@ impl LiveWater {
             }
         }
         fluid.set_config(config)?;
-        world.set_batch(edits);
+        world.restore_terrain_edits(edits);
         let occupancy: Vec<_> = fluid
             .overrides()
             .filter_map(|(c, m)| {

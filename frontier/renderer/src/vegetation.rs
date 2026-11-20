@@ -1294,6 +1294,7 @@ impl VegetationStream {
     }
     /// Frustum culling affects display selection only; all-heading placement
     /// demand remains warm for camera turns. FOV is vertical radians.
+    #[cfg(test)]
     pub fn update_view(
         &mut self,
         camera: [f64; 3],
@@ -1303,12 +1304,37 @@ impl VegetationStream {
         forward: [f64; 3],
         aspect: f32,
     ) -> VegetationFrame {
+        self.update_camera(
+            camera,
+            viewport_height,
+            fov_y,
+            world_revision,
+            forward,
+            0.,
+            aspect,
+        )
+    }
+    pub fn update_camera(
+        &mut self,
+        camera: [f64; 3],
+        viewport_height: u32,
+        fov_y: f32,
+        world_revision: u64,
+        forward: [f64; 3],
+        roll: f32,
+        aspect: f32,
+    ) -> VegetationFrame {
         self.update_inner(
             camera,
             viewport_height,
             fov_y,
             world_revision,
-            CullView::new(camera, forward, fov_y, aspect),
+            CullView::new(camera, forward, fov_y, aspect).map(|mut view| {
+                let (s, c) = (roll as f64).sin_cos();
+                (view.right, view.up) =
+                    (view.right * c - view.up * s, view.up * c + view.right * s);
+                view
+            }),
         )
     }
     fn update_inner(

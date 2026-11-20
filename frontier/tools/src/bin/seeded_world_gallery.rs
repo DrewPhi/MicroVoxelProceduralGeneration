@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(arg) = args.next() {
         if arg == "--help" {
-            println!("seeded_world_gallery [--output DIR] [--seed INTEGER] [--span METERS] [--resolution 257] [--center X,Z] [--recipe seeded-world|watershed]\nRepeat --seed/--span; defaults seeds 7,19,83 and spans 10000,100000m. Canonical CPU samples only; eval timing is not FPS. Then run python3 tools/seeded_world_gallery.py DIR");
+            println!("seeded_world_gallery [--output DIR] [--seed INTEGER] [--span METERS] [--resolution 257] [--center X,Z] [--recipe seeded-world|watershed|highlands]\nRepeat --seed/--span; defaults seeds 7,19,83 and spans 10000,100000m. Canonical CPU samples only; eval timing is not FPS. Then run python3 tools/seeded_world_gallery.py DIR");
             return Ok(());
         }
         let value = args.next().ok_or("flag requires a value")?;
@@ -28,8 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--recipe" => {
                 recipe = match value.as_str() {
                     "seeded-world" => FbmRecipe::SeededWorld,
+                    "highlands" => FbmRecipe::Highlands,
                     "watershed" => FbmRecipe::Watershed,
-                    _ => return Err("--recipe requires seeded-world|watershed".into()),
+                    _ => return Err("--recipe requires seeded-world|watershed|highlands".into()),
                 }
             }
             "--resolution" => n = value.parse()?,

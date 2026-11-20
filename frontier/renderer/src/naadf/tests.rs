@@ -10,6 +10,7 @@ fn manual_estimate_ceiling_respects_available_ram() {
 #[test]
 fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
     let mut camera = Camera {
+        roll: 0.,
         position: DVec3::new(-1e9, 300., 1e9),
         yaw: 1.2,
         pitch: -0.3,
@@ -332,6 +333,7 @@ fn gpu_matches_canonical_rays_for_source(
             DVec3::new(0., height + 1.7, 0.)
         };
         let mut camera = Camera {
+            roll: 0.,
             position: eye,
             far: 100.,
             fov_y: 60.,

@@ -1,4 +1,4 @@
-// Bounded, half-resolution cloud lighting. This texture contains premultiplied
+// Bounded, quarter-resolution cloud lighting. This texture contains premultiplied
 // cloud scattering RGB and clear-sky transmittance A, never terrain colour.
 struct AtmosphereUniform {
     inverse_view_projection:mat4x4<f32>,relative_eye:vec4<f32>,world_eye:vec4<f32>,
@@ -26,32 +26,31 @@ fn noise3(p:vec3<f32>)->f32 {
 fn density(p:vec3<f32>)->f32 {
     let height=(p.y-1720.)/680.;
     let wind=vec3(1.,0.,.32)*atmosphere.weather.w*atmosphere.weather.y;
-    let q=p*vec3(.0030,.0038,.0030)+wind;
+    // Broad cloud streets leave connected blue lanes between cumulus banks.
+    let q=p*vec3(.00083,.00145,.00105)+wind;
     // Genuine 3D density removes the six isolated projected noise sheets.
     // A broad vertical dome cuts rounded tops; a shallow base fades smoothly.
     let broad=noise3(q);
-    let detail=noise3(q*2.07+vec3(17.,3.,11.));
-    let shape=broad*.69+detail*.31;
+    let detail=noise3(q*3.13+vec3(17.,3.,11.));
+    let shape=broad*.73+detail*.27;
     let dome=pow(abs((height-.42)/.58),2.);
-    let threshold=mix(.79,.30,atmosphere.weather.x);
+    let threshold=mix(.78,.32,atmosphere.weather.x);
     let envelope=smoothstep(0.,.10,height)*(1.-smoothstep(.82,1.,height));
     return smoothstep(threshold,threshold+.16,shape-dome*.19)*envelope;
 }
 @fragment fn fs_main(i:VertexOutput)->@location(0) vec4<f32> {
     let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,1.,1.);
     let ray=normalize(p.xyz/p.w-atmosphere.relative_eye.xyz);
-    if ray.y<=.035 || atmosphere.weather.x<=.001 || atmosphere.world_eye.y>=2400. {return vec4(0.,0.,0.,1.);}
-    let start=max((1720.-atmosphere.world_eye.y)/ray.y,0.);
-    let end=min((2400.-atmosphere.world_eye.y)/ray.y,start+12000.);
-    let step=(end-start)/20.;var transmittance=1.;var light=vec3(0.);
+    let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
+    if segment.y <= segment.x || atmosphere.weather.x <= .001 { return vec4(0.,0.,0.,1.); }
+    let start = segment.x;
+    let count = u32(clamp(ceil((segment.y - start)/175.), 16., 48.));
+    let step = (segment.y - start) / f32(count);
+    var transmittance=1.;var light=vec3(0.);
     let warm=1.-smoothstep(.04,.45,atmosphere.sun.y);
     let sun_color=mix(vec3(1.12,1.08,1.00),vec3(1.15,.85,.58),warm*.7);
-    // World-direction anchored substep offset, continuous across the image and
-    // stable while stationary. It breaks coherent slab integration boundaries
-    // without temporal random noise or screen-space grain.
-    let phase=.5+.16*sin(dot(ray,vec3(371.,173.,257.)));
-    for(var k=0u;k<20u;k+=1u) {
-        let position=atmosphere.world_eye.xyz+ray*(start+(f32(k)+phase)*step);
+    for(var k=0u;k<count;k+=1u) {
+        let position=atmosphere.world_eye.xyz+ray*(start+(f32(k)+.5)*step);
         let rho=density(position);
         if rho>.001 {
             let sun_density=density(position+atmosphere.sun.xyz*110.)+density(position+atmosphere.sun.xyz*280.);
@@ -66,6 +65,6 @@ fn density(p:vec3<f32>)->f32 {
             if transmittance<.015 {break;}
         }
     }
-    let horizon=smoothstep(.035,.13,ray.y);
+    let horizon=1.-smoothstep(9000.,24000.,start);
     return vec4(light*horizon,mix(1.,transmittance,horizon));
 }

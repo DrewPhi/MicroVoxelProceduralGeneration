@@ -2256,7 +2256,7 @@ impl CameraQueries {
     ) -> Self {
         let projection = camera_projection(camera, width, height);
         let forward = camera.direction().as_dvec3().normalize();
-        let right = forward.cross(DVec3::Y).normalize();
+        let right = forward.cross(camera.view_up().as_dvec3()).normalize();
         let up = right.cross(forward);
         let ty = projection.map_or(0., |p| (p.vertical_fov_radians * 0.5).tan() * (1. + 1e-6));
         Self {
@@ -2397,7 +2397,7 @@ fn vertical_pixel_bound(
         );
     }
     let forward = camera.direction().as_dvec3().normalize();
-    let right = forward.cross(DVec3::Y).normalize();
+    let right = forward.cross(camera.view_up().as_dvec3()).normalize();
     let up = right.cross(forward);
     p.projected_vertical_error_px(
         error_m,
@@ -2474,7 +2474,7 @@ fn frustum_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Optio
         return None;
     }
     let f = camera.direction().as_dvec3().normalize();
-    let r = f.cross(DVec3::Y).normalize();
+    let r = f.cross(camera.view_up().as_dvec3()).normalize();
     let u = r.cross(f);
     let projection = glam::Mat4::perspective_rh(
         camera.fov_y.to_radians(),
@@ -2500,11 +2500,7 @@ fn frustum_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Optio
     }
 }
 fn same_pose(a: &Camera, b: &Camera) -> bool {
-    a.position == b.position
-        && a.yaw == b.yaw
-        && a.pitch == b.pitch
-        && a.far == b.far
-        && a.fov_y == b.fov_y
+    a == b
 }
 fn split(n: Node, out: &mut Vec<Node>) {
     let half = n.width / 2;
@@ -2573,7 +2569,7 @@ fn adjacency(nodes: &[Node]) -> Vec<(usize, usize, usize, usize)> {
 }
 fn world_bounds_to_view(bounds: [[f64; 3]; 2], camera: &Camera) -> ViewBounds {
     let forward = camera.direction().as_dvec3().normalize();
-    let right = forward.cross(DVec3::Y).normalize();
+    let right = forward.cross(camera.view_up().as_dvec3()).normalize();
     let up = right.cross(forward);
     let mut result = ViewBounds {
         min: [f64::INFINITY; 3],
@@ -3420,7 +3416,7 @@ mod tests {
                 camera.pitch = pitch;
                 let extents = frustum_horizontal_extents(&camera, 1920, 1080).unwrap();
                 let f = camera.direction().as_dvec3().normalize();
-                let r = f.cross(DVec3::Y).normalize();
+                let r = f.cross(camera.view_up().as_dvec3()).normalize();
                 let u = r.cross(f);
                 let ty = (camera.fov_y as f64 * std::f64::consts::PI / 360.0).tan();
                 let tx = ty * 1920.0 / 1080.0;
@@ -4363,14 +4359,7 @@ impl Worker {
             });
         s.motion.observe(&camera, now, horizon);
         if let Some((old, w, h)) = &s.last_request {
-            if *w == width
-                && *h == height
-                && old.position == camera.position
-                && old.yaw == camera.yaw
-                && old.pitch == camera.pitch
-                && old.far == camera.far
-                && old.fov_y == camera.fov_y
-            {
+            if *w == width && *h == height && *old == camera {
                 return s.epoch;
             }
         }

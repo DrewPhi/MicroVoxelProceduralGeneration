@@ -718,6 +718,24 @@ fn build_region_options(
     profile.end(Stage::EditIndex, phase);
     let mut leaves = LeafIndex::default();
     let mut cursor = 0;
+    // A high-altitude strip can contain millions of native columns of empty
+    // sky. One conservative height bound covers its whole XZ footprint.
+    // Cheap center rejection avoids affine work in ordinary ground builds.
+    let above_source = world.topology_base_cells().is_none()
+        && nx * nz >= 4
+        && world.fbm_terrain().is_some_and(|terrain| {
+            use frontier_world::affine_bounds::{bound_native_height, BoundBudget, ColumnBox};
+            let floor_m = min.y as f64 * frontier_world::voxel_size();
+            if terrain.height_cells(min.x + (nx * 8) as i64, min.z + (nz * 8) as i64) >= min.y {
+                return false;
+            }
+            let region = ColumnBox {
+                min: [min.x, min.z],
+                size_cells: [(nx * 16) as u32, (nz * 16) as u32],
+            };
+            bound_native_height(terrain, region, BoundBudget::default())
+                .is_some_and(|bound| bound.height_range[1] < floor_m)
+        });
     stage.store(2, Ordering::Relaxed);
     for cz in 0..nz {
         for cx in 0..nx {
@@ -747,6 +765,20 @@ fn build_region_options(
                     }
                     continue;
                 }
+            }
+            if above_source && !column_edited && !plant_column {
+                // The strip floor is a conservative upper bound. This summary
+                // can skip future air above it, but cannot claim solid or
+                // retire a raster tile when the player descends.
+                out.columns[cz * nx + cx] = ColumnSummary {
+                    low: i64::MIN + 16,
+                    high: min.y,
+                    deep: 0,
+                    fast: true,
+                    owned: false,
+                };
+                out.fast_skipped_chunks += ny;
+                continue;
             }
             let source_fast = world.fbm_terrain().is_some()
                 // The fixture's ownership boundary is metre aligned. A shifted

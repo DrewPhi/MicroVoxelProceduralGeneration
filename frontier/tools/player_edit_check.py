@@ -12,31 +12,40 @@ from record_walk import ROOT, X11
 
 def inventory(path):
     data = path.read_bytes()
+    if data.startswith(b'FVGRID01'):
+        data = data[16:]
     if data[:8] != b'FVWATER3':
         raise RuntimeError('expected inventory checkpoint version 3')
     pos = 8 + 8 * 8
     count = struct.unpack_from('<Q', data, pos)[0]
-    pos += 8 + count * 25
+    pos += 8
+    edits = sorted(struct.iter_unpack('<qqqB', data[pos:pos+count*25]))
+    pos += count * 25
     demo = data[pos]
     pos += 1 + (24 if demo else 0) + 8
     values = struct.unpack_from('<13Q', data, pos)
-    return {'counts': list(values[:10]), 'capacity': values[10],
+    return {'edits': edits, 'counts': list(values[:10]), 'capacity': values[10],
             'selected': values[11], 'sequence': values[12]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--terrain-only', action='store_true',
+                        help='exercise persistent editing with water simulation disabled')
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     binary = ROOT / 'target/release/frontier'
     cmd = [str(binary), '--scene', 'adaptive', '--terrain-recipe', 'regional',
            '--amplitude', '0', '--vegetation', 'off', '--walk', 'off',
-           '--live-water', 'on', '--naadf', 'on', '--naadf-radius', '8',
+           '--naadf', 'on', '--naadf-radius', '8',
            '--width', '1280', '--height', '720', '--eye', '0,1.7,0',
-           '--target', '0,0,0.5', '--water-save', str(out/'world.save'),
-           '--capture-on-exit', str(out/'exit.png'), '--report', str(out/'game.json')]
+           '--target', '0,0,0.5']
+    persistence = ['--world-save'] if args.terrain_only else ['--live-water', 'on', '--water-save']
+    base = cmd + persistence + [str(out/'world.save')]
+    cmd = base + ['--capture-on-exit', str(out/'exit.png'), '--report', str(out/'game.json')]
+    ready = '8.00/8.00 m' if args.terrain_only else 'water simulation started'
     x = None
     app = None
     window = None
@@ -53,7 +62,7 @@ def main():
                 if app.poll() is not None:
                     raise RuntimeError('viewer exited before native readiness')
                 window = x.find(app.pid)
-                if window and 'water simulation started' in (out/'game.log').read_text():
+                if window and ready in (out/'game.log').read_text():
                     break
                 time.sleep(.1)
             else:
@@ -80,6 +89,13 @@ def main():
             # Three picked solid cells, one returned: no capture-click edit.
             if sum(state['counts']) != 2 or state['sequence'] != 3:
                 raise RuntimeError(f'pickup/hold/place result failed: {state}')
+            if not state['edits']:
+                raise RuntimeError('expected edited terrain after placement')
+            with (out/'reload.log').open('w') as reload_log:
+                subprocess.run(base + ['--seconds', '1'], cwd=ROOT, stdout=reload_log,
+                               stderr=subprocess.STDOUT, timeout=90, check=True)
+            if inventory(out/'world.save') != state:
+                raise RuntimeError('terrain or inventory changed across reload')
             (out/'result.json').write_text(json.dumps(state, indent=2)+'\n')
     finally:
         if x:

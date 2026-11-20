@@ -5,6 +5,7 @@ pub use crate::development_resources::{MemorySnapshot, ResourceProfile};
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualSettings {
     pub beauty: bool,
+    pub flight_horizon: bool,
     pub vegetation: bool,
     pub walking: bool,
     pub step_smoothing: bool,
@@ -57,6 +58,7 @@ impl Default for VisualSettings {
     fn default() -> Self {
         Self {
             beauty: false,
+            flight_horizon: false,
             vegetation: false,
             walking: false,
             step_smoothing: true,

@@ -4,8 +4,14 @@ use crate::{settings::VisualSettings, Camera};
 use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-const SKY_SHADER: &str = include_str!("atmosphere_sky.wgsl");
-const SHADER: &str = include_str!("atmosphere.wgsl");
+const SKY_SHADER: &str = concat!(
+    include_str!("cloud_layer.wgsl"),
+    include_str!("atmosphere_sky.wgsl")
+);
+const SHADER: &str = concat!(
+    include_str!("cloud_layer.wgsl"),
+    include_str!("atmosphere.wgsl")
+);
 const BLIT: &str = r#"
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var image_sampler: sampler;
@@ -70,7 +76,7 @@ pub(crate) struct Atmosphere {
     scene: wgpu::TextureView,
     depth: wgpu::TextureView,
     msaa: Option<wgpu::TextureView>,
-    composite: wgpu::TextureView,
+    composite: Option<wgpu::TextureView>,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     blit_group: wgpu::BindGroup,
@@ -80,6 +86,7 @@ pub(crate) struct Atmosphere {
     blit_pipeline: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
     scene_format: wgpu::TextureFormat,
+    horizon: Option<crate::flight_horizon::Horizon>,
     sky: wgpu::TextureView,
     sky_bind: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
@@ -98,7 +105,7 @@ pub(crate) struct Atmosphere {
     sample_count: u32,
 }
 
-fn texture(
+pub(crate) fn texture(
     device: &wgpu::Device,
     label: &str,
     format: wgpu::TextureFormat,
@@ -248,7 +255,16 @@ impl Atmosphere {
         scale: f32,
         sample_count: u32,
     ) -> Self {
-        Self::new_with_scene_format(device, format, width, height, scale, sample_count, format)
+        Self::new_with_scene_format(
+            device,
+            format,
+            width,
+            height,
+            scale,
+            sample_count,
+            format,
+            false,
+        )
     }
     pub(crate) fn new_with_scene_format(
         device: &wgpu::Device,
@@ -258,6 +274,7 @@ impl Atmosphere {
         scale: f32,
         sample_count: u32,
         scene_format: wgpu::TextureFormat,
+        flight_horizon: bool,
     ) -> Self {
         let scale = scale.clamp(0.5, 1.0);
         let width = ((width as f32 * scale).round() as u32).max(1);
@@ -284,10 +301,10 @@ impl Atmosphere {
         );
         let sky = texture(
             device,
-            "half resolution volumetric clouds",
+            "quarter resolution volumetric clouds",
             wgpu::TextureFormat::Rgba16Float,
-            width.div_ceil(2),
-            height.div_ceil(2),
+            width.div_ceil(4),
+            height.div_ceil(4),
             1,
         );
         let air = texture(
@@ -298,7 +315,11 @@ impl Atmosphere {
             height.div_ceil(4),
             1,
         );
-        let composite = texture(device, "atmosphere composite", format, width, height, 1);
+        let horizon = flight_horizon.then(|| {
+            crate::flight_horizon::Horizon::new(device, width.div_ceil(2), height.div_ceil(2))
+        });
+        let composite =
+            (scale < 1.).then(|| texture(device, "atmosphere composite", format, width, height, 1));
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("atmosphere parameters"),
             contents: bytemuck::bytes_of(&Uniform::zeroed()),
@@ -357,6 +378,16 @@ impl Atmosphere {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -383,6 +414,12 @@ impl Atmosphere {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&sky),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        horizon.as_ref().map_or(&sky, |h| &h.color),
+                    ),
+                },
             ],
         });
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -408,7 +445,7 @@ impl Atmosphere {
         });
         let sky_pipeline = make_pipeline(
             device,
-            "half resolution volumetric clouds",
+            "quarter resolution volumetric clouds",
             &sky_layout,
             SKY_SHADER,
             wgpu::TextureFormat::Rgba16Float,
@@ -496,7 +533,9 @@ impl Atmosphere {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&composite),
+                    resource: wgpu::BindingResource::TextureView(
+                        composite.as_ref().unwrap_or(&scene),
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -527,6 +566,7 @@ impl Atmosphere {
         );
         let blit_pipeline = make_pipeline(device, "scene upscale", &blit_layout, BLIT, format);
         Self {
+            horizon,
             sky,
             sky_bind,
             sky_pipeline,
@@ -582,6 +622,7 @@ impl Atmosphere {
             scale,
             sample_count,
             self.scene_format,
+            self.horizon.is_some(),
         );
     }
     pub(crate) fn scene_view(&self) -> &wgpu::TextureView {
@@ -595,11 +636,12 @@ impl Atmosphere {
     }
     /// Logical texel storage for every texture owned by this pass, including
     /// resolved colour, optional MSAA colour, sampled depth, composite, the two
-    /// half-resolution RGBA16F lighting targets and disabled 1x1 shadow depth.
+    /// quarter-resolution RGBA16F lighting targets and disabled 1x1 shadow depth.
     /// Driver alignment/metadata and the caller's output target are excluded.
     pub(crate) fn attachment_bytes(&self) -> u64 {
         let pixels = u64::from(self.width) * u64::from(self.height);
-        let half_pixels = u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2));
+        let lighting_pixels =
+            u64::from(self.width.div_ceil(4)) * u64::from(self.height.div_ceil(4));
         let scene_bpp = u64::from(
             self.scene_format
                 .block_copy_size(None)
@@ -612,9 +654,13 @@ impl Atmosphere {
         );
         let samples = u64::from(self.sample_count);
         let scene_samples = 1 + if self.msaa.is_some() { samples } else { 0 };
-        pixels * (scene_bpp * scene_samples + 4 * samples + composite_bpp)
-            + half_pixels * 8
-            + u64::from(self.width.div_ceil(4)) * u64::from(self.height.div_ceil(4)) * 8
+        pixels
+            * (scene_bpp * scene_samples
+                + 4 * samples
+                + composite_bpp * u64::from(self.composite.is_some()))
+            + u64::from(self.horizon.is_some())
+                * (u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2)) * 12)
+            + lighting_pixels * 16
             + 4
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
@@ -654,6 +700,29 @@ impl Atmosphere {
 
     pub(crate) fn peak_haze_regions(&self) -> usize {
         self.peak_haze_regions.get()
+    }
+
+    pub(crate) fn prepare_horizon(
+        &mut self,
+        queue: &wgpu::Queue,
+        world: &frontier_world::World,
+        camera: Camera,
+        settings: &VisualSettings,
+        capture: bool,
+    ) {
+        if !settings.atmosphere || !settings.beauty {
+            return;
+        }
+        if let (Some(horizon), Some(source)) = (&mut self.horizon, world.fbm_terrain()) {
+            horizon.prepare(
+                queue,
+                source,
+                camera,
+                self.width as f32 / self.height as f32,
+                sun_direction(settings.sun_elevation, settings.sun_azimuth),
+                capture,
+            );
+        }
     }
 
     pub(crate) fn prepare(
@@ -729,7 +798,11 @@ impl Atmosphere {
                 settings.sunbeams,
                 haze_strength,
                 context.region_count as f32,
-                0.,
+                if self.horizon.is_some() {
+                    settings.view_distance
+                } else {
+                    0.
+                },
             ],
             far_shadow: context.shadow_projection,
             haze_regions: context.regions,
@@ -746,9 +819,12 @@ impl Atmosphere {
         shadows: Option<&crate::adaptive_gpu::AdaptiveGpu>,
     ) {
         if self.beauty_enabled.get() {
+            if let Some(horizon) = &self.horizon {
+                horizon.draw(encoder);
+            }
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("half resolution volumetric clouds"),
+                    label: Some("quarter resolution volumetric clouds"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &self.sky,
                         resolve_target: None,
@@ -789,7 +865,7 @@ impl Atmosphere {
         }
         for (view, pipeline, group, label) in [
             (
-                &self.composite,
+                self.composite.as_ref().unwrap_or(output),
                 &self.pipeline,
                 &self.bind_group,
                 "atmosphere",
@@ -806,6 +882,9 @@ impl Atmosphere {
             ),
         ] {
             if label == "atmosphere" && !self.effects_enabled.get() {
+                continue;
+            }
+            if label == "scene upscale" && self.effects_enabled.get() && self.composite.is_none() {
                 continue;
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

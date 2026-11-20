@@ -22,7 +22,7 @@ pub(crate) const WATERSHED_MAX_WATER_DEPTH: f64 = 9.;
 pub(crate) const WATERSHED_WATER_ABOVE_LAND: f64 = 0.7;
 
 pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.uses_watersheds() {
         3.
     } else {
         8.
@@ -30,7 +30,7 @@ pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
 }
 
 pub(crate) fn maximum_lake_radius(p: FbmParams) -> f64 {
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.uses_watersheds() {
         140.
     } else {
         100.
@@ -38,7 +38,9 @@ pub(crate) fn maximum_lake_radius(p: FbmParams) -> f64 {
 }
 
 pub(crate) fn global_height_range(p: FbmParams) -> [f64; 2] {
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let authored = if p.recipe == FbmRecipe::Highlands {
+        [-650., 3880.]
+    } else if p.recipe.uses_watersheds() {
         [-600., 2320.]
     } else {
         [-402., 1663.]
@@ -64,6 +66,31 @@ pub(crate) fn watershed_relief<V: Value>(
         .add(highlands)
         .add(hills.mul(V::point(50.).add(strata.scale(30.))))
         .add(fine.scale(5.))
+}
+
+// Low passes and individual summits interrupt the main crest. Smaller
+// tributary ridges rise along its flanks. Relief in both bands fades across
+// the foothills, leaving climate and drainage continuous into the lowlands.
+pub(crate) fn highland_relief<V: Value>(
+    continent: V,
+    mountain: V,
+    ridge: V,
+    hills: V,
+    fine: V,
+    spur: V,
+) -> V {
+    let crest = ridge.mul(ridge);
+    let summits = crest.mul(ridge).mul(V::point(1360.).add(hills.scale(820.)));
+    let buttresses = spur.mul(spur).mul(crest).scale(420.);
+    let relief = mountain.mul(mountain).mul(summits.add(buttresses));
+    let foothills = mountain.mul(V::point(170.).add(hills.scale(230.)));
+    continent
+        .scale(480.)
+        .add(V::point(96.))
+        .add(relief)
+        .add(foothills)
+        .add(hills.scale(85.))
+        .add(fine.mul(V::point(5.).add(mountain.mul(ridge).scale(72.))))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -122,7 +149,20 @@ fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
     let ridge = 1. - fbm(seed, x, z, 3600., 4, 0.48, 0x5105).abs();
     let foothill = fbm(seed, x, z, 1800., 3, 0.45, 0x5106);
     let fine = fbm(seed, x, z, 90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let authored = if p.recipe == FbmRecipe::Highlands {
+        let spur = 1.
+            - fbm(
+                seed,
+                x + 410. * foothill,
+                z - 260. * foothill,
+                960.,
+                4,
+                0.52,
+                0x5174,
+            )
+            .abs();
+        highland_relief(continental, mountain, ridge, foothill, fine, spur)
+    } else if p.recipe.uses_watersheds() {
         let strata = fbm(seed, x, z, 1050., 3, 0.45, 0x5121);
         watershed_relief(continental, mountain, ridge, foothill, fine, strata)
     } else {
@@ -219,7 +259,7 @@ fn node(seed: u64, p: FbmParams, ix: i64, iz: i64) -> Node {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let mut x = ix as f64 * spacing;
     let mut z = iz as f64 * spacing;
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.uses_watersheds() {
         let unit = |salt| (super::hash(ix, iz, seed ^ salt) >> 11) as f64 / (1u64 << 53) as f64;
         x += (unit(0x5131) - 0.5) * 0.32 * spacing;
         z += (unit(0x5132) - 0.5) * 0.32 * spacing;
@@ -367,7 +407,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     }
     // Build outside the cache borrow. A one-node halo includes every incident
     // edge affecting this region, including diagonals and negative boundaries.
-    let watershed = p.recipe == FbmRecipe::Watershed;
+    let watershed = p.recipe.uses_watersheds();
     // The row just outside the accumulated halo is needed to choose the
     // downstream link of its outermost contributors.
     let halo = if watershed { RUNOFF_HOPS + 1 } else { 0 };
@@ -598,7 +638,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
     let l = land(seed, p, x, z);
     let mut ground = l.h;
     let mut water = if ground < 0. { Some(0.) } else { None };
-    let watershed = p.recipe == FbmRecipe::Watershed;
+    let watershed = p.recipe.uses_watersheds();
     let relief = p.amplitude / 1000.;
     let land_water_ceiling = (l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.);
     let mut nearest_bank: Option<(f64, f64)> = None;
@@ -627,7 +667,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                     + (l.h - stage - bank_height) * smooth((d - width) / (outer - width))
             };
             // Sea-level reach caps may cut the seabed, never raise a ring.
-            let profile = if p.recipe == FbmRecipe::Watershed || (stage == 0. && l.h < 0.) {
+            let profile = if p.recipe.uses_watersheds() || (stage == 0. && l.h < 0.) {
                 profile.min(l.h)
             } else {
                 profile
@@ -691,9 +731,9 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
         SeededBiome::Mountains
     } else if moisture < 0.39 && effective_temperature > 0.48 {
         SeededBiome::Desert
-    } else if p.recipe == FbmRecipe::Watershed && moisture >= 0.56 {
+    } else if p.recipe.uses_watersheds() && moisture >= 0.56 {
         SeededBiome::Woodland
-    } else if p.recipe == FbmRecipe::Watershed && moisture < 0.44 {
+    } else if p.recipe.uses_watersheds() && moisture < 0.44 {
         SeededBiome::Steppe
     } else {
         SeededBiome::Plains
@@ -743,7 +783,7 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
         SeededBiome::Mountains => {
             if f.temperature < 0.36 {
                 Material::Snow
-            } else if p.recipe == FbmRecipe::Watershed && f.moisture >= 0.46 {
+            } else if p.recipe.uses_watersheds() && f.moisture >= 0.46 {
                 let x = x * 1800. / p.horizontal_scale;
                 let z = z * 1800. / p.horizontal_scale;
                 let patch = noise(x / 190., z / 190., seed ^ 0x5124);
@@ -775,6 +815,23 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
             }
         }
     };
+    if p.recipe == FbmRecipe::Highlands
+        && f.mountain > 0.32
+        && f.ground_height_m > 440. * p.amplitude / 1000.
+    {
+        // Broken snowfields follow the local snow line. Exposed ribs and rock
+        // interrupt the blanket of snow as the wind scours the upper slopes.
+        let scale = 1800. / p.horizontal_scale;
+        let nx = x * scale;
+        let nz = z * scale;
+        let shelter = fbm(seed, nx, nz, 480., 3, 0.48, 0x5177);
+        let snow_line = 0.22 + 0.14 * shelter;
+        if f.temperature < snow_line && shelter > -0.40 {
+            surface = Material::Snow;
+        } else if f.temperature < 0.35 || shelter < -0.34 {
+            surface = Material::Stone;
+        }
+    }
     if visible_top > ground_top {
         surface = if matches!(
             f.biome,
@@ -805,7 +862,7 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
 pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
     let a = p.amplitude / 1000.;
     let global = global_height_range(p);
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.uses_watersheds() {
         // The affine path supplies the local conservative bounds for this recipe.
         return global;
     }

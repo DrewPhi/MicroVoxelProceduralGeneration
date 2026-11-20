@@ -992,6 +992,7 @@ mod tests {
             2,
         );
         let camera = Camera {
+            roll: 0.,
             position: DVec3::new(-5., -5., -5.),
             yaw: 0.,
             pitch: 0.,

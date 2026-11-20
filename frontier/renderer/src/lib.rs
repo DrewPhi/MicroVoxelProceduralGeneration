@@ -3,6 +3,7 @@ mod adaptive_geometry;
 mod adaptive_gpu;
 mod adaptive_stream;
 mod adaptive_view;
+mod aircraft;
 mod appearance_hierarchy;
 mod appearance_map;
 mod appearance_method;
@@ -16,6 +17,7 @@ mod derived_disk_cache;
 mod derived_disk_writeback;
 mod development_resources;
 mod discrete_water_live;
+mod flight_horizon;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
@@ -201,6 +203,7 @@ struct Camera {
     position: DVec3,
     yaw: f32,
     pitch: f32,
+    roll: f32,
     far: f32,
     fov_y: f32,
 }
@@ -214,6 +217,7 @@ impl Camera {
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
+            roll: 0.,
         }
     }
     /// Headless comparisons must apply the requested eye before planning coverage.
@@ -232,10 +236,16 @@ impl Camera {
             self.yaw.cos() * self.pitch.cos(),
         )
     }
+    fn view_up(&self) -> Vec3 {
+        if self.roll == 0. {
+            return Vec3::Y;
+        }
+        glam::Quat::from_axis_angle(self.direction().normalize(), self.roll) * Vec3::Y
+    }
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
         Mat4::perspective_rh(self.fov_y.to_radians(), aspect, 0.025, self.far)
-            * Mat4::look_to_rh(eye, self.direction(), Vec3::Y)
+            * Mat4::look_to_rh(eye, self.direction(), self.view_up())
     }
 }
 
@@ -1085,7 +1095,7 @@ impl Gpu {
         });
         let mut post_attachment_bytes = 0u64;
         if let Some(settings) = post_settings {
-            let atmosphere = atmosphere::Atmosphere::new_with_scene_format(
+            let mut atmosphere = atmosphere::Atmosphere::new_with_scene_format(
                 &self.device,
                 self.format,
                 width,
@@ -1093,9 +1103,11 @@ impl Gpu {
                 settings.render_scale,
                 self.sample_count,
                 self.scene_format,
+                settings.flight_horizon,
             );
             post_attachment_bytes = atmosphere.attachment_bytes();
             let (rw, rh) = atmosphere.dimensions();
+            atmosphere.prepare_horizon(&self.queue, world, *camera, settings, true);
             atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.set_lighting_context(
                 camera,
@@ -1315,8 +1327,9 @@ impl Gpu {
         let eye = camera.position.to_array();
         let target = (camera.position + camera.direction().as_dvec3()).to_array();
         let native_voxel_m = voxel_size();
+        let roll_degrees = camera.roll.to_degrees();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -1604,6 +1617,7 @@ struct Viewer {
     multisample: Option<wgpu::Texture>,
     camera: Camera,
     walking: walking::WalkingCamera,
+    aircraft: Option<aircraft::Aircraft>,
     frame_trace: playability::FrameTrace,
     shadow_trace: playability::ShadowTrace,
     keys: HashSet<KeyCode>,
@@ -2172,56 +2186,74 @@ impl Viewer {
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
-            let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
-            let right = forward.cross(Vec3::Y);
-            let mut movement = Vec3::ZERO;
-            for (key, direction) in [
-                (KeyCode::KeyW, forward),
-                (KeyCode::KeyS, -forward),
-                (KeyCode::KeyD, right),
-                (KeyCode::KeyA, -right),
-                (KeyCode::Space, Vec3::Y),
-                (KeyCode::ControlLeft, -Vec3::Y),
-                (KeyCode::ControlRight, -Vec3::Y),
-            ] {
-                if self.keys.contains(&key) {
-                    movement += direction;
-                }
-            }
-            let fast_flight = self.fbm
-                || (!self.visual_settings.walking
-                    && self.world.fbm_terrain().is_some_and(|terrain| {
-                        terrain.params().recipe == frontier_world::FbmRecipe::Watershed
-                    }));
-            let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
-                || self.keys.contains(&KeyCode::ShiftRight)
-            {
-                if fast_flight {
-                    80.
-                } else {
-                    15.
-                }
-            } else {
-                if fast_flight {
-                    35.
-                } else {
-                    3.
-                }
-            };
-            if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
-                let horizontal =
-                    Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
-                self.camera.position = DVec3::from_array(self.walking.advance_presented(
+            if let Some(plane) = &mut self.aircraft {
+                let axis = |positive, negative| {
+                    f32::from(self.keys.contains(&positive))
+                        - f32::from(self.keys.contains(&negative))
+                };
+                if !plane.advance(
+                    &mut self.camera,
                     &self.world,
-                    self.camera.position.to_array(),
-                    [horizontal.x as f64, horizontal.z as f64],
-                    self.keys.contains(&KeyCode::Space),
-                    dt as f64,
-                    self.visual_settings.step_smoothing,
-                ));
+                    axis(KeyCode::KeyD, KeyCode::KeyA),
+                    axis(KeyCode::ArrowDown, KeyCode::ArrowUp),
+                    axis(KeyCode::KeyW, KeyCode::KeyS),
+                    dt,
+                ) {
+                    self.aircraft = None;
+                }
             } else {
-                self.camera.position +=
-                    movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+                let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
+                let right = forward.cross(Vec3::Y);
+                let mut movement = Vec3::ZERO;
+                for (key, direction) in [
+                    (KeyCode::KeyW, forward),
+                    (KeyCode::KeyS, -forward),
+                    (KeyCode::KeyD, right),
+                    (KeyCode::KeyA, -right),
+                    (KeyCode::Space, Vec3::Y),
+                    (KeyCode::ControlLeft, -Vec3::Y),
+                    (KeyCode::ControlRight, -Vec3::Y),
+                ] {
+                    if self.keys.contains(&key) {
+                        movement += direction;
+                    }
+                }
+                let fast_flight = self.fbm
+                    || (!self.visual_settings.walking
+                        && self
+                            .world
+                            .fbm_terrain()
+                            .is_some_and(|terrain| terrain.params().recipe.uses_watersheds()));
+                let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
+                    || self.keys.contains(&KeyCode::ShiftRight)
+                {
+                    if fast_flight {
+                        80.
+                    } else {
+                        15.
+                    }
+                } else {
+                    if fast_flight {
+                        35.
+                    } else {
+                        3.
+                    }
+                };
+                if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
+                    let horizontal =
+                        Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
+                    self.camera.position = DVec3::from_array(self.walking.advance_presented(
+                        &self.world,
+                        self.camera.position.to_array(),
+                        [horizontal.x as f64, horizontal.z as f64],
+                        self.keys.contains(&KeyCode::Space),
+                        dt as f64,
+                        self.visual_settings.step_smoothing,
+                    ));
+                } else {
+                    self.camera.position +=
+                        movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+                }
             }
         }
         let pose = self.route.pose_at(
@@ -2595,7 +2627,14 @@ impl Viewer {
             .multisample
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
-        if let Some(atmosphere) = &self.atmosphere {
+        if let Some(atmosphere) = &mut self.atmosphere {
+            atmosphere.prepare_horizon(
+                &gpu.queue,
+                &self.world,
+                self.camera,
+                &self.visual_settings,
+                false,
+            );
             let (width, height) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(gpu.medium_ground_height);
             atmosphere.set_lighting_context(
@@ -2867,6 +2906,7 @@ impl ApplicationHandler for Viewer {
                     self.visual_settings.render_scale,
                     gpu.sample_count,
                     gpu.scene_format,
+                    self.visual_settings.flight_horizon,
                 ));
             }
             self.config = Some(config);
@@ -2890,6 +2930,9 @@ impl ApplicationHandler for Viewer {
         event: DeviceEvent,
     ) {
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
+            if self.aircraft.is_some() {
+                return;
+            }
             if let DeviceEvent::MouseMotion { delta } = event {
                 self.camera.yaw -= delta.0 as f32 * 0.002;
                 self.camera.pitch = (self.camera.pitch - delta.1 as f32 * 0.002).clamp(-1.55, 1.55);
@@ -2973,7 +3016,23 @@ impl ApplicationHandler for Viewer {
                                 }
                             }
                         }
+                        if key == KeyCode::KeyV
+                            && !event.repeat
+                            && self.world.fbm_terrain().is_some()
+                        {
+                            self.camera.roll = 0.;
+                            if self.aircraft.take().is_none() {
+                                self.aircraft = Some(aircraft::Aircraft::default());
+                                self.visual_settings.walking = false;
+                                self.walking.reset();
+                                if let Some(ui) = &mut self.settings_ui {
+                                    ui.set_walking(false);
+                                }
+                            }
+                        }
                         if key == KeyCode::KeyF && !event.repeat {
+                            self.aircraft = None;
+                            self.camera.roll = 0.;
                             self.visual_settings.walking = !self.visual_settings.walking;
                             self.walking.reset();
                             if let Some(ui) = &mut self.settings_ui {
@@ -3170,7 +3229,7 @@ pub fn run() -> Result<()> {
     {
         appearance_method::initialize_meadow_application();
     }
-    adaptive_geometry::distant_voxels::Mode::initialize_application();
+    adaptive_geometry::distant_voxels::Mode::initialize_application(visual_settings.flight_horizon);
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
         || scene == "pages-topology"
@@ -3182,7 +3241,7 @@ pub fn run() -> Result<()> {
         World::fbm(seed, params)?
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
-    let mut live_water = if live_water_enabled {
+    let mut live_water = if live_water_enabled || player_edit_enabled {
         Some(discrete_water_live::WaterDriver::new(
             &mut world,
             water_save,
@@ -3196,6 +3255,9 @@ pub fn run() -> Result<()> {
     } else {
         None
     };
+    if let Some(discrete_water_live::WaterDriver::Ca(driver)) = &mut live_water {
+        driver.simulate = live_water_enabled;
+    }
     if let Some(live) = &mut live_water {
         if live.inventory().total() > inventory_capacity {
             return Err("saved inventory exceeds requested capacity".into());
@@ -3264,7 +3326,7 @@ pub fn run() -> Result<()> {
             camera.pitch = -0.3;
             if let Some(source) = world
                 .fbm_terrain()
-                .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Watershed)
+                .filter(|t| t.params().recipe.uses_watersheds())
             {
                 camera.yaw = terrain::seeded_world_heading(source, start_x, start_z).0;
             }
@@ -3363,6 +3425,7 @@ pub fn run() -> Result<()> {
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
+            roll: 0.,
         };
         capture_pose(
             &mut camera,
@@ -3457,6 +3520,7 @@ pub fn run() -> Result<()> {
             position,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
+            roll: 0.,
             far: (terrain::half_extent(view_levels) * 3.) as f32,
             fov_y: 60.,
         };
@@ -3525,6 +3589,7 @@ pub fn run() -> Result<()> {
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
+            roll: 0.,
         };
         mesh
     } else {
@@ -3785,6 +3850,8 @@ pub fn run() -> Result<()> {
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
+        aircraft: (visual_settings.flight_horizon && !visual_settings.walking)
+            .then(aircraft::Aircraft::default),
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -3842,13 +3909,7 @@ pub fn run() -> Result<()> {
         multisample: None,
         sample_count: msaa,
         voxel_filter,
-        initial_camera: Camera {
-            position: camera.position,
-            far: camera.far,
-            fov_y: camera.fov_y,
-            yaw: camera.yaw,
-            pitch: camera.pitch,
-        },
+        initial_camera: camera,
         camera,
         walking: Default::default(),
         frame_trace: Default::default(),
