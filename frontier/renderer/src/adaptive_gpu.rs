@@ -1245,6 +1245,9 @@ impl AdaptiveGpu {
             match kind {
                 1 => wgpu::BufferUsages::INDEX,
                 3 => wgpu::BufferUsages::STORAGE,
+                PROJECTION_VERTEX_POOL if coarse_projection::visibility_probe_requested() => {
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC
+                }
                 _ => wgpu::BufferUsages::VERTEX,
             },
         );
@@ -2030,6 +2033,68 @@ impl AdaptiveGpu {
         if let Some(batch) = &self.coarse_batch {
             batch.encode_cull(encoder);
         }
+    }
+
+    /// Read the exact submitted column records and their tile-relative cameras
+    /// only during a depth capture, for an offline occlusion upper bound.
+    pub(crate) fn capture_coarse_visibility_input(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: &std::path::Path,
+    ) -> std::io::Result<()> {
+        use std::io::{BufWriter, Error, Write};
+
+        if !coarse_projection::visibility_probe_requested() {
+            return Ok(());
+        }
+        if self.coarse_projection.as_ref().map(|pass| pass.mode.label()) != Some("boxes") {
+            return Err(Error::other("coarse visibility probe requires the active boxes path"));
+        }
+        let tiles: Vec<_> = self.visible.iter().enumerate().filter_map(|(i, item)| {
+            self.clusters[&item.key].projection.as_ref().map(|resident| (i, resident))
+        }).collect();
+        let bytes: u64 = tiles.iter().map(|(_, resident)| {
+            u64::from(resident.columns) * coarse_projection::COLUMN_BYTES
+        }).sum();
+        if bytes == 0 || bytes > device.limits().max_buffer_size {
+            return Err(Error::other("coarse visibility probe has no columns or exceeds the readback limit"));
+        }
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("coarse visibility diagnostic readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut offset = 0;
+        for (_, resident) in &tiles {
+            let source = &self.projection_vertices[resident.allocation.page].buffer;
+            let range = resident.column_range();
+            let bytes = range.end - range.start;
+            encoder.copy_buffer_to_buffer(source, range.start, &staging, offset, bytes);
+            offset += bytes;
+        }
+        queue.submit(Some(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().map_err(Error::other)?.map_err(Error::other)?;
+        let mapped = staging.slice(..).get_mapped_range();
+        let mut writer = BufWriter::new(std::fs::File::create(path.with_extension("coarse-visibility.bin"))?);
+        writer.write_all(b"FRCVIS01")?;
+        let mut offset = 0;
+        for (i, resident) in tiles {
+            let bytes = resident.columns as usize * coarse_projection::COLUMN_BYTES as usize;
+            let camera = i * UNIFORM_STRIDE as usize;
+            writer.write_all(&resident.columns.to_le_bytes())?;
+            writer.write_all(&self.camera_upload[camera..camera + 80])?;
+            writer.write_all(&mapped[offset..offset + bytes])?;
+            offset += bytes;
+        }
+        writer.flush()
     }
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(1, &self.shadows.sampling_bind, &[]);

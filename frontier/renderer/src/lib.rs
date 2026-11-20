@@ -1255,6 +1255,9 @@ impl Gpu {
                 .collect();
             std::fs::write(path.with_extension("coverage.f32"), coverage)?;
             std::fs::write(path.with_extension("depth.f32"), packed)?;
+            if let Some(adaptive) = &self.adaptive {
+                adaptive.capture_coarse_visibility_input(&self.device, &self.queue, path)?;
+            }
         } else {
             // Do not leave diagnostic files from an earlier non-postprocessed capture.
             for extension in ["depth.f32", "coverage.f32"] {

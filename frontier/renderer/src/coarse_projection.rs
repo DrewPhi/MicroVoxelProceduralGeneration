@@ -1,9 +1,14 @@
 //! Alternative color passes for published, seed-sampled coarse columns.
 use super::Allocation;
-use std::{collections::HashMap, ops::Range};
+use std::{collections::HashMap, ops::Range, sync::OnceLock};
 
 pub(super) const COLUMN_BYTES: u64 = 52;
 pub(super) const SEAM_BYTES: u64 = 32;
+
+pub(super) fn visibility_probe_requested() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FRONTIER_COARSE_VISIBILITY_PROBE").is_some_and(|v| v == "1"))
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Mode {

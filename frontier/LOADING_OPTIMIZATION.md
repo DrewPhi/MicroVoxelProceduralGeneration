@@ -724,3 +724,34 @@ exercised the retained raster path at this experiment's current tile limits.
 Local evidence is under `output/coarse-projection-refined-*` and
 `output/coarse-projection-comparison`. Repeat the walk and horizon commands in
 this file with `FRONTIER_COARSE_PROJECTION=quads` and then `=boxes` to compare.
+
+### Finished-depth occlusion probe
+
+The probe captures the published GPU column records and their exact draw
+cameras alongside a headless MSAA1 depth image. It rejects back-facing and
+off-screen boxes first. A maximum-depth pyramid checks a padded rectangle
+against the nearest possible depth of its box. The optional exact rectangle
+scan separates limits of the pyramid from limits of the box bounds.
+
+At the same Alpine 6 km pose with the 6 px target, 449,920 columns were
+submitted by 1,957 tiles. Facing and frustum checks rejected 213,297.
+Finished-frame depth rejected 48,082 of the remaining 236,623 via the depth
+pyramid. That accounts for 14.0% of their summed padded rectangle area.
+Scanning every rectangle pixel found 17,549 additional fully occluded
+rectangles. Together they account for 21.8% of the area. A per-pixel depth
+check against each box's nearest bound could reject 32.9% of that area,
+including pixels covered by boxes with partly visible rectangles. This is
+rectangle coverage with overlap and padding, so the percentages do not
+measure GPU fragment invocations or frame time. The probe uses finished
+depth and does not pay the cost of building live occluders.
+
+To reproduce, use the 6 km camera and source settings above. Switch the
+window benchmark to a fixed `--capture-linear --capture output/probe.png`,
+set `--pixel-error 6`, and set `FRONTIER_COARSE_PROJECTION=boxes` and
+`FRONTIER_COARSE_VISIBILITY_PROBE=1`. Keep MSAA1 and disable atmosphere and
+terrain shadows for the same depth capture.
+
+```sh
+python3 tools/coarse_visibility_probe.py output/probe.png --exact-rectangles \
+  --output output/probe-rejection.json
+```
