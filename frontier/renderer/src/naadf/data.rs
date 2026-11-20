@@ -50,7 +50,7 @@ pub struct Snapshot {
     pub cpu_profile: Option<Metrics>,
     pub source_revision: u64,
     pub region_has_edits: bool,
-    pub contains_water: bool,
+    pub water_bounds: Option<super::stream::Region>,
     pub mixed_chunks: usize,
     pub unique_blocks: usize,
     pub sampled_columns: usize,
@@ -73,6 +73,34 @@ impl Snapshot {
             lo,
             hi: std::array::from_fn(|axis| lo[axis] + self.dims[axis] as i64),
         }
+    }
+    fn static_water_bounds(&self) -> Option<super::stream::Region> {
+        let is_water = |&word: &u32| {
+            word & (FULL | CHILD) == FULL
+                && self.palette[(word & !(FULL | CHILD)) as usize].material == id(Material::Water)
+        };
+        // Most solid blocks share their leaf payloads. Classify each distinct
+        // payload once, then reduce the resulting water flags up to the roots.
+        let wet_leaves: Vec<bool> = self
+            .voxels
+            .chunks_exact(64)
+            .map(|leaf| leaf.iter().any(is_water))
+            .collect();
+        let child_wet = |word: &u32, children: &[bool]| {
+            if word & CHILD == 0 {
+                is_water(word)
+            } else {
+                children[((word & !(FULL | CHILD)) / 64) as usize]
+            }
+        };
+        let wet_blocks: Vec<bool> = self
+            .blocks
+            .chunks_exact(64)
+            .map(|block| block.iter().any(|word| child_wet(word, &wet_leaves)))
+            .collect();
+        super::stream::root_bounds_where(self.region(), &self.chunks, |word| {
+            child_wet(word, &wet_blocks)
+        })
     }
     pub fn material(&self, p: [usize; 3]) -> u32 {
         let [nx, ny, _] = self.dims;
@@ -544,7 +572,7 @@ fn build_region_options(
         cpu_profile: None,
         source_revision: world.revision(),
         region_has_edits: false,
-        contains_water: false,
+        water_bounds: None,
         mixed_chunks: 0,
         unique_blocks: 0,
         sampled_columns: 0,
@@ -1092,15 +1120,7 @@ fn build_region_options(
     }
     // Inspect canonical, unpacked nodes before 16-bit leaf packing, sparse
     // encoding or remapping to arena addresses. Include uniform roots/blocks.
-    out.contains_water = out
-        .chunks
-        .iter()
-        .chain(&out.blocks)
-        .chain(&out.voxels)
-        .any(|&word| {
-            word & (FULL | CHILD) == FULL
-                && out.palette[(word & !(FULL | CHILD)) as usize].material == id(Material::Water)
-        });
+    out.water_bounds = out.static_water_bounds();
     profile.end(Stage::Ownership, phase);
     if let Some(m) = &mut profile.metrics {
         m.region_worker_wall_ms = start.elapsed().as_secs_f64() * 1000.;
@@ -1678,7 +1698,7 @@ fn deep_ocean_uniform_chunks_preserve_bed_air_and_edits() {
         .unwrap()
     };
     let baseline = build(&world);
-    assert!(baseline.contains_water);
+    assert!(baseline.water_bounds.is_some());
     let water_only = build_region_options(
         &world,
         Cell { x, y: -64, z },

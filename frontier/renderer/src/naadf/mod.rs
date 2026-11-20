@@ -630,7 +630,7 @@ impl Pending {
         let volume = Volume {
             occupied,
             may_have_local_edits: snapshot.region_has_edits,
-            water_bounds: snapshot.contains_water.then(|| snapshot.region()),
+            water_bounds: snapshot.water_bounds,
             resources,
             dynamic_water_key: None,
             dynamic_water_binding: 0,
@@ -858,6 +858,7 @@ pub struct Experiment {
     stream_active_frames: u64,
     stream_outside_frames: u64,
     sky_frames: u64,
+    split_pixels: std::cell::Cell<[u64; 2]>,
     sky_clearance: crate::sky_clearance::Airspace,
     pub status: String,
     pub stage: u32,
@@ -906,6 +907,7 @@ impl Default for Experiment {
             stream_active_frames: 0,
             stream_outside_frames: 0,
             sky_frames: 0,
+            split_pixels: Default::default(),
             sky_clearance: Default::default(),
             status: "Off".into(),
             stage: 0,
@@ -1668,11 +1670,52 @@ impl Experiment {
             let Some([x, y, w, h]) = ray_scissor(camera, bounds, width, height) else {
                 return;
             };
-            pass.set_scissor_rect(x, y, w, h);
-            pass.set_pipeline(a.pipeline_for_view(submerged));
             pass.set_bind_group(0, &a.bind, &[]);
             pass.set_bind_group(1, far, &[]);
             a.beam.bind(pass);
+            let outer = [x, y, w, h];
+            if let (Some(water), Some(dry)) = (a.water_bounds, &a.dry_pipeline) {
+                if !submerged
+                    && !a.has_dynamic_water()
+                    && !a.diagnostics.enabled
+                    && capture_layer() == CaptureLayer::Scene
+                {
+                    // AO reads adjacent native cells. Include their reach in
+                    // the wet footprint even when the primary hit is on land.
+                    let [lo, hi] = water.bounds();
+                    let pad = 3. * voxel_size();
+                    let wet = ray_scissor(
+                        camera,
+                        [lo.map(|v| v - pad), hi.map(|v| v + pad)],
+                        width,
+                        height,
+                    );
+                    let (outer_parts, wet_part) = partition_scissor(outer, wet);
+                    let [dry_total, wet_total] = self.split_pixels.get();
+                    let wet_area = wet_part.map_or(0, |[_, _, w, h]| u64::from(w) * u64::from(h));
+                    let area = u64::from(w) * u64::from(h);
+                    self.split_pixels.set([
+                        dry_total.saturating_add(area - wet_area),
+                        wet_total.saturating_add(wet_area),
+                    ]);
+                    pass.set_pipeline(dry);
+                    for [dx, dy, dw, dh] in outer_parts {
+                        if dw > 0 && dh > 0 {
+                            pass.set_scissor_rect(dx, dy, dw, dh);
+                            pass.draw(0..3, 0..1);
+                        }
+                    }
+                    if let Some([wx, wy, ww, wh]) = wet_part {
+                        pass.set_pipeline(&a.pipeline);
+                        pass.set_scissor_rect(wx, wy, ww, wh);
+                        pass.draw(0..3, 0..1);
+                    }
+                    pass.set_scissor_rect(0, 0, width, height);
+                    return;
+                }
+            }
+            pass.set_scissor_rect(x, y, w, h);
+            pass.set_pipeline(a.pipeline_for_view(submerged));
             pass.draw(0..3, 0..1);
             pass.set_scissor_rect(0, 0, width, height);
         }
@@ -1839,6 +1882,12 @@ impl Experiment {
             ",\"static_water_possible\":{},\"dry_pipeline_available\":{}",
             a.is_some_and(|v| v.water_bounds.is_some()),
             a.is_some_and(|v| v.dry_pipeline.is_some())
+        )
+        .unwrap();
+        write!(
+            json,
+            ",\"split_dry_wet_pixels\":{:?}",
+            self.split_pixels.get()
         )
         .unwrap();
         write!(json, ",\"proven_sky_frames\":{}", self.sky_frames).unwrap();
@@ -2234,28 +2283,73 @@ pub(crate) fn ray_profile() -> (bool, bool) {
     )
 }
 
-// Perspective extrema of an AABB in front of the camera occur at its
-// vertices. If it crosses the eye plane, keep the full viewport.
+// Return disjoint dry rectangles and their wet complement inside the draw.
+fn partition_scissor(outer: [u32; 4], wet: Option<[u32; 4]>) -> ([[u32; 4]; 4], Option<[u32; 4]>) {
+    let [x, y, w, h] = outer;
+    let Some([a, b, c, d]) = wet else {
+        return ([outer, [0; 4], [0; 4], [0; 4]], None);
+    };
+    let (left, top, right, bottom) = (a.max(x), b.max(y), (a + c).min(x + w), (b + d).min(y + h));
+    if right <= left || bottom <= top {
+        return ([outer, [0; 4], [0; 4], [0; 4]], None);
+    }
+    (
+        [
+            [x, y, w, top - y],
+            [x, bottom, w, y + h - bottom],
+            [x, top, left - x, bottom - top],
+            [right, top, x + w - right, bottom - top],
+        ],
+        Some([left, top, right - left, bottom - top]),
+    )
+}
+
+// Project the vertices of the convex box clipped in front of the eye. Rays
+// start at 2.5 cm view depth, so clipping at 1 cm leaves numerical slack.
 fn ray_scissor(camera: Camera, bounds: [[f64; 3]; 2], w: u32, h: u32) -> Option<[u32; 4]> {
+    const CLIP_W: f64 = 0.01;
+    let eye = camera.position;
+    if (0..3).all(|a| bounds[0][a] <= eye[a] && eye[a] <= bounds[1][a]) {
+        return Some([0, 0, w, h]);
+    }
     let origin = DVec3::from_array(bounds[0]);
-    let matrix = camera.matrix(origin, w as f32 / h as f32);
-    let size = (DVec3::from_array(bounds[1]) - origin).as_vec3();
+    let matrix = camera.matrix(origin, w as f32 / h as f32).as_dmat4();
+    let size = DVec3::from_array(bounds[1]) - origin;
+    let corners: [glam::DVec4; 8] = std::array::from_fn(|i| {
+        matrix
+            * glam::DVec4::new(
+                if i & 1 == 0 { 0. } else { size.x },
+                if i & 2 == 0 { 0. } else { size.y },
+                if i & 4 == 0 { 0. } else { size.z },
+                1.,
+            )
+    });
+    if corners.iter().any(|p| !p.is_finite()) {
+        return Some([0, 0, w, h]);
+    }
     let mut lo = glam::Vec2::splat(f32::INFINITY);
     let mut hi = -lo;
-    for i in 0..8 {
-        let v = glam::Vec4::new(
-            if i & 1 == 0 { 0. } else { size.x },
-            if i & 2 == 0 { 0. } else { size.y },
-            if i & 4 == 0 { 0. } else { size.z },
-            1.,
-        );
-        let clip = matrix * v;
-        if !clip.is_finite() || clip.w <= 0.01 {
-            return Some([0, 0, w, h]);
+    let mut project = |c: glam::DVec4| {
+        let p = glam::DVec2::new(c.x, -c.y) / c.w;
+        lo = lo.min(p.as_vec2());
+        hi = hi.max(p.as_vec2());
+    };
+    for (i, &a) in corners.iter().enumerate() {
+        if a.w >= CLIP_W {
+            project(a);
         }
-        let p = glam::Vec2::new(clip.x, -clip.y) / clip.w;
-        lo = lo.min(p);
-        hi = hi.max(p);
+        for axis in [1, 2, 4] {
+            if i & axis != 0 {
+                continue;
+            }
+            let b = corners[i | axis];
+            if (a.w < CLIP_W) != (b.w < CLIP_W) {
+                project(a.lerp(b, (CLIP_W - a.w) / (b.w - a.w)));
+            }
+        }
+    }
+    if lo.x == f32::INFINITY {
+        return None;
     }
     let viewport = glam::Vec2::new(w as f32, h as f32);
     let xy = ((lo * 0.5 + 0.5) * viewport - 2.)
@@ -2266,6 +2360,38 @@ fn ray_scissor(camera: Camera, bounds: [[f64; 3]; 2], w: u32, h: u32) -> Option<
         .clamp(glam::Vec2::ZERO, viewport);
     let span = end - xy;
     (span.x > 0. && span.y > 0.).then_some([xy.x as u32, xy.y as u32, span.x as u32, span.y as u32])
+}
+
+#[test]
+fn wet_and_dry_draw_rectangles_partition_each_pixel_once() {
+    let outer = [2, 3, 9, 7];
+    for wet in [
+        None,
+        Some([0, 0, 2, 3]),
+        Some([0, 0, 6, 6]),
+        Some([4, 5, 2, 3]),
+        Some([2, 3, 9, 7]),
+        Some([0, 0, 20, 20]),
+    ] {
+        let (dry, water) = partition_scissor(outer, wet);
+        let inside = |p: [u32; 4], x: u32, y: u32| {
+            x >= p[0] && x < p[0] + p[2] && y >= p[1] && y < p[1] + p[3]
+        };
+        for y in 0..12 {
+            for x in 0..14 {
+                let wet_pixel = water.is_some_and(|p| inside(p, x, y));
+                let dry_count = dry.iter().filter(|&&p| inside(p, x, y)).count();
+                assert_eq!(
+                    usize::from(wet_pixel) + dry_count,
+                    usize::from(inside(outer, x, y))
+                );
+                assert_eq!(
+                    wet_pixel,
+                    inside(outer, x, y) && wet.is_some_and(|p| inside(p, x, y))
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -2286,6 +2412,12 @@ fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
         ray_scissor(camera, [[90., -1., 10.], [92., 1., 12.]], 1920, 1080),
         None
     );
+    assert_eq!(
+        ray_scissor(camera, [[-4., -2., -6.], [2., 3., -1.]], 1920, 1080),
+        None
+    );
+    let strip = ray_scissor(camera, [[-32., -8., -32.], [32., -1., 32.]], 1920, 1080).unwrap();
+    assert!(strip[1] > 540 && strip[1] + strip[3] == 1080);
     let [x, y, w, h] = ray_scissor(camera, [[-1., -1., 10.], [1., 1., 12.]], 1920, 1080).unwrap();
     assert!(x < 960 && x + w > 960 && y < 540 && y + h > 540);
     assert!(w < 250 && h < 250);

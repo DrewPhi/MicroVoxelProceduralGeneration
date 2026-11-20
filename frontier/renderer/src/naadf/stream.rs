@@ -62,15 +62,22 @@ impl Region {
 /// Tight root-space bounds before sparse packing or toroidal addressing.
 /// Ordinary empty nodes may contain distance bits in their low 30 bits.
 pub(super) fn occupied_bounds(region: Region, nodes: &[u32]) -> Option<Region> {
+    root_bounds_where(region, nodes, |word| *word & (FULL | CHILD) != 0)
+}
+
+pub(super) fn root_bounds_where(
+    region: Region,
+    nodes: &[u32],
+    occupied: impl Fn(&u32) -> bool,
+) -> Option<Region> {
     let [nx, ny, nz] = region.dims();
     debug_assert_eq!(nodes.len(), nx * ny * nz);
-    let occupied = |word: &u32| *word & (FULL | CHILD) != 0;
     let mut bounds: Option<Region> = None;
     for (index, column) in nodes.chunks_exact(ny).enumerate() {
-        let Some(bottom) = column.iter().position(occupied) else {
+        let Some(bottom) = column.iter().position(&occupied) else {
             continue;
         };
-        let top = column.iter().rposition(occupied).unwrap();
+        let top = column.iter().rposition(&occupied).unwrap();
         let x = region.lo[0] + (index % nx) as i64;
         let z = region.lo[2] + (index / nx) as i64;
         let strip = Region {
@@ -514,8 +521,7 @@ impl State {
         // unpublished incoming roots available as proof support to later work.
         let incoming_water = snapshots
             .iter()
-            .filter(|s| s.contains_water)
-            .map(|s| s.region())
+            .filter_map(|s| s.water_bounds)
             .reduce(Region::enclosing);
         let proof_start = Instant::now();
         let mut occupancy = self.occupancy.clone();
@@ -906,7 +912,7 @@ mod tests {
         )
         .unwrap();
         assert!(first.region_has_edits);
-        assert!(!first.contains_water);
+        assert!(first.water_bounds.is_none());
         let origin = first.region();
         assert!(occupied_bounds(origin, &first.chunks).is_none());
         let mut state = State::new_with_encoding(first, [1048576; 3], Encoding::Wide32);
@@ -941,7 +947,7 @@ mod tests {
             &|| false,
         )
         .unwrap();
-        assert!(!first.contains_water);
+        assert!(first.water_bounds.is_none());
         let region = first.region();
         let mut state = State::new_with_encoding(first, [1048576; 3], Encoding::Wide32);
         let wet = Cell {
@@ -954,7 +960,13 @@ mod tests {
             .prepare_refresh(&world, &[wet], 32 * 1048576, &|| false)
             .unwrap();
         let water = update.retained_bounds(None, update.incoming_water);
-        assert!(water.is_some());
+        assert_eq!(
+            water,
+            Some(Region {
+                lo: [-1, min.y / 16, -1],
+                hi: [0, min.y / 16 + 1, 0]
+            })
+        );
         state.finish(update, true);
         let moved = Region {
             lo: [region.lo[0] + 2, region.lo[1], region.lo[2]],
