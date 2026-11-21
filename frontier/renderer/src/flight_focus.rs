@@ -2,13 +2,20 @@
 //! edge closure and ownership checks remain authoritative at publication.
 use super::{Camera, RefinementCandidate, TileKey};
 use frontier_world::{voxel_size, World};
-use glam::DVec3;
+use glam::{DVec2, DVec3, Vec3Swizzles};
 use std::collections::HashSet;
+
+#[derive(Clone, Copy)]
+struct Hit {
+    column: [i64; 2],
+    depth: f64,
+    grade: f64,
+}
 
 #[derive(Default)]
 pub(super) struct Focus {
     view: Option<(Camera, f32)>,
-    hits: Vec<([i64; 2], f64)>,
+    hits: Vec<Hit>,
     skyline_count: usize,
 }
 
@@ -42,24 +49,73 @@ impl Focus {
             if length < 0.1 {
                 continue;
             }
+            let heading = d.xz() / length;
+            let project = heading.dot(forward.xz()).max(0.5);
+            // Clip distance is measured along the camera forward, whereas the
+            // survey walks in horizontal metres. The corner of the frustum
+            // reaches farther than its center, even with a level aircraft.
+            let end = if blocks {
+                (f64::from(camera.far) / project).min(10000.)
+            } else {
+                far
+            };
+            let terrain = |distance: f64| {
+                let p = eye.xz() + heading * distance;
+                let height = world.height_m(p.x, p.y);
+                ((height - eye.y) / distance, p, height)
+            };
+            let mut range = 64_f64.min(end);
+            let mut best = range;
             let mut best_slope = f64::NEG_INFINITY;
-            let mut best = None;
-            let mut distance = 64.;
-            while distance <= far {
-                let x = eye.x + distance * d.x / length;
-                let z = eye.z + distance * d.z / length;
-                let h = world.height_m(x, z);
-                let slope = (h - eye.y) / distance;
+            loop {
+                let (slope, _, _) = terrain(range);
                 if slope > best_slope {
                     best_slope = slope;
-                    best = Some(([x, z], distance));
+                    best = range;
                 }
-                distance += (distance * 0.045).clamp(32., 96.);
+                if range >= end {
+                    break;
+                }
+                range = (range + (range * 0.045).clamp(32., 96.)).min(end);
             }
-            if let Some((p, range)) = best {
-                self.hits
-                    .push((p.map(|x| (x / voxel_size()).floor() as i64), range));
+            if blocks {
+                // Refine around the angular maximum. A narrow crest between
+                // the coarse probes can belong to the neighboring terrain tile.
+                let span = (best * 0.045).clamp(32., 96.);
+                let center = best;
+                for tap in [-3, -2, -1, 1, 2, 3] {
+                    let distance = (center + f64::from(tap) * span * 0.25).clamp(1., end);
+                    let (slope, _, _) = terrain(distance);
+                    if slope > best_slope {
+                        best_slope = slope;
+                        best = distance;
+                    }
+                }
             }
+            let (_, p, h) = terrain(best);
+            let relative = DVec3::new(p.x - eye.x, h - eye.y, p.y - eye.z);
+            let mut grade = 1.;
+            if blocks {
+                // A coarse column on a cliff can shift its visible height by
+                // several times its horizontal sampling error.
+                let radius = (best * 0.008).clamp(6., 32.);
+                grade = [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y]
+                    .into_iter()
+                    .map(|axis| {
+                        let q = p + axis * radius;
+                        (world.height_m(q.x, q.y) - h).abs() / radius
+                    })
+                    .fold(0.0, f64::max);
+            }
+            self.hits.push(Hit {
+                column: p.to_array().map(|v| (v / voxel_size()).floor() as i64),
+                depth: if blocks {
+                    relative.dot(forward).max(1.)
+                } else {
+                    best
+                },
+                grade,
+            });
         }
         self.skyline_count = self.hits.len();
         let base = [
@@ -97,8 +153,11 @@ impl Focus {
                         }
                     }
                     let p = eye + direction * hi;
-                    self.hits
-                        .push(([p.x, p.z].map(|x| (x / voxel_size()).floor() as i64), hi));
+                    self.hits.push(Hit {
+                        column: [p.x, p.z].map(|x| (x / voxel_size()).floor() as i64),
+                        depth: hi,
+                        grade: 1.,
+                    });
                     break;
                 }
                 if hi >= far {
@@ -114,13 +173,17 @@ impl Focus {
         &mut self,
         world: &World,
         camera: &Camera,
-        aspect: f32,
+        viewport: [u32; 2],
+        pixel_error: f64,
         candidates: &[RefinementCandidate],
         budget: usize,
     ) -> Option<HashSet<TileKey>> {
         if candidates.is_empty() || budget == 0 {
             return None;
         }
+        let aspect = viewport[0] as f32 / viewport[1].max(1) as f32;
+        let pixel_angle =
+            2. * (f64::from(camera.fov_y).to_radians() * 0.5).tan() / f64::from(viewport[1].max(1));
         if self.view.is_none_or(|(old, a)| {
             a != aspect
                 || old.fov_y != camera.fov_y
@@ -140,12 +203,16 @@ impl Focus {
             let side = i64::from(key.width_cells);
             let step = f64::from(key.step_cells) * voxel_size();
             let mut debt = [0_f64; 2];
-            for (i, (p, range)) in self.hits.iter().enumerate() {
-                if (0..2).all(|a| p[a] >= key.min[a] && p[a] < key.min[a] + side) {
-                    let limit = if blocks {
-                        (range * 0.006).clamp(2., 32.)
+            for (i, hit) in self.hits.iter().enumerate() {
+                if (0..2).all(|a| hit.column[a] >= key.min[a] && hit.column[a] < key.min[a] + side)
+                {
+                    let limit = if blocks && i < self.skyline_count {
+                        (hit.depth * pixel_angle * pixel_error / (0.75 + 0.45 * hit.grade.min(4.)))
+                            .clamp(1., 40.)
+                    } else if blocks {
+                        (hit.depth * 0.006).clamp(2., 32.)
                     } else {
-                        (range * 0.012).clamp(4., 48.)
+                        (hit.depth * 0.012).clamp(4., 48.)
                     };
                     let debt = &mut debt[usize::from(i >= self.skyline_count)];
                     *debt = debt.max(step / limit);
@@ -218,15 +285,18 @@ mod tests {
         });
         let mut focus = Focus::default();
         assert_eq!(
-            focus.select(&world, &camera, 1.6, &candidates, 2),
+            focus.select(&world, &camera, [1600, 1000], 5., &candidates, 2),
             Some(HashSet::from([key]))
         );
         camera.yaw = std::f32::consts::PI;
         assert_eq!(
-            focus.select(&world, &camera, 1.6, &candidates, 2),
+            focus.select(&world, &camera, [1600, 1000], 5., &candidates, 2),
             Some(HashSet::from([other]))
         );
         camera.position.y = 2.;
-        assert_eq!(focus.select(&world, &camera, 1.6, &candidates, 2), None);
+        assert_eq!(
+            focus.select(&world, &camera, [1600, 1000], 5., &candidates, 2),
+            None
+        );
     }
 }

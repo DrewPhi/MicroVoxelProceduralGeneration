@@ -90,15 +90,19 @@ median by 0.09 px and left p95 unchanged across 240 screen columns.
 ### Flight benchmark
 
 Radeon 760M, 1920×1080, MSAA 1, 6 km active view, 32 m native radius.
-Each row is a cold-cache, 10-second flight at 80 m/s with ongoing refinement.
-The ridgeline comparison samples 240 columns at the final pose, with 0.5 m
-forward spacing and vegetation off.
+Each row is a cold-cache, 10-second flight with ongoing refinement. The
+ridgeline comparison samples 240 columns at the final pose, with 0.5 m
+forward spacing and vegetation off. The flight scheduler samples narrow
+crests and local cliff grades to prioritize the visible ridgeline.
 
-| Highlands seed | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
-| --- | --- | ---: | ---: |
-| 19 | 8.50 / 10.34 / 11.72 | 8.71 | 32 / 240 |
-| 40961 | 4.15 / 5.43 / 5.75 | 2.39 | 0 / 240 |
-| 673 | 7.67 / 9.83 / 11.08 | 7.79 | 37 / 240 |
+| Highlands seed | Speed (m/s) | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
+| --- | ---: | --- | ---: | ---: |
+| 19 | 80 | 9.31 / 11.64 / 12.94 | 3.80 | 4 / 240 |
+| 673 | 80 | 9.09 / 11.43 / 12.67 | 4.37 | 8 / 240 |
+| 40961 | 80 | 4.46 / 5.76 / 6.07 | 2.51 | 1 / 240 |
+| 997 | 100 | 8.86 / 10.82 / 11.64 | 2.79 | 3 / 240 |
+| 8123 | 100 | 5.71 / 7.68 / 8.97 | 6.11 | 16 / 240 |
+| 29123 | 100 | 9.63 / 12.37 / 13.72 | 6.77 | 22 / 240 |
 
 The gallery view, with vegetation enabled, measured **12.29 / 14.93 / 16.18 ms**
 and **12.97 / 16.25 / 17.29 ms** over two 12-second cold refinement runs.

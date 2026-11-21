@@ -960,7 +960,8 @@ impl AdaptiveStream {
                 focus.select(
                     &self.world,
                     camera,
-                    width as f32 / height as f32,
+                    [width,height],
+                    self.settings.pixel_error,
                     &urgent,
                     self.settings.refinements_per_transaction,
                 )
