@@ -63,6 +63,8 @@ pub struct NativeQuad {
 }
 #[path = "native_conforming.rs"]
 mod native_conforming;
+#[path = "native_water.rs"]
+pub(crate) mod native_water;
 
 /// Stable representation tag; source identity is unchanged.
 pub fn native_geometry_mode() -> &'static str {
@@ -1536,6 +1538,7 @@ fn native_profiles_with_summary_reuse(
     };
     let origin = [mesh.origin.x, mesh.origin.y, mesh.origin.z];
     let mut addresses = vec![];
+    let mut wet_blocks = HashMap::new();
     for (index, quad) in mesh.vertices.chunks_exact(4).enumerate() {
         if index % 256 == 0 && cancelled() {
             return Err("adaptive geometry cancelled".into());
@@ -1578,9 +1581,13 @@ fn native_profiles_with_summary_reuse(
                     (origin[0] + owned[0]).div_euclid(BLOCK) * BLOCK,
                     (origin[2] + owned[2]).div_euclid(BLOCK) * BLOCK,
                 ];
-                let id = *ids
-                    .get(&block)
-                    .ok_or("native face profile ownership outside tile")?;
+                let id = if quad[0].color == Material::Water.color() && terrain.params().recipe.has_static_water() {
+                    *wet_blocks.entry(block).or_insert_with(|| native_water::append(
+                        &mut profiles, heights, terrain, block, [origin[0] + owned[0], origin[2] + owned[2]],
+                    ))
+                } else {
+                    *ids.get(&block).ok_or("native face profile ownership outside tile")?
+                };
                 let base = out.vertices.len() as u32;
                 for (du, dv) in [
                     (uu[0], vv[0]),
@@ -1634,26 +1641,27 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
     let mut profile = [[0.; 4]; 5];
     for z in key.min[1]..max[1] {
         for x in key.min[0]..max[0] {
-            let h = heights
-                .height(x, z)
-                .ok_or("missing native profile column")?;
+            let source = heights.column(x, z).ok_or("missing native profile column")?;
+            let h = source.height;
             if TRACK_EXTREMA {
                 note([x, z], h);
             }
-            let water_column = (terrain.params().recipe.has_static_water()).then(|| {
-                let c = terrain.column_cells(x, z);
-                NativeColumn {
-                    height: c.visible_top,
-                    ground_height: c.ground_top,
-                    bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
+            let water_column = terrain.params().recipe.has_static_water().then(|| {
+                if reuse_top {
+                    source
+                } else {
+                    let c = terrain.column_cells(x, z);
+                    NativeColumn {
+                        height: c.visible_top,
+                        ground_height: c.ground_top,
+                        bands: [c.ground_surface, c.ground_subsurface, Material::Stone],
+                    }
                 }
             });
             let top = if let Some(c) = water_column {
                 c.material(h - 1)
             } else if reuse_top {
-                heights
-                    .top_material(x, z)
-                    .ok_or("missing native profile material")?
+                source.material(h - 1)
             } else {
                 terrain.surface_material(
                     (x as f64 + 0.5) * voxel_size(),

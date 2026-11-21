@@ -689,6 +689,27 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
         river=river_coverage(in.local.xz-camera.eye.xz,spacing,world_height);
     }
+    if in.surface_word==1u && (camera.paint_origin.w&2u)!=0u {
+        let header=face_profiles[in.profile_index].top;
+        if header.w==-8. {
+            var word=u32(header.y);
+            if word==0u {
+                // Floor on the water side of the face, including negative world cells.
+                let local=vec2<i32>(floor(in.local.xz*VOXELS_PER_METER-in.normal.xz*.01));
+                let cell=(bitcast<vec2<u32>>(local)+camera.paint_origin.xz)&vec2(15u);
+                let row=face_profiles[in.profile_index+1u+cell.y];
+                let values=array(row.px,row.nx,row.pz,row.nz);
+                word=u32(values[cell.x/4u][cell.x%4u]);
+            }
+            if word!=0u {
+                let axis=select(2u,0u,abs(in.normal.x)>.5);
+                let outward=axis+u32(in.normal.x+in.normal.z>.5);
+                let step=in.normal.y==0. && (word&(1u<<(12u+outward)))!=0u;
+                in.surface_word=0x27u|select(0u,0x40u,step)|((word&15u)<<8u)
+                    |((((word>>4u)&255u)-1u)<<12u)|(u32(header.x)<<24u);
+            }
+        }
+    }
     if diagnostic==0u && (in.surface_word!=0u || river>.003) {
         let direction=normalize(in.local-camera.eye.xyz);
         var normal=select(vec3(0.,1.,0.),normalize(in.normal),in.surface_word!=0u);

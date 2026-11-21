@@ -127,7 +127,7 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
                 let Some(base) = target(index, p[0][0]) else {
                     return false;
                 };
-                if matches!(table[base][0][3], -6. | -7.) {
+                if matches!(table[base][0][3], -6. | -7. | -8.) {
                     return false;
                 }
                 let Some(map) = target(index, p[0][1]) else {
@@ -205,6 +205,26 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
                     target(index, offset).is_none_or(|node| table[node][0][3] != -3.)
                 }) {
                     return false;
+                }
+            }
+            -8. => {
+                let [grade, uniform, reserved, _] = p[0];
+                if grade.fract() != 0. || !(0. ..=3.).contains(&grade) || reserved != 0.
+                    || p[1..].iter().flatten().any(|&v| v != 0.)
+                    || !crate::adaptive_geometry::native_water::valid_word(uniform)
+                {
+                    return false;
+                }
+                if uniform == 0. {
+                    let Some(rows) = table.get(index + 1..index + 17) else { return false };
+                    for (i, row) in rows.iter().enumerate() {
+                        if row[0] != [0., 0., 0., -4.] || owned[index + 1 + i]
+                            || !row[1..].iter().flatten().copied().all(crate::adaptive_geometry::native_water::valid_word)
+                        {
+                            return false;
+                        }
+                        owned[index + 1 + i] = true;
+                    }
                 }
             }
             -4. => {} // Ownership is checked after all map descriptors.

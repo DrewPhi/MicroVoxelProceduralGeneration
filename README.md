@@ -200,6 +200,16 @@ found identical bed and water elevations before and after the snow change.
 On seed 673, 287 of 315 sampled mountain columns above 2,300 m carried snow
 in the new world. The older source had 298 snowy columns at those elevations.
 
+![The same stretch of shallow whitewater before and after. The dark rectangular patch on the left disappears when the native terrain tile carries its own depth and sediment.](frontier/reference/gallery/highlands-rapids.jpg)
+
+*Two in-engine views of a seed 673 rapid. Exact terrain triangles now look up
+the depth, sediment and connected one-voxel drops beneath every wet face.
+Beyond the near ray volume, a four-metre survey estimates the submerged bed
+when a ray exits early. Across three 70 m river plots this reduced mean
+depth error from 45–56 cm to 17–26 cm. A separate settled 768×432
+raster comparison matched all 331,776 depth pixels before and after the
+native tile gained its bed data.*
+
 The native and distant water use the same world-space ripples. Refraction
 reaches 8 m down and native bank reflections reach 24 m on every grid.
 Adjacent wet columns share their optical response across a single-voxel

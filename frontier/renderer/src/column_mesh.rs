@@ -70,10 +70,7 @@ impl SampledColumn {
 pub struct ColumnHeights {
     pub min: [i64; 2],
     pub size: [usize; 2],
-    values: Vec<i64>,
-    // Retain only the already sampled top band for native appearance. Repainting
-    // regional cover would repeat its analytic landform derivatives per column.
-    top_materials: Vec<Material>,
+    columns: Vec<SampledColumn>,
 }
 impl ColumnHeights {
     fn index(&self, x: i64, z: i64) -> Option<usize> {
@@ -85,18 +82,20 @@ impl ColumnHeights {
         }
         Some(dz as usize * (self.size[0] + 2) + dx as usize)
     }
+    pub fn column(&self, x: i64, z: i64) -> Option<SampledColumn> {
+        self.index(x, z).map(|i| self.columns[i])
+    }
     pub fn height(&self, x: i64, z: i64) -> Option<i64> {
-        self.index(x, z).map(|i| self.values[i])
+        self.column(x, z).map(|c| c.height)
     }
     pub fn top_material(&self, x: i64, z: i64) -> Option<Material> {
-        self.index(x, z).map(|i| self.top_materials[i])
+        self.column(x, z).map(|c| c.material(c.height - 1))
     }
     pub fn sampled_columns(&self) -> usize {
-        self.values.len()
+        self.columns.len()
     }
     pub fn allocated_bytes(&self) -> usize {
-        self.values.capacity() * std::mem::size_of::<i64>()
-            + self.top_materials.capacity() * std::mem::size_of::<Material>()
+        self.columns.capacity() * std::mem::size_of::<SampledColumn>()
     }
 }
 pub struct ColumnMesh {
@@ -171,8 +170,6 @@ pub fn build_sampled(
         }
     }
     let mut columns = Vec::with_capacity(count);
-    let mut values = Vec::with_capacity(count);
-    let mut top_materials = Vec::with_capacity(count);
     let (mut low, mut high) = (i64::MAX, i64::MIN);
     for z in 0..halo[1] {
         for x in 0..halo[0] {
@@ -185,8 +182,6 @@ pub fn build_sampled(
                     "height-column vertical coordinate exceeds exact local f32 range".into(),
                 );
             }
-            values.push(h);
-            top_materials.push(c.material(h - 1));
             columns.push(c);
         }
     }
@@ -196,8 +191,7 @@ pub fn build_sampled(
     let heights = ColumnHeights {
         min: [min.x, min.z],
         size,
-        values,
-        top_materials,
+        columns,
     };
     let index = |x: usize, z: usize| z * halo[0] + x;
     let mut mesh = Mesh {
@@ -210,10 +204,10 @@ pub fn build_sampled(
     for z in 0..size[1] {
         for x in 0..size[0] {
             let i = index(x + 1, z + 1);
-            let h = heights.values[i];
+            let h = heights.columns[i].height;
             tops.push(Some(Top {
                 height: h,
-                material: columns[i].material(h - 1),
+                material: heights.columns[i].material(h - 1),
             }));
         }
     }
@@ -275,16 +269,16 @@ pub fn build_sampled(
                         } else {
                             index(x, if positive { z + 1 } else { z - 1 })
                         };
-                        let h = heights.values[i];
-                        let lo = heights.values[neighbor];
+                        let h = heights.columns[i].height;
+                        let lo = heights.columns[neighbor].height;
                         if lo < h {
                             let mut start = lo;
-                            for end in columns[i].run_ends() {
+                            for end in heights.columns[i].run_ends() {
                                 if end > start {
                                     next[span_count] = Some(Span {
                                         lo: start,
                                         hi: end,
-                                        material: columns[i].material(start),
+                                        material: heights.columns[i].material(start),
                                         start: t,
                                         end: t + 1,
                                     });
@@ -475,8 +469,7 @@ mod tests {
                         13 * 11,
                         "warm native extraction must not regenerate columns"
                     );
-                    assert_eq!(actual.heights.values, expected.heights.values);
-                    assert_eq!(actual.heights.top_materials, expected.heights.top_materials);
+                    assert_eq!(actual.heights.columns, expected.heights.columns);
                     assert_eq!(actual.mesh.origin, expected.mesh.origin);
                     assert_eq!(
                         actual.mesh.exposed_native_faces,
@@ -567,8 +560,8 @@ mod tests {
             ] {
                 let world = World::fbm(7, params).unwrap();
                 let out = build(&world, min, [11, 9]).unwrap();
-                let low = *out.heights.values.iter().min().unwrap();
-                let high = *out.heights.values.iter().max().unwrap();
+                let low = out.heights.columns.iter().map(|c| c.height).min().unwrap();
+                let high = out.heights.columns.iter().map(|c| c.height).max().unwrap();
                 let dense_min = Cell {
                     x: min.x,
                     y: low - 1,
@@ -688,7 +681,7 @@ mod tests {
             [47, 43],
         )
         .unwrap();
-        let high = *out.heights.values.iter().max().unwrap() as f64 * voxel_size();
+        let high = out.heights.columns.iter().map(|c| c.height).max().unwrap() as f64 * voxel_size();
         for z in -16..15 {
             for x in -19..18 {
                 let o = glam::DVec3::new(

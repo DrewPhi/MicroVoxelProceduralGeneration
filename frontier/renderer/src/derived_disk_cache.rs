@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 24;
+const REPRESENTATION_VERSION: u64 = 25;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -287,7 +287,7 @@ impl DiskCache {
     fn profile_representation_matches(&self, tile: &GeometryTile) -> bool {
         tile.face_profiles.iter().all(|p| {
             let tag = p[0][3];
-            if tag >= 0. {
+            if tag >= 0. || (tile.exact && matches!(tag, -8. | -4.)) {
                 return true;
             }
             match self.keyer.appearance.method {
