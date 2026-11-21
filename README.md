@@ -25,6 +25,14 @@ Click the window to take the controls. **W/S** increase or decrease airspeed,
 between the aircraft and free camera. **F** switches to walking from the
 aircraft. The fuselage, wingtips and wheels check swept paths against the
 edited voxels. The chase camera also checks the space behind the aircraft.
+For a reproducible exterior view, add `--flight-view chase --bank 32` to
+a launch or capture. Positive bank angles lower the right wing.
+
+Level cruise trims to 65 m/s. Pulling into a climb trades airspeed for height,
+and a dive recovers speed. Banking increases drag and raises the stall speed
+above the 24 m/s wings-level value. The instruments show vertical speed and
+warn as you approach a stall. Lower the nose, level the wings and add power
+to recover.
 
 To land, bring the wings level, slow below 48 m/s and descend at less than
 3.5 m/s onto a firm, nearly level strip. On the ground, **A/D** steer and

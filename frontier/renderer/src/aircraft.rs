@@ -19,6 +19,21 @@ const BODY: [Vec3; 5] = [
     Vec3::new(5.55, 1.12, 0.),
 ];
 const ROTATION_SPEED: f32 = 29.;
+const LEVEL_STALL_SPEED: f32 = 24.;
+const GRAVITY: f32 = 9.81;
+fn load_factor(bank: f32) -> f32 {
+    1. / bank.cos().max(0.45)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Instruments {
+    pub speed_mps: f32,
+    pub altitude_m: f64,
+    pub climb_mps: f32,
+    pub bank_degrees: f32,
+    pub stall_warning: bool,
+    pub grounded: bool,
+}
 
 struct Contact {
     fraction: f64,
@@ -131,6 +146,21 @@ impl Aircraft {
     pub(crate) fn exterior_pose(&self) -> Option<Camera> {
         self.pilot
     }
+    pub(crate) fn instruments(&self, pose: Camera) -> Instruments {
+        Instruments {
+            speed_mps: self.speed,
+            altitude_m: pose.position.y,
+            climb_mps: if self.grounded {
+                0.
+            } else {
+                self.speed * pose.pitch.sin() - self.sink
+            },
+            bank_degrees: pose.roll.to_degrees(),
+            stall_warning: !self.grounded
+                && self.speed < 1.08 * LEVEL_STALL_SPEED * load_factor(pose.roll).sqrt(),
+            grounded: self.grounded,
+        }
+    }
     pub(crate) fn exit(self, camera: &mut Camera) {
         if let Some(pilot) = self.pilot {
             camera.position = pilot.position;
@@ -149,7 +179,7 @@ impl Aircraft {
             self.follow(camera, world);
         }
     }
-    fn follow(&mut self, camera: &mut Camera, world: &World) {
+    pub(super) fn follow(&mut self, camera: &mut Camera, world: &World) {
         self.pilot = Some(*camera);
         let forward = camera.direction().as_dvec3();
         let offset = -forward * 15. + glam::DVec3::Y * 4.2;
@@ -243,13 +273,29 @@ impl Aircraft {
         dt: f32,
     ) -> bool {
         let start = *camera;
-        // A plane rolling off unsupported ground retains its actual speed.
-        self.speed = (self.speed + throttle * 28. * dt).clamp(self.speed.min(24.), 150.);
-        let stall = (1. - self.speed / 24.).clamp(0., 1.);
-        self.sink = (self.sink + (9.81 * stall - 5. * (1. - stall)) * dt).clamp(0., 25.);
         camera.roll += (bank * 1.05 - camera.roll) * (1. - (-3. * dt).exp());
-        camera.pitch = (camera.pitch + pitch * 0.6 * dt).clamp(-1.3, 1.3);
-        camera.yaw -= 9.81 * camera.roll.tan() / self.speed.max(8.) * dt;
+        let load = load_factor(camera.roll);
+        // Trim power balances drag at level cruise. Gravity exchanges speed
+        // with height, and a banked turn costs extra induced drag.
+        let airflow = (self.speed / 12.).min(1.);
+        let trim = airflow * 0.00032 * (65. * 65. - self.speed * self.speed);
+        let turn_drag = 1.25 * (load * load - 1.);
+        let acceleration = 18. * throttle + trim - GRAVITY * camera.pitch.sin() - turn_drag;
+        self.speed = (self.speed + acceleration * dt).clamp(0., 150.);
+        // Required lift increases as the wings bank. Below the corresponding
+        // stall speed the plane settles and the nose begins to drop.
+        let stall_speed = LEVEL_STALL_SPEED * load.sqrt();
+        let lift = (self.speed / stall_speed).min(1.).powi(2);
+        let sink_accel = if self.speed >= stall_speed {
+            -5.
+        } else {
+            GRAVITY * (1. - lift)
+        };
+        self.sink = (self.sink + sink_accel * dt).clamp(0., 30.);
+        let elevator = airflow * 0.6 * pitch * (0.25 + 0.75 * lift);
+        camera.pitch =
+            (camera.pitch + (elevator - airflow * 0.45 * (1. - lift)) * dt).clamp(-1.3, 1.3);
+        camera.yaw -= GRAVITY * camera.roll.tan() * lift / self.speed.max(8.) * dt;
         let velocity =
             camera.direction().as_dvec3() * self.speed as f64 - DVec3::Y * self.sink as f64;
         let travel = velocity * dt as f64;
@@ -375,6 +421,37 @@ mod tests {
         assert!(!plane.grounded);
         assert!(plane.advance(&mut camera, &world, 0., 0., 0., 0.05));
         assert!(camera.position.y < ground_position.y);
+    }
+    #[test]
+    fn climb_dive_and_banked_stall_exchange_energy_and_recover_under_power() {
+        let (world, mut base) = runway();
+        base.position.y = 2000.;
+        let advance = |plane: &mut Aircraft, camera: &mut Camera, bank, pitch, throttle, steps| {
+            for _ in 0..steps {
+                assert!(plane.advance(camera, &world, bank, pitch, throttle, 0.02));
+            }
+        };
+        let mut end_speeds = Vec::new();
+        for angle in [0.25, 0., -0.25] {
+            let mut pose = Camera {
+                pitch: angle,
+                ..base
+            };
+            let mut plane = Aircraft::default();
+            advance(&mut plane, &mut pose, 0., 0., 0., 150);
+            end_speeds.push(plane.speed);
+        }
+        assert!(end_speeds[0] < 59. && (end_speeds[1] - 65.).abs() < 0.01 && end_speeds[2] > 71.);
+        let mut plane = Aircraft {
+            speed: 30.,
+            ..Default::default()
+        };
+        let mut pose = base;
+        assert!(!plane.instruments(pose).stall_warning);
+        advance(&mut plane, &mut pose, 1., 0., 0., 100);
+        assert!(plane.instruments(pose).stall_warning && plane.instruments(pose).climb_mps < 0.);
+        advance(&mut plane, &mut pose, 0., 0., 1., 100);
+        assert!(!plane.instruments(pose).stall_warning && plane.sink == 0.);
     }
     #[test]
     fn steep_impact_does_not_enter_ground_roll() {

@@ -171,9 +171,11 @@ impl SettingsUi {
                             ))
                             .strong(),
                         );
-                        if let Some((speed, altitude, bank, grounded)) = stats.flight {
-                            ui.label(format!("{:.0} km/h   ·   {altitude:.0} m ASL   ·   bank {bank:+.0}°", speed * 3.6));
-                            if grounded {ui.small("W accelerate  ·  S brake  ·  A/D steer  ·  ↓ lift off above 105 km/h");} else {ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");}
+                        if let Some(flight) = stats.flight {
+                            ui.label(format!("{:.0} km/h   ·   {:.0} m ASL   ·   {:+.1} m/s vertical   ·   bank {:+.0}°",
+                                flight.speed_mps * 3.6, flight.altitude_m, flight.climb_mps, flight.bank_degrees));
+                            if flight.stall_warning {ui.colored_label(egui::Color32::YELLOW, "Low airspeed · level wings, lower nose, add power");}
+                            if flight.grounded {ui.small("W accelerate  ·  S brake  ·  A/D steer  ·  ↓ lift off above 105 km/h");} else {ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");}
                         }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {

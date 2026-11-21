@@ -56,6 +56,9 @@ class X11:
         self.motion = bind(self.t, "XTestFakeMotionEvent", I, P, I, I, I, U)
         self.translate = bind(self.x, "XTranslateCoordinates", I, P, U, U, I, I,
                               C.POINTER(I), C.POINTER(I), C.POINTER(U))
+        uint_out = C.POINTER(C.c_uint)
+        self.geometry = bind(self.x, "XGetGeometry", I, P, U, C.POINTER(U),
+                             C.POINTER(I), C.POINTER(I), uint_out, uint_out, uint_out, uint_out)
         self.send = bind(self.x, "XSendEvent", I, P, U, I, C.c_long, C.POINTER(Event))
         self.d = self.open(None)
         if not self.d:
@@ -122,7 +125,13 @@ class X11:
 
     def click(self, window):
         x = I(); y = I(); child = U()
-        self.translate(self.d, window, self.root(self.d), 640, 360, C.byref(x), C.byref(y), C.byref(child))
+        width, height, border, depth = (C.c_uint() for _ in range(4))
+        if not self.geometry(self.d, window, C.byref(child), C.byref(x), C.byref(y),
+                             C.byref(width), C.byref(height), C.byref(border), C.byref(depth)):
+            raise RuntimeError("Could not read Frontier window dimensions")
+        if not self.translate(self.d, window, self.root(self.d), width.value // 2, height.value // 2,
+                              C.byref(x), C.byref(y), C.byref(child)):
+            raise RuntimeError("Could not locate Frontier window center")
         self.motion(self.d, -1, x.value, y.value, 0)
         self.button(self.d, 1, 1, 0); self.button(self.d, 1, 0, 0); self.flush(self.d)
 

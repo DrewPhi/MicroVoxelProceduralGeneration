@@ -111,7 +111,7 @@ impl Default for VisualSettings {
 
 #[derive(Clone, Debug, Default)]
 pub struct SettingsStats {
-    pub flight: Option<(f32, f64, f32, bool)>,
+    pub flight: Option<crate::aircraft::Instruments>,
     pub available_mib: Option<usize>,
     pub naadf_status: String,
     pub naadf_gpu_mib: f64,

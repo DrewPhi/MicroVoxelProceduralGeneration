@@ -761,6 +761,21 @@ impl Gpu {
             view_formats: &[],
         }))
     }
+    fn set_aircraft_pose(&mut self, pose: Option<Camera>) {
+        self.airframe_pose = pose;
+        if pose.is_some()
+            && self
+                .airframe
+                .as_ref()
+                .is_none_or(|m| m.samples != self.sample_count)
+        {
+            self.airframe = Some(aircraft_model::Model::new(
+                &self.device,
+                self.scene_format,
+                self.sample_count,
+            ));
+        }
+    }
     fn draw(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -2325,6 +2340,14 @@ impl Viewer {
             && self.pending_teleport.is_none()
             && !matches!(self.route, frontier_runtime::routes::Route::Stationary)
         {
+            let pilot = self
+                .aircraft
+                .as_ref()
+                .and_then(aircraft::Aircraft::exterior_pose);
+            if let Some(pose) = pilot {
+                self.camera.position = pose.position;
+                self.camera.roll = pose.roll;
+            }
             if self.route.grounded() {
                 let t = if self.route_realtime {
                     self.route_started.elapsed().as_secs_f64()
@@ -2365,6 +2388,11 @@ impl Viewer {
             }
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
+            if pilot.is_some() {
+                if let Some(plane) = &mut self.aircraft {
+                    plane.follow(&mut self.camera, &self.world);
+                }
+            }
         }
         if let Some(live) = &mut self.live_water {
             live.observe_camera(self.camera);
@@ -2410,22 +2438,11 @@ impl Viewer {
             );
         }
         if let Some(gpu) = &mut self.gpu {
-            gpu.airframe_pose = self
-                .aircraft
-                .as_ref()
-                .and_then(|plane| plane.exterior_pose());
-            if gpu.airframe_pose.is_some()
-                && gpu
-                    .airframe
+            gpu.set_aircraft_pose(
+                self.aircraft
                     .as_ref()
-                    .is_none_or(|m| m.samples != gpu.sample_count)
-            {
-                gpu.airframe = Some(aircraft_model::Model::new(
-                    &gpu.device,
-                    gpu.scene_format,
-                    gpu.sample_count,
-                ));
-            }
+                    .and_then(aircraft::Aircraft::exterior_pose),
+            );
             // Restore raster ownership using this frame's vegetation readiness.
             let restore_id = gpu.naadf.as_ref().map_or(Some(0), |n| n.restore_owner_id());
             let plants = &gpu.vegetation_stats;
@@ -3268,6 +3285,8 @@ pub fn run() -> Result<()> {
         eye,
         target: explicit_target,
         fov_y,
+        chase_view,
+        bank_degrees,
         capture_linear,
         capture_far,
         pixel_error,
@@ -3732,6 +3751,17 @@ pub fn run() -> Result<()> {
         camera.far = far;
     }
     camera.set_explicit_pose(eye, explicit_target);
+    camera.roll = bank_degrees.to_radians();
+    let aircraft = (visual_settings.flight_horizon
+        && !visual_settings.walking
+        && (capture.is_none() || chase_view))
+        .then(|| {
+            let mut plane = aircraft::Aircraft::enter(&world, &mut camera);
+            if chase_view {
+                plane.toggle_view(&mut camera, &world);
+            }
+            plane
+        });
     let mut page_stream = None;
     let mut page_initial = None;
     if scene.starts_with("pages") {
@@ -3824,6 +3854,11 @@ pub fn run() -> Result<()> {
             gpu.init_pages(&cover);
         }
         gpu.configure_visuals(&world, &visual_settings);
+        gpu.set_aircraft_pose(
+            aircraft
+                .as_ref()
+                .and_then(aircraft::Aircraft::exterior_pose),
+        );
         if let Some(view) = &mut adaptive_view {
             if visual_settings.naadf_enabled {
                 view.poll(&mut gpu, camera, width, height)?;
@@ -3936,14 +3971,17 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
+    let initial_camera = aircraft
+        .as_ref()
+        .and_then(aircraft::Aircraft::exterior_pose)
+        .unwrap_or(camera);
     let now = Instant::now();
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
-        aircraft: (visual_settings.flight_horizon && !visual_settings.walking)
-            .then(|| aircraft::Aircraft::enter(&world, &mut camera)),
+        aircraft,
         visual_settings,
         settings_ui: None,
         atmosphere: None,
@@ -4001,7 +4039,7 @@ pub fn run() -> Result<()> {
         multisample: None,
         sample_count: msaa,
         voxel_filter,
-        initial_camera: camera,
+        initial_camera,
         camera,
         walking: Default::default(),
         frame_trace: Default::default(),
