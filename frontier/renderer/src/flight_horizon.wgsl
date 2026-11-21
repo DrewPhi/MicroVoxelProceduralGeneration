@@ -1,5 +1,5 @@
 const unit: f32 = GRID_UNIT;
-struct Camera { matrix: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, screen: vec4<f32> };
+struct Camera { matrix: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, screen: vec4<f32>, cloud_panorama:array<vec4<u32>,512> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct EditFrame { eye:vec4<f32>, origin:vec4<u32> };
 @group(0) @binding(1) var edited_columns:texture_2d<u32>;
@@ -77,13 +77,17 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     let color=face_color(MATERIAL_COLORS[material],max(0.,dot(normal,camera.sun.xyz)),.5+.5*normal.y);
     return Vertex(clip,relative,color,clip.w,vec2(0.),normal.xz);
 }
+fn cloud_texel(x:u32,y:u32)->vec4<f32> {
+    return unpack4x8unorm(camera.cloud_panorama[16u*y+x/4u][x%4u]);
+}
 fn surface(v:Vertex) -> vec4<f32> {
     if v.view_depth < camera.eye.w { discard; }
     var color=v.color;
     if v.optics.x>0. {
         let ray=normalize(v.relative);
         let normal=vec3(0.,1.,0.);
-        let above=water_sky(reflect(ray,normal),camera.sun.xyz,camera.sun.w);
+        let reflected=reflect(ray,normal);
+        let above=water_cloud_light(v.relative,reflected,water_sky(reflected,camera.sun.xyz,camera.sun.w),camera.screen.yzw);
         let cosine=clamp(-ray.y,0.,1.);
         let path=v.optics.y*inverseSqrt(1.-.5628*(1.-cosine*cosine));
         let surface=mix(water_medium(color,path),above,water_fresnel(cosine))

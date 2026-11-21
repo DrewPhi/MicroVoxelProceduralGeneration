@@ -74,10 +74,11 @@ impl WaterClouds {
         encoder: &mut wgpu::CommandEncoder,
         sky: &wgpu::BindGroup,
         view: CloudView,
-        receivers: impl Iterator<Item = &'a wgpu::Buffer>,
-    ) {
+        receivers: impl Iterator<Item = (&'a wgpu::Buffer, u64)>,
+    ) -> bool {
         let weather = Weather::from(view);
-        if self.weather.as_ref() != Some(&weather) {
+        let changed = self.weather.as_ref() != Some(&weather);
+        if changed {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sample reflected cloud hemisphere"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -99,13 +100,13 @@ impl WaterClouds {
         }
         // A complete angular row is exactly one aligned texture-copy row.
         // Newly installed native buffers receive the current panorama too.
-        for buffer in receivers {
+        for (buffer, offset) in receivers {
             encoder.copy_texture_to_buffer(
                 self.texture.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
                     buffer,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: crate::terrain_light::CLOUD_OFFSET,
+                        offset,
                         bytes_per_row: Some(WIDTH * 4),
                         rows_per_image: Some(HEIGHT),
                     },
@@ -113,6 +114,7 @@ impl WaterClouds {
                 self.texture.size(),
             );
         }
+        changed
     }
 }
 

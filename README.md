@@ -234,10 +234,12 @@ refining distant tiles in motion.
 uses 4× MSAA, a 1.8 km active view, 39% cloud coverage and a 27° sun at azimuth 241°. The native and distant terrain had
 finished refining at capture.*
 
-Near water, a 64×32 directional map samples the same moving cloud volume
-that lights the sky. The water surface samples it along the reflected ray,
-with a correction for the distance between the camera and the reflecting
-voxel. Nearby banks and trees can cross in front of a reflected cloud.
+A 64×32 directional map samples the moving cloud volume along reflected
+rays. Near the bank, reflections account for the offset to the water voxel.
+As the aircraft climbs, the sample origin descends to water level. Active
+water and the 35 km horizon then see the cloud deck from the surface even
+when the aircraft is above it. Nearby banks and trees can cross in front
+of a reflected cloud.
 The river's nearby ripples travel along the drainage graph. Faster, steeper
 reaches have stronger surface slopes, and the calm sandbar has short patches
 of moving water between clear reflections. Both render paths sample the
@@ -251,6 +253,14 @@ With moving clouds, p95 was 13.12 ms and 12.95 ms respectively. A 100 m/s
 approach with reflections took 8.65 / 14.82 / 17.98 ms at p50/p95/p99.
 These eight-second runs used 47% cloud coverage, fixed coarse detail, a
 1.5 km active view and a 16 m native radius.
+
+On Highlands seed 40961, the same sea was captured from 6, 178, 182, 500
+and 2,250 m. The active terrain depth and upper sky matched the earlier
+renderer at every altitude. At 500 m the new reflection covered both active
+and horizon water. In two 100 m/s open-sea flights from that height at 1080p
+MSAA 1, p50/p95/p99 were 4.69–4.70 / 5.38–5.40 / 6.23–6.24 ms. The earlier
+renderer took 4.46–4.62 / 5.07–5.49 / 5.98–6.22 ms on the same ten-second
+route with coarse detail and moving clouds.
 
 With downstream ripples enabled, the same sandbar measured 11.14–11.24 ms
 median, compared with 11.03–11.06 ms for the wind-swell version. Upstream

@@ -8,6 +8,7 @@ struct AtmosphereUniform {
     haze_regions: array<vec4<f32>,8>,
     plane_shadow: array<vec4<f32>,4>,
     cloud_map: vec4<f32>,
+    water_probe: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> atmosphere:AtmosphereUniform;
 struct VertexOutput {@builtin(position) position:vec4<f32>,@location(0) uv:vec2<f32>};
@@ -60,19 +61,20 @@ struct CloudOutput {
 @fragment fn fs_main(i:VertexOutput)->CloudOutput {
     let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,0.,1.);
     let ray=normalize(p.xyz/p.w-atmosphere.relative_eye.xyz);
-    return march_clouds(ray);
+    return march_clouds(ray,atmosphere.world_eye.xyz);
 }
 
 @fragment fn fs_water_clouds(i:VertexOutput)->@location(0) vec4<f32> {
     let azimuth=i.uv.x*6.283185307;
     let elevation=i.uv.y*1.570796327;
     let ray=vec3(sin(azimuth)*cos(elevation),sin(elevation),cos(azimuth)*cos(elevation));
-    let sample=march_clouds(ray).scattering;
+    let origin=vec3(atmosphere.world_eye.x,atmosphere.water_probe.x,atmosphere.world_eye.z);
+    let sample=march_clouds(ray,origin).scattering;
     return vec4(sample.rgb*.5,1.-sample.a);
 }
 
-fn march_clouds(ray:vec3<f32>)->CloudOutput {
-    let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
+fn march_clouds(ray:vec3<f32>,origin:vec3<f32>)->CloudOutput {
+    let segment = cloud_interval(origin.y, ray.y);
     if segment.y <= segment.x || atmosphere.weather.x <= .001 { return CloudOutput(vec4(0.,0.,0.,1.),vec4(1.)); }
     let start = segment.x;
     let length_m = segment.y - start;
@@ -92,7 +94,7 @@ fn march_clouds(ray:vec3<f32>)->CloudOutput {
     for(var k=0u;k<count;k+=1u) {
         let offset = f32(k)*spacing;
         let step = min(spacing, length_m-offset);
-        let position=atmosphere.world_eye.xyz+ray*(start+offset+.5*step);
+        let position=origin+ray*(start+offset+.5*step);
         let q=position+vec3(weather_offset.x,0.,weather_offset.y);
         let bank=bank_coverage(q.xz);
         let rho=cloud_body(q,bank);

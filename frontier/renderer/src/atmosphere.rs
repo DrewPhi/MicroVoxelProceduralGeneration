@@ -34,6 +34,7 @@ struct Uniform {
     haze_regions: [[f32; 4]; crate::streaming_haze::REGIONS],
     plane_shadow: [[f32; 4]; 4],
     cloud_map: [f32; 4],
+    water_probe: [f32; 4],
 }
 
 /// Opt-in shader diagnostics; default presentation and legacy profile are unchanged.
@@ -288,6 +289,7 @@ fn air_shader_source(samples: u32) -> String {
         include_str!("naadf/trace.wgsl"),
         include_str!("sunlight.wgsl"),
         include_str!("ground_light.wgsl"),
+        include_str!("reflected_clouds.wgsl"),
         include_str!("atmosphere_air.wgsl"),
     );
     source
@@ -876,8 +878,12 @@ impl Atmosphere {
         }
     }
 
+    pub(crate) fn visible_water_height(&self) -> Option<f32> {
+        self.horizon.as_ref()?.visible_water_height
+    }
+
     pub(crate) fn prepare(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         inverse_view_projection: Mat4,
         relative_eye: Vec3,
@@ -885,7 +891,11 @@ impl Atmosphere {
         seed: u64,
         settings: &VisualSettings,
         time_seconds: f32,
+        water_probe: Option<f32>,
     ) {
+        if let Some(horizon) = &mut self.horizon {
+            horizon.set_cloud_probe(queue, world_eye.y as f32, water_probe);
+        }
         self.effects_enabled.set(
             settings.atmosphere
                 || settings.exposure != 1.0
@@ -928,6 +938,7 @@ impl Atmosphere {
         key ^= key >> 31;
         let weather_origin = [(key & 65535) as f32, (key >> 32 & 65535) as f32];
         let uniform = Uniform {
+            water_probe: [water_probe.unwrap_or(world_eye.y as f32), 0., 0., 0.],
             inverse_view_projection: inverse_view_projection.to_cols_array_2d(),
             relative_eye: relative_eye.extend(weather_origin[0]).to_array(),
             world_eye: world_eye
@@ -1013,13 +1024,24 @@ impl Atmosphere {
         }));
     }
     pub(crate) fn reflect_clouds<'a>(
-        &mut self,
+        &'a mut self,
         encoder: &mut wgpu::CommandEncoder,
+        height: f32,
         receivers: impl Iterator<Item = &'a wgpu::Buffer>,
     ) {
-        if let Some(view) = self.cloud_view.get() {
-            self.water_clouds
-                .draw(encoder, &self.sky_bind, view, receivers);
+        if let Some(mut view) = self.cloud_view.get() {
+            view.world_eye.y = height;
+            let targets = receivers
+                .map(|b| (b, crate::terrain_light::CLOUD_OFFSET))
+                .chain(self.horizon.as_ref().and_then(|h| h.cloud_receiver()));
+            if self
+                .water_clouds
+                .draw(encoder, &self.sky_bind, view, targets)
+            {
+                if let Some(horizon) = &self.horizon {
+                    horizon.cloud_changed();
+                }
+            }
         }
     }
     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
@@ -1148,7 +1170,7 @@ mod tests {
     }
     #[test]
     fn atmosphere_uniform_contract() {
-        assert_eq!(std::mem::size_of::<super::Uniform>(), 448);
+        assert_eq!(std::mem::size_of::<super::Uniform>(), 464);
         assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
         let module =
             naga::front::wgsl::parse_str(&crate::voxel_shader(super::shader_source(1))).unwrap();
@@ -1163,7 +1185,7 @@ mod tests {
         assert_eq!(*span as usize, std::mem::size_of::<super::Uniform>());
         assert_eq!(
             members.last().unwrap().offset as usize,
-            std::mem::offset_of!(super::Uniform, cloud_map)
+            std::mem::offset_of!(super::Uniform, water_probe)
         );
     }
 

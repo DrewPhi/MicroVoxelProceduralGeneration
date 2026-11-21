@@ -69,6 +69,7 @@ pub(super) struct Batch {
     pub min: [f32; 3],
     pub max: [f32; 3],
     pub faces: [Range<u32>; 5],
+    pub wet_center: Option<glam::Vec3>,
 }
 
 pub(super) struct Mesh {
@@ -305,6 +306,7 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
         for cz in (-half..half).step_by(CHUNK as usize) {
             for cx in (-half..half).step_by(CHUNK as usize) {
                 let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+                let mut wet = glam::Vec4::ZERO;
                 roofs(&columns, first, level, cx, cz, &mut directions[0]);
                 for z in cz..(cz + CHUNK).min(half) {
                     for x in cx..(cx + CHUNK).min(half) {
@@ -319,6 +321,14 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
                         let index = (z + HALF) * CELLS + x + HALF;
                         let high = columns[base + index as usize];
                         let (x, z) = (x * step, z * step);
+                        if high.water > 0 {
+                            wet += glam::Vec4::new(
+                                (x as f32 + step as f32 * 0.5) * UNIT,
+                                high.y,
+                                (z as f32 + step as f32 * 0.5) * UNIT,
+                                1.,
+                            ) * high.water as f32;
+                        }
                         min_y = min_y.min(high.y);
                         max_y = max_y.max(high.y);
                         for (axis, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
@@ -375,6 +385,7 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
                         first..mesh.faces.len() as u32
                     });
                     mesh.batches.push(Batch {
+                        wet_center: (wet.w > 0.).then(|| wet.truncate() / wet.w),
                         faces,
                         min: [(cx * step) as f32 * UNIT, min_y, (cz * step) as f32 * UNIT],
                         max: [
@@ -481,6 +492,7 @@ mod tests {
             );
             let mesh = build(&lattice, 0.0625);
             assert!(mesh.faces.len() <= 100 * (LEVELS - first));
+            assert!(mesh.batches.iter().all(|batch| batch.wet_center.is_none()));
             let mut covered = vec![false; RING * (LEVELS - first)];
             for f in &mesh.faces {
                 let level = ((f[1] >> 27) & 3) as usize;
@@ -516,6 +528,24 @@ mod tests {
                 .faces
                 .iter()
                 .all(|f| (f[1] >> 24) & 7 == 0 && f32::from_bits(f[3]) == 7.5));
+        }
+    }
+
+    #[test]
+    fn water_probes_sample_the_horizon_batch_elevation_and_extent() {
+        let lattice = super::super::lattice(
+            [0, 0],
+            1,
+            None,
+            |_, _| [0.5, 0.3, 0.2, 80., 1., 4., 0.2, 0.3, 0.1, 0.3, 0.3, 0.3],
+            |_, _| 80.,
+        );
+        let mesh = build(&lattice, 0.0625);
+        assert!(!mesh.batches.is_empty());
+        for b in &mesh.batches {
+            let p = b.wet_center.unwrap();
+            assert!((p.y - 80.).abs() < 1e-4);
+            assert!(p.x >= b.min[0] && p.x <= b.max[0] && p.z >= b.min[2] && p.z <= b.max[2]);
         }
     }
 

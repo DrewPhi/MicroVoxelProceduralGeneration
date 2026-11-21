@@ -23,11 +23,24 @@ pub(crate) struct GroundUniform {
 pub(crate) const CLOUD_OFFSET: u64 = std::mem::size_of::<GroundUniform>() as u64;
 
 impl GroundUniform {
-    pub(crate) fn enable_clouds(&mut self, enabled: bool, eye_height: f64) -> bool {
-        let active = enabled && self.water.enabled();
-        self.water_options[0] = if active { 1. } else { 0. };
-        self.water_options[1] = (2060. - eye_height) as f32;
-        active
+    pub(crate) fn enable_clouds(
+        &mut self,
+        enabled: bool,
+        eye: f64,
+        distant: Option<f32>,
+    ) -> Option<f32> {
+        let nearby = (self.water_options[0] > 0.).then_some(eye as f32 + self.water_options[3]);
+        let stage = enabled.then(|| nearby.or(distant)).flatten();
+        self.water_options[0] = f32::from(stage.is_some());
+        self.water_options[1] = (2060. - eye) as f32;
+        let probe = stage.map(|y| {
+            // Keep the sky probe at eye level along the waterline and lower it
+            // continuously to the reflecting surface as the aircraft climbs.
+            let t = ((eye as f32 - y).abs() / 150.).clamp(0., 1.);
+            eye as f32 + (y - eye as f32) * t * t * (3. - 2. * t)
+        });
+        self.water_options[3] = probe.map_or(0., |y| y - eye as f32);
+        probe
     }
 
     pub(crate) fn upload_bytes(&self) -> &[u8] {
@@ -91,11 +104,13 @@ impl GroundField {
             self.nodes = nodes;
         }
         let mut water = bytemuck::Zeroable::zeroed();
+        let mut cloud_stage = None;
         if let Some(terrain) = world
             .fbm_terrain()
             .filter(|t| t.params().recipe.has_static_water())
         {
             let mut nearest = f64::INFINITY;
+            let mut nearest_wet = f64::INFINITY;
             let mut anchor = None;
             let center = [eye.x, eye.z].map(|v| (v / 48.).round() * 48.);
             for (i, node) in self.nodes.iter().enumerate() {
@@ -103,6 +118,10 @@ impl GroundField {
                     let x = (start[0] + (i % SIDE) as i64) as f64 * SPACING;
                     let z = (start[1] + (i / SIDE) as i64) as f64 * SPACING;
                     let distance = (x - center[0]).powi(2) + (z - center[1]).powi(2);
+                    if distance < nearest_wet {
+                        nearest_wet = distance;
+                        cloud_stage = Some(y);
+                    }
                     if distance < nearest && (y - eye.y).abs() < 180. {
                         nearest = distance;
                         anchor = Some([x, y + 0.125, z]);
@@ -127,7 +146,12 @@ impl GroundField {
             has_current |= node.current != 0;
         }
         GroundUniform {
-            water_options: [0., 0., f32::from(has_current), 0.],
+            water_options: [
+                f32::from(cloud_stage.is_some()),
+                0.,
+                f32::from(has_current),
+                cloud_stage.map_or(0., |y| (y - eye.y) as f32),
+            ],
             currents,
             water,
             origin_strength: [
@@ -179,5 +203,26 @@ fn sample_ground(world: &World, x: i64, z: i64) -> GroundSample {
         bed: height,
         water,
         current,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+
+    #[test]
+    fn reflection_probe_follows_the_water_through_flight_altitudes() {
+        for eye in [178., 182., 500., 2250.] {
+            let mut ground = GroundUniform::zeroed();
+            ground.water_options = [1., 0., 0., -eye as f32];
+            assert_eq!(ground.enable_clouds(true, eye, Some(30.)), Some(0.));
+            assert_eq!(ground.water_options[3], -eye as f32);
+        }
+        let mut dry = GroundUniform::zeroed();
+        assert_eq!(dry.enable_clouds(true, 2400., None), None);
+        assert_eq!(dry.enable_clouds(true, 2400., Some(680.)), Some(680.));
+        let mut off = GroundUniform::zeroed();
+        assert_eq!(off.enable_clouds(false, 2400., Some(680.)), None);
     }
 }

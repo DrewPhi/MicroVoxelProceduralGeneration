@@ -169,6 +169,8 @@ fn samples(
     Patch { lattice, mesh }
 }
 
+pub(super) const CLOUD_OFFSET: u64 = 112;
+
 pub(crate) struct Horizon {
     pub(crate) color: wgpu::TextureView,
     depth: wgpu::TextureView,
@@ -176,6 +178,8 @@ pub(crate) struct Horizon {
     faces: Option<wgpu::Buffer>,
     batches: Vec<blocks::Batch>,
     visible: Vec<Range<u32>>,
+    pub(super) visible_water_height: Option<f32>,
+    cloud_parameters: [f32; 3],
     view: Option<[f32; 28]>,
     target_height: u32,
     dirty: std::cell::Cell<bool>,
@@ -217,8 +221,8 @@ impl Horizon {
             })
         };
         let params = buffer(
-            "horizon camera",
-            112,
+            "horizon camera and reflected cloud light",
+            CLOUD_OFFSET + crate::atmosphere::water_clouds::BYTES,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -229,6 +233,7 @@ impl Horizon {
                     include_str!("water.wgsl"),
                     include_str!("edited_columns.wgsl"),
                     include_str!("material_palette.wgsl"),
+                    include_str!("reflected_clouds.wgsl"),
                     include_str!("flight_horizon.wgsl")
                 )
                 .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
@@ -320,6 +325,8 @@ impl Horizon {
             faces: None,
             batches: Vec::new(),
             visible: Vec::new(),
+            visible_water_height: None,
+            cloud_parameters: [0.; 3],
             view: None,
             target_height: height,
             dirty: std::cell::Cell::new(true),
@@ -398,6 +405,7 @@ impl Horizon {
             self.lattice = None;
             self.view = None;
             self.visible.clear();
+            self.visible_water_height = None;
             self.dirty.set(true);
             self.pending = None;
             self.source_key = Some(key);
@@ -453,6 +461,7 @@ impl Horizon {
             data[16..20].copy_from_slice(&eye.extend(camera.far * 0.52).to_array());
             data[20..24].copy_from_slice(&sun.extend(overcast).to_array());
             data[24] = focal_pixels;
+            data[25..28].copy_from_slice(&self.cloud_parameters);
             if self.view == Some(data) {
                 return;
             }
@@ -469,6 +478,8 @@ impl Horizon {
                 rows.z_axis,
             ];
             self.visible.clear();
+            let mut nearest_wet = f32::INFINITY;
+            self.visible_water_height = None;
             for batch in &self.batches {
                 let lo = Vec3::from(batch.min);
                 let hi = Vec3::from(batch.max);
@@ -487,6 +498,13 @@ impl Horizon {
                     eye.z >= lo.z,
                     eye.z <= hi.z,
                 ];
+                if let Some(wet) = batch.wet_center.filter(|_| facing[0]) {
+                    let distance = (wet - eye).length_squared();
+                    if distance < nearest_wet {
+                        nearest_wet = distance;
+                        self.visible_water_height = Some(wet.y);
+                    }
+                }
                 for (range, visible) in batch.faces.iter().zip(facing) {
                     if !visible || range.is_empty() {
                         continue;
@@ -509,6 +527,27 @@ impl Horizon {
                 frame[4..7].copy_from_slice(&[e.cell.x as u32, e.cell.y as u32, e.cell.z as u32]);
                 queue.write_buffer(&self.edit_params, 0, bytemuck::cast_slice(&frame));
             }
+        }
+    }
+    pub(super) fn set_cloud_probe(&mut self, queue: &wgpu::Queue, eye: f32, probe: Option<f32>) {
+        let parameters = probe
+            .filter(|_| self.visible_water_height.is_some())
+            .map_or([0.; 3], |height| [1., 2060. - eye, height - eye]);
+        if parameters != self.cloud_parameters {
+            self.cloud_parameters = parameters;
+            if let Some(view) = &mut self.view {
+                view[25..28].copy_from_slice(&parameters);
+            }
+            queue.write_buffer(&self.params, 25 * 4, bytemuck::cast_slice(&parameters));
+            self.dirty.set(true);
+        }
+    }
+    pub(super) fn cloud_receiver(&self) -> Option<(&wgpu::Buffer, u64)> {
+        (self.cloud_parameters[0] > 0.).then_some((&self.params, CLOUD_OFFSET))
+    }
+    pub(super) fn cloud_changed(&self) {
+        if self.cloud_parameters[0] > 0. {
+            self.dirty.set(true);
         }
     }
     pub(crate) fn draw(&self, encoder: &mut wgpu::CommandEncoder) {

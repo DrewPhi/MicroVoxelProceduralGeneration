@@ -13,6 +13,7 @@ struct AtmosphereUniform {
     haze_regions: array<vec4<f32>,8>,
     plane_shadow: array<vec4<f32>,4>,
     cloud_map: vec4<f32>,
+    water_probe: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS

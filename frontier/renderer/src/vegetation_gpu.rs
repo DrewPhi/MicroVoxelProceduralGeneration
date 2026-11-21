@@ -123,6 +123,7 @@ const SHADER: &str = concat!(
     include_str!("naadf/trace.wgsl"),
     include_str!("sunlight.wgsl"),
     include_str!("ground_light.wgsl"),
+    include_str!("reflected_clouds.wgsl"),
     include_str!("vegetation.wgsl")
 );
 

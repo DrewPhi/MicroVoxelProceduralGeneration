@@ -1146,15 +1146,17 @@ impl Gpu {
         camera: Camera,
         capture: bool,
         post: bool,
-    ) -> bool {
-        let Some(settings) = &self.visual_settings else { return false };
+        distant: Option<f32>,
+    ) -> Option<f32> {
+        let settings = self.visual_settings.as_ref()?;
         if !settings.beauty || settings.visibility_benchmark {
-            return false;
+            return None;
         }
         let mut field = self.ground_field.borrow_mut().prepare(world, camera, settings, capture);
         let clouds = field.enable_clouds(
             post && settings.atmosphere && settings.cloud_coverage > 0.001,
             camera.position.y,
+            distant,
         );
         for buffer in self.ground_light_buffers() {
             self.queue.write_buffer(buffer, 0, field.upload_bytes());
@@ -1197,7 +1199,6 @@ impl Gpu {
                 || self.scene_format != self.format)
                 && !floating
         });
-        let reflect_clouds = self.prepare_ground_light(world, *camera, true, post_settings.is_some());
         // Reuse the capture depth as the atmosphere's sampled attachment when
         // output and scene pixels align. The readback measures opaque terrain
         // and objects before sky, clouds and the 35 km horizon composite.
@@ -1230,6 +1231,13 @@ impl Gpu {
                 self.adaptive.as_ref(),
                 true,
             );
+            let water_probe = self.prepare_ground_light(
+                world,
+                *camera,
+                true,
+                true,
+                atmosphere.visible_water_height(),
+            );
             horizon_face_bytes = atmosphere.horizon_face_bytes();
             atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.set_lighting_context(
@@ -1250,9 +1258,10 @@ impl Gpu {
                 world.seed(),
                 settings,
                 0.,
+                water_probe,
             );
-            if reflect_clouds {
-                atmosphere.reflect_clouds(&mut encoder, self.ground_light_buffers());
+            if let Some(height) = water_probe {
+                atmosphere.reflect_clouds(&mut encoder, height, self.ground_light_buffers());
             }
             self.draw(
                 &mut encoder,
@@ -1267,6 +1276,7 @@ impl Gpu {
             );
             atmosphere.encode_with_shadows(&mut encoder, &target, self.adaptive.as_ref());
         } else {
+            self.prepare_ground_light(world, *camera, true, false, None);
             let multisample = self.multisample_texture(width, height);
             let multisample_view = multisample
                 .as_ref()
@@ -2804,8 +2814,6 @@ impl Viewer {
             &self.world,
             self.visual_started.elapsed().as_secs_f32(),
         );
-        let reflect_clouds =
-            gpu.prepare_ground_light(&self.world, self.camera, false, self.atmosphere.is_some());
         let target = frame.texture.create_view(&Default::default());
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.prepare_horizon(
@@ -2816,6 +2824,13 @@ impl Viewer {
                 &self.visual_settings,
                 gpu.adaptive.as_ref(),
                 false,
+            );
+            let water_probe = gpu.prepare_ground_light(
+                &self.world,
+                self.camera,
+                false,
+                true,
+                atmosphere.visible_water_height(),
             );
             let (width, height) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(gpu.medium_ground_height);
@@ -2837,9 +2852,10 @@ impl Viewer {
                 self.world.seed(),
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
+                water_probe,
             );
-            if reflect_clouds {
-                atmosphere.reflect_clouds(&mut encoder, gpu.ground_light_buffers());
+            if let Some(height) = water_probe {
+                atmosphere.reflect_clouds(&mut encoder, height, gpu.ground_light_buffers());
             }
             gpu.draw(
                 &mut encoder,
@@ -2858,6 +2874,7 @@ impl Viewer {
             );
             atmosphere.encode_with_shadows(&mut encoder, &target, gpu.adaptive.as_ref());
         } else {
+            gpu.prepare_ground_light(&self.world, self.camera, false, false, None);
             let depth = self
                 .depth
                 .as_ref()
