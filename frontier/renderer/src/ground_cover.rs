@@ -163,7 +163,7 @@ fn source(w: &World) -> [u64; 8] {
     [
         w.seed(),
         vegetation::VEGETATION_SOURCE_VERSION as u64 | ((directional_enabled() as u64) << 32),
-        p.recipe as u64,
+        p.recipe as u64 | ((p.legacy_riverbanks as u64) << 32),
         p.horizontal_scale.to_bits(),
         p.amplitude.to_bits(),
         p.octaves as u64,

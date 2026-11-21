@@ -403,6 +403,7 @@ mod tests {
         let extreme = FbmTerrain::new(
             7,
             FbmParams {
+                legacy_riverbanks: false,
                 recipe: FbmRecipe::Regional,
                 horizontal_scale: 16.0,
                 amplitude: 100000.0,

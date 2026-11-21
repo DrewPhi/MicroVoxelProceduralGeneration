@@ -7436,6 +7436,7 @@ mod tests {
         let world = World::fbm(
             7,
             FbmParams {
+                legacy_riverbanks: false,
                 recipe: frontier_world::FbmRecipe::Legacy,
                 horizontal_scale: 1800.,
                 amplitude: 1000.,

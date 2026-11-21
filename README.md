@@ -115,6 +115,18 @@ pixels. On the Radeon 760M, the layered snow view at 1080p MSAA 1 took
 underfoot use the native 6.25 cm grid. The hillside across the clearing
 uses larger, axis-aligned faces.*
 
+![Two views from the same Watershed riverbank. The older source on the left exposes a wall of water. The revised stream on the right meets the meadow at ground level.](frontier/reference/gallery/watershed-bank-comparison.jpg)
+
+*Watershed seed 997, same camera and sun. New Watershed and Highlands worlds
+fit each reach to its valley, lower streams as they enter a lake and carry
+tributaries across drainage-region edges. Existing saves load their original
+generation version. The banks, bed and water occupy native voxel cells.*
+
+On a 4.8 km square survey of the 6.25 cm grid, the highest wet-to-dry step on
+Highlands seed 673 fell from **9 m to 25 cm**. The new source had 7,368 sampled
+bank crossings and a 6.25 cm 95th-percentile step. Watershed seed 997 fell
+from **2.44 m to 6.25 cm** across 12,230 crossings on the new source.
+
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 
 *At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. This in-engine 1920×1080 view uses 4× MSAA, a 16° left bank and a 6 km active view.*

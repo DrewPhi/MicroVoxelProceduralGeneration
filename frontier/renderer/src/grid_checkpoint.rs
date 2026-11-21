@@ -17,6 +17,31 @@ fn header_for(format: &[u8; 8], grid: VoxelGrid) -> Vec<u8> {
     bytes
 }
 
+/// Select the generator before finding a spawn or starting terrain workers.
+/// Both water drivers validate the complete identity and body during restore.
+pub(crate) fn legacy_riverbanks(
+    path: &std::path::Path,
+    recipe: frontier_world::FbmRecipe,
+) -> crate::Result<bool> {
+    use std::io::Read;
+    if !recipe.uses_watersheds() {
+        return Ok(false);
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    // Optional 16-byte grid prefix plus the format, seed, recipe and version.
+    let mut header = Vec::with_capacity(48);
+    file.take(48).read_to_end(&mut header)?;
+    let header = payload(&header)?;
+    Ok(header.len() >= 32
+        && matches!(&header[..8], b"FVWATER2" | b"FVWATER3" | b"FVDWATR1")
+        && header[16..24] == (recipe as u64).to_le_bytes()
+        && header[24..32] == 1u64.to_le_bytes())
+}
+
 pub(crate) fn payload(bytes: &[u8]) -> Result<&[u8], String> {
     payload_for(bytes, voxel_grid())
 }

@@ -320,6 +320,7 @@ impl Region {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
+    legacy_riverbanks: bool,
     recipe: FbmRecipe,
     seed: u64,
     scale: u64,
@@ -387,6 +388,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
     let key = Key {
+        legacy_riverbanks: p.legacy_riverbanks,
         recipe: p.recipe,
         seed,
         scale: p.horizontal_scale.to_bits(),
@@ -411,7 +413,11 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     // The row just outside the accumulated halo is needed to choose the
     // downstream link of its outermost contributors.
     let halo = if watershed { RUNOFF_HOPS + 1 } else { 0 };
-    let side = 8 + 2 * halo;
+    // A region covers four intervals and has five bounding nodes. A reach
+    // owned one node beyond either end can drain back into it. In particular
+    // a jittered endpoint may cross the positive boundary from the next region.
+    let extra_owner = usize::from(watershed && !p.legacy_riverbanks);
+    let side = 8 + extra_owner + 2 * halo;
     let base = [rx * 4 - 2 - halo as i64, rz * 4 - 2 - halo as i64];
     let mut nodes = Vec::with_capacity(side * side);
     for iz in base[1]..base[1] + side as i64 {
@@ -432,8 +438,8 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
         authored * p.horizontal_scale / 1800.
     };
     let mut reaches = Vec::new();
-    for j in halo + 1..halo + 7 {
-        for i in halo + 1..halo + 7 {
+    for j in halo + 1..halo + 7 + extra_owner {
+        for i in halo + 1..halo + 7 + extra_owner {
             let index = j * side + i;
             let a = nodes[index];
             if a.potential <= 0. {
@@ -528,7 +534,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                         potential: a.potential + t * (b.potential - a.potential),
                     }
                 };
-                let points: [Node; 17] = std::array::from_fn(|i| point(i as u8));
+                let mut points: [Node; 17] = std::array::from_fn(|i| point(i as u8));
                 let downstream_width = river_width(next);
                 let valley_radius = watershed.then(|| {
                     // Deep channels through uplift need broader shoulders than
@@ -564,6 +570,30 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                         max_width * p.horizontal_scale / 1800.,
                     )
                 });
+                if watershed && !p.legacy_riverbanks {
+                    // An interpolated reach can cross a saddle below its graph
+                    // stage. Fit one stage across its width, preserving the
+                    // shared end nodes and a non-increasing downstream profile.
+                    let mut upstream = a.stage;
+                    for i in 1..16 {
+                        let tx = points[i + 1].x - points[i - 1].x;
+                        let tz = points[i + 1].z - points[i - 1].z;
+                        let radius = widths[i] / tx.hypot(tz);
+                        let point = &mut points[i];
+                        let mut shoulder = land(seed, p, point.x, point.z).h;
+                        for sign in [-1., 1.] {
+                            let x = point.x - sign * tz * radius;
+                            let z = point.z + sign * tx * radius;
+                            shoulder = shoulder.min(land(seed, p, x, z).h);
+                        }
+                        point.stage = point
+                            .stage
+                            .min(upstream)
+                            .min(shoulder - 0.7 * p.amplitude / 1000.)
+                            .max(b.stage);
+                        upstream = point.stage;
+                    }
+                }
                 for segment in 0..16 {
                     let segment_width = widths[segment as usize];
                     let segment_width_b = widths[segment as usize + 1];
@@ -657,6 +687,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
         let mut total_weight = 1.;
         let mut river_stage = f64::NEG_INFINITY;
         let mut lake_stage: Option<f64> = None;
+        let mut near_lake = false;
         for r in region.candidates(x, z) {
             let (d, stage) = project(r, x, z);
             let outer = r.outer_radius();
@@ -665,6 +696,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
             if d >= outer || stage < 0. {
                 continue;
             }
+            near_lake |= r.lake;
             let amplitude = p.amplitude / 1000.;
             let depth = r.depth * amplitude;
             let bank_height = 0.7 * amplitude;
@@ -705,8 +737,42 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
         if let Some(stage) = lake_stage {
             // Tributaries can lift the blended shore above the lake level.
             // Flat lake priority applies only to its actual wet interior.
-            if stage > ground {
+            if stage > ground && (!watershed || p.legacy_riverbanks) {
                 river_stage = stage;
+            }
+        }
+        if watershed && !p.legacy_riverbanks && river_stage > ground.max(0.) {
+            // At a confluence the blended bed can sit below either reach's
+            // nominal bank. Limit each reach to its own shrinking cross-section
+            // before taking their union. Sea level is continuous offshore.
+            let mut supported_stage = 0.0_f64;
+            for r in region.candidates(x, z) {
+                let t = projection_t(r, x, z);
+                let width = r.width + t * (r.width_b - r.width);
+                let (d, stage) = project(r, x, z);
+                if d < width && stage > supported_stage {
+                    let depth = r.depth * relief;
+                    let head = (depth - (depth + 0.7 * relief) * smooth(d / width)).max(0.);
+                    supported_stage = supported_stage.max(stage.min(ground + head));
+                }
+            }
+            river_stage = river_stage.min(supported_stage);
+            if near_lake {
+                // Draw tributaries down to the receiving basin before the bed
+                // crosses the lake level. A binary lake-priority switch here
+                // leaves an abrupt water wall on the first shallow voxel.
+                let upstream = river_stage;
+                for lake in region
+                    .candidates(x, z)
+                    .filter(|r| r.lake && r.a.stage < upstream)
+                {
+                    let (d, stage) = project(lake, x, z);
+                    let radius = lake.outer_radius();
+                    if d < radius {
+                        let away = smooth(((d - lake.width) / (radius - lake.width)).clamp(0., 1.));
+                        river_stage = river_stage.min(stage + (upstream - stage) * away);
+                    }
+                }
             }
         }
         if river_stage > ground {
@@ -1171,6 +1237,56 @@ mod tests {
         }
         assert!(common > 100);
         assert!(max_width > min_width * 2., "{min_width}..{max_width}");
+    }
+    #[test]
+    fn perched_river_regressions_and_saved_source_replay() {
+        for (seed, recipe, x, z, dx, dz, old_lip) in [
+            (673, FbmRecipe::Highlands, -34728, -3328, -1, 0, 144),
+            (997, FbmRecipe::Watershed, 520, 5657, 0, -1, 39),
+        ] {
+            let current = FbmParams {
+                recipe,
+                ..Default::default()
+            };
+            let saved = FbmParams {
+                legacy_riverbanks: true,
+                ..current
+            };
+            let at = |p, dx: i64, dz: i64| column_tops(seed, p, x + dx, z + dz);
+            // Exercise shared thread-local caches in both source orders.
+            for p in [saved, current, saved, current] {
+                let bank = at(p, dx, dz);
+                let river = at(p, 0, 0);
+                if p.legacy_riverbanks {
+                    assert_eq!(bank[0], bank[1]);
+                    assert_eq!(river[1] - bank[1], old_lip);
+                } else {
+                    assert!(river[1].abs_diff(bank[1]) <= 2);
+                }
+            }
+        }
+    }
+    #[test]
+    fn watershed_banks_agree_across_drainage_region_boundary() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Highlands,
+            ..Default::default()
+        };
+        let x = -1991.65625;
+        let z = 0.;
+        let collect = |side| {
+            let region = region(673, p, x, side);
+            let mut list = Vec::new();
+            for r in region.candidates(x, side) {
+                let (d, stage) = project(r, x, z);
+                if d < r.outer_radius() {
+                    list.push((r.owner, r.segment, r.lake, d, stage, r.width, r.width_b));
+                }
+            }
+            list.sort_by_key(|r| (r.0, r.1));
+            list
+        };
+        assert_eq!(collect(-0.03), collect(0.03));
     }
     #[test]
     fn deterministic_columns_survive_negative_boundaries_and_cache_eviction() {

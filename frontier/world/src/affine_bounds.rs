@@ -1075,6 +1075,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let mut contributions: Vec<(I, I)> = Vec::new();
     let mut stage_upper = 0.0_f64;
     let mut guaranteed_stage: Option<f64> = None;
+    let mut guaranteed_head = 0.;
     let mut possible_lake_lower = f64::INFINITY;
     let mut wet_lakes = Vec::new();
     let mut only_sea_reaches = true;
@@ -1179,13 +1180,21 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             hi: raw.hi.max(0.),
         };
         contributions.push((weight, profile));
+        if r.lake && p.recipe.uses_watersheds() && !p.legacy_riverbanks {
+            possible_lake_lower = possible_lake_lower.min(stage.lo);
+        }
         if d.lo < width.hi {
             stage_upper = stage_upper.max(stage.hi);
             if r.lake {
                 possible_lake_lower = possible_lake_lower.min(stage.lo);
             }
             if fully_active && distance.hi < width.lo {
-                guaranteed_stage = Some(guaranteed_stage.map_or(stage.lo, |old| old.max(stage.lo)));
+                if guaranteed_stage.is_none_or(|old| stage.lo > old) {
+                    guaranteed_stage = Some(stage.lo);
+                    guaranteed_head = I::point(depth)
+                        .sub(I::point(depth).add(bank).mul(smooth(d.div(width))))
+                        .lo.max(0.);
+                }
                 if r.lake && profile.hi < stage.lo {
                     wet_lakes.push(stage);
                 }
@@ -1260,7 +1269,10 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         }
     };
     if let Some(stage) = guaranteed_stage {
-        let lower = stage.min(possible_lake_lower);
+        let mut lower = stage.min(possible_lake_lower);
+        if p.recipe.uses_watersheds() && !p.legacy_riverbanks {
+            lower = lower.min(I::point(ground.lo).add(I::point(guaranteed_head)).lo.max(0.));
+        }
         // Prove a wholly wet region without carrying its hidden bed into the
         // visible error. Test the signed weighted excess above the water level;
         // this stays useful even when several huge centerline weights overlap.
@@ -1572,6 +1584,7 @@ mod tests {
                 let terrain = FbmTerrain::new(
                     seed,
                     FbmParams {
+                        legacy_riverbanks: false,
                         recipe,
                         horizontal_scale: 1800.0,
                         amplitude: 1000.0,

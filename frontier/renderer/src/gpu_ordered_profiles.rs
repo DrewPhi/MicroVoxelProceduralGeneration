@@ -995,6 +995,7 @@ mod tests {
                 .unwrap();
             println!("ordered-profile adapter={:?}", adapter.get_info());
             let primary_params = FbmParams {
+                legacy_riverbanks: false,
                 recipe: FbmRecipe::Legacy,
                 horizontal_scale: 1800.,
                 amplitude: 1000.,

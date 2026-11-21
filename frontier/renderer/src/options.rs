@@ -880,6 +880,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     if visual.vegetation && scene != "adaptive" {
         return Err("--vegetation on currently requires --scene adaptive".into());
     }
+    if let Some(path) = &water_save {
+        params.legacy_riverbanks = crate::grid_checkpoint::legacy_riverbanks(path, params.recipe)?;
+    }
     params.validate()?;
     if seeded_preset && !explicit_start && eye.is_none() && params.recipe.has_static_water() {
         start_xz = if visual.flight_horizon {

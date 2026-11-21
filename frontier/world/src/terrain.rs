@@ -79,6 +79,8 @@ impl FbmRecipe {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FbmParams {
     pub recipe: FbmRecipe,
+    /// Restore the original bank profile for saved version-one Watershed and Highlands worlds.
+    pub legacy_riverbanks: bool,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
@@ -94,6 +96,7 @@ impl Default for FbmParams {
     fn default() -> Self {
         Self {
             recipe: FbmRecipe::Legacy,
+            legacy_riverbanks: false,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -158,7 +161,7 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
-            FbmRecipe::Watershed | FbmRecipe::Highlands => 1,
+            FbmRecipe::Watershed | FbmRecipe::Highlands => if self.params.legacy_riverbanks { 1 } else { 2 },
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
