@@ -79,6 +79,7 @@ struct Run {
     ground: i64,
     top_material: Material,
     deep_material: Material,
+    soil_bands: Option<[Material; 2]>,
     paint: u32,
     profile: u32,
 }
@@ -167,6 +168,55 @@ fn packed_quad(
     }
 }
 
+fn pack_color(color: [f32; 3]) -> u32 {
+    let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
+    0x10 | r << 8 | g << 14 | b << 20
+}
+
+impl Run {
+    fn wall_material(self, low: i64, high: i64, default: Material) -> (Material, u32) {
+        let paint = |m| {
+            if m == self.top_material {
+                self.paint
+            } else {
+                0
+            }
+        };
+        let Some([surface, soil]) = self.soil_bands else {
+            return (default, paint(default));
+        };
+        if low >= self.ground {
+            return (default, paint(default));
+        }
+        // The ground voxel and its eleven subsurface cells also have side
+        // faces. Integrate their canonical albedo over an unresolved cliff.
+        let skin = (self.ground - 1).clamp(low, high);
+        let bed = (self.ground - 12).clamp(low, high);
+        let bands = [
+            (high - skin, surface),
+            (skin - bed, soil),
+            (bed - low, self.deep_material),
+        ];
+        let &(_, material) = bands.iter().max_by_key(|b| b.0).unwrap();
+        if bands.iter().all(|&(n, m)| n == 0 || m == material) {
+            return (material, paint(material));
+        }
+        let mut color = [0.; 3];
+        for (n, m) in bands {
+            let packed = paint(m);
+            let albedo = if packed & 16 == 0 {
+                m.color()
+            } else {
+                [8, 14, 20].map(|shift| ((packed >> shift) & 63) as f32 / 63.)
+            };
+            for i in 0..3 {
+                color[i] += albedo[i] * (n as f32 / (high - low) as f32);
+            }
+        }
+        (material, pack_color(color))
+    }
+}
+
 fn wall_quads(
     axis: usize,
     plane: i64,
@@ -190,10 +240,9 @@ fn wall_quads(
         } else {
             ([span.start, lo, plane], [span.end - span.start, hi - lo])
         };
+        let (material, paint) = high.wall_material(lo, hi, material);
         let mut quad = packed_quad(anchor, axis, positive, extent, material, high.profile);
-        if material == high.top_material {
-            quad.material |= high.paint;
-        }
+        quad.material |= paint;
         Some(quad)
     })
 }
@@ -362,6 +411,7 @@ impl Generator<'_> {
                 top_material: column.material(column.height - 1),
                 paint: 0,
                 deep_material: column.bands[2],
+                soil_bands: None,
                 profile,
             },
             column.height,
@@ -562,7 +612,16 @@ impl Generator<'_> {
 
     fn sampled_block(&mut self, sample: [i64; 2]) -> Result<Run, String> {
         if f64::from(self.key.step_cells) * voxel_size() < 1. {
-            return Ok(self.coarse_run(sample, 1, 0)?.0);
+            let column = self.column(sample)?;
+            return Ok(Run {
+                top: column.height,
+                ground: column.ground_height,
+                top_material: column.material(column.height - 1),
+                deep_material: column.bands[2],
+                soil_bands: Some([column.bands[0], column.bands[1]]),
+                profile: 0,
+                paint: 0,
+            });
         }
         // This path owns procedural heightfields. Saved volume edits are drawn
         // by their own indexed surface. Fetch climate and bedrock together so
@@ -574,11 +633,10 @@ impl Generator<'_> {
             generated = true;
             let (col, color) =
                 terrain.landscape_column(at[0], at[1], self.world.vegetation_enabled());
-            let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
             let paint = if col.top_material() == Material::Water {
                 0
             } else {
-                0x10 | r << 8 | g << 14 | b << 20
+                pack_color(color)
             };
             (col, paint)
         };
@@ -605,6 +663,7 @@ impl Generator<'_> {
             ground: col.ground_top,
             top_material: material,
             deep_material: Material::Stone,
+            soil_bands: Some([col.ground_surface, col.ground_subsurface]),
             profile: 0,
             paint,
         })
@@ -697,8 +756,70 @@ impl Generator<'_> {
         Ok(top_range)
     }
 
+    // Dense flight tiles can have 1,024 roofs. A small fixed lattice of
+    // interval bounds encloses them without evaluating the noise graph once
+    // per roof. Every roof contributes its extrema to its physical group.
+    fn bound_block_groups(
+        &mut self,
+        side: u32,
+        roofs: &[[i64; 2]; 16],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let pitch = self.key.width_cells / side;
+        let pages = match &self.samples.pages.terrain_bounds {
+            Some(cache) => cache.tile(
+                self.world.fbm_terrain().unwrap(),
+                self.key.min,
+                self.key.width_cells,
+                pitch,
+                cancelled,
+            )?,
+            None => None,
+        };
+        for z in 0..side {
+            for x in 0..side {
+                if cancelled() {
+                    return Err("adaptive geometry cancelled".into());
+                }
+                let i = (z * side + x) as usize;
+                let bound = pages.as_ref().map(|p| p[i]).unwrap_or_else(|| {
+                    self.samples.pages.bound(
+                        self.world,
+                        ColumnBox {
+                            min: [
+                                self.key.min[0] + i64::from(x * pitch),
+                                self.key.min[1] + i64::from(z * pitch),
+                            ],
+                            size_cells: [pitch; 2],
+                        },
+                        BoundBudget::default(),
+                    )
+                });
+                self.affine_stats.quad_bounds += 1;
+                if let Some(bound) = bound {
+                    self.affine_stats.noise_cells += u64::from(bound.noise_cells);
+                    self.affine_stats.full_range_fallbacks += u64::from(bound.full_range_fallbacks);
+                    self.affine_range[0] = self.affine_range[0].min(bound.height_range[0]);
+                    self.affine_range[1] = self.affine_range[1].max(bound.height_range[1]);
+                    self.affine_error = self
+                        .affine_error
+                        .max(bound.roof_range_error(roofs[i].map(|y| y as f64 * voxel_size())));
+                } else {
+                    self.affine_complete = false;
+                    self.affine_stats.unavailable_quads += 1;
+                }
+            }
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.;
+        self.affine_stats.cpu_ms += ms;
+        self.affine_stats.coarse_source_ms += ms;
+        Ok(())
+    }
+
     pub(super) fn coarse_surface(
         &mut self,
+        mode: Mode,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), String> {
         let key = self.key;
@@ -708,9 +829,16 @@ impl Generator<'_> {
         let patches = u64::from(grid) * u64::from(grid);
         let needs_affine = key.width_cells > MAX_CERTIFICATE_WIDTH;
         let can_certify = !needs_affine || patches <= MAX_AFFINE_QUADS;
+        let blocks = mode == Mode::Blocks;
+        let group_side = if blocks && !can_certify {
+            1 << grid.trailing_zeros().min(2)
+        } else {
+            0
+        };
+        let mut group_roofs = [[i64::MAX, i64::MIN]; 16];
         // An incomplete certificate is discarded by the caller. Avoid doing
         // the first 256 analyses when the entire tile needs a global fallback.
-        if !can_certify {
+        if !can_certify && group_side == 0 {
             self.affine_complete = false;
             self.affine_stats.unavailable_quads = patches;
         }
@@ -734,16 +862,15 @@ impl Generator<'_> {
         } else {
             None
         };
-        let seed_profile = if Mode::current() == Mode::Blocks {
+        let seed_profile = if blocks {
             // Axis-aligned faces carry sampled source albedo in the instance.
             self.appearance.exhaustive = false;
             Some(0)
-        } else if Mode::current() == Mode::Seed && key.width_cells >= 128 && pitch >= 4 {
+        } else if mode == Mode::Seed && key.width_cells >= 128 && pitch >= 4 {
             Some(self.seed_appearance(cancelled)?)
         } else {
             None
         };
-        let blocks = Mode::current() == Mode::Blocks;
         let use_interior = !blocks && needs_affine && can_certify;
         #[cfg(test)]
         let use_interior = use_interior && !self.samples.coarse_reference;
@@ -766,6 +893,12 @@ impl Generator<'_> {
                         (center - range[0]).abs().max((center - range[1]).abs()) as f64
                             * voxel_size(),
                     );
+                    if group_side > 0 {
+                        let side = i64::from(group_side);
+                        let index = (z * side / width * side + x * side / width) as usize;
+                        group_roofs[index][0] = group_roofs[index][0].min(range[0]);
+                        group_roofs[index][1] = group_roofs[index][1].max(range[1]);
+                    }
                     if can_certify {
                         let index = ((z / pitch) * i64::from(grid) + x / pitch) as usize;
                         let bound = bounds.as_ref().map(|bounds| bounds[index]);
@@ -876,6 +1009,9 @@ impl Generator<'_> {
                     )?;
                 }
             }
+        }
+        if group_side > 0 {
+            self.bound_block_groups(group_side, &group_roofs, cancelled)?;
         }
         if let Some(interior) = interior {
             self.append_quads(interior.walls.iter().map(|&q| NativeQuad {
@@ -1084,7 +1220,36 @@ mod tests {
     use crate::adaptive_geometry::{build_surface_with_geometry, SourceSamples, TileKey};
     use frontier_world::{FbmParams, World};
 
+    #[test]
+    fn shallow_voxel_steps_expose_the_surface_and_soil_layers() {
+        let run = Run {
+            top: 20,
+            ground: 20,
+            top_material: Material::Grass,
+            deep_material: Material::Stone,
+            soil_bands: Some([Material::Grass, Material::Soil]),
+            paint: pack_color([0.1, 0.4, 0.2]),
+            profile: 0,
+        };
+        assert_eq!(
+            run.wall_material(19, 20, Material::Stone),
+            (Material::Grass, run.paint)
+        );
+        assert_eq!(
+            run.wall_material(8, 19, Material::Stone),
+            (Material::Soil, 0)
+        );
+        assert_eq!(
+            run.wall_material(0, 8, Material::Stone),
+            (Material::Stone, 0)
+        );
+        let (mat, paint) = run.wall_material(8, 20, Material::Stone);
+        assert_eq!(mat, Material::Soil);
+        assert!(paint & 16 != 0);
+    }
+
     fn mixed_tile(
+        mode: Mode,
         world: &World,
         min: [i64; 2],
         width: u32,
@@ -1099,10 +1264,45 @@ mod tests {
             source_revision: 0,
         };
         let mut tile =
-            build_surface_with_geometry(world, key, || false, &mut SourceSamples::new(0), true)
+            build_surface_with_geometry(world, key, || false, &mut SourceSamples::new(0), mode)
                 .unwrap();
         merge_quads(&mut tile);
         tile
+    }
+
+    #[test]
+    fn dense_block_groups_enclose_every_rendered_roof_and_native_height() {
+        let world = World::fbm(
+            19,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let min = [-256, 0];
+        let tile = mixed_tile(Mode::Blocks, &world, min, 256, 8, [4, 8, 2, 8]);
+        assert_eq!(tile.affine_stats.quad_bounds, 16);
+        let error = tile.affine_error_m.unwrap();
+        let bounds = tile.affine_height_range_m.unwrap();
+        let mut covered = vec![false; 256 * 256];
+        for q in tile.native_quads.iter().filter(|q| q.axis_sign == 1) {
+            let cells = |m: f32| (f64::from(m) / voxel_size()).round() as usize;
+            let x0 = cells(q.anchor[0]);
+            let z0 = cells(q.anchor[2]);
+            for z in z0..z0 + cells(q.extent[0]) {
+                for x in x0..x0 + cells(q.extent[1]) {
+                    assert!(!std::mem::replace(&mut covered[z * 256 + x], true));
+                    let h = world
+                        .column(min[0] + x as i64, min[1] + z as i64)
+                        .height_cells() as f64
+                        * voxel_size();
+                    assert!((bounds[0]..=bounds[1]).contains(&h));
+                    assert!((h - f64::from(q.anchor[1])).abs() <= error);
+                }
+            }
+        }
+        assert!(covered.into_iter().all(|p| p));
     }
 
     fn edge_top(tile: &GeometryTile, boundary_x: f32, positive: bool, z: f32) -> f32 {
@@ -1140,24 +1340,26 @@ mod tests {
     #[test]
     fn coarse_and_fine_tiles_share_a_closed_boundary_with_unique_side_ownership() {
         let world = World::fbm(7, FbmParams::default()).unwrap();
-        let coarse = mixed_tile(&world, [-64, -64], 64, 8, [8, 8, 4, 8]);
-        for offset in [0, 32] {
-            let fine = mixed_tile(&world, [0, -64 + offset], 32, 4, [4; 4]);
-            for t in 0..32 {
-                let fine_z = ((t as f64 + 0.5) * voxel_size()) as f32;
-                let coarse_z = fine_z + (offset as f64 * voxel_size()) as f32;
-                let a = edge_top(&coarse, 4., true, coarse_z);
-                let b = edge_top(&fine, 0., false, fine_z);
-                let a_faces = side_span(&coarse, 0, 4., coarse_z);
-                let b_faces = side_span(&fine, 4, 0., fine_z);
-                if a > b {
-                    assert_eq!(a_faces, vec![[b, a]]);
-                    assert!(b_faces.is_empty());
-                } else if b > a {
-                    assert_eq!(b_faces, vec![[a, b]]);
-                    assert!(a_faces.is_empty());
-                } else {
-                    assert!(a_faces.is_empty() && b_faces.is_empty());
+        for mode in [Mode::Voxy, Mode::Blocks] {
+            let coarse = mixed_tile(mode, &world, [-64, -64], 64, 8, [8, 8, 4, 8]);
+            for offset in [0, 32] {
+                let fine = mixed_tile(mode, &world, [0, -64 + offset], 32, 4, [4; 4]);
+                for t in 0..32 {
+                    let fine_z = ((t as f64 + 0.5) * voxel_size()) as f32;
+                    let coarse_z = fine_z + (offset as f64 * voxel_size()) as f32;
+                    let a = edge_top(&coarse, 4., true, coarse_z);
+                    let b = edge_top(&fine, 0., false, fine_z);
+                    let a_faces = side_span(&coarse, 0, 4., coarse_z);
+                    let b_faces = side_span(&fine, 4, 0., fine_z);
+                    if a > b {
+                        assert_eq!(a_faces, vec![[b, a]]);
+                        assert!(b_faces.is_empty());
+                    } else if b > a {
+                        assert_eq!(b_faces, vec![[a, b]]);
+                        assert!(a_faces.is_empty());
+                    } else {
+                        assert!(a_faces.is_empty() && b_faces.is_empty());
+                    }
                 }
             }
         }
@@ -1166,16 +1368,18 @@ mod tests {
     #[test]
     fn exact_neighbor_receives_native_height_and_face_ownership() {
         let world = World::fbm(7, FbmParams::default()).unwrap();
-        let coarse = mixed_tile(&world, [-32, 0], 32, 4, [4, 4, 1, 4]);
-        for t in 0..32 {
-            let z = ((t as f64 + 0.5) * voxel_size()) as f32;
-            let a = world.column(-1, t).height_m() as f32;
-            let b = world.column(0, t).height_m() as f32;
-            assert_eq!(edge_top(&coarse, 2., true, z), a);
-            assert_eq!(
-                side_span(&coarse, 0, 2., z),
-                if a > b { vec![[b, a]] } else { vec![] }
-            );
+        for mode in [Mode::Voxy, Mode::Blocks] {
+            let coarse = mixed_tile(mode, &world, [-32, 0], 32, 4, [4, 4, 1, 4]);
+            for t in 0..32 {
+                let z = ((t as f64 + 0.5) * voxel_size()) as f32;
+                let a = world.column(-1, t).height_m() as f32;
+                let b = world.column(0, t).height_m() as f32;
+                assert_eq!(edge_top(&coarse, 2., true, z), a);
+                assert_eq!(
+                    side_span(&coarse, 0, 2., z),
+                    if a > b { vec![[b, a]] } else { vec![] }
+                );
+            }
         }
     }
 
@@ -1201,7 +1405,7 @@ mod tests {
         samples.pages.coarse_interiors = Some(cache.clone());
         let build = |key, samples: &mut SourceSamples| {
             let mut tile =
-                build_surface_with_geometry(&world, key, || false, samples, true).unwrap();
+                build_surface_with_geometry(&world, key, || false, samples, Mode::Voxy).unwrap();
             merge_quads(&mut tile);
             tile
         };

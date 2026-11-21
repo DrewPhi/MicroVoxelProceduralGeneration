@@ -279,8 +279,9 @@ fn build_cached_staged(
     samples.begin_job();
     samples.gpu_job_allowed = integrated_profiles::eligible(world, key);
     if world.topology_base_cells().is_none() {
-        let coarse = distant_voxels::enabled() && key.step_cells > 1;
-        let mut tile = build_surface_with_geometry(world, key, &mut cancelled, samples, coarse)?;
+        let mode = distant_voxels::Mode::current();
+        let coarse = mode != distant_voxels::Mode::Surface && key.step_cells > 1;
+        let mut tile = build_surface_with_geometry(world, key, &mut cancelled, samples, mode)?;
         if let Some(deferred) = deferred {
             if crate::ground_cover::eligible(world, &tile) {
                 *deferred = Some(deferred_cover::Input::from_tile(&tile));
@@ -958,7 +959,13 @@ fn build_surface(
     cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
 ) -> Result<GeometryTile, String> {
-    build_surface_with_geometry(world, key, cancelled, samples, false)
+    build_surface_with_geometry(
+        world,
+        key,
+        cancelled,
+        samples,
+        distant_voxels::Mode::Surface,
+    )
 }
 
 fn build_surface_with_geometry(
@@ -966,8 +973,9 @@ fn build_surface_with_geometry(
     key: TileKey,
     mut cancelled: impl FnMut() -> bool,
     samples: &mut SourceSamples,
-    coarse: bool,
+    mode: distant_voxels::Mode,
 ) -> Result<GeometryTile, String> {
+    let coarse = mode != distant_voxels::Mode::Surface && key.step_cells > 1;
     if world.fbm_terrain().is_none()
         || world.topology_base_cells().is_some()
         || world.revision() != 0
@@ -1115,7 +1123,7 @@ fn build_surface_with_geometry(
     let width = key.width_cells as i64;
     let step = key.step_cells as i64;
     let proxy_triangles = if coarse {
-        generator.coarse_surface(&mut cancelled)?;
+        generator.coarse_surface(mode, &mut cancelled)?;
         0
     } else {
         // A quad has a canonical central anchor and four edges. Shared interior

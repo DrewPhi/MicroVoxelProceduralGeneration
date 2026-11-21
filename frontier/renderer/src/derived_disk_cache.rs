@@ -523,7 +523,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {
         Mode::Surface => {}
-        Mode::Blocks => put(&mut b, 0x424c4f434b0001),
+        Mode::Blocks => put(&mut b, 0x424c4f434b0002),
         Mode::Voxy => put(&mut b, 0x564f5859),
         Mode::Seed => put(&mut b, 0x534545440001),
     }
