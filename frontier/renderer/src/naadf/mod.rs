@@ -1786,6 +1786,12 @@ impl Experiment {
         let aspect = width as f32 / height as f32;
         let basis = ray_basis(camera, aspect);
         let eye = (camera.position - origin).as_vec3();
+        // Some terrain recipes have no far shadow caster pass. An unrendered
+        // depth texture would incorrectly shade the entire native window.
+        let far_shadow = gpu
+            .adaptive
+            .as_ref()
+            .filter(|a| s.terrain_shadows && !s.visibility_benchmark && a.shadows_active());
         a.beam.set_view(eye, basis);
         gpu.queue.write_buffer(
             &a.uniform,
@@ -1810,9 +1816,7 @@ impl Experiment {
                     0.,
                     if s.visibility_benchmark { 1. } else { 0. },
                 ],
-                far_matrix: gpu
-                    .adaptive
-                    .as_ref()
+                far_matrix: far_shadow
                     .map_or(glam::Mat4::IDENTITY, |a| a.far_shadow_projection(&camera))
                     .to_cols_array_2d(),
                 forward: basis[0],
@@ -1827,11 +1831,7 @@ impl Experiment {
                     .as_ref()
                     .map_or([0; 4], |c| c.uniforms(aspect)),
                 shadow: [
-                    if s.terrain_shadows && !s.visibility_benchmark {
-                        1.
-                    } else {
-                        0.
-                    },
+                    f32::from(u8::from(far_shadow.is_some())),
                     f32::from(u8::from(ray_profile().0)),
                     f32::from(u8::from(ray_profile().1)),
                     0.,
