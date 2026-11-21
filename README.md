@@ -75,6 +75,13 @@ The unbounded controls gave **18.27 / 21.49 / 22.91 ms** and
 native radius and GPU stage timing. Walking still misses the 16.67 ms budget.
 Set `FRONTIER_NAADF_SUN_TOP=0` for the control.
 
+Looking directly into a saved voxel pool at 1080p, the above-water shader
+for static water measured **6.83–7.01 ms** median native GPU time across two
+runs. The general water shader took **7.56–8.02 ms**. The two paths gave
+identical linear color, depth and coverage in the oblique pool check. The
+mostly dry seed 997 walking route showed little difference between these
+water shaders. Set `FRONTIER_NAADF_STATIC_WATER_PIPELINE=0` for the control.
+
 ### Earlier measurements
 
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover

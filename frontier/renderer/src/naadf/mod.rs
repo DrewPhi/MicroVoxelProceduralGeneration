@@ -265,6 +265,7 @@ struct Volume {
     ownership: std::sync::Arc<ownership::Ownership>,
     pipeline: wgpu::RenderPipeline,
     dry_pipeline: Option<wgpu::RenderPipeline>,
+    static_water_pipeline: Option<wgpu::RenderPipeline>,
     height: Option<traversal::Height>,
     diagnostics: diagnostics::Diagnostics,
     beam: traversal::Beam,
@@ -343,9 +344,14 @@ impl Volume {
     }
 
     fn pipeline_for_view(&self, submerged: bool) -> &wgpu::RenderPipeline {
-        if !submerged && self.water_bounds.is_none() && !self.has_dynamic_water() {
-            if let Some(dry) = &self.dry_pipeline {
-                return dry;
+        if !submerged && !self.has_dynamic_water() {
+            if self.water_bounds.is_none() {
+                if let Some(dry) = &self.dry_pipeline {
+                    return dry;
+                }
+            }
+            if let Some(wet) = &self.static_water_pipeline {
+                return wet;
             }
         }
         &self.pipeline
@@ -606,10 +612,11 @@ impl Pending {
             (None, traversal::empty_height(&gpu.device))
         };
         let beam = traversal::Beam::new(&gpu.device, options);
-        let (pipeline, dry_pipeline) = make_pipelines(
+        let (pipeline, dry_pipeline, static_water_pipeline) = make_pipelines(
             gpu,
             &layout,
             beam.layout(),
+            snapshot.water_bounds.is_some(),
             options,
             [
                 1 + u32::from(encoding.is_compact()),
@@ -651,6 +658,7 @@ impl Pending {
             ownership: snapshot.ownership.clone(),
             pipeline,
             dry_pipeline,
+            static_water_pipeline,
             height,
             diagnostics,
             beam,
@@ -963,10 +971,15 @@ impl Experiment {
             .chain(self.pending.iter_mut().map(|p| &mut p.volume))
         {
             if volume.samples != gpu.sample_count {
-                (volume.pipeline, volume.dry_pipeline) = make_pipelines(
+                (
+                    volume.pipeline,
+                    volume.dry_pipeline,
+                    volume.static_water_pipeline,
+                ) = make_pipelines(
                     gpu,
                     &volume.pipeline.get_bind_group_layout(0),
                     volume.beam.layout(),
+                    volume.water_bounds.is_some(),
                     traversal::options(),
                     [
                         1 + u32::from(volume.leaf_encoding.is_compact()),
@@ -1720,7 +1733,7 @@ impl Experiment {
                         }
                     }
                     if let Some([wx, wy, ww, wh]) = wet_part {
-                        pass.set_pipeline(&a.pipeline);
+                        pass.set_pipeline(a.pipeline_for_view(false));
                         pass.set_scissor_rect(wx, wy, ww, wh);
                         pass.draw(0..3, 0..1);
                     }
@@ -1893,9 +1906,10 @@ impl Experiment {
         .unwrap();
         write!(
             json,
-            ",\"static_water_possible\":{},\"dry_pipeline_available\":{}",
+            ",\"static_water_possible\":{},\"dry_pipeline_available\":{},\"static_water_pipeline_available\":{}",
             a.is_some_and(|v| v.water_bounds.is_some()),
-            a.is_some_and(|v| v.dry_pipeline.is_some())
+            a.is_some_and(|v| v.dry_pipeline.is_some()),
+            a.is_some_and(|v| v.static_water_pipeline.is_some())
         )
         .unwrap();
         write!(
@@ -2187,9 +2201,14 @@ fn make_pipelines(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,
     beam_layout: &wgpu::BindGroupLayout,
+    has_static_water: bool,
     options: traversal::Options,
     format: [u32; 3],
-) -> (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>) {
+) -> (
+    wgpu::RenderPipeline,
+    Option<wgpu::RenderPipeline>,
+    Option<wgpu::RenderPipeline>,
+) {
     let shader = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2218,7 +2237,11 @@ fn make_pipelines(
         u8::from(capture_layer() == CaptureLayer::Steps).into(),
     );
     constants.insert("traversal_beam".into(), u8::from(options.beam).into());
-    let mut make = |dry: bool| {
+    let mut make = |dry: bool, static_water: bool| {
+        constants.insert(
+            "traversal_static_water".into(),
+            u8::from(static_water).into(),
+        );
         constants.insert("traversal_dry".into(), u8::from(dry).into());
         gpu.device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2259,11 +2282,14 @@ fn make_pipelines(
                 cache: None,
             })
     };
-    let full = make(false);
+    let full = make(false, false);
     let dry = std::env::var_os("FRONTIER_NAADF_DRY_PIPELINE")
         .is_none_or(|v| v != "0")
-        .then(|| make(true));
-    (full, dry)
+        .then(|| make(true, false));
+    let wet = (has_static_water
+        && std::env::var_os("FRONTIER_NAADF_STATIC_WATER_PIPELINE").is_none_or(|v| v != "0"))
+    .then(|| make(false, true));
+    (full, dry, wet)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

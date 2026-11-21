@@ -209,7 +209,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     let d=normalize(naadf.forward.xyz+ndc.x*naadf.right.xyz*naadf.right.w+ndc.y*naadf.up.xyz*naadf.up.w);
     let cosine=dot(d,naadf.forward.xyz);
     let minimum=naadf.projection.x/cosine*VOXELS_PER_METER;
-    if !traversal_dry && naadf.eye.w>0.5 && naadf.viewport.w<0.5 && naadf.sky.w<0.5 && !traversal_diagnostic {
+    if !traversal_dry && !traversal_static_water && naadf.eye.w>0.5 && naadf.viewport.w<0.5 && naadf.sky.w<0.5 && !traversal_diagnostic {
         return shade_submerged(o,d,cosine);
     }
     var prefix=minimum;

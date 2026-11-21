@@ -13,7 +13,10 @@ struct Pigment {rgb:vec3<f32>,material:u32};
 struct DynamicWater {origin:vec4<i32>,size:vec4<u32>,states:array<u32>};
 @group(NAADF_GROUP) @binding(NAADF_BASE+8u) var<storage,read> dynamic_water:DynamicWater;
 override traversal_dry:bool=false;
+// Specialize above-water draws only when the live-water binding is empty.
+override traversal_static_water:bool=false;
 fn water_state(cell:vec3<i32>)->u32 {
+    if traversal_dry || traversal_static_water {return 0u;}
     let p=cell-dynamic_water.origin.xyz;
     if any(p<vec3(0)) || any(p>=vec3<i32>(dynamic_water.size.xyz)) {return 0u;}
     let c=vec3<u32>(p);
@@ -351,7 +354,7 @@ fn trace_native_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:
                 node=naadf_leaf_word((node&0x3fffffffu)+vp.x+4u*(vp.y+4u*vp.z));
             }
         }
-        let solid=(node&0x40000000u)!=0u && !(water_node(node) && (skip_water || (all(dynamic_water.size.xyz>vec3(0u)) && water_state(cell)==1u)));
+        let solid=(node&0x40000000u)!=0u && !(water_node(node) && (skip_water || (!traversal_static_water && all(dynamic_water.size.xyz>vec3(0u)) && water_state(cell)==1u)));
         if solid && occlusion {return VoxelHit(true,t,vec3(0.),0u,visits,0u);}
         if solid && !was_solid && faces!=0u {
             return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,0u);
@@ -545,7 +548,7 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             // A homogeneous water cube is empty to the optical ray. Retain
             // its size, but never decode its old pigment as a skip proof.
             node=0u;
-        } else if !traversal_dry && all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
+        } else if !traversal_dry && !traversal_static_water && all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
             scale=1u;
             if water_state(cell)==1u {node=0u;}
         }
@@ -704,7 +707,7 @@ fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusio
 // proofs never skip a newly wet cell. This bound crosses every possible plane.
 fn trace_water(o:vec3<f32>,d:vec3<f32>,minimum:f32,maximum:f32,occlusion:bool)->VoxelHit {
     var miss=VoxelHit(false,0.,vec3(0.),7u,vec3(0u),0u);
-    if traversal_dry || dynamic_water.origin.w==0 || any(dynamic_water.size.xyz==vec3(0u)) {return miss;}
+    if traversal_dry || traversal_static_water || dynamic_water.origin.w==0 || any(dynamic_water.size.xyz==vec3(0u)) {return miss;}
     let lo=dynamic_water.origin.xyz;
     let hi=lo+vec3<i32>(dynamic_water.size.xyz);
     let native_interval=voxel_interval(o,d);
