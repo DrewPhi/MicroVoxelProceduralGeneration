@@ -1,5 +1,11 @@
 //! Scene integration: canonical plants and a bounded, independently streamed display layer.
 use super::*;
+fn plant_render_origin(position: DVec3, cell: f64) -> DVec3 {
+    // Both the camera and the integer plant roots must rebase to the same
+    // native face when a world uses a decimal-sized lattice.
+    let span = (32. / cell).round().max(1.) * cell;
+    DVec3::from_array(position.to_array().map(|v| (v / span).floor() * span))
+}
 impl Gpu {
     pub(super) fn settle_naadf(&mut self, world: &World, camera: Camera) -> Result<()> {
         if self
@@ -73,6 +79,9 @@ impl Gpu {
         }
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
+            if let Some(adaptive) = &mut self.adaptive {
+                adaptive.clear_canopy_shadows();
+            }
             self.vegetation.take();
             self.vegetation_stream.take();
             self.vegetation_stats = Default::default();
@@ -100,8 +109,7 @@ impl Gpu {
         // Adaptive ground owns separate tile-relative uniforms. Its empty
         // native mesh lets the plant pass use a moving integer-aligned origin.
         if self.adaptive.is_some() && !self.volume_owner && self.index_count == 0 {
-            self.origin =
-                DVec3::from_array(camera.position.to_array().map(|v| (v / 32.).floor() * 32.));
+            self.origin = plant_render_origin(camera.position, voxel_size());
         }
         if let Some(settings) = &self.visual_settings {
             let stream = self.vegetation_stream.as_mut().unwrap();
@@ -140,6 +148,14 @@ impl Gpu {
             camera.roll,
             width as f32 / height.max(1) as f32,
         );
+        if let Some(adaptive) = &mut self.adaptive {
+            adaptive.update_canopy_shadows(
+                &self.device,
+                &self.queue,
+                &self.vegetation_stream.as_ref().unwrap().far_tree_roots,
+                &frame,
+            );
+        }
         self.vegetation_stats = frame.stats;
         self.vegetation_inspection
             .clone_from(&frame.shadow_inspection);
@@ -249,6 +265,11 @@ impl Gpu {
             self.vegetation_stats.naadf_retire_unresolved
         ));
         json.pop();
+        let (canopy_trees, canopy_quads) =
+            self.adaptive.as_ref().map_or((0, 0), |a| a.canopy_stats());
+        json.push_str(&format!(
+            r#","far_canopy_trees":{canopy_trees},"far_canopy_quads":{canopy_quads}"#
+        ));
         let j = s.jobs;
         json.push_str(&format!(",\"gpu_representation\":\"{}\",\"tree_lod_changes\":{},\"tree_refinements\":{},\"tree_coarsenings\":{},\"tree_lod_histogram\":{:?},\"demanded_by_species\":{:?},\"ready_by_species\":{:?},\"shadow_admitted\":{},\"shadow_removed\":{},\"shadow_budget_rejected\":{},\"shadow_stream_budget_rejected\":{},\"tree_shadow_triangle_budget\":150000,\"total_shadow_triangle_budget\":200000,\"explicit_shadow_instances\":{},\"explicit_shadow_triangles\":{},\"shadow_lod_histogram\":{:?},\"shadow_lod_changes\":{},\"selected_cpu_geometry_bytes\":{},\"total_cpu_geometry_bytes\":{},\"cpu_cache_geometry_bytes\":{},\"selected_cpu_meshes\":{},\"selected_mesh_evictions\":{},\"selected_mesh_evicted_bytes\":{},\"ground_assembly_cache\":{},\"jobs\":{{\"workers\":{},\"started\":{:?},\"completed\":{:?},\"cancelled\":{:?},\"worker_wall_nanos\":{:?},\"max_job_nanos\":{:?},\"assembly_nanos\":{:?},\"mesh_nanos\":{:?},\"scope\":\"cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly\"}}}}", self.vegetation.as_ref().map_or("disabled", |v|v.representation()),s.tree_lod_changes,s.tree_refinements,s.tree_coarsenings,s.tree_lod_histogram,s.demanded_by_species,s.ready_by_species,g.shadow_admitted,g.shadow_removed,g.shadow_budget_rejected,s.shadow_budget_rejected,s.explicit_shadow_instances,s.explicit_shadow_triangles,s.shadow_lod_histogram,s.shadow_lod_changes,s.selected_cpu_geometry_bytes,s.total_cpu_geometry_bytes,s.cpu_cache_geometry_bytes,s.selected_cpu_meshes,s.selected_mesh_evictions,s.selected_mesh_evicted_bytes,vegetation::ground_cache_json(),j.workers,j.started,j.completed,j.cancelled,j.cpu_nanos,j.max_job_nanos,j.assembly_nanos,j.mesh_nanos));
         json.pop();
@@ -280,5 +301,26 @@ impl Gpu {
             ));
         }
         json
+    }
+}
+
+#[cfg(test)]
+mod plant_origin_tests {
+    use super::*;
+    #[test]
+    fn floating_plant_origin_stays_on_the_configured_lattice() {
+        for cell in [0.0625, 0.1, 0.25, 0.3, 0.7, 48.] {
+            for p in [
+                DVec3::new(250.01, -240.3, -30.7),
+                DVec3::new(-1e7, 1e6, 1e7),
+            ] {
+                let origin = plant_render_origin(p, cell);
+                for v in origin.to_array() {
+                    assert!((v - (v / cell).round() * cell).abs() < 1e-8);
+                }
+                assert!((p - origin).min_element() >= 0.);
+                assert!((p - origin).max_element() <= 32. + cell);
+            }
+        }
     }
 }

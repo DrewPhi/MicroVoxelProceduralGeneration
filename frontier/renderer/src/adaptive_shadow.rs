@@ -4,9 +4,13 @@
 //! owners are outside this presentation experiment's shadow coverage.
 use super::*;
 use glam::Mat4;
+#[path = "canopy_shadow.rs"]
+mod canopy_shadow;
+pub(crate) use canopy_shadow::Canopy;
 const SIZE: u32 = 2048;
 const HALF_EXTENT: f32 = 1024.;
 pub(super) struct ShadowResources {
+    pub(super) canopy: Canopy,
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     pub sampling_bind: wgpu::BindGroup,
@@ -27,7 +31,8 @@ pub(super) struct ShadowResources {
     far_depth_uniform: wgpu::Buffer,
     far_depth_bind: wgpu::BindGroup,
     cached: Option<ShadowCacheKey>,
-    redraw: bool,
+    pending_depth: std::cell::Cell<bool>,
+    reused: std::cell::Cell<bool>,
     cascades: bool,
     cache_enabled: bool,
 }
@@ -92,6 +97,7 @@ impl ShadowResources {
             } else {
                 UNIFORM_STRIDE
             }
+            + self.canopy.allocated_bytes()
             + 240 // near/far sampling transforms and empty profile table
     }
     pub(super) fn new(
@@ -174,6 +180,7 @@ impl ShadowResources {
         Self {
             near: NearShadowResources::new(device),
             zero_table,
+            canopy: Canopy::default(),
             _texture: texture,
             view,
             sampling_bind,
@@ -192,7 +199,8 @@ impl ShadowResources {
             far_depth_uniform,
             far_depth_bind,
             cached: None,
-            redraw: true,
+            pending_depth: std::cell::Cell::new(true),
+            reused: std::cell::Cell::new(false),
             cascades: shadow_cascades_enabled(),
             cache_enabled: std::env::var("FRONTIER_SHADOW_CACHE").as_deref() != Ok("off"),
         }
@@ -380,12 +388,13 @@ impl AdaptiveGpu {
             sun: light_frame.sun.to_array().map(f32::to_bits),
             keys: self.shadows.keys.clone(),
         };
-        // Cascades receive changing plant depths after terrain: rebuild instead
-        // of retaining those depths after a caster moves or is replaced.
-        self.shadows.redraw = !self.shadows.cache_enabled
-            || self.shadows.cascades
-            || self.shadows.cached.as_ref() != Some(&cache_key);
-        self.shadows.cached = Some(cache_key);
+        // Preparation can run repeatedly between submitted frames. Keep a
+        // changed owner set pending until its depth pass has been encoded.
+        let terrain_changed = self.shadows.cached.as_ref() != Some(&cache_key);
+        if terrain_changed {
+            self.shadows.pending_depth.set(true);
+            self.shadows.cached = Some(cache_key);
+        }
         if self.shadows.cascades {
             let mut far_uniform = [0f32; 20];
             far_uniform[..16].copy_from_slice(&light_frame.matrix(camera.position).to_cols_array());
@@ -440,7 +449,7 @@ impl AdaptiveGpu {
                 queue.write_buffer(&self.shadows.near_terrain_uniform, 0, &near_bytes);
             }
         }
-        if !self.shadows.redraw {
+        if !terrain_changed {
             return;
         }
         let mut bytes = vec![0u8; self.shadows.keys.len() * UNIFORM_STRIDE as usize];
@@ -454,11 +463,24 @@ impl AdaptiveGpu {
             queue.write_buffer(&self.shadows.uniform, 0, &bytes);
         }
     }
-    pub(crate) fn draw_shadows(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub(crate) fn draw_shadows(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+    ) {
         if self.lighting[5] < 0.5 {
             return;
         }
-        if self.shadows.redraw {
+        let canopy_changed = self.shadows.canopy.dirty.replace(false);
+        let terrain_changed = self.shadows.pending_depth.replace(false);
+        let redraw = terrain_changed
+            || canopy_changed
+            || !self.shadows.cache_enabled
+            || self.shadows.cascades;
+        self.shadows.reused.set(!redraw);
+        if redraw {
+            self.shadows.canopy.prepare(queue, camera, self.lighting);
             self.draw_shadow_map(encoder, false);
         }
         if self.shadows.cascades && self.near_shadows_active() {
@@ -484,6 +506,11 @@ impl AdaptiveGpu {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        if !near {
+            self.shadows
+                .canopy
+                .draw(&mut pass, &self.shadows.pipelines[2], &self.quad_indices);
+        }
         self.draw_edit_shadows(&mut pass, &self.shadows.pipelines[2], near);
         let pipelines = if let Some(bind) = &self.shadows.caster_mask {
             pass.set_bind_group(1, bind, &[]);
@@ -829,7 +856,7 @@ impl AdaptiveGpu {
         });
         self.shadows.near.edit_mask = mask;
         self.shadows.cached = None;
-        self.shadows.redraw = true;
+        self.shadows.pending_depth.set(true);
         queue.write_buffer(
             &self.shadows.near.uniform,
             68,
@@ -871,7 +898,7 @@ impl AdaptiveGpu {
         self.shadows.cascades && self.near_shadows_active()
     }
     pub(crate) fn shadow_cache_reused(&self) -> bool {
-        self.shadows_active() && !self.shadows.redraw
+        self.shadows_active() && self.shadows.reused.get()
     }
     /// Called immediately before the near vegetation pass. An unchanged map
     /// retains its existing depth attachment; cascades always rebuild because

@@ -74,7 +74,7 @@ struct ShadowOut {
     return shadow_vertex(position,normal,root,turn,progress,role);
 }
 fn shadow_vertex(position:vec3<f32>,normal:vec3<f32>,root:vec3<f32>,turn:u32,progress:f32,role:u32)->ShadowOut {
-    let pivot=vec3<f32>(0.03125,0.,0.03125);
+    let pivot=vec3<f32>(0.5,0.,0.5)*NATIVE_VOXEL_METERS;
     let local=root+pivot+rotate(position-pivot,turn);
     var out:ShadowOut;
     out.position=shadow.projection*vec4<f32>(local-camera.eye.xyz,1.);

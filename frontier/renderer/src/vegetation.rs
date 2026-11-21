@@ -768,6 +768,7 @@ pub struct VegetationStream {
     benchmark_cube: Option<[[f64; 3]; 2]>,
     benchmark_base_radii: [f64; 3],
     shadows_enabled: bool,
+    pub(crate) far_tree_roots: Vec<(PlantRecord, u64)>,
     naadf_owner: Option<Arc<crate::naadf::ownership::Ownership>>,
     naadf_retirement: Option<crate::naadf::ownership::Retirement>,
     pub naadf_omitted: usize,
@@ -1053,6 +1054,7 @@ impl VegetationStream {
                 config.tree_radius_m,
             ],
             shadows_enabled: true,
+            far_tree_roots: Vec::new(),
             matched_tree_lods,
             naadf_owner: None,
             naadf_retirement: None,
@@ -1466,6 +1468,7 @@ impl VegetationStream {
             ..Default::default()
         };
         let mut batches: BTreeMap<MeshKey, VegetationBatch> = BTreeMap::new();
+        self.far_tree_roots.clear();
         // A revision without its new immutable snapshot must never resurrect edits.
         if world_revision != self.world.revision() {
             stats.pending_jobs = 1;
@@ -1634,6 +1637,9 @@ impl VegetationStream {
                         root_y,
                         root_y + (vegetation::MAX_PLANT_HEIGHT_CELLS + 8) as f64 * voxel_size(),
                     );
+                    if self.shadows_enabled && distance < 320. && distance < radii[2] {
+                        self.far_tree_roots.push((*p, self.edits.id(p)));
+                    }
                     if distance < radii[t.species as usize] {
                         if view.as_ref().is_none_or(|v| v.plant_visible(p))
                             || (self.native_detail_distance_m > 0.

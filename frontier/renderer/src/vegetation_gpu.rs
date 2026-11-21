@@ -1385,13 +1385,14 @@ fn cluster_visible(cluster: &Cluster, matrix: glam::Mat4) -> bool {
     !outside.contains(&8)
 }
 fn cluster_bounds(bounds: [[f32; 3]; 2], instances: &[Instance], vertices: u32) -> Cluster {
+    let pivot = 0.5 * frontier_world::voxel_size() as f32;
     let mut low = [f32::INFINITY; 4];
     let mut high = [f32::NEG_INFINITY; 4];
     for instance in instances {
         for corner in 0..8 {
             let p = std::array::from_fn::<_, 3, _>(|axis| bounds[(corner >> axis) & 1][axis]);
-            let x = p[0] - 0.03125;
-            let z = p[2] - 0.03125;
+            let x = p[0] - pivot;
+            let z = p[2] - pivot;
             let (x, z) = match instance.turn & 3 {
                 1 => (-z, x),
                 2 => (-x, -z),
@@ -1399,9 +1400,9 @@ fn cluster_bounds(bounds: [[f32; 3]; 2], instances: &[Instance], vertices: u32) 
                 _ => (x, z),
             };
             let p = [
-                instance.root[0] + 0.03125 + x,
+                instance.root[0] + pivot + x,
                 instance.root[1] + p[1],
-                instance.root[2] + 0.03125 + z,
+                instance.root[2] + pivot + z,
             ];
             for axis in 0..3 {
                 low[axis] = low[axis].min(p[axis] - 0.001);
@@ -2168,7 +2169,7 @@ mod tests {
                 let p = glam::Vec3::from_array(std::array::from_fn(|axis| {
                     bounds[(corner >> axis) & 1][axis]
                 }));
-                let pivot = glam::Vec3::new(0.03125, 0., 0.03125);
+                let pivot = glam::Vec3::new(0.5, 0., 0.5) * frontier_world::voxel_size() as f32;
                 let d = p - pivot;
                 let rotated = match turn {
                     1 => glam::Vec3::new(-d.z, d.y, d.x),

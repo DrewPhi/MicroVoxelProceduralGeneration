@@ -115,7 +115,7 @@ fn vertex_out(position:vec3<f32>, normal:vec3<f32>, color:vec3<f32>, root:vec3<f
     var out:Out;
     // World cell indices rotate about the root cell center, so q1 maps the
     // native cell index (x,z) to (-z,x), including negative-index cells.
-    let pivot=vec3<f32>(0.03125,0.,0.03125);
+    let pivot=vec3<f32>(0.5,0.,0.5)*NATIVE_VOXEL_METERS;
     out.local=root+pivot+rotate(position-pivot,turn);
     out.position=camera.view_projection*vec4<f32>(out.local,1.);
     out.color=color;

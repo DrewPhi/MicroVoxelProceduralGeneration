@@ -919,7 +919,7 @@ impl Gpu {
         if let Some(adaptive) = &self.adaptive {
             adaptive.prepare_edit_draw(&self.queue, *camera, width as f32 / height as f32);
             adaptive.encode_coarse_cull(encoder);
-            adaptive.draw_shadows(encoder);
+            adaptive.draw_shadows(encoder, &self.queue, camera);
             if adaptive.shadow_cascades_active() {
                 if let Some(plants) = &self.vegetation {
                     plants.draw_far_shadows(
@@ -1499,7 +1499,7 @@ impl Gpu {
             }
             let shadows_active = self.adaptive.as_ref().is_some_and(|a| a.shadows_active());
             metadata.push_str(&format!(
-                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_and_edit_surfaces\",\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\"}}}}",
+                ",\"atmosphere\":{},\"render_scale\":{},\"postprocessed\":{},\"depth_available\":{},\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_edits_and_resident_canopies\",\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\"}}}}",
                 settings.atmosphere, settings.render_scale, post_settings.is_some(), depth_buffer.is_some(),
                 settings.atmosphere, settings.render_scale, settings.exposure,
                 settings.fog_density, settings.fog_height_falloff, settings.sun_elevation,
@@ -4451,7 +4451,7 @@ pub fn run() -> Result<()> {
         let visual = &viewer.visual_settings;
         json.pop();
         json.push_str(&format!(
-            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_and_edit_surfaces\",\"menu_enabled\":{},\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
+            ",\"visual\":{{\"atmosphere\":{},\"render_scale\":{},\"exposure\":{},\"fog_density\":{},\"fog_height_falloff\":{},\"sun_elevation\":{},\"sun_azimuth\":{},\"cloud_coverage\":{},\"cloud_speed\":{},\"overcast\":{},\"terrain_shadows_requested\":{},\"terrain_shadows_active\":{},\"shadow_map_size\":2048,\"shadow_footprint_m\":2048,\"shadow_casters\":\"published_adaptive_terrain_edits_and_resident_canopies\",\"menu_enabled\":{},\"gpu_timing_scope\":\"opaque_scene_pass_without_atmosphere_or_ui\",\"settings_may_have_changed\":{}}},\"projection\":{{\"fov_y_degrees\":{},\"near_m\":0.025,\"far_m\":{}}}}}",
             visual.atmosphere, visual.render_scale, visual.exposure,
             visual.fog_density, visual.fog_height_falloff, visual.sun_elevation,
             visual.sun_azimuth, visual.cloud_coverage, visual.cloud_speed,
