@@ -597,12 +597,17 @@ fn main() -> Result<()> {
     }
     fs::create_dir_all(&output)?;
     let mut pixels = vec![[0f32; 6]; width * height];
-    let rows = height.div_ceil(threads.min(height));
+    // Shallow water and grazing skyline rays can cost much more than the
+    // foreground. Hand out short strips while retaining each worker's caches.
+    let workers = threads.min(height);
+    let rows = height.div_ceil(workers).clamp(1, 8);
+    let strips = std::sync::Mutex::new(pixels.chunks_mut(rows * width).enumerate());
     let render = Instant::now();
     let boundary_misses = AtomicU64::new(0);
     let rays = camera.raster_rays(viewport_width, viewport_height, bank);
     std::thread::scope(|scope| {
-        for (part, out) in pixels.chunks_mut(rows * width).enumerate() {
+        for _ in 0..workers {
+            let strips = &strips;
             let scene = &scene;
             let camera = &camera;
             let rays = &rays;
@@ -613,103 +618,115 @@ fn main() -> Result<()> {
                     daylight::Daylight::new(terrain, lighting.sun_direction(), lighting.overcast)
                 });
                 let mut incomplete = 0u64;
-                for (ix, iy) in pixel_tiles(width, out.len() / width) {
-                    let p = &mut out[iy * width + ix];
-                    let [x, y] = crop.pixel(ix, part * rows + iy);
-                    let mut rgb = [0.; 3];
-                    let mut water_hits = 0u32;
-                    let mut covered = 0.;
-                    let mut depth = 0.;
-                    for sy in 0..grid {
-                        for sx in 0..grid {
-                            let [px, py] =
-                                sample_position(x, y, viewport_width, grid, sx, sy, sample_seed);
-                            let (d, n, f) = rays(px, py);
-                            let c = if let Some((hit, plant)) = scene.ray(camera.eye, d, n, f) {
-                                covered += 1.;
-                                water_hits += u32::from(hit.material == 7);
-                                depth += hit.distance;
-                                let sample = ((y * viewport_width + x) as u64)
-                                    .wrapping_mul(0x9e3779b97f4a7c15)
-                                    ^ sample_seed
-                                    ^ ((sy * grid + sx) as u64).wrapping_mul(0xd1b54a32d192ed03);
-                                let sun = daylight.as_ref().map_or_else(
-                                    || lighting.sun_direction(),
-                                    |l| {
-                                        l.sun_sample(
-                                            jitter(sample ^ 0x9ab3ea6f),
-                                            jitter(sample ^ 0x17312f6a),
-                                        )
-                                    },
+                loop {
+                    let next = strips.lock().unwrap().next();
+                    let Some((part, out)) = next else { break };
+                    for (ix, iy) in pixel_tiles(width, out.len() / width) {
+                        let p = &mut out[iy * width + ix];
+                        let [x, y] = crop.pixel(ix, part * rows + iy);
+                        let mut rgb = [0.; 3];
+                        let mut water_hits = 0u32;
+                        let mut covered = 0.;
+                        let mut depth = 0.;
+                        for sy in 0..grid {
+                            for sx in 0..grid {
+                                let [px, py] = sample_position(
+                                    x,
+                                    y,
+                                    viewport_width,
+                                    grid,
+                                    sx,
+                                    sy,
+                                    sample_seed,
                                 );
-                                let normal_sign = if hit.face % 2 == 0 { -1. } else { 1. };
-                                let visibility = if shadows
-                                    && (sun[hit.face / 2] * normal_sign > 0.
-                                        || (daylight.is_some() && hit.material == 7))
-                                {
-                                    let mut origin = std::array::from_fn(|a| {
-                                        camera.eye[a] + d[a] * hit.distance
-                                    });
-                                    origin[hit.face / 2] += normal_sign * 0.001;
-                                    if scene.ray(origin, sun, 0.001, shadow_distance).is_some() {
-                                        0.
+                                let (d, n, f) = rays(px, py);
+                                let c = if let Some((hit, plant)) = scene.ray(camera.eye, d, n, f) {
+                                    covered += 1.;
+                                    water_hits += u32::from(hit.material == 7);
+                                    depth += hit.distance;
+                                    let sample = ((y * viewport_width + x) as u64)
+                                        .wrapping_mul(0x9e3779b97f4a7c15)
+                                        ^ sample_seed
+                                        ^ ((sy * grid + sx) as u64)
+                                            .wrapping_mul(0xd1b54a32d192ed03);
+                                    let sun = daylight.as_ref().map_or_else(
+                                        || lighting.sun_direction(),
+                                        |l| {
+                                            l.sun_sample(
+                                                jitter(sample ^ 0x9ab3ea6f),
+                                                jitter(sample ^ 0x17312f6a),
+                                            )
+                                        },
+                                    );
+                                    let normal_sign = if hit.face % 2 == 0 { -1. } else { 1. };
+                                    let visibility = if shadows
+                                        && (sun[hit.face / 2] * normal_sign > 0.
+                                            || (daylight.is_some() && hit.material == 7))
+                                    {
+                                        let mut origin = std::array::from_fn(|a| {
+                                            camera.eye[a] + d[a] * hit.distance
+                                        });
+                                        origin[hit.face / 2] += normal_sign * 0.001;
+                                        if scene.ray(origin, sun, 0.001, shadow_distance).is_some()
+                                        {
+                                            0.
+                                        } else {
+                                            1.
+                                        }
                                     } else {
                                         1.
+                                    };
+                                    let c = match &mut daylight {
+                                        Some(light) => light.shade(
+                                            scene,
+                                            hit,
+                                            plant,
+                                            camera.eye,
+                                            d,
+                                            visibility,
+                                            [
+                                                jitter(sample ^ 0x81b71dd5),
+                                                jitter(sample ^ 0x72c28641),
+                                            ],
+                                            camera.far,
+                                            if shadows { shadow_distance } else { 0. },
+                                        ),
+                                        None => lighting.shade_visibility(hit, visibility),
+                                    };
+                                    let tint = if paint
+                                        && plant.is_none()
+                                        && (daylight.is_none() || hit.material != 7)
+                                    {
+                                        shaded_tint(hit.cell, camera.eye, lighting.profile)
+                                    } else {
+                                        [1.; 3]
+                                    };
+                                    std::array::from_fn(|a| c[a] * tint[a])
+                                } else {
+                                    if !ray_within_native_footprint(min, size, camera.eye, d, n, f)
+                                    {
+                                        incomplete += 1;
                                     }
-                                } else {
-                                    1.
+                                    daylight.as_ref().map_or(SKY, |light| light.sky(d))
                                 };
-                                let c = match &mut daylight {
-                                    Some(light) => light.shade(
-                                        scene,
-                                        hit,
-                                        plant,
-                                        camera.eye,
-                                        d,
-                                        visibility,
-                                        [jitter(sample ^ 0x81b71dd5), jitter(sample ^ 0x72c28641)],
-                                        camera.far,
-                                        if shadows { shadow_distance } else { 0. },
-                                    ),
-                                    None => lighting.shade_visibility(hit, visibility),
-                                };
-                                let tint = if paint
-                                    && plant.is_none()
-                                    && (daylight.is_none() || hit.material != 7)
-                                {
-                                    shaded_tint(hit.cell, camera.eye, lighting.profile)
-                                } else {
-                                    [1.; 3]
-                                };
-                                std::array::from_fn(|a| c[a] * tint[a])
-                            } else {
-                                if !ray_within_native_footprint(min, size, camera.eye, d, n, f) {
-                                    incomplete += 1;
+                                for a in 0..3 {
+                                    rgb[a] += c[a];
                                 }
-                                daylight.as_ref().map_or(SKY, |light| light.sky(d))
-                            };
-                            for a in 0..3 {
-                                rgb[a] += c[a];
                             }
                         }
+                        for a in 0..3 {
+                            p[a] = (rgb[a] / spp as f64) as f32;
+                        }
+                        p[5] = water_hits as f32 / spp as f32;
+                        p[3] = (covered / spp as f64) as f32;
+                        p[4] = if covered > 0. {
+                            (depth / covered) as f32
+                        } else {
+                            f32::NAN
+                        };
                     }
-                    for a in 0..3 {
-                        p[a] = (rgb[a] / spp as f64) as f32;
-                    }
-                    p[5] = water_hits as f32 / spp as f32;
-                    p[3] = (covered / spp as f64) as f32;
-                    p[4] = if covered > 0. {
-                        (depth / covered) as f32
-                    } else {
-                        f32::NAN
-                    };
                 }
                 boundary_misses.fetch_add(incomplete, Ordering::Relaxed);
-                eprintln!(
-                    "Rendered rows {}..{}",
-                    part * rows,
-                    (part * rows + rows).min(height)
-                );
             });
         }
     });

@@ -9,6 +9,17 @@ from PIL import Image, ImageDraw, ImageFont
 from reference_compare import same_camera, ray_distance, stats, srgb
 
 
+def interior_pinholes(full, hit):
+    """Missed pixels surrounded by native terrain and live raster hits."""
+    mask = np.zeros_like(hit, dtype=bool)
+    if min(hit.shape) >= 5:
+        windows = np.lib.stride_tricks.sliding_window_view
+        native = windows(full, (5, 5)).all(axis=(-2, -1))
+        neighbors = windows(hit, (5, 5)).sum(axis=(-2, -1))
+        mask[2:-2, 2:-2] = ~hit[2:-2, 2:-2] & native & (neighbors >= 22)
+    return mask
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('reference', type=Path)
@@ -47,7 +58,11 @@ def main():
                  ('amplitude', 'amplitude_m'), ('octaves', 'octaves'),
                  ('roughness', 'roughness')]:
         assert reference['params'][a] == gpu[b], f'parameter mismatch: {a}'
-    if reference['miss_fraction'] != 0:
+    assert reference['voxel_size_m'] == gpu['native_voxel_m'], 'voxel size mismatch'
+    assert not reference['lod'], 'requires a native-grid reference'
+    if 'finite_domain_miss_samples' in reference:
+        assert reference['finite_domain_miss_samples'] == 0, 'reference has incomplete primary rays'
+    elif reference['miss_fraction'] != 0:
         # Sky is valid only when the entire view frustum stays within the crop.
         half = np.tan(np.deg2rad(reference['fov_y_degrees']) / 2)
         radius = reference['far'] * np.sqrt(1 + half**2 * (1 + (reference['width']/reference['height'])**2))
@@ -67,7 +82,7 @@ def main():
         font = ImageFont.truetype('DejaVuSans.ttf', 24)
     except OSError:
         font = ImageFont.load_default()
-    draw.text((20, 20), f"Exact 6.25 cm voxels | offline {reference['spp']} samples/pixel", font=font, fill='white')
+    draw.text((20, 20), f"Exact {100 * reference['voxel_size_m']:g} cm voxels | offline {reference['spp']} samples/pixel", font=font, fill='white')
     label = ('Adaptive terrain | projected error + voxel-derived appearance'
              if gpu.get('scene', '').startswith('adaptive')
              else 'Experimental uniform GPU pages | proxy + exact native region'
@@ -99,6 +114,7 @@ def main():
             'available': True,
             'false_coverage_pixels': int((hit & empty).sum()),
             'missing_coverage_pixels': int((~hit & full).sum()),
+            'isolated_interior_missing_pixels': int(interior_pinholes(full, hit).sum()),
             'partial_reference_pixels': int(((coverage > 0) & (coverage < 1)).sum()),
             'coverage_absolute_error': stats(hit.astype(float) - coverage),
             'center_vs_subpixel_mean_depth_difference_m': stats((ray_distance(ndc, gpu) - ref_depth)[shared]),
