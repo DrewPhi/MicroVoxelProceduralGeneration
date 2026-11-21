@@ -408,6 +408,7 @@ mod tests {
                 shaped_banks: true,
                 fitted_channels: true,
                 sheltered_snowfields: true,
+                bedrock_outcrops: true,
                 recipe: FbmRecipe::Regional,
                 horizontal_scale: 16.0,
                 amplitude: 100000.0,

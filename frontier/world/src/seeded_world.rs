@@ -1067,7 +1067,34 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
     }
     let riparian = nearest_bank.is_some_and(|bank| {
         let stage = bank.stage;
-        stage > 0. && (stage - 2. * relief..=stage + 7. * relief).contains(&ground)
+        let floodplain = (stage - 2. * relief..=stage + 7. * relief).contains(&ground);
+        if stage <= 0. {
+            return false;
+        }
+        if !p.has_bedrock_outcrops() || bank.lake || l.mountain <= 0.32 {
+            return floodplain;
+        }
+        // A broad floodplain can support turf. On a steep bedrock chute,
+        // saturated soil persists in narrow pockets beside the channel.
+        // Cross-fade the old flood height to a lateral habitat boundary:
+        // a small change of axial stage at a segment end should not paint a
+        // terrace across the whole mountainside.
+        let scale = 1800. / p.horizontal_scale;
+        let grade = bank.grade / (scale * relief);
+        let scouring = smooth((grade - 0.055) / 0.24) * smooth((l.mountain - 0.32) / 0.22);
+        if scouring == 0. {
+            return floodplain;
+        }
+        let nx = x * scale;
+        let nz = z * scale;
+        let shelter = 0.68 * noise(nx / 32., nz / 32., seed ^ 0x51f9)
+            + 0.32 * noise(nx / 9., nz / 9., seed ^ 0x51fa);
+        let above_stage = (ground - stage) / relief;
+        let flood_margin = ((above_stage + 2.) / 2.)
+            .min((7. - above_stage) / 7.)
+            .min(1. - bank.bank_distance);
+        let rock_margin = 1.08 + 0.72 * shelter - bank.width_fraction;
+        flood_margin * (1. - scouring) + rock_margin * scouring > 0.
     });
     Hydrography {
         land: l,
@@ -1314,6 +1341,9 @@ fn column_from_fields(
     } else {
         None
     };
+    let outcrop = p.has_bedrock_outcrops()
+        && (surface == Material::Stone
+            || (surface == Material::Snow && f.biome == SeededBiome::Mountains));
     let surface = deposit.unwrap_or(surface);
     TerrainColumn {
         ground_top,
@@ -1321,6 +1351,8 @@ fn column_from_fields(
         ground_surface: surface,
         ground_subsurface: deposit.unwrap_or(if surface == Material::Sand {
             Material::Sand
+        } else if outcrop {
+            Material::Stone
         } else {
             Material::Soil
         }),
@@ -1794,17 +1826,97 @@ mod tests {
 
     #[test]
     fn warm_gorge_has_no_secondary_snow_band_below_the_alpine_snowline() {
-        let params = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
+        let params = FbmParams {
+            recipe: FbmRecipe::Highlands,
+            ..Default::default()
+        };
         let fresh = super::super::FbmTerrain::new(673, params).unwrap();
-        let saved = super::super::FbmTerrain::new(673, FbmParams {
-            sheltered_snowfields: false, ..params
-        }).unwrap();
-        assert_eq!((saved.source_version(), fresh.source_version()), (5, 6));
+        let saved = super::super::FbmTerrain::new(
+            673,
+            FbmParams {
+                sheltered_snowfields: false,
+                ..params
+            },
+        )
+        .unwrap();
+        let previous = super::super::FbmTerrain::new(
+            673,
+            FbmParams {
+                bedrock_outcrops: false,
+                ..params
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                saved.source_version(),
+                previous.source_version(),
+                fresh.source_version()
+            ),
+            (5, 6, 7)
+        );
         for (x, z) in [(-4253.7, -1666.1), (-4237.6, -1658.7), (-4229.5, -1654.9)] {
             let c = crate::Cell::from_meters([x, 0., z]);
             assert_eq!(saved.column_tops(c.x, c.z), fresh.column_tops(c.x, c.z));
             assert_eq!(saved.column_cells(c.x, c.z).top_material(), Material::Snow);
-            assert_eq!(fresh.column_cells(c.x, c.z).top_material(), Material::Stone);
+            let outcrop = fresh.column_cells(c.x, c.z);
+            let old = previous.column_cells(c.x, c.z);
+            assert_eq!(old.ground_top, outcrop.ground_top);
+            assert_eq!(
+                (old.top_material(), outcrop.top_material()),
+                (Material::Stone, Material::Stone)
+            );
+            assert_eq!(
+                (
+                    old.material(old.ground_top - 2),
+                    outcrop.material(outcrop.ground_top - 2)
+                ),
+                (Material::Soil, Material::Stone)
+            );
+        }
+    }
+
+    #[test]
+    fn steep_headwaters_expose_rock_while_the_lower_gallery_bank_keeps_its_turf() {
+        use super::super::FbmTerrain;
+        let params = FbmParams {
+            recipe: FbmRecipe::Highlands,
+            ..Default::default()
+        };
+        let fresh = FbmTerrain::new(673, params).unwrap();
+        let saved = FbmTerrain::new(
+            673,
+            FbmParams {
+                bedrock_outcrops: false,
+                ..params
+            },
+        )
+        .unwrap();
+        for (center, steep) in [([-4240, -1840], true), ([-2935, -1100], false)] {
+            let mut changed = 0;
+            let mut water = 0;
+            for dz in (-96..96).step_by(4) {
+                for dx in (-96..96).step_by(4) {
+                    let [x, z] = [center[0] + dx, center[1] + dz]
+                        .map(|v| ((f64::from(v) + 0.5) / voxel_size()).floor() as i64);
+                    let (old, new) = (saved.column_cells(x, z), fresh.column_cells(x, z));
+                    assert_eq!(
+                        [old.visible_top, old.ground_top],
+                        [new.visible_top, new.ground_top]
+                    );
+                    if new.visible_top > new.ground_top {
+                        water += 1;
+                        assert_eq!(old.ground_surface, new.ground_surface);
+                    }
+                    changed += usize::from(old.ground_surface != new.ground_surface);
+                }
+            }
+            assert!(water > 0);
+            if steep {
+                assert!(changed > 150);
+            } else {
+                assert_eq!(changed, 0);
+            }
         }
     }
 

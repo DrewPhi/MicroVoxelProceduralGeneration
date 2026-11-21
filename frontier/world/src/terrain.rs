@@ -90,6 +90,8 @@ pub struct FbmParams {
     pub fitted_channels: bool,
     /// Use one local snow line for exposed Highlands rock and sheltered drifts.
     pub sheltered_snowfields: bool,
+    /// Expose alpine bedrock under crags and on scoured headwater banks.
+    pub bedrock_outcrops: bool,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
@@ -110,6 +112,7 @@ impl Default for FbmParams {
             shaped_banks: true,
             fitted_channels: true,
             sheltered_snowfields: true,
+            bedrock_outcrops: true,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -138,7 +141,13 @@ impl FbmParams {
     }
 
     pub(crate) fn has_sheltered_snowfields(self) -> bool {
-        self.recipe == FbmRecipe::Highlands && self.sheltered_snowfields && self.has_fitted_channels()
+        self.recipe == FbmRecipe::Highlands
+            && self.sheltered_snowfields
+            && self.has_fitted_channels()
+    }
+
+    pub(crate) fn has_bedrock_outcrops(self) -> bool {
+        self.bedrock_outcrops && self.has_sheltered_snowfields()
     }
 
     pub fn validate(&self) -> Result<(), FbmError> {
@@ -193,7 +202,11 @@ impl FbmTerrain {
                 if self.params.legacy_riverbanks {
                     1
                 } else if self.params.has_sheltered_snowfields() {
-                    6
+                    if self.params.bedrock_outcrops {
+                        7
+                    } else {
+                        6
+                    }
                 } else if self.params.has_fitted_channels() {
                     5
                 } else if self.params.has_shaped_banks() {

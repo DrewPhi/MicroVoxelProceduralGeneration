@@ -218,6 +218,15 @@ found identical bed and water elevations before and after the snow change.
 On seed 673, 287 of 315 sampled mountain columns above 2,300 m carried snow
 in the new world. The older source had 298 snowy columns at those elevations.
 
+Version seven exposes bedrock under alpine crags and narrows the wetland habitat
+along steep headwaters. Pockets of turf follow the stream and local shelter.
+On a 384 m square around the upper cascade, the wetland covered 13,830 of
+147,456 one-metre sample positions, down from 40,886. The bed and water
+elevations agreed at every sample. All 36,864 sampled surface materials in
+the lower riverbank view also matched version six. A version-six game save
+retained its original generator and matched byte for byte after reopening
+it in the updated engine.
+
 A snow patch can cross the top of a distant voxel. Mixed rock and snow
 patches use a 5×5 grid of native material samples. On the shaded valley
 floor of seed 673, the visible snow overlapped 92% of the union of the
