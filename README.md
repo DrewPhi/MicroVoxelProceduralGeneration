@@ -322,6 +322,13 @@ Full-resolution RGB RMS error fell from 53.05 to 47.23, but mean absolute
 error rose from 35.26 to 39.78. The gorge comparison measures stripe
 suppression separately from agreement with the active renderer.
 
+Each interior horizon block now obtains its grade from adjacent native roof
+samples. The ring boundary uses the shared lighting lattice. Two signed
+seven-bit slope components fit the existing 16-byte face. Across 10,243
+land blocks, a survey compared directional light with sixteen finer slope
+measurements per block. Mean absolute light error fell by 31% on Highlands
+673, 31% on Highlands 40961 and 53% on Watershed 997.
+
 The active terrain and horizon use the same sun color as its elevation changes.
 Flight and beauty views keep highlights in a floating-point scene target until
 exposure and tone mapping. The Radeon uses packed 11/11/10-bit RGB at four

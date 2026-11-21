@@ -7,6 +7,8 @@ const CELLS: i32 = 2 * (SIDE as i32 - 1);
 const RING: usize = (CELLS * CELLS) as usize;
 const HALF: i32 = CELLS / 2;
 const CHUNK: i32 = 32;
+// A signed nine-bit coordinate includes both outside edges of every ring.
+const _: () = assert!(HALF < 256);
 pub(super) const UNIT: f32 = SPACING as f32 / (2 << (LEVELS - 1)) as f32;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -185,19 +187,28 @@ fn columns(lattice: &Lattice) -> Vec<Column> {
                         + u * (samples[i + SIDE + 1][k] - samples[i + SIDE][k]);
                     a + v * (b - a)
                 };
-                let a = samples[i][3];
-                let b = samples[i + 1][3];
-                let c = samples[i + SIDE][3];
-                let d = samples[i + SIDE + 1][3];
-                let dx = (a - b) * (1. - v) + (c - d) * v;
-                let dz = (a - c) * (1. - u) + (b - d) * u;
+                let index = (level - first) * RING + (z * CELLS + x) as usize;
+                let radius = (2 * (x - HALF) + 1).abs().max((2 * (z - HALF) + 1).abs());
+                let inner = if level > first { extent(level - 1) } else { 0 };
+                // Interior neighbors are two roof pitches apart. Along a
+                // ring join use the shared lighting lattice's gradient.
+                let [dx, dz] = if radius < 2 * half - 1 && (inner == 0 || radius > inner + 1) {
+                    [1, CELLS as usize].map(|offset| {
+                        lattice.roofs[index - offset].height - lattice.roofs[index + offset].height
+                    })
+                } else {
+                    let a = samples[i][3];
+                    let b = samples[i + 1][3];
+                    let c = samples[i + SIDE][3];
+                    let d = samples[i + SIDE + 1][3];
+                    [(a - b) * (1. - v) + (c - d) * v, (a - c) * (1. - u) + (b - d) * u]
+                };
                 let length = dx.abs() + dz.abs() + 2. * UNIT * (1 << level) as f32;
-                let encode = |n: f32| ((15. * n / length).round() as i32 as u32) & 31;
+                let encode = |n: f32| ((63. * n / length).round() as i32 as u32) & 127;
                 let rgb = |k| {
                     let byte = |i| (at(i).clamp(0., 1.) * 255.).round() as u32;
                     byte(k) | byte(k + 1) << 8 | byte(k + 2) << 16
                 };
-                let index = (level - first) * RING + (z * CELLS + x) as usize;
                 let roof = lattice.roofs[index];
                 // The center supplies both physical planes. Neighbors only
                 // estimate how much of an already wet roof is covered.
@@ -210,7 +221,7 @@ fn columns(lattice: &Lattice) -> Vec<Column> {
                     water,
                     depth: (4. * roof.depth).round() as u32,
                     y: roof.height,
-                    slope: encode(dx) | (encode(dz) << 5),
+                    slope: encode(dx) | (encode(dz) << 7),
                     rgb: rgb(0),
                     soil_rgb: rgb(5),
                     rock_rgb: rgb(8),
@@ -224,7 +235,7 @@ fn columns(lattice: &Lattice) -> Vec<Column> {
 fn face(x: i32, z: i32, axis: u32, level: usize, low: f32, high: Column) -> [u32; 4] {
     let (x, z) = (x >> level, z >> level);
     [
-        (x as u32 & 2047) | ((z as u32 & 2047) << 11) | (high.slope << 22),
+        (x as u32 & 511) | ((z as u32 & 511) << 9) | (high.slope << 18),
         high.rgb | (axis << 24) | ((level as u32) << 27) | (high.water << 29),
         if axis == 0 {
             (low + (high.depth << 10) as f32).to_bits()
@@ -418,6 +429,23 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
 mod tests {
     use super::*;
     #[test]
+    fn packed_ring_extremes_preserve_both_signed_relief_components() {
+        for level in 0..LEVELS {
+            for x in [-HALF, HALF] {
+                for z in [-HALF, HALF] {
+                    let slope = ((-53i32 as u32) & 127) | (41 << 7);
+                    let bits = face(x << level, z << level, 0, level, 0., Column {
+                        slope,
+                        ..Default::default()
+                    })[0] as i32;
+                    assert_eq!((bits << 23 >> 23, bits << 14 >> 23), (x, z));
+                    assert_eq!((bits << 7 >> 25, bits >> 25), (-53, 41));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn neighboring_rings_own_half_open_boundaries() {
         for (x, z, level) in [
             (-96, -96, 0),
@@ -512,8 +540,8 @@ mod tests {
             let mut covered = vec![false; RING * (LEVELS - first)];
             for f in &mesh.faces {
                 let level = ((f[1] >> 27) & 3) as usize;
-                let x = (f[0] as i32) << 21 >> 21;
-                let z = ((f[0] >> 11) as i32) << 21 >> 21;
+                let x = (f[0] as i32) << 23 >> 23;
+                let z = ((f[0] >> 9) as i32) << 23 >> 23;
                 let packed = f32::from_bits(f[2]) as i32;
                 for zz in z..z + 1 + packed / CHUNK {
                     for xx in x..x + 1 + packed % CHUNK {
@@ -621,8 +649,8 @@ mod tests {
             for f in build(&lattice, 0.0625).faces {
                 if (f[1] >> 24) & 7 == 1 && f32::from_bits(f[3]) == 70. {
                     assert_eq!(((f[1] >> 27) & 3) as usize, first);
-                    let x = (f[0] as i32) << 21 >> 21;
-                    let z = ((f[0] >> 11) as i32) << 21 >> 21;
+                    let x = (f[0] as i32) << 23 >> 23;
+                    let z = ((f[0] >> 9) as i32) << 23 >> 23;
                     assert_eq!(x, -extent(first));
                     walls.push((z, f32::from_bits(f[2]) as i32));
                 }

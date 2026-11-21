@@ -20,8 +20,8 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
 @vertex fn vs(@builtin(vertex_index) i:u32, @location(0) packed:vec2<u32>, @location(1) heights:vec2<f32>) -> Vertex {
     let axis = (packed.y>>24u)&7u;
     let size = unit*f32(1u<<((packed.y>>27u)&3u));
-    let x = f32(bitcast<i32>(packed.x<<21u)>>21u)*size;
-    let z = f32(bitcast<i32>(packed.x<<10u)>>21u)*size;
+    let x = f32(bitcast<i32>(packed.x<<23u)>>23u)*size;
+    let z = f32(bitcast<i32>(packed.x<<14u)>>23u)*size;
     let u = f32(i&1u);
     let v = f32(i>>1u);
     var p = vec3(x,heights.y,z);
@@ -42,8 +42,8 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     // Each coarse roof and riser covers many native stairs. Weight their
     // upward and outward faces by projected area, leaving some direct face
     // contrast when the geometry spans multiple pixels.
-    let slope=vec2<f32>(f32(bitcast<i32>(packed.x<<5u)>>27u),f32(bitcast<i32>(packed.x)>>27u))/15.;
-    let relief=normalize(vec3(slope.x,max(0.,1.-abs(slope.x)-abs(slope.y)),slope.y));
+    let slope=vec2<f32>(f32(bitcast<i32>(packed.x<<7u)>>25u),f32(bitcast<i32>(packed.x)>>25u))/63.;
+    let relief=vec3(slope.x,max(0.,1.-abs(slope.x)-abs(slope.y)),slope.y);
     var center=vec3(x+.5*size,heights.y,z+.5*size);
     var face_width=size;
     if axis!=0u {
