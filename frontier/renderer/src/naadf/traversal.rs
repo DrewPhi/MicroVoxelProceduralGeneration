@@ -6,7 +6,7 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub(super) struct Options {
     pub(super) cache: u32,
     pub(super) integer_fastpath: bool,

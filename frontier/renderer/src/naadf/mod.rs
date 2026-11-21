@@ -2220,6 +2220,29 @@ pub(crate) fn mesh_traversal_constants() -> std::collections::HashMap<String, f6
     traversal::options().mesh_constants()
 }
 
+type RayPipelines = (
+    wgpu::RenderPipeline,
+    Option<wgpu::RenderPipeline>,
+    Option<wgpu::RenderPipeline>,
+);
+
+#[derive(Clone, Copy, PartialEq)]
+struct PipelineKey {
+    target: wgpu::TextureFormat,
+    samples: u32,
+    voxel_size: f64,
+    options: traversal::Options,
+    format: [u32; 3],
+    diagnostic: bool,
+    dry: bool,
+    wet: bool,
+}
+
+// Each snapshot has its own textures and bind groups. Their explicit layouts
+// are compatible, so moving the exact volume can reuse its compiled shaders.
+#[derive(Default)]
+pub(super) struct PipelineCache(Vec<(PipelineKey, RayPipelines)>);
+
 fn make_pipelines(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,
@@ -2227,11 +2250,21 @@ fn make_pipelines(
     has_static_water: bool,
     options: traversal::Options,
     format: [u32; 3],
-) -> (
-    wgpu::RenderPipeline,
-    Option<wgpu::RenderPipeline>,
-    Option<wgpu::RenderPipeline>,
-) {
+) -> RayPipelines {
+    let key = PipelineKey {
+        target: gpu.scene_format,
+        samples: gpu.sample_count,
+        voxel_size: voxel_size(),
+        options,
+        format: if options.specialize_format { format } else { [0; 3] },
+        diagnostic: capture_layer() == CaptureLayer::Steps,
+        dry: std::env::var_os("FRONTIER_NAADF_DRY_PIPELINE").is_none_or(|v| v != "0"),
+        wet: has_static_water && std::env::var_os("FRONTIER_NAADF_STATIC_WATER_PIPELINE")
+            .is_none_or(|v| v != "0"),
+    };
+    if let Some((_, pipelines)) = gpu.naadf_pipelines.borrow().0.iter().find(|(k, _)| *k == key) {
+        return pipelines.clone();
+    }
     let shader = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2306,13 +2339,15 @@ fn make_pipelines(
             })
     };
     let full = make(false, false);
-    let dry = std::env::var_os("FRONTIER_NAADF_DRY_PIPELINE")
-        .is_none_or(|v| v != "0")
-        .then(|| make(true, false));
-    let wet = (has_static_water
-        && std::env::var_os("FRONTIER_NAADF_STATIC_WATER_PIPELINE").is_none_or(|v| v != "0"))
-    .then(|| make(false, true));
-    (full, dry, wet)
+    let dry = key.dry.then(|| make(true, false));
+    let wet = key.wet.then(|| make(false, true));
+    let pipelines = (full, dry, wet);
+    let mut cache = gpu.naadf_pipelines.borrow_mut();
+    if cache.0.len() == 4 {
+        cache.0.remove(0);
+    }
+    cache.0.push((key, pipelines.clone()));
+    pipelines
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
