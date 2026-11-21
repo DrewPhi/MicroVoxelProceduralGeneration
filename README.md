@@ -239,6 +239,16 @@ order, culling on and off gave identical color and depth at 1280×720.
 The flight scheduler samples the approaching ridgeline and publishes up to two
 refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. Some block-size changes remain visible during refinement.
 
+Under a tight terrain GPU budget, the renderer keeps the last complete
+partition and retries a refused upload when available space changes. At
+64 MiB, the seed 673 ridge diagnostic kept 451,179 visible voxel faces and
+matched the previous depth and coverage at every pixel. Time to capture
+fell from 121.7 s to 20.6 s, with 7,031 redundant upload attempts avoided.
+An 18-second, 145 m/s turn at that budget retained complete terrain on all
+2,020 measured frames. Requested detail remained unresolved. Raising the
+budget from 32 to 700 MiB in the live settings panel restored coverage and
+drew 207,382 faces without restarting the game.
+
 Flight height probes evaluate the procedural land and water stage directly.
 Across four seeds, 57,024 samples per pass ran 5–8% faster at 6.25 cm and
 5–7% faster at 10 cm in alternating release CPU measurements. Every height

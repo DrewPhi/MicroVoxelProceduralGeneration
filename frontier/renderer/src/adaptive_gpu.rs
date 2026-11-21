@@ -118,6 +118,14 @@ fn release_range(free: &mut Vec<Range<u64>>, range: Range<u64>) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct CapacitySignature {
+    revision: u64,
+    budget: u64,
+    allocated: u64,
+    warm: usize,
+}
+
 struct Allocation {
     page: usize,
     range: Range<u64>,
@@ -1194,6 +1202,16 @@ impl AdaptiveGpu {
     }
     pub fn contains(&self, key: &TileKey) -> bool {
         self.clusters.contains_key(key)
+    }
+    // A failed allocation can become possible after a cluster is released, a
+    // retained cluster becomes evictable, or another GPU resource changes size.
+    pub(super) fn capacity_signature(&self) -> CapacitySignature {
+        CapacitySignature {
+            revision: self.residency_revision,
+            budget: self.resource_budget_bytes,
+            allocated: self.allocated_bytes(),
+            warm: self.warm.len(),
+        }
     }
     fn allocated_bytes(&self) -> u64 {
         (self.shadows.allocated_bytes()

@@ -85,7 +85,7 @@ pub struct AdaptiveView {
     cpu_max_visible_error_px: Option<f64>,
     pub coverage_ready: bool,
     pub pending_count: usize,
-    pub unresolved: bool,
+    cpu_resource_limited: bool,
     pub native_clusters: usize,
     pub upload_bytes: u64,
     upload_cpu_ms: f64,
@@ -132,6 +132,9 @@ pub struct AdaptiveView {
     deferred_arc_bytes: usize,
     gpu_pending_clusters: usize,
     gpu_resource_limited: bool,
+    refused_upload: Option<(TileKey, crate::adaptive_gpu::CapacitySignature)>,
+    gpu_allocation_refusals: u64,
+    gpu_upload_retries_avoided: u64,
     /// Configured admission budget; physical pool allocation is reported separately.
     gpu_pool_budget_bytes: u64,
     max_visible_error_px: Option<f64>,
@@ -449,7 +452,7 @@ impl AdaptiveView {
             cpu_max_visible_error_px: None,
             coverage_ready: false,
             pending_count: 0,
-            unresolved: false,
+            cpu_resource_limited: false,
             native_clusters: 0,
             upload_bytes: 0,
             upload_cpu_ms: 0.,
@@ -496,6 +499,9 @@ impl AdaptiveView {
             deferred_arc_bytes: 0,
             gpu_pending_clusters: 0,
             gpu_resource_limited: false,
+            refused_upload: None,
+            gpu_allocation_refusals: 0,
+            gpu_upload_retries_avoided: 0,
             gpu_pool_budget_bytes: 512 * 1024 * 1024,
             max_visible_error_px: None,
             visible_unresolved_count: 0,
@@ -548,7 +554,7 @@ impl AdaptiveView {
             self.cpu_refinement_ready = false;
             self.cpu_max_visible_error_px = None;
             self.coverage_ready = false;
-            self.unresolved = false;
+            self.cpu_resource_limited = false;
         }
         if let Some(result) = self.worker.poll() {
             let frame = result?;
@@ -557,7 +563,7 @@ impl AdaptiveView {
                 self.cpu_quality_ready = frame.quality_ready;
                 self.cpu_refinement_ready = frame.refinement_ready;
                 self.cpu_max_visible_error_px = frame.max_visible_error_px;
-                self.unresolved = frame.limit_reached;
+                self.cpu_resource_limited = frame.limit_reached;
                 self.latest_cache = frame.cache;
                 self.cache_bytes = frame.cache.resident_bytes;
                 self.cache_hits = frame.cache.hits;
@@ -595,7 +601,7 @@ impl AdaptiveView {
                         &mut self.pending,
                         &mut self.deferred,
                         frame,
-                        !pending_covers && incoming_covers,
+                        (!pending_covers || self.gpu_resource_limited) && incoming_covers,
                     );
                 } // never publish partial coverage
             }
@@ -629,7 +635,7 @@ impl AdaptiveView {
         self.gpu_resource_limited = false;
         if let (false, Some(frame)) = (self.background_paused, &self.pending) {
             for tile in &frame.tiles {
-                if adaptive.contains(&tile.key) {
+                if tile.is_empty() || adaptive.contains(&tile.key) {
                     continue;
                 }
                 let bytes = (tile.mesh.vertices.len() * std::mem::size_of::<crate::mesh::Vertex>()
@@ -648,6 +654,17 @@ impl AdaptiveView {
                 if uploaded > 0 && uploaded + bytes > self.upload_budget {
                     break;
                 }
+                if self
+                    .refused_upload
+                    .as_ref()
+                    .is_some_and(|(key, signature)| {
+                        key == &tile.key && *signature == adaptive.capacity_signature()
+                    })
+                {
+                    self.gpu_resource_limited = true;
+                    self.gpu_upload_retries_avoided += 1;
+                    break;
+                }
                 let upload_started = Instant::now();
                 let mut upload_result = adaptive.upload(&gpu.device, &gpu.queue, tile);
                 if upload_result
@@ -660,12 +677,14 @@ impl AdaptiveView {
                 self.upload_cpu_ms += upload_started.elapsed().as_secs_f64() * 1000.;
                 if let Err(error) = upload_result {
                     if crate::adaptive_gpu::resource_capacity_error(&error) {
+                        self.refused_upload = Some((tile.key, adaptive.capacity_signature()));
+                        self.gpu_allocation_refusals += 1;
                         self.gpu_resource_limited = true;
-                        self.unresolved = true;
                         break;
                     }
                     return Err(error);
                 }
+                self.refused_upload = None;
                 uploaded += bytes - adaptive.native_upload_savings(&tile.key);
                 if uploaded >= self.upload_budget {
                     break;
@@ -767,6 +786,26 @@ impl AdaptiveView {
             }
             self.publication_cpu_ms += publication_started.elapsed().as_secs_f64() * 1000.;
         }
+        // A blocked intermediate refinement must not pin its unpublished tiles
+        // while a newer complete partition is available for the current camera.
+        if self.gpu_resource_limited {
+            if let Some(next) = self.deferred.take() {
+                if publication_keys(
+                    &next,
+                    self.surface_source_revision,
+                    self.topology_supported,
+                    &camera,
+                    width,
+                    height,
+                )
+                .is_some()
+                {
+                    self.pending = Some(next);
+                    self.retain_dirty = true;
+                    self.gpu_resource_limited = false;
+                }
+            }
+        }
         if self.pending.is_none() {
             self.pending = self.deferred.take();
             self.retain_dirty |= self.pending.is_some();
@@ -794,6 +833,14 @@ impl AdaptiveView {
                 self.coverage_ready && self.published_pose == Some((camera, width, height));
         }
         self.update_appearance(adaptive, &gpu.device, &gpu.queue, &camera, uploaded == 0)?;
+        if self.gpu_resource_limited
+            && self
+                .refused_upload
+                .as_ref()
+                .is_some_and(|(_, signature)| *signature != adaptive.capacity_signature())
+        {
+            self.gpu_resource_limited = false;
+        }
         let gpu_prepare_started = Instant::now();
         self.stats = adaptive.prepare(
             &gpu.device,
@@ -907,7 +954,9 @@ impl AdaptiveView {
                 }
                 return Err(format!(
                     "adaptive capture not settled after 120s: coverage={} pending={} unresolved={}",
-                    self.coverage_ready, self.pending_count, self.unresolved
+                    self.coverage_ready,
+                    self.pending_count,
+                    self.unresolved()
                 ));
             }
             if last.elapsed().as_secs() >= 10 {
@@ -929,8 +978,21 @@ impl AdaptiveView {
         assert!(self.topology_supported && world.edit_cells().all(|c| world.volume_owned(c)));
         self.displayed_world_revision = world.revision();
     }
+    fn unresolved(&self) -> bool {
+        self.cpu_resource_limited || self.gpu_resource_limited
+    }
     pub fn preparation_refused(&self) -> bool {
-        self.unresolved
+        if self.gpu_resource_limited
+            && self.deferred.is_none()
+            && self
+                .cover
+                .as_ref()
+                .is_none_or(|cover| cover.tiles.is_empty())
+            && self.worker.idle_at(self.epoch)
+        {
+            return true;
+        }
+        self.cpu_resource_limited
             && self.pending_count == 0
             && self.pending.is_none()
             && self.deferred.is_none()
@@ -939,7 +1001,7 @@ impl AdaptiveView {
         self.preparation_started.elapsed().as_secs_f64()
     }
     pub fn json(&self) -> String {
-        let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved,self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
+        let mut json=format!("{{\"pixel_error\":{},\"coverage_ready\":{},\"quality_ready\":{},\"pending_clusters\":{},\"unresolved\":{},\"published_epoch\":{},\"requested_epoch\":{},\"native_clusters\":{},\"resident_clusters\":{},\"visible_clusters\":{},\"triangles\":{},\"gpu_resident_bytes\":{},\"gpu_allocated_bytes\":{},\"upload_bytes\":{},\"max_upload_frame_bytes\":{},\"cpu_cache_bytes\":{},\"cache_hits\":{},\"builds\":{},\"appearance_self_occlusion_exact\":false,\"topology_supported\":{}}}",self.pixel_error,self.coverage_ready,self.quality_ready,self.pending_count,self.unresolved(),self.published_epoch,self.epoch,self.native_clusters,self.stats.resident_clusters,self.stats.visible_clusters,self.stats.triangles,self.stats.resident_bytes,self.stats.allocated_bytes,self.upload_bytes,self.max_upload_frame_bytes,self.cache_bytes,self.cache_hits,self.builds,self.topology_supported);
         json.pop();
         json.push_str(&format!(
             ",\"naadf_owned_tiles\":{},\"naadf_ownership_id\":{},\"naadf_handoff_reused_tiles\":{},\"naadf_handoff_changed_tiles\":{}}}",
@@ -1112,8 +1174,8 @@ impl AdaptiveView {
         ));
         json.pop();
         json.push_str(&format!(
-            ",\"gpu_resource_limited\":{}}}",
-            self.gpu_resource_limited
+            ",\"gpu_resource_limited\":{},\"gpu_allocation_refusals\":{},\"gpu_upload_retries_avoided\":{}}}",
+            self.gpu_resource_limited, self.gpu_allocation_refusals, self.gpu_upload_retries_avoided
         ));
         json.pop();
         json.push_str(&format!(

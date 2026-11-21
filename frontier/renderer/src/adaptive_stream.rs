@@ -4535,6 +4535,15 @@ impl Worker {
             s.publication_ms.push_back(elapsed);
         }
     }
+    /// The final selection for this exact camera demand has already been consumed.
+    pub(super) fn idle_at(&self, epoch: u64) -> bool {
+        let state = self.state.0.lock().unwrap();
+        state.epoch == epoch
+            && state.request.is_none()
+            && state.result.is_none()
+            && state.pending_owner.is_none()
+            && state.pending_settings.is_none()
+    }
     pub fn poll(&self) -> Option<Result<SelectionFrame, String>> {
         self.state.0.lock().unwrap().result.take()
     }
