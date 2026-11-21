@@ -890,22 +890,45 @@ pub(super) fn landscape(
             mix(meadow, [0.086, 0.145, 0.077], canopy)
         }
         Material::Stone if p.recipe == FbmRecipe::Highlands => {
-            // Folded bedding follows elevation across a mountainside. Its
-            // direction changes slowly between valleys, independently of LOD.
+            // Sample a stratigraphic section along folded beds. Independent
+            // units vary in thickness and pinch out along strike.
             let province = noise(nx / 1750., nz / 1750., seed ^ 0xa76d);
-            let fold = stone();
+            let weather = stone();
             let relief = f.ground_height_m / (p.amplitude / 1000.).max(0.01);
-            let bedding = (relief + nx * 0.14 - nz * 0.09 + 74. * fold + 145. * province) / 76.;
-            let layers = (bedding * std::f64::consts::TAU).cos();
-            let seams = smooth((layers - 0.39) * 1.85);
-            let strata = smooth(0.62 + province * 0.9);
-            let country = mix([0.26, 0.292, 0.33], [0.47, 0.385, 0.30], 0.48 + fold * 0.82);
-            let outcrop = mix(
-                country,
-                [0.50, 0.47, 0.41],
-                strata * smooth(0.5 + 0.8 * layers) * 0.43,
+            let depth = relief + nx * 0.14 - nz * 0.09 + 68. * weather + 145. * province;
+            let strike = (nx * 0.54 + nz * 0.84) / 1660.;
+            let formation = noise(depth / 155., strike, seed ^ 0xda01);
+            let beds = noise(depth / 36., strike * 2.2, seed ^ 0xda02);
+            let strata = smooth(0.55 + province * 0.9);
+            let granite = mix(
+                [0.25, 0.285, 0.315],
+                [0.43, 0.405, 0.365],
+                0.55 + weather * 0.7,
             );
-            mix(outcrop, [0.17, 0.19, 0.20], seams * strata * 0.58)
+            let sandstone = mix(
+                [0.31, 0.30, 0.28],
+                [0.51, 0.425, 0.32],
+                0.54 + formation * 0.86 + weather * 0.28,
+            );
+            let shale = smooth((0.44 - formation - beds * 0.52) * 1.18);
+            mix(
+                granite,
+                mix(sandstone, [0.235, 0.257, 0.268], shale * 0.73),
+                strata,
+            )
+        }
+        Material::Snow if p.recipe == FbmRecipe::Highlands => {
+            // Wind-scoured firn and fresher drifts have distinct albedos.
+            let drift = noise(
+                (nx + nz * 0.32) / 275.,
+                (nz - nx * 0.32) / 94.,
+                seed ^ 0xda03,
+            );
+            mix(
+                [0.72, 0.80, 0.87],
+                [0.925, 0.946, 0.968],
+                smooth(0.68 + drift * 0.60),
+            )
         }
         Material::Stone => mix(
             [0.32, 0.345, 0.37],

@@ -17,7 +17,7 @@ cargo build --release --locked --bin frontier
 
 ![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
 
-*Exterior chase view above the seed 19 Highlands, captured in-engine on an isolated display using llvmpipe.*
+*The bush plane banks 32° over the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
 
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
@@ -55,7 +55,8 @@ occupied edit buckets reduced measured frames over 16.67 ms from 13 and 15
 to zero. Frame p95 was 5.58 and 5.50 ms with the index.
 
 The Highlands recipe combines ridged summits, branching foothills, watershed
-drainage and snow. The preset renders a 6 km active terrain view with a
+drainage and snow. Rock formations vary in thickness along folded beds,
+and snow albedo varies between wind-scoured firn and softer drifts. The preset renders a 6 km active terrain view with a
 world-aligned landscape horizon fading out to 35 km. The horizon samples the
 procedural source. A sparse mesh carries saved terrain edits beyond the resident native
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
