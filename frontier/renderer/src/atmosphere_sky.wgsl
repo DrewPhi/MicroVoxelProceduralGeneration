@@ -60,6 +60,18 @@ struct CloudOutput {
 @fragment fn fs_main(i:VertexOutput)->CloudOutput {
     let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,0.,1.);
     let ray=normalize(p.xyz/p.w-atmosphere.relative_eye.xyz);
+    return march_clouds(ray);
+}
+
+@fragment fn fs_water_clouds(i:VertexOutput)->@location(0) vec4<f32> {
+    let azimuth=i.uv.x*6.283185307;
+    let elevation=i.uv.y*1.570796327;
+    let ray=vec3(sin(azimuth)*cos(elevation),sin(elevation),cos(azimuth)*cos(elevation));
+    let sample=march_clouds(ray).scattering;
+    return vec4(sample.rgb*.5,1.-sample.a);
+}
+
+fn march_clouds(ray:vec3<f32>)->CloudOutput {
     let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
     if segment.y <= segment.x || atmosphere.weather.x <= .001 { return CloudOutput(vec4(0.,0.,0.,1.),vec4(1.)); }
     let start = segment.x;

@@ -850,8 +850,8 @@ impl AdaptiveGpu {
         // A render bundle retains the bind groups used while recording it.
         self.invalidate_bundle();
     }
-    pub(crate) fn prepare_ground_light(&self, queue: &wgpu::Queue, data: &[u8]) {
-        queue.write_buffer(&self.shadows.near.naadf_empty.ground_light, 0, data);
+    pub(crate) fn ground_light(&self) -> &wgpu::Buffer {
+        &self.shadows.near.naadf_empty.ground_light
     }
     /// Published terrain depth uses the same bounded owner set as surface shadows.
     pub(crate) fn far_shadow_bind(&self) -> &wgpu::BindGroup {

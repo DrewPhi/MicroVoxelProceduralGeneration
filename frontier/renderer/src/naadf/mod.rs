@@ -1772,10 +1772,8 @@ impl Experiment {
         a.encode_traversal(gpu, encoder, [width, height], primary);
     }
 
-    pub(crate) fn prepare_ground_light(&self, queue: &wgpu::Queue, data: &[u8]) {
-        if let Some(active) = &self.active {
-            queue.write_buffer(&active.resources.ground_light, 0, data);
-        }
+    pub(crate) fn ground_light(&self) -> Option<&wgpu::Buffer> {
+        self.active.as_ref().map(|active| &active.resources.ground_light)
     }
 
     pub fn prepare(&self, gpu: &Gpu, camera: Camera, width: u32, height: u32) {

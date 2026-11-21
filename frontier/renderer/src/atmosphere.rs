@@ -5,6 +5,8 @@ use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 #[path = "cloud_shadow.rs"]
 mod cloud_shadow;
+#[path = "water_clouds.rs"]
+pub(crate) mod water_clouds;
 
 const SKY_SHADER: &str = concat!(
     include_str!("cloud_layer.wgsl"),
@@ -103,6 +105,7 @@ pub(crate) struct Atmosphere {
     cloud_profile: wgpu::TextureView,
     sky_bind: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
+    water_clouds: water_clouds::WaterClouds,
     cloud_view: std::cell::Cell<Option<CloudView>>,
     drawn_cloud_view: std::cell::Cell<Option<CloudView>>,
     air: wgpu::TextureView,
@@ -700,6 +703,7 @@ impl Atmosphere {
             cloud_profile,
             sky_bind,
             sky_pipeline,
+            water_clouds: water_clouds::WaterClouds::new(device, &sky_layout),
             cloud_view: Default::default(),
             drawn_cloud_view: Default::default(),
             air,
@@ -795,6 +799,7 @@ impl Atmosphere {
                 * (u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2)) * 12)
             + self.aircraft_shadow.as_ref().map_or(0, |s| s.texture_bytes())
             + u64::from(self.cloud_shadow.is_some()) * cloud_shadow::BYTES
+            + water_clouds::BYTES
             + lighting_pixels * 20
             + 4
     }
@@ -1006,6 +1011,16 @@ impl Atmosphere {
             wind: time_seconds * uniform.weather[1],
             weather_origin,
         }));
+    }
+    pub(crate) fn reflect_clouds<'a>(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        receivers: impl Iterator<Item = &'a wgpu::Buffer>,
+    ) {
+        if let Some(view) = self.cloud_view.get() {
+            self.water_clouds
+                .draw(encoder, &self.sky_bind, view, receivers);
+        }
     }
     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
         self.encode_with_shadows(encoder, output, None);

@@ -1131,24 +1131,34 @@ impl Gpu {
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
-    fn prepare_ground_light(&self, world: &World, camera: Camera, capture: bool) {
-        let Some(settings) = &self.visual_settings else {
-            return;
-        };
+    fn ground_light_buffers(&self) -> impl Iterator<Item = &wgpu::Buffer> {
+        self.adaptive
+            .as_ref()
+            .map(|a| a.ground_light())
+            .into_iter()
+            .chain(self.naadf.as_ref().and_then(|n| n.ground_light()))
+    }
+
+    fn prepare_ground_light(
+        &self,
+        world: &World,
+        camera: Camera,
+        capture: bool,
+        post: bool,
+    ) -> bool {
+        let Some(settings) = &self.visual_settings else { return false };
         if !settings.beauty || settings.visibility_benchmark {
-            return;
+            return false;
         }
-        let field = self
-            .ground_field
-            .borrow_mut()
-            .prepare(world, camera, settings, capture);
-        let data = field.upload_bytes();
-        if let Some(adaptive) = &self.adaptive {
-            adaptive.prepare_ground_light(&self.queue, data);
+        let mut field = self.ground_field.borrow_mut().prepare(world, camera, settings, capture);
+        let clouds = field.enable_clouds(
+            post && settings.atmosphere && settings.cloud_coverage > 0.001,
+            camera.position.y,
+        );
+        for buffer in self.ground_light_buffers() {
+            self.queue.write_buffer(buffer, 0, field.upload_bytes());
         }
-        if let Some(native) = &self.naadf {
-            native.prepare_ground_light(&self.queue, data);
-        }
+        clouds
     }
 
     fn observe_water_camera(&self, camera: &Camera, world: &World, elapsed: f32) {
@@ -1166,7 +1176,6 @@ impl Gpu {
         height: u32,
     ) -> Result<()> {
         self.observe_water_camera(camera, world, 0.);
-        self.prepare_ground_light(world, *camera, true);
         let texture = self.texture(width, height, false);
         let floating = self.format == wgpu::TextureFormat::Rgba32Float;
         let bpp = if floating { 16 } else { 4 };
@@ -1187,6 +1196,7 @@ impl Gpu {
                 || self.scene_format != self.format)
                 && !floating
         });
+        let reflect_clouds = self.prepare_ground_light(world, *camera, true, post_settings.is_some());
         // Reuse the capture depth as the atmosphere's sampled attachment when
         // output and scene pixels align. The readback measures opaque terrain
         // and objects before sky, clouds and the 35 km horizon composite.
@@ -1240,6 +1250,9 @@ impl Gpu {
                 settings,
                 0.,
             );
+            if reflect_clouds {
+                atmosphere.reflect_clouds(&mut encoder, self.ground_light_buffers());
+            }
             self.draw(
                 &mut encoder,
                 atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
@@ -2790,7 +2803,8 @@ impl Viewer {
             &self.world,
             self.visual_started.elapsed().as_secs_f32(),
         );
-        gpu.prepare_ground_light(&self.world, self.camera, false);
+        let reflect_clouds =
+            gpu.prepare_ground_light(&self.world, self.camera, false, self.atmosphere.is_some());
         let target = frame.texture.create_view(&Default::default());
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.prepare_horizon(
@@ -2823,6 +2837,9 @@ impl Viewer {
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
             );
+            if reflect_clouds {
+                atmosphere.reflect_clouds(&mut encoder, gpu.ground_light_buffers());
+            }
             gpu.draw(
                 &mut encoder,
                 atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),

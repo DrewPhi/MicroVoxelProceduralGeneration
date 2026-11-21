@@ -5,7 +5,6 @@ use crate::{
     Camera,
 };
 use frontier_world::{Cell, Material, World};
-use wgpu::util::DeviceExt;
 
 const SIDE: usize = 13;
 const SPACING: f64 = 12.;
@@ -16,10 +15,24 @@ const COUNT: usize = SIDE * SIDE;
 pub(crate) struct GroundUniform {
     origin_strength: [f32; 4],
     nodes: [[[f32; 4]; SIDE]; SIDE],
+    cloud_light: [f32; 4],
     water: Panorama,
 }
 
+pub(crate) const CLOUD_OFFSET: u64 = std::mem::size_of::<GroundUniform>() as u64;
+
 impl GroundUniform {
+    pub(crate) fn enable_clouds(&mut self, enabled: bool, eye_height: f64) -> bool {
+        let active = enabled && self.water.enabled();
+        self.cloud_light = [
+            if active { 1. } else { 0. },
+            (2060. - eye_height) as f32,
+            0.,
+            0.,
+        ];
+        active
+    }
+
     pub(crate) fn upload_bytes(&self) -> &[u8] {
         let bytes = bytemuck::bytes_of(self);
         if self.water.enabled() {
@@ -32,11 +45,11 @@ impl GroundUniform {
 }
 
 pub(crate) fn buffer(device: &wgpu::Device) -> wgpu::Buffer {
-    use bytemuck::Zeroable;
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("nearby terrain color and elevation"),
-        contents: bytemuck::bytes_of(&GroundUniform::zeroed()),
+        size: CLOUD_OFFSET + crate::atmosphere::water_clouds::BYTES,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     })
 }
 
@@ -111,6 +124,7 @@ impl GroundField {
             }
         }
         GroundUniform {
+            cloud_light: [0.; 4],
             water,
             origin_strength: [
                 (start[0] as f64 * SPACING - eye.x) as f32,
