@@ -160,10 +160,11 @@ fn cache() -> &'static shared_cache::Cache {
 }
 fn source(w: &World) -> [u64; 8] {
     let p = w.fbm_terrain().map(|t| t.params()).unwrap_or_default();
+    let source_version = w.fbm_terrain().map_or(0, |terrain| terrain.source_version());
     [
         w.seed(),
         vegetation::VEGETATION_SOURCE_VERSION as u64 | ((directional_enabled() as u64) << 32),
-        p.recipe as u64 | ((p.legacy_riverbanks as u64) << 32),
+        p.recipe as u64 | (u64::from(source_version) << 32),
         p.horizontal_scale.to_bits(),
         p.amplitude.to_bits(),
         p.octaves as u64,

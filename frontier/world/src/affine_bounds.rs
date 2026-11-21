@@ -1585,6 +1585,7 @@ mod tests {
                     seed,
                     FbmParams {
                         legacy_riverbanks: false,
+                        alluvial_deposits: true,
                         recipe,
                         horizontal_scale: 1800.0,
                         amplitude: 1000.0,

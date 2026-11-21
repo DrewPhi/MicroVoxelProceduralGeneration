@@ -881,7 +881,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         return Err("--vegetation on currently requires --scene adaptive".into());
     }
     if let Some(path) = &water_save {
-        params.legacy_riverbanks = crate::grid_checkpoint::legacy_riverbanks(path, params.recipe)?;
+        if let Some(version) = crate::grid_checkpoint::watershed_version(path, params.recipe)? {
+            params.legacy_riverbanks = version == 1;
+            params.alluvial_deposits = version >= 3;
+        }
     }
     params.validate()?;
     if seeded_preset && !explicit_start && eye.is_none() && params.recipe.has_static_water() {

@@ -996,6 +996,7 @@ mod tests {
             println!("ordered-profile adapter={:?}", adapter.get_info());
             let primary_params = FbmParams {
                 legacy_riverbanks: false,
+                alluvial_deposits: true,
                 recipe: FbmRecipe::Legacy,
                 horizontal_scale: 1800.,
                 amplitude: 1000.,

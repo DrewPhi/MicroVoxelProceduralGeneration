@@ -167,6 +167,23 @@ drop as it becomes smaller than a pixel. An isolated block of water and
 a taller drop keep their distinct side faces. In a 960×540 Watershed
 riverbank view, the median brightness dip along a measured 6.25 cm step
 fell from 67 to 47 levels out of 255. The depth at the step stayed identical.
+At 1080p MSAA 1 on the Radeon 760M, the shared water optics added
+0.17–0.33 ms to the median frame at a stationary Highlands riverbank.
+A 100 m/s approach measured 9.04 / 10.88 / 12.09 ms at p50/p95/p99.
+The rapids were heavier at 15.59 / 16.72 / 17.37 ms. These 8-second passes
+used a 1.5 km active view, a 16 m native radius and fixed coarse detail.
+
+![A shallow sand bar in a Watershed meadow and a stony bank beside the faster reach upstream.](frontier/reference/gallery/watershed-alluvium.jpg)
+
+*Two banks of the same seed 997 stream, captured at 1920×1080 with 4× MSAA.
+The left bank is at (−777, 194.5, 985). The right bank is at (−1205, 252.7,
+1209), looking down the steeper reach toward the meadow.*
+
+New Watershed and Highlands worlds sort sand, soil and stone into deposits
+according to the channel grade. The same patches extend through the shallows
+and onto low banks. A cobble occupies several native cells at 6.25 cm, so
+digging into it exposes its actual material. Existing saves select their
+original bed and bank generation before terrain, vegetation or edits load.
 
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 

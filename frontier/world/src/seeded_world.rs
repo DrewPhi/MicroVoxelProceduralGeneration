@@ -286,6 +286,7 @@ pub(crate) struct Reach {
     pub(crate) width: f64,
     pub(crate) width_b: f64,
     pub(crate) depth: f64,
+    grade: f64,
     valley_radius: f64,
     pub(crate) lake: bool,
     pub(crate) owner: [i64; 2],
@@ -488,6 +489,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                 reaches.push(Reach {
                     a,
                     b: lake_end,
+                    grade: 0.,
                     width,
                     width_b: width,
                     depth,
@@ -598,9 +600,17 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                     let segment_width = widths[segment as usize];
                     let segment_width_b = widths[segment as usize + 1];
                     let widest = segment_width.max(segment_width_b);
+                    let a = points[segment as usize];
+                    let b = points[segment as usize + 1];
+                    let length = (a.x - b.x).hypot(a.z - b.z);
                     reaches.push(Reach {
-                        a: points[segment as usize],
-                        b: points[segment as usize + 1],
+                        a,
+                        b,
+                        grade: if length > 0. {
+                            ((a.stage - b.stage) / length).max(0.)
+                        } else {
+                            0.
+                        },
                         width: segment_width,
                         width_b: segment_width_b,
                         depth,
@@ -664,11 +674,22 @@ fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
         r.a.stage + t * (r.b.stage - r.a.stage),
     )
 }
+#[derive(Clone, Copy)]
+struct ChannelMargin {
+    bank_distance: f64,
+    stage: f64,
+    // Distance in bankfull radii and hydraulic grade at the nearest reach.
+    width_fraction: f64,
+    grade: f64,
+    lake: bool,
+}
+
 struct Hydrography {
     land: Land,
     ground: f64,
     water: Option<f64>,
     riparian: bool,
+    channel: Option<ChannelMargin>,
 }
 
 // Height probes need the same channel bed and hydraulic stage as material
@@ -680,7 +701,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
     let watershed = p.recipe.uses_watersheds();
     let relief = p.amplitude / 1000.;
     let land_water_ceiling = (l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.);
-    let mut nearest_bank: Option<(f64, f64)> = None;
+    let mut nearest_bank: Option<ChannelMargin> = None;
     if p.amplitude > 0. {
         let region = region(seed, p, x, z);
         let mut weighted_ground = ground;
@@ -722,8 +743,14 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
                 // Compare the final combined bed against this stage after blending.
                 let bank_width = (width * 4.5).max(28. * p.horizontal_scale / 1800.);
                 let distance = d / bank_width;
-                if distance < 1. && nearest_bank.is_none_or(|(best, _)| distance < best) {
-                    nearest_bank = Some((distance, stage.min(land_water_ceiling)));
+                if distance < 1. && nearest_bank.is_none_or(|best| distance < best.bank_distance) {
+                    nearest_bank = Some(ChannelMargin {
+                        bank_distance: distance,
+                        stage: stage.min(land_water_ceiling),
+                        width_fraction: d / width,
+                        grade: r.grade,
+                        lake: r.lake,
+                    });
                 }
             }
             if d < width {
@@ -789,7 +816,8 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
                 .min((ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.))
         });
     }
-    let riparian = nearest_bank.is_some_and(|(_, stage)| {
+    let riparian = nearest_bank.is_some_and(|bank| {
+        let stage = bank.stage;
         stage > 0. && (stage - 2. * relief..=stage + 7. * relief).contains(&ground)
     });
     Hydrography {
@@ -797,6 +825,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
         ground,
         water: water.filter(|w| *w > ground),
         riparian,
+        channel: nearest_bank,
     }
 }
 
@@ -819,11 +848,16 @@ pub(super) fn column_tops(seed: u64, p: FbmParams, cx: i64, cz: i64) -> [i64; 2]
 }
 
 pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
+    site_fields(seed, p, x, z).0
+}
+
+fn site_fields(seed: u64, p: FbmParams, x: f64, z: f64) -> (SeededFields, Option<ChannelMargin>) {
     let Hydrography {
         land: l,
         ground,
         water,
         riparian,
+        channel,
     } = hydrography::<true>(seed, p, x, z);
     let [temperature, moisture] = climate(seed, p, x, z);
     let effective_temperature = temperature - 0.00019 * ground.max(0.);
@@ -846,21 +880,83 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
     } else {
         SeededBiome::Plains
     };
-    SeededFields {
-        continentalness: l.continental,
-        temperature: effective_temperature,
-        moisture,
-        mountain: l.mountain,
-        biome,
-        ground_height_m: ground,
-        water_height_m: water,
-    }
+    (
+        SeededFields {
+            continentalness: l.continental,
+            temperature: effective_temperature,
+            moisture,
+            mountain: l.mountain,
+            biome,
+            ground_height_m: ground,
+            water_height_m: water,
+        },
+        channel,
+    )
 }
 pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
-    column_from_fields(seed, p, x, z, fields(seed, p, x, z))
+    let (fields, channel) = site_fields(seed, p, x, z);
+    column_from_fields(seed, p, x, z, fields, channel)
 }
 
-fn column_from_fields(seed: u64, p: FbmParams, x: f64, z: f64, f: SeededFields) -> TerrainColumn {
+// Shallow sand bars break into stony riffles as the hydraulic grade rises.
+// Deposits cross the waterline only in low, connected patches near a reach.
+fn river_sediment(
+    seed: u64,
+    p: FbmParams,
+    x: f64,
+    z: f64,
+    fields: SeededFields,
+    channel: ChannelMargin,
+    wet: bool,
+) -> Option<Material> {
+    let relief = p.amplitude / 1000.;
+    let elevation = fields.ground_height_m - channel.stage;
+    if channel.width_fraction > 1.18
+        || (!wet && (elevation < -0.08 * relief || elevation > 0.58 * relief))
+    {
+        return None;
+    }
+    let scale = 1800. / p.horizontal_scale;
+    let (x, z) = (x * scale, z * scale);
+    let bar =
+        0.70 * noise(x / 24., z / 24., seed ^ 0x51f1) + 0.30 * noise(x / 7., z / 7., seed ^ 0x51f2);
+    if !wet && (bar < -0.04 || elevation > (0.24 + 0.38 * bar) * relief) {
+        return None;
+    }
+    let grains = noise(x / 1.8, z / 1.8, seed ^ 0x51f3);
+    let grade = if channel.lake {
+        0.
+    } else {
+        // Grade is dimensionless. Normalize for the recipe's horizontal and
+        // vertical scaling so equivalent valleys expose the same deposits.
+        channel.grade / (scale * relief).max(1e-9)
+    };
+    let energy = smooth((grade - 0.012) / 0.13);
+    let stone = 0.83 * energy + 0.66 * bar + 0.18 * grains;
+    // A fast reach packs more cobbles together. Small pockets between them
+    // retain sand even at high grades. One cobble spans several native cells.
+    let cobble = stone > 0.20
+        && noise(x / 0.44, z / 0.44, seed ^ 0x51f4) > (0.68 - 1.25 * stone).max(-0.55);
+    let sand = bar + 0.19 * grains + 0.55 * energy;
+    Some(if cobble {
+        Material::Stone
+    } else if sand > 0.08
+        || (sand > -0.32 && sand + 0.20 * noise(x / 0.65, z / 0.65, seed ^ 0x51f5) > -0.12)
+    {
+        Material::Sand
+    } else {
+        Material::Soil
+    })
+}
+
+fn column_from_fields(
+    seed: u64,
+    p: FbmParams,
+    x: f64,
+    z: f64,
+    f: SeededFields,
+    channel: Option<ChannelMargin>,
+) -> TerrainColumn {
     let [ground_top, visible_top] = quantized_tops(f.ground_height_m, f.water_height_m);
     let mut surface = match f.biome {
         SeededBiome::Ocean | SeededBiome::Coast => Material::Sand,
@@ -949,15 +1045,21 @@ fn column_from_fields(seed: u64, p: FbmParams, x: f64, z: f64, f: SeededFields) 
             Material::Soil
         };
     }
+    let deposit = if p.alluvial_deposits && !p.legacy_riverbanks {
+        channel.and_then(|c| river_sediment(seed, p, x, z, f, c, visible_top > ground_top))
+    } else {
+        None
+    };
+    let surface = deposit.unwrap_or(surface);
     TerrainColumn {
         ground_top,
         visible_top,
         ground_surface: surface,
-        ground_subsurface: if surface == Material::Sand {
+        ground_subsurface: deposit.unwrap_or(if surface == Material::Sand {
             Material::Sand
         } else {
             Material::Soil
-        },
+        }),
     }
 }
 
@@ -972,8 +1074,8 @@ pub(super) fn landscape(
 ) -> (TerrainColumn, [f32; 3]) {
     let x = (cx as f64 + 0.5) * voxel_size();
     let z = (cz as f64 + 0.5) * voxel_size();
-    let f = fields(seed, p, x, z);
-    let col = column_from_fields(seed, p, x, z, f);
+    let (f, channel) = site_fields(seed, p, x, z);
+    let col = column_from_fields(seed, p, x, z, f, channel);
     let mat = col.top_material();
     let scale = 1800. / p.horizontal_scale;
     let (nx, nz) = (x * scale, z * scale);
@@ -1196,6 +1298,51 @@ mod tests {
         assert!(dry_grassy_bank > 20, "dry grassy banks {dry_grassy_bank}");
         assert!(steppe_grass > steppe_soil && steppe_soil > 0);
         assert!(desert_sand > 100);
+    }
+
+    #[test]
+    fn alluvial_source_sorts_native_beds_and_keeps_the_previous_water_stage() {
+        let params = FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..Default::default()
+        };
+        let fresh = FbmTerrain::new(997, params).unwrap();
+        let old = FbmTerrain::new(
+            997,
+            FbmParams {
+                alluvial_deposits: false,
+                ..params
+            },
+        )
+        .unwrap();
+        assert_eq!((old.source_version(), fresh.source_version()), (2, 3));
+        for (center, dominant) in [
+            ([-791., 987.], Material::Sand),
+            ([-1194., 1223.], Material::Stone),
+        ] {
+            let mut wet = 0;
+            let mut deposits = 0;
+            let mut exposed_bank = 0;
+            for dz in -28..=28 {
+                for dx in -28..=28 {
+                    let [x, z] = [center[0] + f64::from(dx), center[1] + f64::from(dz)]
+                        .map(|v| (v / voxel_size()).floor() as i64);
+                    let a = fresh.column_cells(x, z);
+                    let b = old.column_cells(x, z);
+                    assert_eq!((a.ground_top, a.visible_top), (b.ground_top, b.visible_top));
+                    if a.visible_top > a.ground_top {
+                        assert_eq!(b.ground_surface, Material::Soil);
+                        assert_eq!(a.material(a.ground_top), Material::Water);
+                        assert_eq!(a.material(a.visible_top), Material::Air);
+                        wet += 1;
+                        deposits += usize::from(a.material(a.ground_top - 1) == dominant);
+                    } else if a.ground_surface != b.ground_surface {
+                        exposed_bank += 1;
+                    }
+                }
+            }
+            assert!(wet > 100 && deposits > wet / 2 && exposed_bank > 0);
+        }
     }
 
     #[test]

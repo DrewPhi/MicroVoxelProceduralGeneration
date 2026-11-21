@@ -81,6 +81,9 @@ pub struct FbmParams {
     pub recipe: FbmRecipe,
     /// Restore the original bank profile for saved version-one Watershed and Highlands worlds.
     pub legacy_riverbanks: bool,
+    /// Give channel beds and the low bank their source-derived sediment.
+    /// Version-two Watershed and Highlands saves use their original materials.
+    pub alluvial_deposits: bool,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
@@ -97,6 +100,7 @@ impl Default for FbmParams {
         Self {
             recipe: FbmRecipe::Legacy,
             legacy_riverbanks: false,
+            alluvial_deposits: true,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -161,7 +165,15 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
-            FbmRecipe::Watershed | FbmRecipe::Highlands => if self.params.legacy_riverbanks { 1 } else { 2 },
+            FbmRecipe::Watershed | FbmRecipe::Highlands => {
+                if self.params.legacy_riverbanks {
+                    1
+                } else if self.params.alluvial_deposits {
+                    3
+                } else {
+                    2
+                }
+            }
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
