@@ -184,6 +184,7 @@ fn pack_water_bed(cells: i64, material: Material) -> u32 {
 // Positive-Y river roofs can carry four bed samples in vertex order (z, then x).
 // Homogeneous beds retain the regular water encoding and merge across flat runs.
 const SEDIMENT_ROOF: u32 = 0xa7;
+pub(crate) const SNOW_ROOF: u32 = 0x83;
 fn sediment_code(material: Material) -> Option<u32> {
     match material {
         Material::Soil => Some(0),
@@ -818,6 +819,58 @@ impl Generator<'_> {
         Ok(roof)
     }
 
+    // A coarse voxel preserves the terrain silhouette; its top can cross a
+    // native snow margin. Sample that margin only on mixed alpine patches.
+    // The 25 probes are shared across all roofs in this source patch.
+    fn snow_profile(
+        &mut self,
+        runs: &mut HashMap<[i64; 2], Run>,
+        x: i64,
+        z: i64,
+        pitch: i64,
+    ) -> Result<u32, String> {
+        let mut rows = [0u32; 5];
+        let mut colors = [[0u32; 3]; 2];
+        let mut counts = [0u32; 2];
+        for (k, row) in rows.iter_mut().enumerate() {
+            for j in 0..5 {
+                let p = [x + j * (pitch / 4), z + k as i64 * (pitch / 4)];
+                let run = self.block_run(runs, p)?;
+                let snow = run.top_material == Material::Snow;
+                *row |= u32::from(snow) << j;
+                if snow || run.top_material == Material::Stone {
+                    let group = usize::from(snow);
+                    counts[group] += 1;
+                    for channel in 0..3 {
+                        colors[group][channel] += (run.paint >> (8 + channel * 6)) & 63;
+                    }
+                }
+            }
+        }
+        if counts.contains(&0) {
+            return Ok(0);
+        }
+        let cell = voxel_size();
+        let mut profile = [[0.; 4]; 5];
+        profile[0] = [
+            (x as f64 * cell) as f32,
+            (z as f64 * cell) as f32,
+            (4. / (pitch as f64 * cell)) as f32,
+            -9.,
+        ];
+        for group in 0..2 {
+            for channel in 0..3 {
+                profile[1 + group][channel] =
+                    colors[group][channel] as f32 / (63 * counts[group]) as f32;
+            }
+        }
+        profile[3][0] = (rows[0] | rows[1] << 5 | rows[2] << 10) as f32;
+        profile[3][1] = (rows[3] | rows[4] << 5) as f32;
+        let id = self.face_profiles.len() as u32;
+        self.face_profiles.push(profile);
+        Ok(id)
+    }
+
     // Anchor coarse blocks at lattice nodes. A regular node owns half a cell
     // on either side, so its two halves also agree across a tile boundary.
     // A finer shared edge introduces smaller blocks for the adjacent half row.
@@ -836,9 +889,13 @@ impl Generator<'_> {
         // Shorelines and narrow ridge crests gain a half-pitch lattice while
         // the outer half row keeps the tile's negotiated boundary spacing.
         let mut interior_pitch = pitch;
+        let mut snow_profile = 0;
         if pitch >= 4 && pitch as f64 * voxel_size() >= 4. {
             let mut heights = [0; 4];
             let mut shoreline = false;
+            let center_material = center.material(center.height - 1);
+            let mut snow = center_material == Material::Snow;
+            let mut rock = center_material == Material::Stone;
             for (height, sample) in heights.iter_mut().zip([
                 [x, z],
                 [x + pitch, z],
@@ -847,7 +904,19 @@ impl Generator<'_> {
             ]) {
                 let node = self.block_run(runs, sample)?;
                 *height = node.top;
+                snow |= node.top_material == Material::Snow;
+                rock |= node.top_material == Material::Stone;
                 shoreline |= (node.top > node.ground) != (center.height > center.ground_height);
+            }
+            if snow
+                && rock
+                && pitch as f64 * voxel_size() >= 12.
+                && self
+                    .world
+                    .fbm_terrain()
+                    .is_some_and(|t| t.params().recipe == FbmRecipe::Highlands)
+            {
+                snow_profile = self.snow_profile(runs, x, z, pitch)?;
             }
             if shoreline || needs_finer_blocks(heights, center.height, pitch) {
                 interior_pitch = half;
@@ -862,7 +931,12 @@ impl Generator<'_> {
                 let run = this.block_run(runs, sample)?;
                 top_range[0] = top_range[0].min(run.top);
                 top_range[1] = top_range[1].max(run.top);
-                let roof = this.block_roof(&xx, &zz, run)?;
+                let mut roof = this.block_roof(&xx, &zz, run)?;
+                if snow_profile != 0 && matches!(run.top_material, Material::Snow | Material::Stone)
+                {
+                    roof.material = SNOW_ROOF;
+                    roof.profile_index = snow_profile;
+                }
                 this.append_quads([roof])?;
                 rect_edges(edges, xx, zz, run, None);
                 Ok(())
@@ -1523,6 +1597,51 @@ mod tests {
                 .unwrap();
         merge_quads(&mut tile);
         tile
+    }
+
+    #[test]
+    fn sheltered_snow_margin_matches_native_columns_across_coarse_roofs() {
+        let world = World::fbm(
+            673,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let min = [-2432 * 16, -1792 * 16];
+        let tile = mixed_tile(Mode::Blocks, &world, min, 4096, 1024, [1024; 4]);
+        let mut roofs = 0;
+        let mut checked = std::collections::BTreeSet::new();
+        for q in tile.native_quads.iter().filter(|q| q.material == SNOW_ROOF) {
+            roofs += 1;
+            assert_eq!(q.axis_sign, 1);
+            if !checked.insert(q.profile_index) {
+                continue;
+            }
+            let p = tile.face_profiles[q.profile_index as usize];
+            assert_eq!(p[0][3], -9.);
+            let bits = p[3][0] as u32 | (p[3][1] as u32) << 15;
+            for z in 0..5 {
+                let row = bits >> (5 * z);
+                for x in 0..5 {
+                    let at = [p[0][0] + x as f32 / p[0][2], p[0][1] + z as f32 / p[0][2]];
+                    let [cx, cz] = std::array::from_fn(|i| {
+                        min[i] + (f64::from(at[i]) / voxel_size()).round() as i64
+                    });
+                    let c = world.column(cx, cz);
+                    assert_eq!(
+                        (row >> x) & 1 != 0,
+                        c.material_without_fluid(c.height_cells() - 1) == Material::Snow
+                    );
+                }
+            }
+        }
+        assert!(checked.len() >= 2 && roofs >= checked.len());
+        assert!(crate::spatial_appearance::valid_table(&tile.face_profiles));
+        let mut corrupt = tile.face_profiles;
+        corrupt[*checked.first().unwrap() as usize][3][0] = 32768.;
+        assert!(!crate::spatial_appearance::valid_table(&corrupt));
     }
 
     #[test]

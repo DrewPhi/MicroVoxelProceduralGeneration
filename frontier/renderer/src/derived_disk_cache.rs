@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 25;
+const REPRESENTATION_VERSION: u64 = 26;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -1016,6 +1016,22 @@ fn validate(t: &GeometryTile) -> bool {
                             || (q.axis_sign == 1
                                 && crate::adaptive_geometry::distant_voxels::valid_sediment_roof(
                                     q.material,
+                                ))
+                            || (q.axis_sign == 1
+                                && q.material
+                                    == crate::adaptive_geometry::distant_voxels::SNOW_ROOF
+                                && t.face_profiles.get(q.profile_index as usize).is_some_and(
+                                    |p| {
+                                        if p[0][3] == -6. {
+                                            let base = i64::from(q.profile_index) + p[0][0] as i64;
+                                            usize::try_from(base)
+                                                .ok()
+                                                .and_then(|i| t.face_profiles.get(i))
+                                                .is_some_and(|b| b[0][3] == -9.)
+                                        } else {
+                                            p[0][3] == -9.
+                                        }
+                                    },
                                 ))
                             || (q.material & 0xfc0000f0 == 0x10 && q.material & 15 < 10)
                             || ((q.material & 0xfcf000ff == 0x27

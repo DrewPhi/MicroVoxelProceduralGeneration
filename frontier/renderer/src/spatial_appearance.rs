@@ -207,6 +207,21 @@ pub(crate) fn valid_table(table: &[Profile]) -> bool {
                     return false;
                 }
             }
+            -9. => {
+                if p[0][2] <= 0.
+                    || p[1..3]
+                        .iter()
+                        .any(|rgb| rgb[3] != 0. || rgb[..3].iter().any(|v| !(0. ..=1.).contains(v)))
+                    || [32767., 1023.]
+                        .into_iter()
+                        .zip(p[3])
+                        .any(|(max, v)| v.fract() != 0. || !(0. ..=max).contains(&v))
+                    || p[3][2..] != [0.; 2]
+                    || p[4] != [0.; 4]
+                {
+                    return false;
+                }
+            }
             -8. => {
                 let [grade, uniform, reserved, _] = p[0];
                 if grade.fract() != 0. || !(0. ..=3.).contains(&grade) || reserved != 0.

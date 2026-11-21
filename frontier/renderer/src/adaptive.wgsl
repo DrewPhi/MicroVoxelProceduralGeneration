@@ -422,6 +422,8 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         let height=select(extent.y,extent.x,axis==0u)*VOXELS_PER_METER;
         out.color=vec3(select(0.,height,position.y==anchor.y),height,0.);
         out.surface_word=material;
+    } else if material==0x83u {
+        out.surface_word=material;
     } else if (material&255u)==0xa7u {
         // The native face corners run around the roof in z, then x.
         let code=(material>>(8u+2u*corner))&3u;
@@ -508,6 +510,22 @@ fn detail_window(cell:vec2<f32>,side:vec2<f32>,shift:vec2<f32>,transition:vec2<f
     let previous=transition.y*smoothstep(1.,margin,min(old_edge.x,old_edge.y));
     return mix(min(previous,weight),weight,transition.x);
 }
+// Local snow and exposed rock on the same upward-facing coarse voxel.
+fn snow_roof_color(profile:u32,local:vec2<f32>,footprint:vec2<f32>)->vec3<f32> {
+    var id=profile;
+    let tag=face_profiles[profile].top;
+    if tag.w==-6. {id=u32(i32(profile)+i32(tag.x));}
+    let header=face_profiles[id].top;
+    let grid=clamp((local-header.xy)*header.z,vec2(0.),vec2(4.));
+    let at=min(vec2<u32>(grid),vec2(3u));
+    let f=grid-vec2<f32>(at);
+    let bits=face_profiles[id].pz.xy;
+    let cells=(u32(bits.x)|(u32(bits.y)<<15u))>>(5u*at.y+at.x);
+    let mask=mix(mix(f32(cells&1u),f32((cells>>1u)&1u),f.x),
+                 mix(f32((cells>>5u)&1u),f32((cells>>6u)&1u),f.x),f.y);
+    let aa=clamp(.5*max(footprint.x,footprint.y)*header.z,.04,.45);
+    return mix(face_profiles[id].px.rgb,face_profiles[id].nx.rgb,smoothstep(.5-aa,.5+aa,mask));
+}
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
@@ -523,14 +541,18 @@ fn shade(input: VertexOut) -> vec4<f32> {
     }
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
-    let wall_footprint=fwidth(in.local.y)*VOXELS_PER_METER;
+    let dx=dpdx(in.local); let dy=dpdy(in.local);
+    let wall_footprint=(abs(dx.y)+abs(dy.y))*VOXELS_PER_METER;
+    if in.surface_word==0x83u {
+        in.color=snow_roof_color(in.profile_index,in.local.xz,abs(dx.xz)+abs(dy.xz));
+        in.surface_word=0u;
+    }
     var skin_color=in.color;
     if (in.surface_word&LAYERED_WALL)!=0u {
         skin_color=cliff_skin(in.surface_word);
         in.color=cliff_albedo(in.surface_word,skin_color,in.color.xy,wall_footprint);
         in.surface_word=0u;
     }
-    let dx=dpdx(in.local); let dy=dpdy(in.local);
     var sky_exposure=1.;
     var filter_weight=0.;
     var visible_faces=vec3(0.);

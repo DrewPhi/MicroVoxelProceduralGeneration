@@ -175,6 +175,13 @@ valley, including its skyline, ground colors and sun direction. A worker
 refreshes that panorama while you move. Player-built structures enter the
 reflection within the native ray's reach.*
 
+The rowan on the opposite bank stands 125 m from this camera. Streamed trees
+within 320 m can now shade the terrain using their occupied wood and crown
+columns. The detailed plant shadow map still resolves individual branches
+near the player. In a close view of that rowan, the new shadow covered all
+250 visible ground pixels that a ray to the sun found behind native tree
+voxels. All 331,776 scene depth pixels matched the previous renderer.
+
 To visit this riverbank, run the following from `frontier/`.
 
 ```sh
@@ -199,6 +206,14 @@ temperature rules. A survey of 65,536 columns across four Highlands seeds
 found identical bed and water elevations before and after the snow change.
 On seed 673, 287 of 315 sampled mountain columns above 2,300 m carried snow
 in the new world. The older source had 298 snowy columns at those elevations.
+
+A snow patch can cross the top of a distant voxel. Mixed rock and snow
+patches use a 5×5 grid of native material samples. On the shaded valley
+floor of seed 673, the visible snow overlapped 92% of the union of the
+rendered and source footprints, up from 80% at the same flight camera.
+Across 462,654 source probes on mixed 64 m patches from five Highlands
+seeds, this sampling reduced snow classification errors from 23.3% to 5.0%
+compared with nearest-corner sampling.
 
 ![The same stretch of shallow whitewater before and after. The dark rectangular patch on the left disappears when the native terrain tile carries its own depth and sediment.](frontier/reference/gallery/highlands-rapids.jpg)
 
