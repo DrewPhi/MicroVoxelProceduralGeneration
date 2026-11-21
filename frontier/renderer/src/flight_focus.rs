@@ -14,14 +14,88 @@ struct Hit {
 
 #[derive(Default)]
 pub(super) struct Focus {
-    view: Option<(Camera, f32)>,
+    view: Option<(Camera, [u32; 2], f64)>,
     hits: Vec<Hit>,
     skyline_count: usize,
 }
 
+/// A foreground shelf can lie just below a farther summit on the same ray.
+/// Either shelf can own the rendered silhouette while square roofs are coarse.
+fn skyline_crests(
+    end: f64,
+    blocks: bool,
+    angular_tolerance: f64,
+    probes: &mut Vec<(f64, f64)>,
+    mut slope: impl FnMut(f64) -> f64,
+) -> [Option<f64>; 2] {
+    let mut range = 64_f64.min(end);
+    let mut best = (range, f64::NEG_INFINITY);
+    probes.clear();
+    loop {
+        let elevation = slope(range);
+        if blocks {
+            probes.push((range, elevation));
+        }
+        if elevation > best.1 {
+            best = (range, elevation);
+        }
+        if range >= end {
+            break;
+        }
+        range = (range + (range * 0.045).clamp(32., 96.)).min(end);
+    }
+    if !blocks {
+        return [Some(best.0), None];
+    }
+    // Choose a separate local maximum. Samples on the shoulder of the
+    // winning ridge often outrank a genuine second ridge farther along.
+    let separation = (best.0 * 0.10).max(120.);
+    let mut alternate = None;
+    for (i, &(r, e)) in probes.iter().enumerate() {
+        if (r - best.0).abs() < separation
+            || i > 0 && probes[i - 1].1 > e
+            || i + 1 < probes.len() && probes[i + 1].1 > e
+        {
+            continue;
+        }
+        if alternate.is_none_or(|(_, previous)| e > previous) {
+            alternate = Some((r, e));
+        }
+    }
+    let mut refine = |(center, elevation): (f64, f64)| {
+        let span = (center * 0.045).clamp(32., 96.);
+        let mut crest = (center, elevation);
+        for tap in [-3, -2, -1, 1, 2, 3] {
+            let d = (center + f64::from(tap) * span * 0.25).clamp(1., end);
+            let e = slope(d);
+            if e > crest.1 {
+                crest = (d, e);
+            }
+        }
+        crest
+    };
+    let primary = refine(best);
+    let Some(secondary) = alternate.map(refine) else {
+        return [Some(primary.0), None];
+    };
+    if (primary.1 - secondary.1).abs() <= angular_tolerance {
+        [Some(primary.0), Some(secondary.0)]
+    } else {
+        [
+            Some(if primary.1 >= secondary.1 {
+                primary.0
+            } else {
+                secondary.0
+            }),
+            None,
+        ]
+    }
+}
+
 impl Focus {
-    fn survey(&mut self, world: &World, camera: &Camera, aspect: f32) {
-        self.view = Some((*camera, aspect));
+    fn survey(&mut self, world: &World, camera: &Camera, viewport: [u32; 2], pixel_error: f64) {
+        let aspect = f64::from(viewport[0]) / f64::from(viewport[1].max(1));
+        self.view = Some((*camera, viewport, pixel_error));
         self.hits.clear();
         self.skyline_count = 0;
         let eye = camera.position;
@@ -40,10 +114,13 @@ impl Focus {
         // Those summits still form the terrain's most visible boundary.
         let blocks = crate::adaptive_geometry::distant_voxels::Mode::current()
             == crate::adaptive_geometry::distant_voxels::Mode::Blocks;
-        let half_samples = if blocks { 8 } else { 5 };
+        let half_samples = if blocks { 16 } else { 5 };
+        let view_fraction = if blocks { 0.99 } else { 0.95 };
+        let angular_tolerance = 4. * half_height * pixel_error / f64::from(viewport[1].max(1));
+        let mut probes = Vec::with_capacity(128);
         for i in -half_samples..=half_samples {
             let across =
-                f64::from(i) / f64::from(half_samples) * 0.95 * f64::from(aspect) * half_height;
+                f64::from(i) / f64::from(half_samples) * view_fraction * aspect * half_height;
             let d = forward + right * across;
             let length = d.x.hypot(d.z);
             if length < 0.1 {
@@ -64,58 +141,35 @@ impl Focus {
                 let height = world.height_m(p.x, p.y);
                 ((height - eye.y) / distance, p, height)
             };
-            let mut range = 64_f64.min(end);
-            let mut best = range;
-            let mut best_slope = f64::NEG_INFINITY;
-            loop {
-                let (slope, _, _) = terrain(range);
-                if slope > best_slope {
-                    best_slope = slope;
-                    best = range;
-                }
-                if range >= end {
-                    break;
-                }
-                range = (range + (range * 0.045).clamp(32., 96.)).min(end);
-            }
-            if blocks {
-                // Refine around the angular maximum. A narrow crest between
-                // the coarse probes can belong to the neighboring terrain tile.
-                let span = (best * 0.045).clamp(32., 96.);
-                let center = best;
-                for tap in [-3, -2, -1, 1, 2, 3] {
-                    let distance = (center + f64::from(tap) * span * 0.25).clamp(1., end);
-                    let (slope, _, _) = terrain(distance);
-                    if slope > best_slope {
-                        best_slope = slope;
-                        best = distance;
-                    }
-                }
-            }
-            let (_, p, h) = terrain(best);
-            let relative = DVec3::new(p.x - eye.x, h - eye.y, p.y - eye.z);
-            let mut grade = 1.;
-            if blocks {
-                // A coarse column on a cliff can shift its visible height by
-                // several times its horizontal sampling error.
-                let radius = (best * 0.008).clamp(6., 32.);
-                grade = [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y]
-                    .into_iter()
-                    .map(|axis| {
-                        let q = p + axis * radius;
-                        (world.height_m(q.x, q.y) - h).abs() / radius
-                    })
-                    .fold(0.0, f64::max);
-            }
-            self.hits.push(Hit {
-                column: p.to_array().map(|v| (v / voxel_size()).floor() as i64),
-                depth: if blocks {
-                    relative.dot(forward).max(1.)
-                } else {
-                    best
-                },
-                grade,
+            let crests = skyline_crests(end, blocks, angular_tolerance, &mut probes, |distance| {
+                terrain(distance).0
             });
+            for best in crests.into_iter().flatten() {
+                let (_, p, h) = terrain(best);
+                let relative = DVec3::new(p.x - eye.x, h - eye.y, p.y - eye.z);
+                let mut grade = 1.;
+                if blocks {
+                    // A coarse column on a cliff can shift its visible height by
+                    // several times its horizontal sampling error.
+                    let radius = (best * 0.008).clamp(6., 32.);
+                    grade = [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y]
+                        .into_iter()
+                        .map(|axis| {
+                            let q = p + axis * radius;
+                            (world.height_m(q.x, q.y) - h).abs() / radius
+                        })
+                        .fold(0.0, f64::max);
+                }
+                self.hits.push(Hit {
+                    column: p.to_array().map(|v| (v / voxel_size()).floor() as i64),
+                    depth: if blocks {
+                        relative.dot(forward).max(1.)
+                    } else {
+                        best
+                    },
+                    grade,
+                });
+            }
         }
         self.skyline_count = self.hits.len();
         let base = [
@@ -137,8 +191,7 @@ impl Focus {
         ];
         for &(h, v) in base.iter().chain(foreground.iter().filter(|_| blocks)) {
             let direction =
-                (forward + right * (h * f64::from(aspect) * half_height) + up * (v * half_height))
-                    .normalize();
+                (forward + right * (h * aspect * half_height) + up * (v * half_height)).normalize();
             let above = |p: DVec3| p.y > world.height_m(p.x, p.z);
             let mut lo = 0.;
             let mut hi = 40_f64.min(far);
@@ -181,18 +234,18 @@ impl Focus {
         if candidates.is_empty() || budget == 0 {
             return None;
         }
-        let aspect = viewport[0] as f32 / viewport[1].max(1) as f32;
         let pixel_angle =
             2. * (f64::from(camera.fov_y).to_radians() * 0.5).tan() / f64::from(viewport[1].max(1));
-        if self.view.is_none_or(|(old, a)| {
-            a != aspect
+        if self.view.is_none_or(|(old, size, target)| {
+            size != viewport
+                || target != pixel_error
                 || old.fov_y != camera.fov_y
                 || old.far != camera.far
                 || old.position.distance_squared(camera.position) > 48. * 48.
                 || old.direction().dot(camera.direction()) < 0.997
                 || (old.roll - camera.roll).abs() > 0.08
         }) {
-            self.survey(world, camera, aspect);
+            self.survey(world, camera, viewport, pixel_error);
         }
         let blocks = crate::adaptive_geometry::distant_voxels::Mode::current()
             == crate::adaptive_geometry::distant_voxels::Mode::Blocks;
@@ -251,6 +304,20 @@ impl Focus {
 mod tests {
     use super::*;
     use frontier_world::FbmParams;
+    #[test]
+    fn skyline_survey_keeps_competing_ridges_in_separate_tiles() {
+        let mut probes = Vec::new();
+        let sample =
+            |r: f64| (0.30 - ((r - 640.) / 900.).powi(2)).max(0.294 - ((r - 1720.) / 830.).powi(2));
+        let [Some(a), Some(b)] = skyline_crests(3200., true, 0.01, &mut probes, sample) else {
+            panic!("expected both crests");
+        };
+        assert!((a - 640.).abs() < 16. && (b - 1720.).abs() < 16.);
+        let [Some(a), None] = skyline_crests(3200., true, 0.001, &mut probes, sample) else {
+            panic!("expected the higher crest only");
+        };
+        assert!((a - 640.).abs() < 16.);
+    }
     #[test]
     fn survey_prioritizes_visible_approach_and_releases_the_scheduler_on_foot() {
         let world = World::fbm(

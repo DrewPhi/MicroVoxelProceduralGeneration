@@ -170,6 +170,12 @@ Across four seeds, 57,024 samples per pass ran 5–8% faster at 6.25 cm and
 5–7% faster at 10 cm in alternating release CPU measurements. Every height
 checksum matched the full-column path on both grids.
 
+The pilot survey follows 33 directions and tracks a second crest when it
+could compete for the same skyline. Fixed-pose p95 after 12 seconds was
+5.67, 3.63, 1.24, 4.09 and 0.68 px on seeds 29123, 673, 8123, 19 and
+40961. The first two improved and the other three rose slightly. On moving
+seed 29123 the endpoint still measured 6.52 px, with frame p95 of 12.23 ms.
+
 The block renderer also probes each patch center against its four corner
 heights. A sharp bend or a shoreline gets smaller square columns inside the
 patch. On the same three routes, this gave ridgeline p95 of **4.96 px** on
