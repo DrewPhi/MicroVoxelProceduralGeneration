@@ -419,20 +419,20 @@ fn proxy_position(address:u32)->vec3<f32> {
     return native_face(vertex,anchor,extent,axis_sign,material,profile_index);
 }
 @vertex fn vs_compact_native(@builtin(vertex_index) vertex:u32,
-    @location(0) xz:vec2<u32>,@location(1) y:f32,@location(2) long_extent:f32,
-    @location(3) axis_material:u32,@location(4) width_profile:u32)->VertexOut {
+    @location(0) address:vec4<u32>,@location(1) axis_material:u32,@location(2) width_profile:u32)->VertexOut {
     camera=draw_camera;
-    let axis_sign=axis_material>>29u;
     let profile=width_profile&0x1ffffu;
-    let address=vec3<u32>(xz,width_profile>>17u);
-    var values=vec3<f32>(address)*NATIVE_VOXEL_METERS;
+    let width_address=width_profile>>17u;
+    var values=vec4<f32>(address)*NATIVE_VOXEL_METERS;
+    var width=f32(width_address)*NATIVE_VOXEL_METERS;
     if (axis_material&0x10000000u)!=0u {
         let base=profile*20u;
-        values=vec3(proxy_positions[base+address.x],proxy_positions[base+address.y],proxy_positions[base+address.z]);
+        values=vec4(proxy_positions[base+address.x],proxy_positions[base+address.y],
+                    proxy_positions[base+address.z],proxy_positions[base+address.w]);
+        width=proxy_positions[base+width_address];
     }
-    let width=values.z;
-    let extent=select(vec2(long_extent,width),vec2(width,long_extent),(axis_sign&3u)==2u);
-    return native_face(vertex,vec3(values.x,y,values.y),extent,axis_sign,axis_material&0x0fffffffu,profile);
+    let y=bitcast<f32>(bitcast<u32>(values.z)|((axis_material&0x08000000u)<<4u));
+    return native_face(vertex,vec3(values.x,y,values.y),vec2(values.w,width),axis_material>>29u,axis_material&0x07ffffffu,profile);
 }
 @vertex fn vs_native_batch(@builtin(vertex_index) vertex:u32,
     @location(0) anchor:vec3<f32>,@location(1) extent:vec2<f32>,

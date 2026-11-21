@@ -208,7 +208,9 @@ struct Cluster {
 }
 impl Cluster {
     fn instance_stride(&self) -> u64 {
-        if self.compact_native || self.derived_proxy {
+        if self.compact_native {
+            16
+        } else if self.derived_proxy {
             20
         } else if self.indexed_proxy {
             40
@@ -716,8 +718,7 @@ impl AdaptiveGpu {
         let profile_attributes = wgpu::vertex_attr_array![3=>Uint32];
         let native_attributes =
             wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Uint32,4=>Uint32];
-        let compact_attributes =
-            wgpu::vertex_attr_array![0=>Uint16x2,1=>Float32,2=>Float32,3=>Uint32,4=>Uint32];
+        let compact_attributes = wgpu::vertex_attr_array![0=>Uint16x4,1=>Uint32,2=>Uint32];
         let proxy_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,3=>Float32x3,4=>Float32x3,5=>Uint32];
         let indexed_proxy_attributes =
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
@@ -2159,7 +2160,7 @@ impl AdaptiveGpu {
             compact = None;
         }
         let (vertex_bytes, kind) = if let Some(packed) = &compact {
-            (bytemuck::cast_slice(packed.faces.as_slice()), 4)
+            (bytemuck::cast_slice(packed.faces.as_slice()), 0)
         } else {
             for quad in &mut quads {
                 quad.profile_index += profile_base;
