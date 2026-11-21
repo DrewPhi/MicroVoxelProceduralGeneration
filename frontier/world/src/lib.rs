@@ -238,12 +238,10 @@ impl WorldColumn<'_> {
             y,
             z: self.z,
         };
-        let base = self.material_without_fluid(y);
-        if base == Material::Air && !self.world.edits.contains_key(&c) {
-            self.world.vegetation_voxel(c).map_or(base, |v| v.material)
-        } else {
-            base
-        }
+        self.world.material_over_source(c, || {
+            self.world
+                .source_with_column(c, self.height, self.terrain_column)
+        })
     }
     fn canonical_material(&self, y: i64) -> Material {
         self.world.compose_fluid(
@@ -460,9 +458,12 @@ impl World {
     /// Physical terrain/vegetation before live water composition. Air edits open
     /// a cell to fluid; solid edits always take precedence over fluid occupancy.
     pub fn material_without_fluid(&self, c: Cell) -> Material {
+        self.material_over_source(c, || self.source(c))
+    }
+    fn material_over_source(&self, c: Cell, source: impl FnOnce() -> Material) -> Material {
         self.edits.get(&c).copied().unwrap_or_else(|| {
-            let m = self.source(c);
-            if m == Material::Air {
+            let m = source();
+            if m == Material::Air && self.vegetation_enabled() {
                 self.vegetation_voxel(c).map_or(m, |v| v.material)
             } else {
                 m
@@ -731,13 +732,19 @@ impl World {
         h
     }
     fn source(&self, c: Cell) -> Material {
+        let (height, column) = self.source_column(c.x, c.z);
+        self.source_with_column(c, height, column)
+    }
+    fn source_column(&self, x: i64, z: i64) -> (i64, Option<terrain::TerrainColumn>) {
         let column = self
             .terrain
             .as_ref()
             .filter(|t| t.params().recipe.has_static_water())
-            .map(|t| t.column_cells(c.x, c.z));
-        let h = column.map_or_else(|| self.height_cells(c.x, c.z), |v| v.visible_top);
-        self.source_with_column(c, h, column)
+            .map(|t| t.column_cells(x, z));
+        (
+            column.map_or_else(|| self.height_cells(x, z), |v| v.visible_top),
+            column,
+        )
     }
     fn source_with_column(
         &self,
@@ -930,13 +937,19 @@ fn raycast_matching(
     }
     let mut distance = 0.0;
     let mut normal = [0; 3];
+    let mut column = None;
     loop {
         let cell = Cell {
             x: c[0],
             y: c[1],
             z: c[2],
         };
-        let material = world.material(cell);
+        let base = world.material_over_source(cell, || {
+            let (height, source) =
+                *column.get_or_insert_with(|| world.source_column(cell.x, cell.z));
+            world.source_with_column(cell, height, source)
+        });
+        let material = world.compose_fluid(cell, base);
         if accepts(material) {
             return Some(RayHit {
                 cell,
@@ -957,6 +970,9 @@ fn raycast_matching(
                     normal[i] = -(step[i] as i32);
                 }
                 c[i] = c[i].checked_add(step[i])?;
+                if i != 1 {
+                    column = None;
+                }
                 next[i] += delta[i];
             }
         }
@@ -1603,6 +1619,56 @@ mod tests {
         let hit = raycast(&w, start, [1.0, 0.0, 0.0], 2.0).unwrap();
         assert_eq!(hit.cell, far);
         assert_eq!(hit.distance, 1.0 - voxel_size() / 2.0);
+    }
+    #[test]
+    fn diagonal_rays_resample_crossed_columns_and_preserve_edit_and_water_ownership() {
+        let mut world = World::fbm(
+            19,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let size = voxel_size();
+        for x in -10..10 {
+            let origin = Cell {
+                x,
+                y: world.height_cells(x, 5) + 12,
+                z: 5,
+            };
+            let at = |n| Cell {
+                x: x + n,
+                y: origin.y - n,
+                z: 5 - n,
+            };
+            if x % 2 == 0 {
+                world.set_batch([(at(3), Material::Air), (at(9), Material::Wood)]);
+                world.set_fluid_occupancy([(at(3), true)]);
+            }
+            // From a cell center, all three planes tie on every step. This
+            // gives an independent sequence of cells without using DDA state.
+            for solid in [false, true] {
+                let expected = (0..=40).find_map(|n| {
+                    let cell = at(n);
+                    let material = world.material(cell);
+                    (if solid {
+                        material.is_blocking()
+                    } else {
+                        material != Material::Air
+                    })
+                    .then_some((cell, material))
+                });
+                let pick = if solid { raycast_solid } else { raycast };
+                let result = pick(
+                    &world,
+                    origin.center_m(),
+                    [1., -1., -1.],
+                    40. * size * 3f64.sqrt(),
+                );
+                assert_eq!(result.map(|hit| (hit.cell, hit.material)), expected);
+            }
+        }
     }
     fn box_distance(o: [f64; 3], d: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<f64> {
         let n = d.iter().map(|x| x * x).sum::<f64>().sqrt();

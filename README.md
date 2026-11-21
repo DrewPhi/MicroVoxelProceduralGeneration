@@ -68,6 +68,12 @@ stamp took **1.67 ms median / 1.88 ms p95** to query and commit. A 64 × 1 × 64
 slab took **2.02 / 2.17 ms**. The maximum 256 × 1 × 256 slab took **32.13 /
 33.95 ms**. Native renderer publication follows asynchronously.
 
+Picking also reuses the procedural column on vertical steps. On Regional
+terrain at 6.25 cm, a batch of 1,400 downward 8 m rays took 2.44 ms,
+down from 26.29 ms. Shallow rays took 63.66 ms, down from 69.28 ms.
+These release CPU timings use vegetation off. Hit cells, face normals,
+materials and distances matched on Highlands and Regional at 6.25 and 10 cm.
+
 A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
 6.25 cm voxels. From the approach, the distant renderer draws its deck, underside,
 edges and surrounding ground in nine quads using 130 KiB including the column
