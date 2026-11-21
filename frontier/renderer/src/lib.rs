@@ -3148,15 +3148,22 @@ impl ApplicationHandler for Viewer {
                     if state == ElementState::Pressed {
                         self.grab(true);
                     }
-                } else if self.aircraft.is_none()
-                    && (button == MouseButton::Left || button == MouseButton::Right)
-                {
+                } else if self.aircraft.is_none() {
+                    let primary = matches!(button, MouseButton::Left | MouseButton::Right);
                     if self.player_edit.enabled {
-                        self.player_mouse(button, state);
+                        if primary {
+                            self.player_mouse(button, state);
+                        }
                     } else if state == ElementState::Pressed {
-                        if let (Some(brush), Some(discrete_water_live::WaterDriver::Ca(live))) =
-                            (&mut self.brush, &mut self.live_water)
-                        {
+                        if let (
+                            Some(brush),
+                            Some(discrete_water_live::WaterDriver::Ca(live)),
+                            Some(action),
+                        ) = (
+                            &mut self.brush,
+                            &mut self.live_water,
+                            creative_brush::Action::from_button(button),
+                        ) {
                             brush.stamp(
                                 &mut self.world,
                                 live,
@@ -3165,9 +3172,9 @@ impl ApplicationHandler for Viewer {
                                     .physical_eye()
                                     .unwrap_or(self.camera.position.to_array()),
                                 self.gpu.as_ref().and_then(|g| g.naadf.as_ref()),
-                                button == MouseButton::Right,
+                                action,
                             );
-                        } else {
+                        } else if primary {
                             self.edit(button == MouseButton::Right);
                         }
                     }

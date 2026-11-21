@@ -56,8 +56,9 @@ To build a strip on foot, launch the creative terrain editor from `frontier/`.
 
 At 6.25 cm, this brush covers a **2 m × 2 m** square one voxel thick.
 Aim at a solid face within 8 m. **Right click** fills empty cells inside
-the yellow outline. **Left click** digs into the face. Use **1–6** to choose
-grass, soil, stone, wood, sand or snow. **Z** restores the last stamp, including
+the yellow outline. **Left click** digs into the face. **Middle click** paints
+solid cells, so you can mark a runway without changing its height. Use
+**1–6** to choose grass, soil, stone, wood, sand or snow. **Z** restores the last stamp, including
 any procedural terrain it removed. Brush dimensions follow the world X, Y
 and Z axes. Edits and material selection persist on close. Undo is available
 during the current session.

@@ -59,10 +59,28 @@ impl Size {
         Some(Bounds { min, end })
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    Dig,
+    Place,
+    Paint,
+}
+
+impl Action {
+    pub(crate) fn from_button(button: winit::event::MouseButton) -> Option<Self> {
+        use winit::event::MouseButton;
+        match button {
+            MouseButton::Left => Some(Self::Dig),
+            MouseButton::Right => Some(Self::Place),
+            MouseButton::Middle => Some(Self::Paint),
+            _ => None,
+        }
+    }
+}
 struct LastStamp {
     undo: TerrainUndo,
     bounds: Bounds,
-    dug: bool,
+    action: Action,
 }
 pub struct Brush {
     size: Size,
@@ -125,7 +143,7 @@ impl Brush {
         grabbed: bool,
     ) -> player_edit::Overlay {
         let [x, y, z] = self.size.0;
-        let text = format!("Creative brush  {x} × {y} × {z} cells  ·  {material:?}\nL dig  ·  R place in outline  ·  1–6 material  ·  Z undo\n{}", self.message);
+        let text = format!("Creative brush  {x} × {y} × {z} cells  ·  {material:?}\nL dig  ·  R place  ·  Middle paint  ·  1–6 material  ·  Z undo\n{}", self.message);
         let mut out = player_edit::Overlay {
             text,
             ..Default::default()
@@ -149,43 +167,55 @@ impl Brush {
         camera: Camera,
         eye: [f64; 3],
         native: Option<&Experiment>,
-        place: bool,
+        action: Action,
     ) {
         let result = self
-            .target_bounds(world, camera, native, place)
+            .target_bounds(world, camera, native, action == Action::Place)
             .and_then(|bounds| {
-                let material = if place {
-                    live.inventory.selected
-                } else {
-                    Material::Air
-                };
+                let selected = live.inventory.selected;
                 let undo = world
                     .edit_terrain_box(bounds.min, bounds.end, |cell, old| {
+                        // Paint changes the material of occupied terrain. Air,
+                        // water and vegetation outside the terrain source keep
+                        // their existing occupancy and fluid state.
+                        if action == Action::Paint {
+                            return Ok(old.is_blocking().then_some(selected));
+                        }
                         if old == Material::Water || live.fluid.mass(cell).is_some_and(|m| m > 0) {
                             return Err("The brush intersects water");
                         }
-                        if place != (old == Material::Air) {
+                        if (action == Action::Place) != (old == Material::Air) {
                             return Ok(None);
                         }
-                        if place && player_edit::intersects_player(cell, eye) {
+                        if action == Action::Place && player_edit::intersects_player(cell, eye) {
                             return Err("The brush intersects the player");
                         }
-                        Ok(Some(material))
+                        Ok(Some(if action == Action::Place {
+                            selected
+                        } else {
+                            Material::Air
+                        }))
                     })?
                     .ok_or("No cells changed")?;
-                live.terrain_changed(world, undo.cells());
+                if action != Action::Paint {
+                    live.terrain_changed(world, undo.cells());
+                }
                 let count = undo.cells().len();
                 self.last = Some(LastStamp {
                     undo,
                     bounds,
-                    dug: !place,
+                    action,
                 });
                 Ok(count)
             });
         self.message = match result {
             Ok(count) => format!(
                 "{} {count} native voxels",
-                if place { "Placed" } else { "Removed" }
+                match action {
+                    Action::Place => "Placed",
+                    Action::Dig => "Removed",
+                    Action::Paint => "Painted",
+                }
             ),
             Err(reason) => reason.into(),
         };
@@ -205,7 +235,7 @@ impl Brush {
             self.message = "Return to the stamp to undo".into();
             return;
         }
-        if last.dug
+        if last.action == Action::Dig
             && last.undo.cells().iter().any(|&c| {
                 player_edit::intersects_player(c, eye)
                     || world.material(c) == Material::Water
@@ -216,7 +246,9 @@ impl Brush {
             return;
         }
         if world.undo_terrain_batch(&last.undo) {
-            live.terrain_changed(world, last.undo.cells());
+            if last.action != Action::Paint {
+                live.terrain_changed(world, last.undo.cells());
+            }
             self.message = format!("Restored {} native voxels", last.undo.cells().len());
         } else {
             self.message = "Terrain changed after this stamp".into();
