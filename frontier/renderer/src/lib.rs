@@ -3250,6 +3250,7 @@ pub fn run() -> Result<()> {
         moving_water,
         water_river_rate,
         player_edit: player_edit_enabled,
+        native_edit_driver,
         hand,
         inventory_capacity,
         water_active_radius,
@@ -3354,7 +3355,7 @@ pub fn run() -> Result<()> {
         World::fbm(seed, params)?
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
-    let mut live_water = if live_water_enabled || player_edit_enabled {
+    let mut live_water = if native_edit_driver {
         Some(discrete_water_live::WaterDriver::new(
             &mut world,
             water_save,
