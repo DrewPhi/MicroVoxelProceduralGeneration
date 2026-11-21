@@ -528,6 +528,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
         Mode::Seed => put(&mut b, 0x534545440001),
     }
     if crate::adaptive_geometry::distant_voxels::enabled() {
+        put(&mut b, 0x46414345454e4401); // endpoint-preserving coplanar face merges
         let divisor = crate::adaptive_geometry::distant_voxels::vertical_pitch_divisor(w);
         if divisor != 1 {
             put(&mut b, 0x5950495443480000 | u64::from(divisor));

@@ -1208,9 +1208,8 @@ pub(crate) const TERRAIN_PALETTE: [Material; 10] = [
 pub(super) fn merge_quads(tile: &mut GeometryTile) {
     let quads = &mut tile.native_quads;
     for merge in [0, 1] {
-        let order = |q: &NativeQuad| {
+        let strip = |q: &NativeQuad| {
             let axis = (q.axis_sign & 3) as usize;
-            let u = (axis + 1 + merge) % 3;
             let v = (axis + 1 + (1 - merge)) % 3;
             (
                 q.axis_sign,
@@ -1219,23 +1218,28 @@ pub(super) fn merge_quads(tile: &mut GeometryTile) {
                 q.anchor[axis].to_bits(),
                 q.anchor[v].to_bits(),
                 q.extent[1 - merge].to_bits(),
-                (q.anchor[u] as f64 / voxel_size()).round() as i64,
             )
         };
-        quads.sort_unstable_by_key(order);
+        quads.sort_unstable_by(|a, b| {
+            strip(a).cmp(&strip(b)).then_with(|| {
+                let u = ((a.axis_sign & 3) as usize + 1 + merge) % 3;
+                a.anchor[u].total_cmp(&b.anchor[u])
+            })
+        });
         quads.dedup_by(|quad, prev| {
             let axis = (quad.axis_sign & 3) as usize;
             let u = (axis + 1 + merge) % 3;
-            let (a, b, c, d, e, f, _) = order(prev);
-            let (g, h, i, j, k, l, _) = order(quad);
-            if (a, b, c, d, e, f) == (g, h, i, j, k, l)
-                && prev.anchor[u] + prev.extent[merge] == quad.anchor[u]
-            {
-                prev.extent[merge] += quad.extent[merge];
-                true
-            } else {
-                false
+            if strip(prev) == strip(quad) && prev.anchor[u] + prev.extent[merge] == quad.anchor[u] {
+                let far = quad.anchor[u] + quad.extent[merge];
+                let combined = far - prev.anchor[u];
+                // Preserve the endpoint used by the GPU even for grid sizes
+                // without an exact binary representation.
+                if prev.anchor[u] + combined == far {
+                    prev.extent[merge] = combined;
+                    return true;
+                }
             }
+            false
         });
     }
     quads.shrink_to_fit();

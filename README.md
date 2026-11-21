@@ -105,6 +105,13 @@ seed 19, **7.56 px** on seed 673 and **3.14 px** on seed 40961. Frame p95
 was **12.70, 14.94 and 7.85 ms**, respectively. The rocky routes benefit
 most. Roofs remain level and every exposed step has a vertical face.
 
+Sorting coplanar faces directly by their positions reduced accumulated tile
+finalization time on seed 19 from **3.48 s to 1.76 s** during a 10-second
+flight. The workers completed 402 builds in the second run and 349 in the
+first. With this packing, frame p50/p95/p99 was **9.78 / 12.21 / 13.43 ms**
+on seed 19, **9.22 / 11.79 / 13.19 ms** on seed 673, and **4.55 / 5.88 /
+6.23 ms** on seed 40961. Final ridgeline p95 was 4.68, 5.59 and 2.30 px.
+
 A separate 46-second run crossed 6.4 km at 140 m/s on seed 673. All 4,590
 measured frames retained terrain coverage. Frame p50/p95/p99 measured
 **10.19 / 12.66 / 13.69 ms**. The conservative 5 px quality target remained

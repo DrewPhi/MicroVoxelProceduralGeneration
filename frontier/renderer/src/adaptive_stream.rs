@@ -2322,22 +2322,18 @@ impl CameraQueries {
         }
     }
     fn bounds(&self, bounds: [[f64; 3]; 2]) -> ViewBounds {
+        let lo = DVec3::from(bounds[0]) - self.camera.position;
+        let hi = DVec3::from(bounds[1]) - self.camera.position;
         let mut result = ViewBounds {
-            min: [f64::INFINITY; 3],
-            max: [f64::NEG_INFINITY; 3],
+            min: [0.; 3],
+            max: [0.; 3],
         };
-        for x in 0..2 {
-            for y in 0..2 {
-                for z in 0..2 {
-                    let d =
-                        DVec3::new(bounds[x][0], bounds[y][1], bounds[z][2]) - self.camera.position;
-                    for (a, basis) in self.axes.iter().enumerate() {
-                        let value = d.dot(*basis);
-                        result.min[a] = result.min[a].min(value);
-                        result.max[a] = result.max[a].max(value);
-                    }
-                }
-            }
+        for (axis, basis) in self.axes.iter().copied().enumerate() {
+            // A linear projection reaches its extrema at the two support
+            // corners. Keep the same f64 dot products as the eight-corner scan.
+            let positive = basis.cmpge(DVec3::ZERO);
+            result.min[axis] = DVec3::select(positive, lo, hi).dot(basis);
+            result.max[axis] = DVec3::select(positive, hi, lo).dot(basis);
         }
         result
     }
