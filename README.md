@@ -95,7 +95,11 @@ ray to the highest occupied native root gave p50/p95/p99 of
 **16.49 / 20.68 / 23.06 ms** and **16.72 / 20.30 / 23.53 ms** on repeat.
 The unbounded controls gave **18.27 / 21.49 / 22.91 ms** and
 **18.39 / 22.03 / 25.37 ms**. This 1080p test uses a 1.5 km view, 32 m
-native radius and GPU stage timing. Walking still misses the 16.67 ms budget.
+native radius and GPU stage timing. A subsequent exact traversal uses the low coordinate bits to align native
+hierarchy nodes. Two seed 997 walking runs then measured **12.13 / 15.23 /
+16.91 ms** and **12.50 / 15.39 / 17.12 ms**. Native GPU medians fell from
+9.35–10.27 ms to 7.12–7.26 ms. Saved-pool color and depth matched byte for
+byte, and five independent Radeon ray, shadow, growth and water checks passed.
 Set `FRONTIER_NAADF_SUN_TOP=0` for the control.
 
 Looking directly into a saved voxel pool at 1080p, the above-water shader

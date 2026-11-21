@@ -146,6 +146,16 @@ fn naadf_leaf_word(address:u32)->u32 {
     let word=(packed>>((address&1u)*16u))&0xffffu;
     return select(word,0x40000000u|(word&0x7fffu),(word&0x8000u)!=0u);
 }
+// All hierarchy edges have 1, 4, 16 or 64 cells. Masking the low
+// coordinate bits avoids three variable integer divides per traversal step.
+fn node_origin(cell:vec3<u32>,scale:u32)->vec3<i32> {
+    return vec3<i32>(cell & vec3(~(scale-1u)));
+}
+fn dense_root_slot(root:vec3<u32>)->vec3<i32> {
+    let address=root+naadf.ring.xyz;
+    let side=vec3(naadf.extent.w);
+    return vec3<i32>(select(address,address-side,address>=side).yxz);
+}
 fn sparse_root_load(address:u32,shape:vec3<u32>)->u32 {
     let row=address/shape.x;
     let texel=vec3(address%shape.x,row%shape.y,row/shape.y);
@@ -163,9 +173,7 @@ fn trace_diagnostic_crossing(o:vec3<f32>,d:vec3<f32>,cell:vec3<i32>,t:f32)->f32 
             node=sparse_root_load(side*side*side+(entry&0x3fffffffu)+local.y+4u*(local.x+4u*local.z),shape);
         }
     } else {
-        let address=cp+naadf.ring.xyz;let size=vec3(naadf.extent.w);
-        let slot=select(address,address-size,address>=size);
-        node=cached_root_word(cp,textureLoad(chunks,vec3<i32>(slot.yxz),0).x,0u,false);
+        node=cached_root_word(cp,textureLoad(chunks,dense_root_slot(cp),0).x,0u,false);
     }
     node=root_decode(node,cp);
     if (node&0x80000000u)!=0u {
@@ -177,7 +185,7 @@ fn trace_diagnostic_crossing(o:vec3<f32>,d:vec3<f32>,cell:vec3<i32>,t:f32)->f32 
         }
     }
     if (node&0x40000000u)!=0u {return t;}
-    let base=vec3<i32>((c/scale)*scale);
+    let base=node_origin(c,scale);
     var lo=base;var hi=base+vec3<i32>(i32(scale));let mask=(1u<<bits)-1u;
     for(var a=0u;a<3u;a++){
         lo[a]-=i32((node>>(a*2u*bits))&mask)*i32(scale);
@@ -338,8 +346,7 @@ fn trace_native_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:
                     +local.y+4u*(local.x+4u*local.z),atlas_shape);
             }
         } else {
-            let slot=(cp+naadf.ring.xyz)%vec3(naadf.extent.w);
-            node=textureLoad(chunks,vec3<i32>(slot.yxz),0).x;
+            node=textureLoad(chunks,dense_root_slot(cp),0).x;
         }
         node=root_decode(node,cp);
         if (node&0x80000000u)!=0u {
@@ -488,11 +495,8 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
                     node=sparse_root_load(address,atlas_shape);
                 }
             } else {
-                let address=cp+naadf.ring.xyz;
-                let size=vec3(naadf.extent.w);
-                let slot=select(address,address-size,address>=size);
                 trace_metric(lane,4u,1u);
-                node=cached_root_word(cp,textureLoad(chunks,vec3<i32>(slot.yxz),0).x,lane,true);
+                node=cached_root_word(cp,textureLoad(chunks,dense_root_slot(cp),0).x,lane,true);
             }
             if traversal_cache_nodes {
                 last_root=cp;
@@ -548,7 +552,7 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             // A homogeneous water cube is empty to the optical ray. Retain
             // its size, but never decode its old pigment as a skip proof.
             node=0u;
-        } else if !traversal_dry && !traversal_static_water && all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(vec3<i32>((c/scale)*scale),vec3<i32>((c/scale)*scale)+vec3(i32(scale))) {
+        } else if !traversal_dry && !traversal_static_water && all(dynamic_water.size.xyz>vec3(0u)) && water_node(node) && water_overlaps(node_origin(c,scale),node_origin(c,scale)+vec3(i32(scale))) {
             scale=1u;
             if water_state(cell)==1u {node=0u;}
         }
@@ -558,7 +562,7 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             return VoxelHit(true,t,trace_normal(faces),node&0x3fffffffu,visits,flags);
         }
         was_solid=solid;
-        let base=vec3<i32>((c/scale)*scale);
+        let base=node_origin(c,scale);
         var lo=base;var hi=base+vec3<i32>(i32(scale));
         if !solid {
             if traversal_integer_fastpath {

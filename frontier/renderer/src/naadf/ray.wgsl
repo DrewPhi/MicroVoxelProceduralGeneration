@@ -57,10 +57,10 @@ fn footprint_word(cell:vec3<u32>)->u32 {
             word=sparse_root_load(side*side*side+(word&0x3fffffffu)+local.y+4u*(local.x+4u*local.z),shape);
         }
     } else {
-        let slot=(root+naadf.ring.xyz)%vec3(naadf.extent.w);
-        word=textureLoad(chunks,vec3<i32>(slot.yxz),0).x;
+        word=textureLoad(chunks,dense_root_slot(root),0).x;
     }
-    word=root_decode(word,root);
+    // A repaired root proves air. Point occupancy never consumes skip distances.
+    if root_repaired(word) {return 0u;}
     if (word&0x80000000u)!=0u {
         let block=(cell%16u)/4u;
         word=blocks[(word&0x3fffffffu)+block.x+4u*(block.y+4u*block.z)];
