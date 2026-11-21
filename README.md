@@ -205,6 +205,11 @@ the settled 1080p MSAA 1 sandbar view measured 14.27 / 15.48 / 16.00 ms
 at p50/p95/p99 on the Radeon 760M. A cold 100 m/s flight across the river
 measured 9.20 / 13.36 / 16.82 ms. All 927 flight frames had terrain coverage.
 Distant tiles were still refining throughout the flight.
+The refinement test follows each river's diagonal course and local width.
+Across two 100 m/s runs starting from settled terrain this reduced tile builds
+from 4,486–4,519 to 3,796–3,798. Frame p95 fell from 17.73–18.23 ms to
+14.29–14.61 ms with terrain visible in every frame. Both runs continued
+refining distant tiles in motion.
 
 ![Clouds above a stepped Watershed sandbar, with the same formations reflected in the river.](frontier/reference/gallery/watershed-cloud-reflection.jpg)
 

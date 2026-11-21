@@ -293,6 +293,48 @@ pub(crate) struct Reach {
     pub(crate) segment: u8,
 }
 impl Reach {
+    /// Radius range at projections of this box onto the finite channel.
+    /// A wet sample must intersect the segment's capsule, including its caps.
+    pub(crate) fn core_radii(self, min: [f64; 2], max: [f64; 2]) -> Option<[f64; 2]> {
+        if self.a.stage.max(self.b.stage) < 0. {
+            return None;
+        }
+        let dx = self.b.x - self.a.x;
+        let dz = self.b.z - self.a.z;
+        let len2 = dx * dx + dz * dz;
+        let mid = [0, 1].map(|a| (min[a] + max[a]) * 0.5);
+        let half = [0, 1].map(|a| (max[a] - min[a]) * 0.5);
+        let x = mid[0] - self.a.x;
+        let z = mid[1] - self.a.z;
+        // Include rounding in both the projection and separating-axis tests.
+        let pad = 1e-8 * (1. + mid[0].abs() + mid[1].abs() + dx.abs() + dz.abs());
+        let length = len2.sqrt();
+        let (t0, t1) = if len2 > 0. {
+            let mid_dot = x * dx + z * dz;
+            let span = half[0] * dx.abs() + half[1] * dz.abs() + pad * length;
+            (
+                ((mid_dot - span) / len2).clamp(0., 1.),
+                ((mid_dot + span) / len2).clamp(0., 1.),
+            )
+        } else {
+            (0., 0.)
+        };
+        let radii = [t0, t1].map(|t| self.width + (self.width_b - self.width) * t);
+        let radius = radii[0].max(radii[1]) + pad;
+        if self.a.x.min(self.b.x) - radius > max[0]
+            || self.a.x.max(self.b.x) + radius < min[0]
+            || self.a.z.min(self.b.z) - radius > max[1]
+            || self.a.z.max(self.b.z) + radius < min[1]
+            || (x * dz - z * dx).abs() > half[0] * dz.abs() + half[1] * dx.abs() + radius * length
+        {
+            return None;
+        }
+        Some([
+            (radii[0].min(radii[1]) - pad).max(self.width.min(self.width_b)),
+            radius,
+        ])
+    }
+
     /// Compact river-valley conditioning stays inside one drainage-node halo.
     pub(crate) fn outer_radius(self) -> f64 {
         self.valley_radius
@@ -1343,6 +1385,54 @@ mod tests {
             recipe: FbmRecipe::SeededWorld,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn feature_boxes_follow_diagonal_channels_and_their_tapered_caps() {
+        let node = |x, z| Node {
+            x,
+            z,
+            stage: 5.,
+            potential: 5.,
+        };
+        let reach = Reach {
+            a: node(-240., -80.),
+            b: node(160., 220.),
+            width: 8.,
+            width_b: 28.,
+            depth: 2.,
+            grade: 0.,
+            valley_radius: 60.,
+            lake: false,
+            owner: [0; 2],
+            segment: 0,
+        };
+        assert!(reach.core_radii([-230., 160.], [-212., 180.]).is_none());
+        for i in 0..=20 {
+            let t = f64::from(i) / 20.;
+            let radius = reach.width + t * (reach.width_b - reach.width);
+            for j in 0..16 {
+                let a = f64::from(j) * std::f64::consts::TAU / 16.;
+                let x = reach.a.x + t * 400. + radius * a.cos();
+                let z = reach.a.z + t * 300. + radius * a.sin();
+                let projected = projection_t(reach, x, z);
+                let actual = reach.width + projected * (reach.width_b - reach.width);
+                if project(reach, x, z).0 <= actual {
+                    let [lo, hi] = reach
+                        .core_radii([x - 0.5, z - 2.], [x + 0.5, z + 2.])
+                        .unwrap();
+                    assert!(lo <= actual && actual <= hi);
+                }
+            }
+        }
+        let [lo, hi] = reach.core_radii([154., 218.], [160., 220.]).unwrap();
+        assert!(lo > 27. && hi >= 28.);
+        let lake = Reach {
+            b: reach.a,
+            width_b: reach.width,
+            ..reach
+        };
+        assert!(lake.core_radii([-232., -80.], [-232., -80.]).is_some());
     }
 
     #[test]

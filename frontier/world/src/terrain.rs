@@ -553,8 +553,7 @@ impl FbmTerrain {
 
     /// Conservative river/lake core-support spacing hint, in meters. This is
     /// a display sampling rule, not a height certificate or water-area estimate.
-    /// Segment endpoint AABBs expanded by maximum width contain every possible
-    /// wet core; tiny floating-point padding keeps boundary queries inclusive.
+    /// Only reaches whose projected core can touch the box contribute.
     pub fn seeded_water_feature_spacing(&self, min: [f64; 2], max: [f64; 2]) -> Option<f64> {
         if !self.params.recipe.has_static_water() {
             return None;
@@ -568,22 +567,8 @@ impl FbmTerrain {
         }
         self.seeded_reaches(min, max)
             .into_iter()
-            .filter_map(|r| {
-                if r.a.stage.max(r.b.stage) < 0. {
-                    return None;
-                }
-                let pad = 1e-8 * (1. + min[0].abs() + min[1].abs() + max[0].abs() + max[1].abs());
-                let radius = r.width.max(r.width_b) + pad;
-                if r.a.x.min(r.b.x) - radius > max[0]
-                    || r.a.x.max(r.b.x) + radius < min[0]
-                    || r.a.z.min(r.b.z) - radius > max[1]
-                    || r.a.z.max(r.b.z) + radius < min[1]
-                {
-                    None
-                } else {
-                    Some(self.water_core_spacing(r.width.min(r.width_b)))
-                }
-            })
+            .filter_map(|r| r.core_radii(min, max))
+            .map(|[radius, _]| self.water_core_spacing(radius))
             .reduce(f64::min)
     }
 
@@ -607,21 +592,11 @@ impl FbmTerrain {
                 0.
             };
         }
-        let pad = 1e-8 * (1. + min[0].abs() + min[1].abs() + max[0].abs() + max[1].abs());
         self.seeded_reaches(min, max)
             .into_iter()
-            .filter(|r| r.a.stage.max(r.b.stage) >= 0.)
-            .filter(|r| step_m > self.water_core_spacing(r.width.min(r.width_b)))
-            .filter(|r| {
-                let radius = r.width.max(r.width_b) + pad;
-                r.a.x.min(r.b.x) - radius <= max[0]
-                    && r.a.x.max(r.b.x) + radius >= min[0]
-                    && r.a.z.min(r.b.z) - radius <= max[1]
-                    && r.a.z.max(r.b.z) + radius >= min[1]
-            })
-            .map(|r| {
-                (step_m * std::f64::consts::SQRT_2).min(2. * r.width.max(r.width_b) + 2. * pad)
-            })
+            .filter_map(|r| r.core_radii(min, max))
+            .filter(|[radius, _]| step_m > self.water_core_spacing(*radius))
+            .map(|[_, radius]| (step_m * std::f64::consts::SQRT_2).min(2. * radius))
             .fold(0., f64::max)
     }
 
@@ -1631,7 +1606,8 @@ mod water_feature_spacing_tests {
             let center = [(r.a.x + r.b.x) * 0.5, (r.a.z + r.b.z) * 0.5];
             let debt =
                 t.seeded_water_feature_debt(center.map(|v| v - 1.), center.map(|v| v + 1.), 1024.);
-            assert!(debt + 1e-6 >= 2. * r.width.max(r.width_b));
+            // The midpoint samples the local cross-section of a tapered reach.
+            assert!(debt + 1e-6 >= r.width + r.width_b);
         }
     }
 
@@ -1654,7 +1630,7 @@ mod water_feature_spacing_tests {
             let hint = t
                 .seeded_water_feature_spacing(center.map(|v| v - 1.), center.map(|v| v + 1.))
                 .unwrap();
-            assert!(hint > 0. && hint <= 0.5 * r.width.min(r.width_b));
+            assert!(hint > 0. && hint <= 0.25 * (r.width + r.width_b) + 1e-8);
             checked += 1;
         }
         assert!(checked > 0);
