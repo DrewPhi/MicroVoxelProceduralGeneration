@@ -473,11 +473,20 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     camera=batch_cameras[in.camera_slot].value;
     return shade(in);
 }
-fn river_texel(cell:vec2<i32>)->f32 {
+fn river_texel(cell:vec2<i32>,height:f32,tolerance:f32)->f32 {
     let channel=u32((cell.x&1)+2*(cell.y&1));
-    return textureLoad(flight_detail,cell/2,2,0)[channel];
+    let lo=u32(round(255.*textureLoad(flight_detail,cell/2,2,0)[channel]));
+    let count=lo&31u;
+    if count==0u {return 0.;}
+    let hi=u32(round(255.*textureLoad(flight_detail,cell/2,3,0)[channel]));
+    let bin=(lo|(hi<<8u))>>5u;
+    let coverage=f32(count)/16.;
+    if bin==2047u {return coverage;}
+    let water=64.*(exp2((vec2(f32(bin))+vec2(0.,1.))/128.)-vec2(1.));
+    let separation=max(water.x-height,height-water.y);
+    return coverage*(1.-smoothstep(tolerance,2.*tolerance,separation));
 }
-fn river_coverage(relative:vec2<f32>, spacing:f32)->f32 {
+fn river_coverage(relative:vec2<f32>, spacing:f32,height:f32)->f32 {
     let side=vec2<f32>(textureDimensions(flight_detail));
     let center=(side-1.)*.5;
     let cell=(relative+near_shadow.parameters.zw-center*8.)/16.+2.*center;
@@ -485,8 +494,9 @@ fn river_coverage(relative:vec2<f32>, spacing:f32)->f32 {
     let fade=smoothstep(1.,12.,min(edge.x,edge.y))*smoothstep(6.,24.,spacing);
     if fade<=0. {return 0.;}
     let q=vec2<i32>(floor(cell));let f=fract(cell);
-    return fade*mix(mix(river_texel(q),river_texel(q+vec2(1,0)),f.x),
-                    mix(river_texel(q+vec2(0,1)),river_texel(q+vec2(1,1)),f.x),f.y);
+    let tolerance=clamp(spacing*.15,3.,18.);
+    return fade*mix(mix(river_texel(q,height,tolerance),river_texel(q+vec2(1,0),height,tolerance),f.x),
+                    mix(river_texel(q+vec2(0,1),height,tolerance),river_texel(q+vec2(1,1),height,tolerance),f.x),f.y);
 }
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
@@ -581,10 +591,11 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if diagnostic==6u {return vec4<f32>(light,1.);}
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
     var river=0.;
+    let world_height=in.local.y+f32(bitcast<i32>(camera.paint_origin.y))*NATIVE_VOXEL_METERS;
     if diagnostic==0u && in.water==0u && near_shadow.parameters.z > -1e10
-        && (camera.paint_origin.w & 26u)==0u && in.normal.y>.35 && in.local.y>0. {
+        && (camera.paint_origin.w & 26u)==0u && in.normal.y>.35 && world_height>0. {
         let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
-        river=river_coverage(in.local.xz-camera.eye.xz,spacing);
+        river=river_coverage(in.local.xz-camera.eye.xz,spacing,world_height);
     }
     if diagnostic==0u && (in.water!=0u || river>.003) {
         let direction=normalize(in.local-camera.eye.xyz);

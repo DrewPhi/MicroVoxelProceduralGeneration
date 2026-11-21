@@ -14,17 +14,19 @@ const RECENTER: i64 = 32;
 const RIVER_SIDE: usize = SIDE * 2;
 const RIVER_STEP: f64 = 16.;
 
-// Each byte stores the fraction of sixteen native column probes that contain
-// inland water. The lattice spans 8.2 km and shares its center with the fine grid.
+// Each word stores the number of wet probes and their mean water elevation.
+// The logarithmic height bin retains precision from lowlands to high plateaus.
+// The lattice spans 8.2 km and shares its center with the fine grid.
 struct Rivers {
     min: [i64; 2],
-    cover: Vec<u8>,
+    texels: Vec<u16>,
 }
 impl Rivers {
     fn make(terrain: &FbmTerrain, center: [i64; 2], previous: Option<&Self>) -> Self {
         let min = center.map(|i| i.div_euclid(2) - (SIDE as i64 - 1));
         let candidates = river_candidates(terrain, min);
-        let cover = candidates
+        let match_stage = std::env::var_os("FRONTIER_RIVER_STAGE").is_none_or(|v| v != "0");
+        let texels = candidates
             .into_iter()
             .enumerate()
             .map(|(i, possible)| {
@@ -36,10 +38,11 @@ impl Rivers {
                 if let Some(old) = previous {
                     let (u, v) = (x - old.min[0], z - old.min[1]);
                     if (0..RIVER_SIDE as i64).contains(&u) && (0..RIVER_SIDE as i64).contains(&v) {
-                        return old.cover[v as usize * RIVER_SIDE + u as usize];
+                        return old.texels[v as usize * RIVER_SIDE + u as usize];
                     }
                 }
-                let mut wet = 0;
+                let mut wet = 0u16;
+                let mut stage_sum = 0.;
                 for dz in [-6., -2., 2., 6.] {
                     for dx in [-6., -2., 2., 6.] {
                         let cell = Cell::from_meters([
@@ -48,13 +51,26 @@ impl Rivers {
                             z as f64 * RIVER_STEP + dz,
                         ]);
                         let col = terrain.column_cells(cell.x, cell.z);
-                        wet += u32::from(col.visible_top > 0 && col.visible_top > col.ground_top);
+                        if col.visible_top > 0 && col.visible_top > col.ground_top {
+                            wet += 1;
+                            stage_sum += col.visible_top as f64 * voxel_size();
+                        }
                     }
                 }
-                ((wet * 255 + 8) / 16) as u8
+                if wet == 0 {
+                    return 0;
+                }
+                let stage = if match_stage {
+                    ((1. + stage_sum / (64. * f64::from(wet))).log2() * 128.)
+                        .floor()
+                        .clamp(0., 2047.) as u16
+                } else {
+                    2047
+                };
+                wet | (stage << 5)
             })
             .collect();
-        Self { min, cover }
+        Self { min, texels }
     }
 }
 
@@ -158,7 +174,7 @@ impl Grid {
             reusable.map(|g| &g.rivers),
         );
         let area = SIDE * SIDE;
-        let mut pixels = vec![0; area * 12];
+        let mut pixels = vec![0; area * 16];
         let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
         for v in 0..SIDE {
             for u in 0..SIDE {
@@ -181,8 +197,10 @@ impl Grid {
                 };
                 let [r, g, b, depth] = samples[j].albedo;
                 for k in 0..4 {
-                    pixels[8 * area + at + k] =
-                        rivers.cover[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2];
+                    let [lo, hi] =
+                        rivers.texels[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2].to_le_bytes();
+                    pixels[8 * area + at + k] = lo;
+                    pixels[12 * area + at + k] = hi;
                 }
                 let dry = depth == 255;
                 pixels[at..at + 4].copy_from_slice(&[x, z, sky, if dry { 255 } else { 0 }]);
@@ -251,7 +269,7 @@ pub(crate) struct Texture {
 }
 impl Texture {
     pub(super) fn bytes(&self) -> u64 {
-        self.texture.width() as u64 * self.texture.height() as u64 * 12
+        self.texture.width() as u64 * self.texture.height() as u64 * 16
     }
     pub(crate) fn new(device: &wgpu::Device, side: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -259,7 +277,7 @@ impl Texture {
             size: wgpu::Extent3d {
                 width: side,
                 height: side,
-                depth_or_array_layers: 3,
+                depth_or_array_layers: 4,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -404,6 +422,7 @@ mod tests {
         for z in (160..350).step_by(3) {
             for x in (160..350).step_by(3) {
                 let mut wet = 0;
+                let mut height = 0.;
                 for dz in [-6., -2., 2., 6.] {
                     for dx in [-6., -2., 2., 6.] {
                         let p = Cell::from_meters([
@@ -412,12 +431,23 @@ mod tests {
                             (rivers.min[1] + z as i64) as f64 * 16. + dz,
                         ]);
                         let c = terrain.column_cells(p.x, p.z);
-                        wet += u32::from(c.visible_top > 0 && c.visible_top > c.ground_top);
+                        if c.visible_top > 0 && c.visible_top > c.ground_top {
+                            wet += 1;
+                            height += c.visible_top as f64 * voxel_size();
+                        }
                     }
                 }
-                let cover = rivers.cover[z * RIVER_SIDE + x];
-                assert_eq!(u32::from(cover), (wet * 255 + 8) / 16);
-                mixed += u32::from(cover > 0 && cover < 255);
+                let word = rivers.texels[z * RIVER_SIDE + x];
+                assert_eq!(u32::from(word & 31), wet);
+                if wet > 0 && word >> 5 < 2047 {
+                    let lo = f64::from(word >> 5);
+                    let avg = height / f64::from(wet);
+                    assert!(
+                        avg >= 64. * (2f64.powf(lo / 128.) - 1.) - 1e-9
+                            && avg <= 64. * (2f64.powf((lo + 1.) / 128.) - 1.) + 1e-9
+                    );
+                }
+                mixed += u32::from(wet > 0 && wet < 16);
             }
         }
         assert!(mixed > 10);
@@ -468,8 +498,8 @@ mod tests {
         for v in river_shift..RIVER_SIDE {
             for u in 0..RIVER_SIDE - river_shift {
                 assert_eq!(
-                    old.rivers.cover[(v - river_shift) * RIVER_SIDE + u + river_shift],
-                    new.rivers.cover[v * RIVER_SIDE + u]
+                    old.rivers.texels[(v - river_shift) * RIVER_SIDE + u + river_shift],
+                    new.rivers.texels[v * RIVER_SIDE + u]
                 );
             }
         }

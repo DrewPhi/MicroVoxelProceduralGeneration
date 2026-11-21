@@ -201,8 +201,12 @@ The final native window covered the deck and the save remained byte-identical.
 A second flight field covers 8.2 km of inland drainage. Each 16 m footprint
 uses 16 native column probes, and the terrain shader blends their water
 coverage into coarse mountain and valley surfaces. This keeps narrow reaches
-visible between mesh vertices. The combined water, normal and albedo texture
-uses 774 KiB. Saved edits and the exact native volume retain ownership.
+visible between mesh vertices. Each footprint also stores the mean elevation
+of its wet probes. Water tint fades where a coarse triangle rises above the
+riverbed or cuts below it. The combined flight texture uses 1.01 MiB. In a
+matched 1080p Radeon capture of seed 673 this corrected 2,417 mountain pixels.
+A seed 19 valley capture changed in 107 pixels by at most four 8-bit levels.
+Both comparisons had byte-identical scene depth. Saved edits and the exact native volume retain ownership.
 
 ## Play the baseline
 
