@@ -181,6 +181,15 @@ could compete for the same skyline. Fixed-pose p95 after 12 seconds was
 40961. The first two improved and the other three rose slightly. On moving
 seed 29123 the endpoint still measured 6.52 px, with frame p95 of 12.23 ms.
 
+On a cold airborne start the renderer prepares up to four extra splits
+around the surveyed skyline. At 1280×720, first-presented-frame p95 error
+fell from 83.10 to 36.59 px on seed 29123, 84.16 to 43.52 on seed 19 and
+11.05 to 3.42 on seed 8123. First coverage took 0.95, 0.63 and 0.85 seconds
+respectively. In 960×540 fixed-camera recordings at 20 samples per second
+on a virtual display, the number of sampled column changes over 5 px during
+the initial twelve seconds fell from 217 to 69 and from 243 to 110 on seeds
+29123 and 19. These measurements include cold refinement.
+
 The block renderer also probes each patch center against its four corner
 heights. A sharp bend or a shoreline gets smaller square columns inside the
 patch. On the same three routes, this gave ridgeline p95 of **4.96 px** on

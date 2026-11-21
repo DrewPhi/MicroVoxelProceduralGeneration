@@ -1124,6 +1124,23 @@ impl AdaptiveStream {
                 }
                 x += root;
             }
+            if self.committed.is_empty()
+                && camera.far >= 3000.
+                && root_segments >= 16
+                && crate::adaptive_geometry::distant_voxels::Mode::current()
+                    == crate::adaptive_geometry::distant_voxels::Mode::Blocks
+            {
+                if let Some(focus) = &mut self.flight_focus {
+                    focus.seed_flight_view(
+                        &self.world,
+                        camera,
+                        [width, height],
+                        self.settings.pixel_error,
+                        &mut nodes,
+                        self.settings.max_nodes,
+                    );
+                }
+            }
         }
         if !same && !self.committed.is_empty() {
             // Reuse spatial detail after every camera change. Starting over at

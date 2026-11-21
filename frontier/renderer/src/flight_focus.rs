@@ -1,6 +1,6 @@
 //! Scheduling hints from the terrain a pilot is looking at. Full source bounds,
 //! edge closure and ownership checks remain authoritative at publication.
-use super::{Camera, RefinementCandidate, TileKey};
+use super::{split_refinement, Camera, Node, RefinementCandidate, TileKey};
 use frontier_world::{voxel_size, World};
 use glam::{DVec2, DVec3, Vec3Swizzles};
 use std::collections::HashSet;
@@ -222,6 +222,80 @@ impl Focus {
         }
     }
 
+    fn update(&mut self, world: &World, camera: &Camera, viewport: [u32; 2], pixel_error: f64) {
+        if self.view.is_none_or(|(old, size, target)| {
+            size != viewport
+                || target != pixel_error
+                || old.fov_y != camera.fov_y
+                || old.far != camera.far
+                || old.position.distance_squared(camera.position) > 48. * 48.
+                || old.direction().dot(camera.direction()) < 0.997
+                || (old.roll - camera.roll).abs() > 0.08
+        }) {
+            self.survey(world, camera, viewport, pixel_error);
+        }
+    }
+
+    pub(super) fn seed_flight_view(
+        &mut self,
+        world: &World,
+        camera: &Camera,
+        viewport: [u32; 2],
+        pixel_error: f64,
+        roots: &mut Vec<Node>,
+        max_nodes: usize,
+    ) {
+        let Some(root) = roots.first().copied() else {
+            return;
+        };
+        self.update(world, camera, viewport, pixel_error);
+        let pixel_angle =
+            2. * (f64::from(camera.fov_y).to_radians() * 0.5).tan() / f64::from(viewport[1].max(1));
+        self.split_coarse_crests(roots, root, pixel_angle, max_nodes);
+    }
+
+    fn split_coarse_crests(
+        &self,
+        nodes: &mut Vec<Node>,
+        root: Node,
+        pixel_angle: f64,
+        max_nodes: usize,
+    ) {
+        // Each split replaces one coarse owner with four children that cover
+        // exactly its area. Limit the cold-start work and use the same keys
+        // that normal flight refinement would generate once coverage is live.
+        let segments = root.width / root.step;
+        for _ in 0..4 {
+            if nodes.len().saturating_add(3) > max_nodes {
+                break;
+            }
+            let mut best = None;
+            for (i, node) in nodes.iter().enumerate() {
+                if node.width <= root.width / 4 || node.step < 2 {
+                    continue;
+                }
+                let pitch = f64::from(node.step) * voxel_size();
+                let mut score = 0.;
+                for hit in &self.hits[..self.skyline_count] {
+                    if (0..2).all(|a| {
+                        (node.min[a]..node.min[a] + i64::from(node.width)).contains(&hit.column[a])
+                    }) {
+                        let pixels = pitch / (pixel_angle * hit.depth);
+                        score += (pixels - 16.).clamp(0., 128.);
+                    }
+                }
+                if score > 0. && best.is_none_or(|(_, value)| score > value) {
+                    best = Some((i, score));
+                }
+            }
+            let Some((i, _)) = best else {
+                break;
+            };
+            let parent = nodes.swap_remove(i);
+            split_refinement(parent, Some(0), segments, nodes);
+        }
+    }
+
     pub(super) fn select(
         &mut self,
         world: &World,
@@ -236,17 +310,7 @@ impl Focus {
         }
         let pixel_angle =
             2. * (f64::from(camera.fov_y).to_radians() * 0.5).tan() / f64::from(viewport[1].max(1));
-        if self.view.is_none_or(|(old, size, target)| {
-            size != viewport
-                || target != pixel_error
-                || old.fov_y != camera.fov_y
-                || old.far != camera.far
-                || old.position.distance_squared(camera.position) > 48. * 48.
-                || old.direction().dot(camera.direction()) < 0.997
-                || (old.roll - camera.roll).abs() > 0.08
-        }) {
-            self.survey(world, camera, viewport, pixel_error);
-        }
+        self.update(world, camera, viewport, pixel_error);
         let blocks = crate::adaptive_geometry::distant_voxels::Mode::current()
             == crate::adaptive_geometry::distant_voxels::Mode::Blocks;
         let mut priorities = Vec::new();
@@ -304,6 +368,52 @@ impl Focus {
 mod tests {
     use super::*;
     use frontier_world::FbmParams;
+    #[test]
+    fn cold_flight_splits_only_surveyed_owners_and_preserves_the_full_partition() {
+        let root = Node {
+            min: [-65536, -65536],
+            width: 65536,
+            step: 2048,
+        };
+        let other = Node {
+            min: [0, -65536],
+            ..root
+        };
+        let focus = Focus {
+            hits: vec![Hit {
+                column: [-2000, -8000],
+                depth: 800.,
+                grade: 1.,
+            }],
+            skyline_count: 1,
+            ..Default::default()
+        };
+        for (limit, expected) in [(2, 2), (5, 5), (32, 8)] {
+            let mut nodes = vec![root, other];
+            focus.split_coarse_crests(&mut nodes, root, 0.001, limit);
+            assert_eq!(nodes.len(), expected);
+            assert!(nodes.contains(&other));
+            assert_eq!(
+                nodes.iter().map(|n| u64::from(n.width).pow(2)).sum::<u64>(),
+                2 * u64::from(root.width).pow(2)
+            );
+            for x in 0..16 {
+                for z in 0..8 {
+                    let point = [-65536 + 4096 + x * 8192, -65536 + 4096 + z * 8192];
+                    assert_eq!(
+                        nodes
+                            .iter()
+                            .filter(|n| (0..2)
+                                .all(|a| (n.min[a]..n.min[a] + i64::from(n.width))
+                                    .contains(&point[a])))
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn skyline_survey_keeps_competing_ridges_in_separate_tiles() {
         let mut probes = Vec::new();
