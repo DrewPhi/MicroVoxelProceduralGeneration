@@ -12,9 +12,15 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt;
 
-// Ground/bed RGB, visible elevation, wet coverage, weighted optical depth,
+// Ground/bed RGB, visible elevation, wet coverage,
 // then subsurface and bedrock RGB from the native material column.
-type Sample = [f32; 12];
+type Sample = [f32; 11];
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct NativeRoof {
+    height: f32,
+    depth: f32,
+}
 
 const SIDE: usize = 161;
 const SPACING: f64 = 512.;
@@ -41,7 +47,7 @@ struct Lattice {
     first: usize,
     center: [i64; 2],
     samples: Vec<Sample>,
-    roof_heights: Vec<f32>,
+    roofs: Vec<NativeRoof>,
 }
 struct Patch {
     lattice: Arc<Lattice>,
@@ -53,9 +59,9 @@ fn lattice(
     first: usize,
     previous: Option<&Lattice>,
     mut sample: impl FnMut(f64, f64) -> Sample,
-    height: impl FnMut(f64, f64) -> f32,
+    roof: impl FnMut(f64, f64) -> NativeRoof,
 ) -> Lattice {
-    let mut out = vec![[0.; 12]; SIDE * SIDE * (LEVELS - first)];
+    let mut out = vec![[0.; 11]; SIDE * SIDE * (LEVELS - first)];
     for level in first..LEVELS {
         let extent = sample_radius(level);
         let inner = sample_radius(level.saturating_sub(1)) / 2;
@@ -116,7 +122,7 @@ fn lattice(
         first,
         center,
         samples: out,
-        roof_heights: blocks::sample_heights(center, first, previous, height),
+        roofs: blocks::sample_roofs(center, first, previous, roof),
     }
 }
 
@@ -140,8 +146,6 @@ fn samples(
             } else {
                 surface
             };
-            let depth =
-                ((col.visible_top - col.ground_top) as f64 * voxel_size()).clamp(0., 12.) as f32;
             let soil = col.ground_subsurface.color();
             let rock = if col.ground_surface == Material::Stone && !wet {
                 surface
@@ -154,7 +158,6 @@ fn samples(
                 b,
                 (col.visible_top as f64 * voxel_size()) as f32,
                 u8::from(wet) as f32,
-                depth,
                 soil[0],
                 soil[1],
                 soil[2],
@@ -163,7 +166,14 @@ fn samples(
                 rock[2],
             ]
         },
-        |x, z| terrain.height_m(x, z) as f32,
+        |x, z| {
+            let cell = Cell::from_meters([x, 0., z]);
+            let [bed, top] = terrain.column_tops(cell.x, cell.z);
+            NativeRoof {
+                height: (top as f64 * voxel_size()) as f32,
+                depth: ((top - bed) as f64 * voxel_size()).min(12.) as f32,
+            }
+        },
     ));
     let mesh = blocks::build(&lattice, voxel_size() as f32);
     Patch { lattice, mesh }
@@ -609,7 +619,6 @@ mod tests {
                 (x + z) as f32,
                 (x * 0.003 + z * 0.007).sin() as f32,
                 0.,
-                0.,
                 x as f32,
                 z as f32,
                 0.,
@@ -618,7 +627,10 @@ mod tests {
                 x as f32,
             ]
         };
-        let height = |x: f64, z: f64| (x * 0.19 + z * 0.47).sin() as f32;
+        let height = |x: f64, z: f64| NativeRoof {
+            height: (x * 0.19 + z * 0.47).sin() as f32,
+            depth: (x * 0.37 + z * 0.61).cos().max(0.) as f32,
+        };
         for (old_first, first) in [(1, 1), (0, 0), (0, 1), (1, 0)] {
             let old = lattice([-3, 7], old_first, None, sample, height);
             for center in [[-3, 7], [1, 7], [-8, 3], [5000, -5000]] {
@@ -653,7 +665,7 @@ mod tests {
                     },
                 );
                 assert_eq!(moved.samples, cold.samples);
-                assert_eq!(moved.roof_heights, cold.roof_heights);
+                assert_eq!(moved.roofs, cold.roofs);
                 if center[0].abs() < 10 {
                     let numerator = if old_first > first { 2 } else { 1 };
                     let denominator = if first == 1 && old_first == 1 { 4 } else { 3 };

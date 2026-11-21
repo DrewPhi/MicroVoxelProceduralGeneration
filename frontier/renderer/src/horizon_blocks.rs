@@ -1,6 +1,6 @@
 //! Exposed faces of the nested flight horizon. Coordinates are relative to
 //! the patch origin and packed in units of each face’s own ring.
-use super::{Lattice, LEVELS, SIDE, SPACING};
+use super::{Lattice, NativeRoof, LEVELS, SIDE, SPACING};
 use std::ops::Range;
 
 const CELLS: i32 = 2 * (SIDE as i32 - 1);
@@ -103,13 +103,13 @@ fn hole(first: usize, level: usize, x: i32, z: i32) -> bool {
 
 /// A visible roof represents the native column at its world-aligned center.
 /// Its color can cover a wider area, but averaging elevations erases crests.
-pub(super) fn sample_heights(
+pub(super) fn sample_roofs(
     center: [i64; 2],
     first: usize,
     previous: Option<&Lattice>,
-    mut height: impl FnMut(f64, f64) -> f32,
-) -> Vec<f32> {
-    let mut roofs = vec![0.; (LEVELS - first) * RING];
+    mut roof: impl FnMut(f64, f64) -> NativeRoof,
+) -> Vec<NativeRoof> {
+    let mut roofs = vec![NativeRoof::default(); (LEVELS - first) * RING];
     for level in first..LEVELS {
         let base = (level - first) * RING;
         let step = f64::from(UNIT) * (1 << level) as f64;
@@ -122,7 +122,7 @@ pub(super) fn sample_heights(
                 });
                 (dx.abs() < i128::from(CELLS) && dz.abs() < i128::from(CELLS)).then(|| {
                     (
-                        &lattice.roof_heights[(level - lattice.first) * RING..],
+                        &lattice.roofs[(level - lattice.first) * RING..],
                         lattice.first,
                         dx as i32,
                         dz as i32,
@@ -147,7 +147,7 @@ pub(super) fn sample_heights(
                         continue;
                     }
                 }
-                *value = height(
+                *value = roof(
                     center[0] as f64 * SPACING + (x as f64 + 0.5) * step,
                     center[1] as f64 * SPACING + (z as f64 + 0.5) * step,
                 );
@@ -189,22 +189,23 @@ fn columns(lattice: &Lattice) -> Vec<Column> {
                     let byte = |i| (at(i).clamp(0., 1.) * 255.).round() as u32;
                     byte(k) | byte(k + 1) << 8 | byte(k + 2) << 16
                 };
-                let wet = at(4).clamp(0., 1.);
-                let water = (7. * wet).round() as u32;
-                let depth = if water > 0 {
-                    (4. * at(5) / wet).round().clamp(0., 48.) as u32
+                let index = (level - first) * RING + (z * CELLS + x) as usize;
+                let roof = lattice.roofs[index];
+                // The center supplies both physical planes. Neighbors only
+                // estimate how much of an already wet roof is covered.
+                let water = if roof.depth > 0. {
+                    (7. * at(4)).round().clamp(1., 7.) as u32
                 } else {
                     0
                 };
-                let index = (level - first) * RING + (z * CELLS + x) as usize;
                 result[index] = Column {
                     water,
-                    depth,
-                    y: lattice.roof_heights[index],
+                    depth: (4. * roof.depth).round() as u32,
+                    y: roof.height,
                     slope: encode(dx) | (encode(dz) << 5),
                     rgb: rgb(0),
-                    soil_rgb: rgb(6),
-                    rock_rgb: rgb(9),
+                    soil_rgb: rgb(5),
+                    rock_rgb: rgb(8),
                 };
             }
         }
@@ -487,8 +488,8 @@ mod tests {
                 [0, 0],
                 first,
                 None,
-                |_, _| [0.5, 0.25, 0.1, 7.5, 0., 0., 0.3, 0.2, 0.1, 0.3, 0.3, 0.3],
-                |_, _| 7.5,
+                |_, _| [0.5, 0.25, 0.1, 7.5, 0., 0.3, 0.2, 0.1, 0.3, 0.3, 0.3],
+                |_, _| NativeRoof { height: 7.5, depth: 0. },
             );
             let mesh = build(&lattice, 0.0625);
             assert!(mesh.faces.len() <= 100 * (LEVELS - first));
@@ -537,8 +538,8 @@ mod tests {
             [0, 0],
             1,
             None,
-            |_, _| [0.5, 0.3, 0.2, 80., 1., 4., 0.2, 0.3, 0.1, 0.3, 0.3, 0.3],
-            |_, _| 80.,
+            |_, _| [0.5, 0.3, 0.2, 80., 1., 0.2, 0.3, 0.1, 0.3, 0.3, 0.3],
+            |_, _| NativeRoof { height: 80., depth: 4. },
         );
         let mesh = build(&lattice, 0.0625);
         assert!(!mesh.batches.is_empty());
@@ -547,6 +548,32 @@ mod tests {
             assert!((p.y - 80.).abs() < 1e-4);
             assert!(p.x >= b.min[0] && p.x <= b.max[0] && p.z >= b.min[2] && p.z <= b.max[2]);
         }
+    }
+
+    #[test]
+    fn horizon_water_and_optical_depth_belong_to_the_native_roof() {
+        let lattice = super::super::lattice(
+            [0, 0],
+            1,
+            None,
+            |x, _| {
+                let mut sample = [0.; 11];
+                sample[4] = f32::from(x < 0.);
+                sample
+            },
+            |x, _| {
+                if x < 0. {
+                    NativeRoof { height: 17., depth: 0. }
+                } else {
+                    NativeRoof { height: 2., depth: 0.5 }
+                }
+            },
+        );
+        let roofs = columns(&lattice);
+        let column = |x| roofs[(HALF * CELLS + x + HALF) as usize];
+        // Coarse samples on the left say all water, on the right all land.
+        assert_eq!((column(-8).water, column(-8).depth), (0, 0));
+        assert_eq!((column(8).water, column(8).depth), (1, 2));
     }
 
     #[test]
@@ -561,9 +588,9 @@ mod tests {
                 [0, 0],
                 first,
                 None,
-                |_, _| [0.; 12],
+                |_, _| [0.; 11],
                 |x, z| {
-                    if x == edge - spacing && z == spacing {
+                    let height = if x == edge - spacing && z == spacing {
                         70.
                     } else if x == edge + 0.5 * spacing && z == 0.5 * spacing {
                         7.
@@ -571,7 +598,8 @@ mod tests {
                         11.
                     } else {
                         0.
-                    }
+                    };
+                    NativeRoof { height, depth: 0. }
                 },
             );
             let mut walls = Vec::new();
@@ -595,13 +623,14 @@ mod tests {
             [-1, 1],
             0,
             None,
-            |_, _| [0.; 12],
+            |_, _| [0.; 11],
             |x, z| {
-                if x == -SPACING - 0.5 * f64::from(UNIT) && z == SPACING + 0.5 * f64::from(UNIT) {
+                let height = if x == -SPACING - 0.5 * f64::from(UNIT) && z == SPACING + 0.5 * f64::from(UNIT) {
                     73.0625
                 } else {
                     0.
-                }
+                };
+                NativeRoof { height, depth: 0. }
             },
         );
         let mesh = build(&lattice, 0.0625);

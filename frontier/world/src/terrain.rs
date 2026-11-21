@@ -211,12 +211,17 @@ impl FbmTerrain {
         self.height_cells(c.x, c.z) as f64 * voxel_size()
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
+        self.column_tops(x, z)[1]
+    }
+    /// Native ground and visible top planes in cells, from one source evaluation.
+    pub fn column_tops(&self, x: i64, z: i64) -> [i64; 2] {
         if self.params.recipe.has_static_water() {
-            return seeded_world::column_tops(self.seed, self.params, x, z)[1];
+            return seeded_world::column_tops(self.seed, self.params, x, z);
         }
         let x = (x as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
         let z = (z as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
-        (self.elevation(x, z) / voxel_size()).floor() as i64
+        let top = (self.elevation(x, z) / voxel_size()).floor() as i64;
+        [top, top]
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
@@ -613,12 +618,7 @@ impl FbmTerrain {
     }
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
-        let top = if self.params.recipe.has_static_water() {
-            seeded_world::column_tops(self.seed, self.params, c.x, c.z)[0]
-        } else {
-            self.height_cells(c.x, c.z)
-        };
-        top as f64 * voxel_size()
+        self.column_tops(c.x, c.z)[0] as f64 * voxel_size()
     }
     /// Return the canonical visible surface and its landscape-scale albedo.
     pub fn landscape_column(&self, x: i64, z: i64, vegetation: bool) -> (TerrainColumn, [f32; 3]) {

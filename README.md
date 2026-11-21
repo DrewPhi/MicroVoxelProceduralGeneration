@@ -262,6 +262,14 @@ MSAA 1, p50/p95/p99 were 4.69–4.70 / 5.38–5.40 / 6.23–6.24 ms. The earlier
 renderer took 4.46–4.62 / 5.07–5.49 / 5.98–6.22 ms on the same ten-second
 route with coarse detail and moving clouds.
 
+Distant shorelines use the ground and water planes from the same native
+column that sets each visible block's height. Neighboring samples estimate
+coverage only on wet blocks. Across 739,425 sampled horizon blocks on seeds
+40961, 673 and 997, the previous interpolation assigned water to 23,266 dry
+centers and missed 4,821 wet ones. From above the sea on seed 40961, the
+center of a 64 m beach block at (−2,016, 2,208) is 8.8125 m above sea level.
+The corrected frame shows dry sand there and reflections on the adjacent sea.
+
 With downstream ripples enabled, the same sandbar measured 11.14–11.24 ms
 median, compared with 11.03–11.06 ms for the wind-swell version. Upstream
 rapids measured 15.87 / 17.31 / 17.98 ms at p50/p95/p99. Open-sea color and
