@@ -127,6 +127,12 @@ hierarchy nodes. Two seed 997 walking runs then measured **12.13 / 15.23 /
 byte, and five independent Radeon ray, shadow, growth and water checks passed.
 Set `FRONTIER_NAADF_SUN_TOP=0` for the control.
 
+Computing the three native ray-plane crossings together reduced the native
+GPU median from **8.17–8.34 ms to 7.81–7.82 ms** across two matched walking
+runs per build. The rendered saved pool matched in color, depth and coverage.
+The Radeon checks included exact corner hits, moving water, sparse roots and
+window growth.
+
 Looking directly into a saved voxel pool at 1080p, the above-water shader
 for static water measured **6.83–7.01 ms** median native GPU time across two
 runs. The general water shader took **7.56–8.02 ms**. The two paths gave

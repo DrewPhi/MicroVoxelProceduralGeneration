@@ -405,6 +405,10 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
     var cell=clamp(forward_cell(o+d*t,d),vec3(0),vec3<i32>(naadf.extent.xyz)-vec3(1));
     var faces=0u;var was_solid=false;
     let extent=vec3<i32>(naadf.extent.xyz);
+    let positive=d>vec3(0.);
+    let moving=d!=vec3(0.);
+    let direction=select(vec3(1.),d,moving);
+    let entering=select(vec3(2u,8u,32u),vec3(1u,4u,16u),positive);
     let sparse=naadf_sparse();
     // Very distant camera origins can lose native-cell precision in o+d*t.
     let use_height=traversal_height_bounds && allow_height
@@ -577,8 +581,10 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             }
             lo=max(lo,parent_lo);hi=min(hi,parent_hi);
         }
-        var next=vec3(1e30);
-        for(var a=0u;a<3u;a++){if d[a]!=0.{next[a]=native_plane_time(select(lo[a],hi[a],d[a]>0.),o[a],d[a]);}}
+        // All lanes use the same ray signs throughout traversal. A parallel
+        // lane has no crossing; the finite divisor keeps its fallback exact.
+        let planes=select(lo,hi,positive);
+        let next=select(vec3(1e30),(vec3<f32>(planes)-o)/direction,moving);
         let crossing=min(next.x,min(next.y,next.z));
         if crossing<=t {trace_metric(lane,20u,1u);return VoxelHit(false,t,vec3(0.),0u,visits,flags|TRACE_STALLED);}
         if crossing>exit {return VoxelHit(false,t,vec3(0.),0u,visits,flags);}
@@ -632,8 +638,11 @@ fn trace_impl_mode(o:vec3<f32>,d:vec3<f32>,minimum:f32,occlusion:bool,measure:bo
             // global safety path when a local state could not be certified.
             flags|=TRACE_LOCAL_UNRESOLVED|TRACE_ROOT_CORNER;
         }
-        cell=clamp(forward_cell(o+d*crossing,d),lo,hi-vec3(1));faces=0u;
-        for(var a=0u;a<3u;a++){if next[a]==crossing{cell[a]=select(lo[a]-1,hi[a],d[a]>0.);faces|=1u<<(a*2u+select(1u,0u,d[a]>0.));}}
+        let crossed=next==vec3(crossing);
+        let along=clamp(forward_cell(o+d*crossing,d),lo,hi-vec3(1));
+        cell=select(along,select(lo-vec3(1),hi,positive),crossed);
+        let lanes=select(vec3(0u),entering,crossed);
+        faces=lanes.x|lanes.y|lanes.z;
         t=crossing;
     }
     if all(cell>=vec3(0)) && all(cell<extent) {flags|=TRACE_STALLED;}

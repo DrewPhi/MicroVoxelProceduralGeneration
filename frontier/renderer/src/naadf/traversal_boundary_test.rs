@@ -7,7 +7,7 @@ const SHADER: &str = concat!(
     "const NAADF_GROUP:u32=0u;const NAADF_BASE:u32=0u;\n",
     include_str!("trace.wgsl"),
     r#"
-@group(0) @binding(8) var<storage,read_write> result:array<vec4<f32>>;
+@group(0) @binding(9) var<storage,read_write> result:array<vec4<f32>>;
 fn sample(h:VoxelHit)->vec4<f32>{
     return vec4(h.normal,select(-1.,h.t,h.found && h.pigment==0u));
 }
@@ -101,7 +101,8 @@ fn accelerated_primary_replays_ambiguous_corner_face() {
         let metrics = super::diagnostics::Diagnostics::new(&device, false);
         let empty = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: &[0; 4],
+            // One pigment and an empty dynamic water header with a sentinel state.
+            contents: &[0; 48],
             usage: wgpu::BufferUsages::STORAGE,
         });
         let buffer = |usage| {
@@ -140,10 +141,12 @@ fn accelerated_primary_replays_ambiguous_corner_face() {
                 (1, wgpu::BindingResource::TextureView(&roots)),
                 (2, empty.as_entire_binding()),
                 (3, empty.as_entire_binding()),
+                (4, empty.as_entire_binding()),
                 (5, wgpu::BindingResource::TextureView(&distance)),
                 (6, wgpu::BindingResource::TextureView(&heights)),
                 (7, metrics.buffer.as_entire_binding()),
-                (8, output.as_entire_binding()),
+                (8, empty.as_entire_binding()),
+                (9, output.as_entire_binding()),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource }),
         });
