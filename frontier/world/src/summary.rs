@@ -407,6 +407,7 @@ mod tests {
                 alluvial_deposits: true,
                 shaped_banks: true,
                 fitted_channels: true,
+                sheltered_snowfields: true,
                 recipe: FbmRecipe::Regional,
                 horizontal_scale: 16.0,
                 amplitude: 100000.0,

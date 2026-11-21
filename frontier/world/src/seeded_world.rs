@@ -1278,7 +1278,22 @@ fn column_from_fields(
         let nz = z * scale;
         let shelter = fbm(seed, nx, nz, 480., 3, 0.48, 0x5177);
         let snow_line = 0.22 + 0.14 * shelter;
-        if f.temperature < snow_line && shelter > -0.40 {
+        if p.has_sheltered_snowfields() {
+            // One threshold across mountain and tundra biomes prevents a second
+            // band of snow below bare rock when an incised valley warms up.
+            // Local wind deposits break up the snow margin along the slope.
+            let snow_line = snow_line - 0.12 * smooth((-0.22 - shelter) / 0.35);
+            let drift = if (f.temperature - snow_line).abs() < 0.032 {
+                0.032 * noise((nx + 0.32 * nz) / 164., (nz - 0.32 * nx) / 53., seed ^ 0x5178)
+            } else {
+                0.
+            };
+            if f.temperature < snow_line + drift {
+                surface = Material::Snow;
+            } else if surface == Material::Snow || f.temperature < 0.35 || shelter < -0.34 {
+                surface = Material::Stone;
+            }
+        } else if f.temperature < snow_line && shelter > -0.40 {
             surface = Material::Snow;
         } else if f.temperature < 0.35 || shelter < -0.34 {
             surface = Material::Stone;
@@ -1778,6 +1793,22 @@ mod tests {
     }
 
     #[test]
+    fn warm_gorge_has_no_secondary_snow_band_below_the_alpine_snowline() {
+        let params = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
+        let fresh = super::super::FbmTerrain::new(673, params).unwrap();
+        let saved = super::super::FbmTerrain::new(673, FbmParams {
+            sheltered_snowfields: false, ..params
+        }).unwrap();
+        assert_eq!((saved.source_version(), fresh.source_version()), (5, 6));
+        for (x, z) in [(-4253.7, -1666.1), (-4237.6, -1658.7), (-4229.5, -1654.9)] {
+            let c = crate::Cell::from_meters([x, 0., z]);
+            assert_eq!(saved.column_tops(c.x, c.z), fresh.column_tops(c.x, c.z));
+            assert_eq!(saved.column_cells(c.x, c.z).top_material(), Material::Snow);
+            assert_eq!(fresh.column_cells(c.x, c.z).top_material(), Material::Stone);
+        }
+    }
+
+    #[test]
     fn a_headwater_grows_from_its_spring_and_keeps_the_next_segments_depth() {
         let p = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
         let drainage = region(673, p, -2230., -1830.);
@@ -1800,6 +1831,7 @@ mod tests {
             let params = FbmParams {
                 recipe: FbmRecipe::Highlands,
                 fitted_channels,
+                sheltered_snowfields: false,
                 ..FbmParams::default()
             };
             let terrain = super::super::FbmTerrain::new(673, params).unwrap();

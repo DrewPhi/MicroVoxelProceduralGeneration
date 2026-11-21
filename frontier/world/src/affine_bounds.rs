@@ -1670,6 +1670,7 @@ mod tests {
                         alluvial_deposits: true,
                         shaped_banks: true,
                         fitted_channels: true,
+                        sheltered_snowfields: true,
                         recipe,
                         horizontal_scale: 1800.0,
                         amplitude: 1000.0,

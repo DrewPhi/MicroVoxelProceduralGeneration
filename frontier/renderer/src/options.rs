@@ -886,6 +886,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             params.alluvial_deposits = version >= 3;
             params.shaped_banks = version >= 4;
             params.fitted_channels = version >= 5;
+            params.sheltered_snowfields = version >= 6;
         }
     }
     params.validate()?;
