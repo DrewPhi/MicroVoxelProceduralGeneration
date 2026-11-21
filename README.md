@@ -125,6 +125,9 @@ include trees and saved edits. In four alternating 100 m/s passes on the
 Radeon 760M at 1920×1080, MSAA 1 and a 6 km active view, p99 frame time was
 43.97–50.96 ms before these changes and 15.82–16.02 ms afterward. The two
 updated runs covered every measured frame and continued refining throughout.
+With fitted channels and the revised water shading, two further passes on
+this route measured 12.31–12.47 ms median, 14.85–14.91 ms p95 and
+15.95–16.26 ms p99 across 1,395 fully covered frames.
 
 In flight, an 8 m lattice of source heights and colors estimates the visible
 areas of the native tops and risers as they shrink below a pixel. The renderer
@@ -148,10 +151,21 @@ fit each reach to its valley, lower streams as they enter a lake and carry
 tributaries across drainage-region edges. Existing saves load their original
 generation version. The banks, bed and water occupy native voxel cells.*
 
-On a 4.8 km square survey of the 6.25 cm grid, the highest wet-to-dry step on
-Highlands seed 673 fell from **9 m to 25 cm**. The new source had 7,368 sampled
-bank crossings and a 6.25 cm 95th-percentile step. Watershed seed 997 fell
-from **2.44 m to 6.25 cm** across 12,230 crossings on the new source.
+Version five fits the water level across each valley and starts headwaters
+as narrow springs. On 142 cross-sections wet in both versions four and five,
+the 95th-percentile height difference across the wet core fell from 7.69 m
+to one 6.25 cm voxel. The largest fell from 10.875 m to 37.5 cm.
+
+![Native terrain and water elevations across the same Highlands headwater in versions four and five, plotted at equal horizontal and vertical scale.](frontier/reference/gallery/highlands-river-section.png)
+
+*Highlands seed 673 at (−2230.70, −1829.19). Brown follows the solid voxel bed. Blue shows the occupied water cells.*
+
+A separate shoreline survey sampled a 4.8 km square on each of four seeds
+at the native 6.25 cm grid. Across 21,961 adjacent wet-to-dry crossings, the
+largest drop from water to land was 18.75 cm on Highlands seed 673, 12.5 cm
+on Highlands 29123 and 6.25 cm on Watershed 997. Each had a 95th percentile
+of one voxel or less. Watershed seed 83 had no crossings along the survey
+lines. Existing saves keep their original channels.
 
 ![Sunlit Highlands stream reflecting its enclosing rock walls, with voxel grass and flowers on the near bank.](frontier/reference/gallery/highlands-river.jpg)
 
@@ -165,17 +179,26 @@ To visit this riverbank, run the following from `frontier/`.
 
 ```sh
 ./run.sh --preset flight --flight-view pilot --seed 673 --walk off \
-  --eye -2900.5718,852.8125,-1054.0096 --target -2931.1769,851.1875,-1089 \
+  --eye -2900.5718,778.6375,-1054.0096 --target -2931.1769,776.5,-1089 \
   --fov-y 62 --sun-elevation 46 --sun-azimuth 26.175 --cloud-speed 0 \
   --cloud-coverage .25 --overcast .08 --fog-density .00011 \
-  --naadf-radius 32 --capture-far 2200 --pixel-error 10 --msaa 1
+  --naadf-radius 32 --capture-far 2200 --pixel-error 10 --msaa 1 \
+  --world-save output/worlds/highlands-673-river-v6.save
 ```
 
-The 1920×1080 image has full terrain coverage. Some distant tiles were still
-refining at capture. In a separate fixed-refinement timing comparison at
+The 1920×1080 riverbank image had full coverage and met its 10-pixel
+refinement target. In a separate fixed-refinement timing comparison at
 1080p MSAA 1, a 1.5 km active view and a 16 m native radius, median frames
 at water level measured 12.90–12.97 ms with valley reflections and
 12.94–13.23 ms with sky alone on the Radeon 760M.
+
+Version six of the Highlands recipe uses a single local snow line. Sheltered
+slopes collect snow and exposed ridges show through. The warm white belt
+below the bare cliff in the older riverbank view came from overlapping
+temperature rules. A survey of 65,536 columns across four Highlands seeds
+found identical bed and water elevations before and after the snow change.
+On seed 673, 287 of 315 sampled mountain columns above 2,300 m carried snow
+in the new world. The older source had 298 snowy columns at those elevations.
 
 The native and distant water use the same world-space ripples. Refraction
 reaches 8 m down and native bank reflections reach 24 m on every grid.
@@ -209,7 +232,7 @@ corners reduced that count to 49. The same 100 m/s route with the new
 bed optics measured 10.38–10.43 ms median and 14.56–15.33 ms p95 at
 1080p MSAA 1, a 1.5 km active view and a 16 m native radius.
 
-The current generator also cuts shallow coves and builds sandbars along
+Generator version four introduced shallow coves and sandbars along
 each channel. Two seeded fields vary the cross-section over 58 m and 19 m
 at the default world scale. Bars rise from the bed and coves meet the
 outer bank at ground level. The previous channel's hydraulic ceiling keeps
