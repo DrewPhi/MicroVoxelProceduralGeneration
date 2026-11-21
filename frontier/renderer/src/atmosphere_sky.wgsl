@@ -49,18 +49,26 @@ fn cloud_body(p:vec3<f32>, bank:f32)->f32 {
     let field=bank*.48+shape*.38+erosion*.14;
     return smoothstep(mix(.77,.27,cover),mix(.77,.27,cover)+.14,field)*vertical;
 }
-@fragment fn fs_main(i:VertexOutput)->@location(0) vec4<f32> {
+const cloud_step_m:f32=90.;
+const cloud_max_steps:u32=128u;
+struct CloudOutput {
+    @location(0) scattering:vec4<f32>,
+    @location(1) transmission:vec4<f32>,
+};
+@fragment fn fs_main(i:VertexOutput)->CloudOutput {
     let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,1.,1.);
     let ray=normalize(p.xyz/p.w-atmosphere.relative_eye.xyz);
     let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
-    if segment.y <= segment.x || atmosphere.weather.x <= .001 { return vec4(0.,0.,0.,1.); }
+    if segment.y <= segment.x || atmosphere.weather.x <= .001 { return CloudOutput(vec4(0.,0.,0.,1.),vec4(1.)); }
     let start = segment.x;
     let length_m = segment.y - start;
     // Keep interior sample locations continuous when another interval enters
     // at the far end of the ray. Redistributing every midpoint at that
     // boundary produced horizontal rings when flying inside the cloud layer.
-    let spacing = clamp(175., length_m / 48., length_m / 16.);
-    let count = min(u32(ceil(length_m / spacing)), 48u);
+    let spacing = clamp(cloud_step_m, length_m / f32(cloud_max_steps), length_m / 16.);
+    let boundaries = length_m*vec4(.125,.25,.5,.75);
+    var optical_depth=vec4(0.);
+    let count = min(u32(ceil(length_m / spacing)), cloud_max_steps);
     var transmittance=1.;var light=vec3(0.);
     let warm=1.-smoothstep(.04,.45,atmosphere.sun.y);
     let sun_color=mix(vec3(1.12,1.08,1.00),vec3(1.15,.85,.58),warm*.7);
@@ -83,11 +91,14 @@ fn cloud_body(p:vec3<f32>, bank:f32)->f32 {
             // Approximate the low-order multiple-scattering fill that keeps a
             // sunlit cumulus body pale rather than a dark pillow with a rim.
             let source=ambient*.72+sun_color*(.10+direct*(.69+.28*forward));
+            // Integrate the fraction of this exact march interval lying in
+            // front of each slice, including a final partial step.
+            optical_depth+=rho*.0045*clamp(boundaries-vec4(offset),vec4(0.),vec4(step));
             let alpha=1.-exp(-rho*step*.0045);
             light+=transmittance*alpha*source;transmittance*=1.-alpha;
             if transmittance<.015 {break;}
         }
     }
     let horizon=1.-smoothstep(9000.,24000.,start);
-    return vec4(light*horizon,mix(1.,transmittance,horizon));
+    return CloudOutput(vec4(light*horizon,mix(1.,transmittance,horizon)),mix(vec4(1.),exp(-optical_depth),horizon));
 }

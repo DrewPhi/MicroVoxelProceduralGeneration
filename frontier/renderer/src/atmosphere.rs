@@ -102,6 +102,7 @@ pub(crate) struct Atmosphere {
     scene_format: wgpu::TextureFormat,
     horizon: Option<crate::flight_horizon::Horizon>,
     sky: wgpu::TextureView,
+    cloud_profile: wgpu::TextureView,
     sky_bind: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
     cloud_view: std::cell::Cell<Option<CloudView>>,
@@ -153,14 +154,14 @@ fn make_pipeline(
     source: &str,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
-    make_pipeline_groups(device, label, &[layout], source, format, "fs_main")
+    make_pipeline_groups(device, label, &[layout], source, &[format], "fs_main")
 }
 fn make_pipeline_groups(
     device: &wgpu::Device,
     label: &str,
     layouts: &[&wgpu::BindGroupLayout],
     source: &str,
-    format: wgpu::TextureFormat,
+    formats: &[wgpu::TextureFormat],
     entry: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -172,6 +173,16 @@ fn make_pipeline_groups(
         bind_group_layouts: layouts,
         push_constant_ranges: &[],
     });
+    let targets: Vec<_> = formats
+        .iter()
+        .map(|&format| {
+            Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        })
+        .collect();
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),
@@ -185,11 +196,7 @@ fn make_pipeline_groups(
             module: &shader,
             entry_point: Some(entry),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &targets,
         }),
         primitive: Default::default(),
         depth_stencil: None,
@@ -212,8 +219,31 @@ pub(crate) fn post_aa_strength() -> f32 {
     })
 }
 
+fn cloud_shader_source() -> std::borrow::Cow<'static, str> {
+    let (step, count) = match std::env::var("FRONTIER_CLOUD_MARCH").as_deref() {
+        Ok("coarse") => (175, 48),
+        Ok("reference") => (24, 512),
+        _ => return SKY_SHADER.into(),
+    };
+    SKY_SHADER
+        .replace("cloud_step_m:f32=90.", &format!("cloud_step_m:f32={step}."))
+        .replace(
+            "cloud_max_steps:u32=128u",
+            &format!("cloud_max_steps:u32={count}u"),
+        )
+        .into()
+}
+
 fn shader_source(samples: u32) -> String {
-    shader_source_with_post_aa(samples, post_aa_strength() > 0.)
+    let source = shader_source_with_post_aa(samples, post_aa_strength() > 0.);
+    if std::env::var_os("FRONTIER_CLOUD_DEPTH_PROFILE").is_some_and(|v| v == "0") {
+        source.replace(
+            "const cloud_depth_profile:bool=true;",
+            "const cloud_depth_profile:bool=false;",
+        )
+    } else {
+        source
+    }
 }
 fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
     let (bindings, body) = if samples > 1 {
@@ -327,6 +357,14 @@ impl Atmosphere {
             height.div_ceil(4),
             1,
         );
+        let cloud_profile = texture(
+            device,
+            "cloud transmittance at four depths",
+            wgpu::TextureFormat::Rgba8Unorm,
+            width.div_ceil(4),
+            height.div_ceil(4),
+            1,
+        );
         let air = texture(
             device,
             "quarter resolution shadowed world air",
@@ -392,10 +430,26 @@ impl Atmosphere {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -409,6 +463,12 @@ impl Atmosphere {
                     count: None,
                 },
             ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear scene and atmosphere sampling"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atmosphere"),
@@ -433,6 +493,14 @@ impl Atmosphere {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&sky),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&cloud_profile),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -463,12 +531,16 @@ impl Atmosphere {
                 resource: uniform.as_entire_binding(),
             }],
         });
-        let sky_pipeline = make_pipeline(
+        let sky_pipeline = make_pipeline_groups(
             device,
             "quarter resolution volumetric clouds",
-            &sky_layout,
-            SKY_SHADER,
-            wgpu::TextureFormat::Rgba16Float,
+            &[&sky_layout],
+            &cloud_shader_source(),
+            &[
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ],
+            "fs_main",
         );
         let air_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("air inputs"),
@@ -517,7 +589,7 @@ impl Atmosphere {
             "shadowed world air",
             &[&air_layout, &near_layout, &far_layout],
             &air_source,
-            wgpu::TextureFormat::Rgba16Float,
+            &[wgpu::TextureFormat::Rgba16Float],
             "fs_main",
         );
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -540,12 +612,6 @@ impl Atmosphere {
                     count: None,
                 },
             ],
-        });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("scene upscale"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
         });
         let blit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene upscale"),
@@ -588,6 +654,7 @@ impl Atmosphere {
         Self {
             horizon,
             sky,
+            cloud_profile,
             sky_bind,
             sky_pipeline,
             cloud_view: Default::default(),
@@ -683,7 +750,7 @@ impl Atmosphere {
                 + composite_bpp * u64::from(self.composite.is_some()))
             + u64::from(self.horizon.is_some())
                 * (u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2)) * 12)
-            + lighting_pixels * 16
+            + lighting_pixels * 20
             + 4
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
@@ -867,14 +934,16 @@ impl Atmosphere {
             if self.drawn_cloud_view.replace(self.cloud_view.get()) != self.cloud_view.get() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("quarter resolution volumetric clouds"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.sky,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: &[&self.sky, &self.cloud_profile].map(|view| {
+                        Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })
+                    }),
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,

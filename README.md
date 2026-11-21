@@ -82,6 +82,15 @@ identical linear color, depth and coverage in the oblique pool check. The
 mostly dry seed 997 walking route showed little difference between these
 water shaders. Set `FRONTIER_NAADF_STATIC_WATER_PIPELINE=0` for the control.
 
+Cloud transmittance is recorded at four distances along each view ray so a
+summit can occlude a cloud bank behind it. Across a sky view and an in-cloud
+mountain view, the 90 m march reduced whole-image RMS RGB error by 79% and
+82% against a 24 m reference. The vegetated seed 19 flight measured
+**8.81 / 11.25 / 12.20 ms** with this sampling and **8.27 / 10.74 / 11.74 ms**
+with the earlier 175 m march. Seed 673 measured **7.96 / 10.18 / 11.03 ms**
+and **7.49 / 9.93 / 10.62 ms**, respectively. The reference controls are
+`FRONTIER_CLOUD_MARCH=coarse` and `FRONTIER_CLOUD_MARCH=reference`.
+
 ### Earlier measurements
 
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover

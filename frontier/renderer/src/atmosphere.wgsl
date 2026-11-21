@@ -17,6 +17,9 @@ struct AtmosphereUniform {
 @group(0) @binding(3) var meadow_air:texture_2d<f32>;
 @group(0) @binding(5) var flight_landscape:texture_2d<f32>;
 @group(0) @binding(4) var cloud_lighting:texture_2d<f32>;
+@group(0) @binding(6) var cloud_transmission:texture_2d<f32>;
+@group(0) @binding(7) var atmosphere_sampler:sampler;
+const cloud_depth_profile:bool=true;
 
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -87,14 +90,22 @@ fn alpine_clear_sky(ray: vec3<f32>) -> vec3<f32> {
 // Only low-frequency cloud scattering/transmittance is reconstructed here.
 // The sky gradient and solar disc remain analytic at native pixel resolution.
 fn cloud_sample(uv:vec2<f32>)->vec4<f32> {
-    let size=vec2<i32>(textureDimensions(cloud_lighting));
-    let p=uv*vec2<f32>(size)-.5;let base=vec2<i32>(floor(p));let f=fract(p);
-    var clouds=vec4(0.);
-    for(var y=0i;y<2i;y+=1i) {for(var x=0i;x<2i;x+=1i) {
-        let weight=mix(1.-f.x,f.x,f32(x))*mix(1.-f.y,f.y,f32(y));
-        clouds+=textureLoad(cloud_lighting,clamp(base+vec2(x,y),vec2(0),size-vec2(1)),0)*weight;
-    }}
-    return clouds;
+    return textureSampleLevel(cloud_lighting,atmosphere_sampler,uv,0.);
+}
+fn cloud_visibility(uv:vec2<f32>,total:f32,f:f32)->f32 {
+    if f<=0. {return 1.;}
+    if f>=1. {return total;}
+    if !cloud_depth_profile {return pow(max(total,.00001),f);}
+    let t=textureSampleLevel(cloud_transmission,atmosphere_sampler,uv,0.);
+    var ends=vec2(t.w,total);
+    var w=4.*f-3.;
+    if f<.125 {ends=vec2(1.,t.x);w=f*8.;}
+    else if f<.25 {ends=t.xy;w=f*8.-1.;}
+    else if f<.5 {ends=t.yz;w=f*4.-1.;}
+    else if f<.75 {ends=t.zw;w=f*4.-2.;}
+    // Log interpolation integrates a homogeneous interval exactly. Quantized
+    // slice values can differ from the full-precision terminal value by 1/255.
+    return clamp(exp(mix(log(max(ends.x,.00001)),log(max(ends.y,.00001)),w)),total,1.);
 }
 fn bounded_height_integral(start: f32, end: f32, distance: f32, falloff: f32) -> f32 {
     // Density rho*exp(-k*max(y,0)). Cap LOCAL density at sea-level rho,
@@ -210,7 +221,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
                     let segment = cloud_interval(atmosphere.world_eye.y,ray.y);
                     if segment.y > segment.x {
                         let fraction = clamp((range-segment.x)/(segment.y-segment.x),0.,1.);
-                        visibility = pow(max(clouds.a,.00001),fraction);
+                        visibility = cloud_visibility(uv,clouds.a,fraction);
                     }
                 }
             }
@@ -239,7 +250,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
             // Mountains intersecting the deck see only a fraction of its
             // integrated optical depth. Foreground geometry stays unobscured.
             let fraction = min((distance-segment.x)/(segment.y-segment.x), 1.);
-            let visibility = pow(max(clouds.a, .00001), fraction);
+            let visibility = cloud_visibility(uv,clouds.a,fraction);
             surface = surface*visibility + clouds.rgb*((1.-visibility)/max(1.-clouds.a,.00001));
         }
         return beauty_finish(surface + meadow_scattering(uv,distance));
