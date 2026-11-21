@@ -44,11 +44,11 @@ fn forward_cell(p:vec3<f32>,d:vec3<f32>)->vec3<i32> {
 }
 @fragment fn fs_main(@builtin(position) pixel:vec4<f32>)->Fragment {
     let ndc=vec2<f32>(pixel.x/camera.viewport.x*2.-1.,1.-pixel.y/camera.viewport.y*2.);
-    let near_h=camera.inverse*vec4<f32>(ndc,0.,1.);
+    let near_h=camera.inverse*vec4<f32>(ndc,camera.viewport.z,1.);
     let mid_h=camera.inverse*vec4<f32>(ndc,0.5,1.);
     let o=camera.eye.xyz*VOXELS_PER_METER;
-    let d=normalize(mid_h.xyz/mid_h.w-camera.eye.xyz);
-    let near_t=length(near_h.xyz/near_h.w-camera.eye.xyz)*VOXELS_PER_METER;
+    let d=normalize(mid_h.xyz/mid_h.w);
+    let near_t=length(near_h.xyz/near_h.w)*VOXELS_PER_METER;
     let extent=vec3<f32>(camera.extent.xyz);
     var entry=vec3<f32>(-1e30); var exit=vec3<f32>(1e30);
     for(var a=0u;a<3u;a++) {

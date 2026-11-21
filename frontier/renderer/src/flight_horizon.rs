@@ -201,7 +201,7 @@ impl Horizon {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -314,7 +314,7 @@ impl Horizon {
             let center = lattice.center;
             let origin = DVec3::new(center[0] as f64 * SPACING, 0., center[1] as f64 * SPACING);
             let eye = (camera.position - origin).as_vec3();
-            let matrix = Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 1., 75000.)
+            let matrix = Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 75000., 1.)
                 * Mat4::look_to_rh(eye, camera.direction(), camera.view_up());
             let mut data = [0f32; 24];
             data[..16].copy_from_slice(&matrix.to_cols_array());
@@ -386,7 +386,7 @@ impl Horizon {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.),
+                    load: wgpu::LoadOp::Clear(0.),
                     store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,

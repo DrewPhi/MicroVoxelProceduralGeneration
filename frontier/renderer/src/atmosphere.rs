@@ -246,7 +246,7 @@ fn shader_source(samples: u32) -> String {
 fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
     let (bindings, body) = if samples > 1 {
         ("@group(0) @binding(1) var scene: texture_multisampled_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_multisampled_2d;",
-         "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) >= 1.0;\nif all_sky { return vec4(composite(vec3(0.0),1.0,in.uv),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
+         "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = max(max(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),max(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) <= 0.0;\nif all_sky { return vec4(composite(vec3(0.0),0.0,in.uv),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
     } else {
         ("@group(0) @binding(1) var scene: texture_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_2d;",
          "return vec4(composite(textureLoad(scene,pixel,0).rgb,textureLoad(depth,pixel,0),in.uv),1.0);")
@@ -273,7 +273,7 @@ fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
 }
 fn air_shader_source(samples: u32) -> String {
     let (binding, load) = if samples > 1 {
-        ("@group(0) @binding(2) var depth:texture_depth_multisampled_2d;","min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3)))")
+        ("@group(0) @binding(2) var depth:texture_depth_multisampled_2d;","max(max(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),max(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3)))")
     } else {
         (
             "@group(0) @binding(2) var depth:texture_depth_2d;",

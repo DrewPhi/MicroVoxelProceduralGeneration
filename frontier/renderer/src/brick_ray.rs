@@ -208,6 +208,7 @@ pub struct BrickRayGpu {
     size: [usize; 3],
     bricks: [usize; 3],
     directional_available: bool,
+    reversed_depth: bool,
     pub resident_bytes: usize,
 }
 impl BrickRayGpu {
@@ -216,6 +217,15 @@ impl BrickRayGpu {
         snapshot: &BrickSnapshot,
         format: wgpu::TextureFormat,
         sample_count: u32,
+    ) -> Result<Self, String> {
+        Self::with_depth_mode(device, snapshot, format, sample_count, false)
+    }
+    pub(crate) fn with_depth_mode(
+        device: &wgpu::Device,
+        snapshot: &BrickSnapshot,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        reversed_depth: bool,
     ) -> Result<Self, String> {
         let limit = device.limits().max_storage_buffer_binding_size as usize;
         if snapshot.headers.len() * 4 > limit
@@ -332,7 +342,11 @@ impl BrickRayGpu {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: if reversed_depth {
+                    wgpu::CompareFunction::Greater
+                } else {
+                    wgpu::CompareFunction::Less
+                },
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -347,6 +361,7 @@ impl BrickRayGpu {
             pipeline,
             bind_group,
             camera,
+            reversed_depth,
             size: snapshot.size,
             bricks: snapshot.brick_size,
             directional_available: snapshot.directional_bounds.len() == snapshot.headers.len() * 4,
@@ -389,9 +404,14 @@ impl BrickRayGpu {
         } else {
             skip_mode.min(2)
         };
+        // Upload an inverse mapping into eye-relative space. Subtracting a
+        // tens-of-metres origin from a 2.5 cm near point in the fragment shader
+        // perturbs ray directions at native silhouette and material boundaries.
+        let eye_relative_inverse =
+            glam::DMat4::from_translation(-eye_local.as_dvec3()) * matrix.as_dmat4().inverse();
         let data = RayCamera {
             matrix: matrix.to_cols_array_2d(),
-            inverse: matrix.inverse().to_cols_array_2d(),
+            inverse: eye_relative_inverse.as_mat4().to_cols_array_2d(),
             eye: eye_local.extend(1.).to_array(),
             extent: [
                 self.size[0] as u32,
@@ -405,7 +425,12 @@ impl BrickRayGpu {
                 self.bricks[2] as u32,
                 0,
             ],
-            viewport: [width as f32, height as f32, 0., 0.],
+            viewport: [
+                width as f32,
+                height as f32,
+                f32::from(self.reversed_depth),
+                0.,
+            ],
         };
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&data));
     }

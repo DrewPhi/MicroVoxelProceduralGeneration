@@ -841,7 +841,11 @@ impl AdaptiveGpu {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_compare: if shadow {
+                        wgpu::CompareFunction::Less
+                    } else {
+                        wgpu::CompareFunction::Greater
+                    },
                     stencil: Default::default(),
                     bias: if shadow {
                         wgpu::DepthBiasState {
@@ -1592,12 +1596,7 @@ impl AdaptiveGpu {
         self.visible.clear();
         self.camera_upload.clear();
         let light_frame = adaptive_shadow::LightFrame::new(camera, self.lighting);
-        let projection = Mat4::perspective_rh(
-            camera.fov_y.to_radians(),
-            width as f32 / height as f32,
-            0.025,
-            camera.far,
-        );
+        let projection = camera.projection(width as f32 / height as f32);
         let direction = camera.direction();
         let view_transform = LocalViewTransform::new(direction, camera.view_up());
         let queries = crate::adaptive_stream::CameraQueries::new(
@@ -2439,22 +2438,19 @@ fn certificate_kind(tile: &GeometryTile) -> u8 {
 
 struct RasterClip {
     planes: [glam::Vec4; 6],
-    tolerance: f32,
 }
 impl RasterClip {
     fn new(matrix: Mat4, [lo, hi]: [Vec3; 2]) -> Self {
         let r = matrix.transpose();
         let abs = lo.abs().max(hi.abs()).extend(1.);
-        // Clip coordinates are computed separately before the hardware comparison.
-        // Include their rounding error even when subtracting nearly parallel rows
-        // (the perspective far plane).
-        let clip_scale = [r.x_axis, r.y_axis, r.z_axis, r.w_axis]
-            .into_iter()
-            .map(|row| row.abs().dot(abs))
-            .fold(1_f32, f32::max);
-        let tolerance = 16. * f32::EPSILON * clip_scale;
+        // Each hardware test uses only its particular clip coordinates. In
+        // reversed depth the far plane uses z alone, whose coefficients are
+        // orders of magnitude smaller than w. A tolerance based on w would
+        // admit entire terrain tiles past the far plane.
+        let [x, y, z, w_err] = [r.x_axis, r.y_axis, r.z_axis, r.w_axis]
+            .map(|row| 16. * f32::EPSILON * row.abs().dot(abs));
         let w = r.w_axis;
-        let planes = [
+        let mut planes = [
             w + r.x_axis,
             w - r.x_axis,
             w + r.y_axis,
@@ -2462,13 +2458,20 @@ impl RasterClip {
             r.z_axis,
             w - r.z_axis,
         ];
-        Self { planes, tolerance }
+        for (plane, margin) in
+            planes
+                .iter_mut()
+                .zip([w_err + x, w_err + x, w_err + y, w_err + y, z, w_err + z])
+        {
+            plane.w += margin;
+        }
+        Self { planes }
     }
     fn intersects(&self, [lo, hi]: [Vec3; 2]) -> bool {
         self.planes.into_iter().all(|plane| {
             let n = plane.truncate();
             let support = Vec3::select(n.cmpge(Vec3::ZERO), hi, lo);
-            n.dot(support) + plane.w >= -self.tolerance
+            n.dot(support) + plane.w >= 0.
         })
     }
 }
@@ -2978,7 +2981,7 @@ mod tests {
     #[test]
     fn raster_clip_retains_touching_faces_and_matches_projected_corners() {
         use super::{intersects_raster_clip, Mat4, Vec3};
-        // In WebGPU the front plane is z=0 and the far plane is z=w.
+        // WebGPU clips z to the interval from zero to w in both depth conventions.
         let inside = [Vec3::new(-1., -1., 0.), Vec3::ONE];
         assert!(intersects_raster_clip(Mat4::IDENTITY, inside));
         for axis in 0..3 {
@@ -2991,6 +2994,15 @@ mod tests {
                 assert!(!intersects_raster_clip(Mat4::IDENTITY, [p, p]));
             }
         }
+        let reversed = Mat4::perspective_rh(1., 1.7, 6000., 0.025);
+        assert!(intersects_raster_clip(
+            reversed,
+            [Vec3::new(0., 0., -6000.); 2]
+        ));
+        assert!(!intersects_raster_clip(
+            reversed,
+            [Vec3::new(-10., 0., -6900.), Vec3::new(10., 5., -6800.)]
+        ));
         let eye = Vec3::new(-3762., 440., 1198.);
         let matrix = Mat4::perspective_rh(1., 1.7, 0.12, 6000.)
             * Mat4::look_to_rh(eye, Vec3::new(0.3, -0.15, 0.9).normalize(), Vec3::Y);

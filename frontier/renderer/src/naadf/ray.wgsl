@@ -229,7 +229,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     }
     let h=trace_prefixed(o,d,minimum,prefix,false,traversal_diagnostic);
     if traversal_diagnostic {
-        return Fragment(vec4(vec3<f32>(h.visits),1.),0.);
+        return Fragment(vec4(vec3<f32>(h.visits),1.),1.);
     }
     if !h.found{discard;}
     let hit=(o+d*h.t)*NATIVE_VOXEL_METERS;

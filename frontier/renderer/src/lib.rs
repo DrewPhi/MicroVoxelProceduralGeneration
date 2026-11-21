@@ -246,10 +246,14 @@ impl Camera {
         }
         glam::Quat::from_axis_angle(self.direction().normalize(), self.roll) * Vec3::Y
     }
+    /// Finite reversed depth keeps the native near clip and distinguishes
+    /// neighbouring voxel faces even near the horizon.
+    fn projection(&self, aspect: f32) -> Mat4 {
+        Mat4::perspective_rh(self.fov_y.to_radians(), aspect, self.far, 0.025)
+    }
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
-        Mat4::perspective_rh(self.fov_y.to_radians(), aspect, 0.025, self.far)
-            * Mat4::look_to_rh(eye, self.direction(), self.view_up())
+        self.projection(aspect) * Mat4::look_to_rh(eye, self.direction(), self.view_up())
     }
 }
 
@@ -465,7 +469,7 @@ impl Gpu {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -513,7 +517,7 @@ impl Gpu {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -606,11 +610,12 @@ impl Gpu {
         snapshot: &brick_ray::BrickSnapshot,
         skip_mode: u32,
     ) -> Result<()> {
-        self.brick = Some(brick_ray::BrickRayGpu::new(
+        self.brick = Some(brick_ray::BrickRayGpu::with_depth_mode(
             &self.device,
             snapshot,
             self.scene_format,
             self.sample_count,
+            true,
         )?);
         self.brick_skip_mode = skip_mode;
         let metrics = &mut self.brick_cache_metrics;
@@ -958,7 +963,7 @@ impl Gpu {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.),
+                    load: wgpu::LoadOp::Clear(0.),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1312,18 +1317,22 @@ impl Gpu {
             for row_bytes in bytes.chunks_exact(depth_row as usize) {
                 packed.extend_from_slice(&row_bytes[..width as usize * 4]);
             }
-            let coverage: Vec<u8> = packed
-                .chunks_exact(4)
-                .flat_map(|bytes| {
-                    let d = f32::from_le_bytes(bytes.try_into().unwrap());
-                    (if d.is_finite() && d >= 0. && d < 1. {
-                        1f32
-                    } else {
-                        0f32
-                    })
-                    .to_le_bytes()
-                })
-                .collect();
+            // Preserve the existing near-zero/far-one capture contract. An
+            // occupied sample within the last forward-depth rounding bin must
+            // remain distinguishable from the clear value for older readers.
+            let mut coverage = Vec::with_capacity(packed.len());
+            let furthest_covered = f32::from_bits(1.0_f32.to_bits() - 1);
+            for pixel in packed.chunks_exact_mut(4) {
+                let reverse = f32::from_le_bytes((&*pixel).try_into().unwrap());
+                let hit = reverse > 0. && reverse <= 1.;
+                let forward = if hit {
+                    (1. - reverse).min(furthest_covered)
+                } else {
+                    1.
+                };
+                pixel.copy_from_slice(&forward.to_le_bytes());
+                coverage.extend_from_slice(&f32::from(u8::from(hit)).to_le_bytes());
+            }
             std::fs::write(path.with_extension("coverage.f32"), coverage)?;
             std::fs::write(path.with_extension("depth.f32"), packed)?;
         } else {
@@ -1399,7 +1408,7 @@ impl Gpu {
         let native_voxel_m = voxel_size();
         let roll_degrees = camera.roll.to_degrees();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"depth_source\":\"opaque_scene_before_atmosphere_and_horizon\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"horizon_face_bytes\":{horizon_face_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"scene_depth_attachment\":\"reversed_ndc_1_0\",\"depth_source\":\"opaque_scene_before_atmosphere_and_horizon\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"horizon_face_bytes\":{horizon_face_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -4804,6 +4813,25 @@ mod tests {
         )
         .validate(&module)
         .unwrap();
+    }
+    #[test]
+    fn scene_depth_resolves_native_layers_across_the_flight_view() {
+        let mut camera = super::Camera::fixture();
+        camera.far = 6000.;
+        let projection = camera.projection(16. / 9.);
+        let inverse = projection.inverse();
+        let depth = |z: f32| projection.project_point3(glam::Vec3::new(0., 0., -z)).z;
+        assert!((depth(0.025) - 1.).abs() < 2e-6);
+        for metres in [100., 1000., 4000., 5999.] {
+            let front = depth(metres);
+            let behind = depth(metres + 0.0625);
+            assert!(front > behind && behind > 0., "depth at {metres} m");
+            let point = inverse.project_point3(glam::Vec3::new(0., 0., front));
+            assert!(
+                (point.z + metres).abs() < 0.002,
+                "unprojection at {metres} m"
+            );
+        }
     }
     #[test]
     fn local_camera_is_stable_at_large_origins() {

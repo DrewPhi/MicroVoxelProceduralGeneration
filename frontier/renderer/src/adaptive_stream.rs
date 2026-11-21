@@ -960,7 +960,7 @@ impl AdaptiveStream {
                 focus.select(
                     &self.world,
                     camera,
-                    [width,height],
+                    [width, height],
                     self.settings.pixel_error,
                     &urgent,
                     self.settings.refinements_per_transaction,
@@ -2466,12 +2466,7 @@ fn camera_projection(camera: &Camera, width: u32, height: u32) -> Option<Project
     {
         return None;
     }
-    let matrix = glam::Mat4::perspective_rh(
-        camera.fov_y.to_radians(),
-        width as f32 / height as f32,
-        0.025,
-        camera.far,
-    );
+    let matrix = camera.projection(width as f32 / height as f32);
     if !matrix.x_axis.x.is_finite()
         || !matrix.y_axis.y.is_finite()
         || matrix.x_axis.x <= 0.0
@@ -2490,10 +2485,10 @@ fn conservative_clip_depth(camera: &Camera) -> Option<f64> {
     if !camera.far.is_finite() || camera.far <= 0.025 {
         return None;
     }
-    // Match glam's f32 depth coefficients. Their rounding can move the actual
-    // GPU far plane beyond the requested distance, especially at long range.
-    let r = camera.far / (0.025_f32 - camera.far);
-    let far = (r * 0.025_f32) as f64 / (r as f64 + 1.0);
+    // Retain a conservative bound for the rounded GPU coefficients. Reversed
+    // depth clips the far plane at z=0 without subtracting nearly equal rows.
+    let r = 0.025_f32 / (camera.far - 0.025_f32);
+    let far = f64::from(r * camera.far) / f64::from(r);
     if !far.is_finite() || far <= 0.0 {
         None
     } else {
@@ -2502,12 +2497,7 @@ fn conservative_clip_depth(camera: &Camera) -> Option<f64> {
 }
 fn all_heading_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Option<[f64; 2]> {
     camera_projection(camera, width, height)?;
-    let matrix = glam::Mat4::perspective_rh(
-        camera.fov_y.to_radians(),
-        width as f32 / height as f32,
-        0.025,
-        camera.far,
-    );
+    let matrix = camera.projection(width as f32 / height as f32);
     let tx = 1.0 / matrix.x_axis.x as f64;
     let ty = 1.0 / matrix.y_axis.y as f64;
     let radius = conservative_clip_depth(camera)? * (1.0 + tx * tx + ty * ty).sqrt() * (1.0 + 1e-6);
@@ -2525,12 +2515,7 @@ fn frustum_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Optio
     let f = camera.direction().as_dvec3().normalize();
     let r = f.cross(camera.view_up().as_dvec3()).normalize();
     let u = r.cross(f);
-    let projection = glam::Mat4::perspective_rh(
-        camera.fov_y.to_radians(),
-        width as f32 / height as f32,
-        0.025,
-        camera.far,
-    );
+    let projection = camera.projection(width as f32 / height as f32);
     let tx = 1.0 / projection.x_axis.x as f64;
     let ty = 1.0 / projection.y_axis.y as f64;
     if !tx.is_finite() || !ty.is_finite() || tx <= 0.0 || ty <= 0.0 {
@@ -3485,12 +3470,13 @@ mod tests {
         let mut camera = Camera::fixture();
         for far in [300.0_f32, 20000.0, 100000.0] {
             camera.far = far;
-            let projection =
-                glam::Mat4::perspective_rh(camera.fov_y.to_radians(), 1920.0 / 1080.0, 0.025, far);
-            let gpu_far = projection.w_axis.z as f64 / (projection.z_axis.z as f64 + 1.0);
+            let projection = camera.projection(1920.0 / 1080.0);
+            let gpu_far = projection.w_axis.z as f64 / projection.z_axis.z as f64;
             assert!(conservative_clip_depth(&camera).unwrap() >= gpu_far);
         }
         camera.far = 10000000.0;
+        assert!(conservative_clip_depth(&camera).unwrap() >= 10000000.);
+        camera.far = f32::INFINITY;
         assert!(conservative_clip_depth(&camera).is_none());
         assert!(frustum_horizontal_extents(&camera, 1920, 1080).is_none());
     }

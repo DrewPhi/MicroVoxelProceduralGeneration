@@ -59,7 +59,7 @@ fn visibility(p:vec3<f32>,distance:f32,forward:f32)->f32 {
     let pixel=clamp(vec2<i32>(i.uv*vec2<f32>(size)),vec2(0),size-vec2(1));
     let d=DEPTH_LOAD;
     let offset=reconstruct(i.uv,d);
-    let endpoint=select(length(offset),4000.,d>=1.);
+    let endpoint=select(length(offset),4000.,d<=0.);
     if atmosphere.beauty.y<.5 || shadow.parameters.x<.5 || atmosphere.fog.x<=0. || atmosphere.sun.y<=0. {
         return vec4(0.,0.,0.,endpoint);
     }

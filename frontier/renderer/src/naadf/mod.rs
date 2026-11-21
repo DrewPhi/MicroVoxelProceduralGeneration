@@ -2274,7 +2274,7 @@ fn make_pipelines(
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_compare: wgpu::CompareFunction::Greater,
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -2471,7 +2471,7 @@ fn ray_basis(camera: Camera, aspect: f32) -> [[f32; 4]; 4] {
     let forward = camera.direction().normalize();
     let right = forward.cross(camera.view_up()).normalize();
     let up = right.cross(forward);
-    let p = glam::Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 0.025, camera.far);
+    let p = camera.projection(aspect);
     [
         forward.extend(0.).to_array(),
         right.extend(1. / p.x_axis.x).to_array(),

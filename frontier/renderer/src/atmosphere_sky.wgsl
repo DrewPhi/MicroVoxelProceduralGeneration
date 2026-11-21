@@ -58,7 +58,7 @@ struct CloudOutput {
     @location(1) transmission:vec4<f32>,
 };
 @fragment fn fs_main(i:VertexOutput)->CloudOutput {
-    let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,1.,1.);
+    let p=atmosphere.inverse_view_projection*vec4(i.uv.x*2.-1.,1.-i.uv.y*2.,0.,1.);
     let ray=normalize(p.xyz/p.w-atmosphere.relative_eye.xyz);
     let segment = cloud_interval(atmosphere.world_eye.y, ray.y);
     if segment.y <= segment.x || atmosphere.weather.x <= .001 { return CloudOutput(vec4(0.,0.,0.,1.),vec4(1.)); }

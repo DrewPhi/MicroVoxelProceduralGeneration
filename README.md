@@ -117,6 +117,20 @@ than 0.01 px in both views.
 On seed 19, halving the reference spacing from 0.5 m to 0.25 m changed the
 median by 0.09 px and left p95 unchanged across 240 screen columns.
 
+The camera uses a floating-point reversed depth buffer with a 2.5 cm near
+plane. It can distinguish adjacent 6.25 cm faces at the 6 km flight clip.
+On seed 8123, the fixed-pose ridgeline p95 fell from 6.97 to **1.08 px**,
+with all 240 columns within 3 px. Seed 29123 still measured 6.03 px at its
+fixed pose. The three exact brick backends agreed with the CPU reference on
+all 153,600 center-ray hit/miss decisions in the 480×320 fixture. Exported
+depth keeps its original near-zero, far-one encoding, and coverage comes
+from the scene attachment before the atmosphere and distant horizon.
+
+In two ten-second moving runs per seed with reversed depth, frame p95 was
+11.52–12.10 ms on seed 19, 7.30–7.56 ms on 8123 and 12.65–12.83 ms on
+29123 (Radeon 760M, 1080p, MSAA 1, vegetation off). A banked flight view
+with vegetation enabled measured 12.94 / 15.61 / 16.89 ms at p50/p95/p99.
+
 ### Flight benchmark
 
 Radeon 760M, 1920×1080, MSAA 1, 6 km active view, 32 m native radius.

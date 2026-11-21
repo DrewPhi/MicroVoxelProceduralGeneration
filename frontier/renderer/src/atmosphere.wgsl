@@ -266,9 +266,9 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         // Air/visibility diagnostics contain this pass only: no scene colour,
         // sky, exposure, tone mapping, or analytical global height-fog terms.
         if atmosphere.beauty.z>.5 && atmosphere.beauty.z<2.5 {
-            return meadow_scattering(uv,select(distance,4000.,depth>=1.));
+            return meadow_scattering(uv,select(distance,4000.,depth<=0.));
         }
-        if depth >= 1.0 {
+        if depth <= 0.0 {
             let clouds = cloud_sample(uv);
             var background = alpine_clear_sky(ray);
             var visibility = clouds.a;
@@ -297,7 +297,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         var surface = mix(haze, color*airframe_light(offset)*cloud_ground_light(offset), transmittance);
         if atmosphere.lighting.w > .5 && distance > atmosphere.lighting.w*.63 {
             let near = .025;
-            let fraction = near / (atmosphere.lighting.w*(1.-depth) + near*depth);
+            let fraction = near / (atmosphere.lighting.w*depth + near*(1.-depth));
             let landscape = horizon_sample(uv);
             if landscape.a > 0. {
                 surface = mix(surface,horizon_air(landscape,ray),smoothstep(.65,.97,fraction));
@@ -314,7 +314,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         }
         return beauty_finish(surface + meadow_scattering(uv,distance));
     }
-    if depth >= 1.0 { return sky(ray)*atmosphere.fog.z; }
+    if depth <= 0.0 { return sky(ray)*atmosphere.fog.z; }
     let transmittance = fog_transmittance(distance,ray.y);
     // Aerial perspective uses the distant sky's scattered-light hue.
     return mix(clear_sky(ray),color,transmittance)*atmosphere.fog.z;

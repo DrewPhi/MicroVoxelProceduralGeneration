@@ -148,7 +148,7 @@ fn frozen_native_gpu_parity() {
             }],
         });
         let eye = Vec3::new(23., 16., 30.);
-        let matrix = Mat4::perspective_rh(55f32.to_radians(), 1., 0.1, 100.)
+        let matrix = Mat4::perspective_rh(55f32.to_radians(), 1., 100., 0.1)
             * Mat4::look_at_rh(eye, Vec3::new(0., 3., 2.), Vec3::Y);
         let mut camera_bytes = Vec::new();
         camera_bytes.extend_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
@@ -262,7 +262,7 @@ fn frozen_native_gpu_parity() {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth_view,
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.),
+                            load: wgpu::LoadOp::Clear(0.),
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -330,7 +330,7 @@ fn frozen_native_gpu_parity() {
             let covered = rgba.chunks_exact(4).filter(|p| p[3] != 0).count();
             let depth_covered = depths
                 .chunks_exact(4)
-                .filter(|p| f32::from_le_bytes((*p).try_into().unwrap()) < 1.)
+                .filter(|p| f32::from_le_bytes((*p).try_into().unwrap()) > 0.)
                 .count();
             assert!(
                 covered > 500,
