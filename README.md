@@ -134,6 +134,16 @@ Horizon walls take their color from the thickness of the exposed snow or grass
 cap, soil, bedrock and water. Deep cuts through a snowy summit expose the
 underlying rock. The additional CPU samples use 1.78 MiB per horizon lattice.
 
+The active terrain and horizon use the same sun color as its elevation changes.
+Flight and beauty views keep highlights in a floating-point scene target until
+exposure and tone mapping. The Radeon uses packed 11/11/10-bit RGB at four
+bytes per pixel, including with 4× MSAA. Devices without the required render
+and resolve support use 16-bit floating-point RGBA. On the 1280×720 ridge and
+plateau captures, packed color differed from the 16-bit reference by at most
+three displayed channel levels. In five sun and cloud settings, a saved timber
+wall shifted by less than three levels between the active and horizon views
+at the same 1 km camera position. The previous renderer shifted by up to 64.
+
 Each horizon roof takes its elevation from the native column at its center.
 In five level-camera profiles, sampled every 2 m along 160 sightlines beyond
 6 km, skyline p95 fell from 7.06 to 2.93 px on seed 19, 24.12 to 8.58 on 673,

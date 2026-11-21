@@ -266,7 +266,7 @@ fn gpu_matches_canonical_rays_for_source(
             &mesh,
             1,
             false,
-            false,
+            None,
         )
         .await
         .unwrap();

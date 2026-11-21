@@ -14,7 +14,7 @@ struct Vertex {
 };
 fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     let fill=mix(vec3(.12,.145,.075),vec3(.25,.33,.43),sky)*(1.+.3*camera.sun.w);
-    let light=vec3(.93,.84,.65)*direct*(1.-.72*camera.sun.w);
+    let light=outdoor_sun_color(camera.sun.y)*direct*(1.-.72*camera.sun.w);
     return albedo*(fill+light);
 }
 @vertex fn vs(@builtin(vertex_index) i:u32, @location(0) packed:vec2<u32>, @location(1) heights:vec2<f32>) -> Vertex {

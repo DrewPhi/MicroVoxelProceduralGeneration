@@ -19,11 +19,6 @@ fn ground_sample(position:vec3<f32>) -> vec4<f32> {
     return mix(low,high,weight.y);
 }
 
-// Daylight warms as its path through the atmosphere gets longer.
-fn outdoor_sun_color(elevation:f32)->vec3<f32> {
-    return mix(vec3(2.12,1.44,0.83),vec3(2.,1.78,1.46),smoothstep(.06,.64,elevation));
-}
-
 // First-bounce approximation for an illuminated ground hemisphere. The same
 // sky/shadow inputs drive all receivers, and only diffuse illumination changes.
 fn ground_irradiance(position:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>,

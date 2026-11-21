@@ -335,6 +335,19 @@ struct Gpu {
     terrain: Option<terrain::TerrainGpu>,
     adapter_info: String,
 }
+fn scene_color_preference(
+    recipe: Option<frontier_world::FbmRecipe>,
+    settings: &settings::VisualSettings,
+) -> Option<wgpu::TextureFormat> {
+    if recipe == Some(frontier_world::FbmRecipe::Alpine) {
+        Some(wgpu::TextureFormat::Rgba16Float)
+    } else if settings.beauty || settings.flight_horizon {
+        Some(wgpu::TextureFormat::Rg11b10Ufloat)
+    } else {
+        None
+    }
+}
+
 impl Gpu {
     async fn new(
         instance: &wgpu::Instance,
@@ -343,7 +356,7 @@ impl Gpu {
         mesh: &mesh::Mesh,
         sample_count: u32,
         voxel_filter: bool,
-        hdr_scene: bool,
+        preferred_color: Option<wgpu::TextureFormat>,
     ) -> Result<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -365,10 +378,34 @@ impl Gpu {
                 })
                 .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
         });
-        let format = if hdr_scene && output_format != wgpu::TextureFormat::Rgba32Float {
+        // Scene radiance can exceed one before the atmosphere applies exposure.
+        // A packed RGB target costs four bytes per pixel and the compositor
+        // reads only RGB. Require resolve support for live 1x/4x MSAA changes.
+        let packed = wgpu::TextureFormat::Rg11b10Ufloat;
+        let packed_features = wgpu::Features::RG11B10UFLOAT_RENDERABLE
+            | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        let needs_hdr =
+            preferred_color.is_some() && output_format != wgpu::TextureFormat::Rgba32Float;
+        let use_packed = needs_hdr
+            && preferred_color == Some(packed)
+            && adapter.features().contains(packed_features)
+            && adapter.get_texture_format_features(packed).flags.contains(
+                wgpu::TextureFormatFeatureFlags::FILTERABLE
+                    | wgpu::TextureFormatFeatureFlags::BLENDABLE
+                    | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4
+                    | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE,
+            );
+        let format = if use_packed {
+            packed
+        } else if needs_hdr {
             wgpu::TextureFormat::Rgba16Float
         } else {
             output_format
+        };
+        let color_features = if use_packed {
+            packed_features
+        } else {
+            wgpu::Features::empty()
         };
         let indirect_features = if adaptive_gpu::coarse_batch::requested() {
             adaptive_gpu::coarse_batch::features()
@@ -383,7 +420,8 @@ impl Gpu {
                         & (wgpu::Features::TIMESTAMP_QUERY
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
-                            | indirect_features),
+                            | indirect_features
+                            | color_features),
                     required_limits: wgpu::Limits {
                         max_buffer_size: adapter.limits().max_buffer_size,
                         max_storage_buffer_binding_size: adapter
@@ -2952,9 +2990,10 @@ impl ApplicationHandler for Viewer {
                 self.mesh.as_ref().unwrap(),
                 self.sample_count,
                 self.voxel_filter,
-                self.world
-                    .fbm_terrain()
-                    .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Alpine),
+                scene_color_preference(
+                    self.world.fbm_terrain().map(|s| s.params().recipe),
+                    &self.visual_settings,
+                ),
             ))?;
             gpu.init_summary_contention(&self.world)?;
             if let Some(snapshot) = self.brick_initial.take() {
@@ -3894,7 +3933,7 @@ pub fn run() -> Result<()> {
             &mesh,
             msaa,
             voxel_filter,
-            !capture_linear && params.recipe == frontier_world::FbmRecipe::Alpine,
+            scene_color_preference(Some(params.recipe), &visual_settings),
         ))?;
         gpu.init_summary_contention(&world)?;
         gpu.volume_owner = world.topology_base_cells().is_some();

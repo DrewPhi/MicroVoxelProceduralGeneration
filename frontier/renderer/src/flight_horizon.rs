@@ -225,6 +225,7 @@ impl Horizon {
             label: Some("flight horizon"),
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
+                    include_str!("sunlight.wgsl"),
                     include_str!("water.wgsl"),
                     include_str!("edited_columns.wgsl"),
                     include_str!("material_palette.wgsl"),

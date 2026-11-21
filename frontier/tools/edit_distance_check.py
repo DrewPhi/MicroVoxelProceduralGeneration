@@ -26,7 +26,7 @@ def write_fixture(template, destination, edits):
     destination.write_bytes(data[:72] + struct.pack('<Q', len(edits)) + records + data[tail:])
 
 
-def capture(out, name, save, eye, target, recipe="regional", visual=(), flight=False):
+def capture(out, name, save, eye, target, recipe="regional", visual=(), flight=False, far=96.):
     checkpoint = out / (save + '.save')
     before = hashlib.sha256(checkpoint.read_bytes()).digest()
     png = out / (name + '.png')
@@ -35,7 +35,7 @@ def capture(out, name, save, eye, target, recipe="regional", visual=(), flight=F
         '--scene', 'adaptive', '--terrain-recipe', recipe,
         '--amplitude', '0', '--vegetation', 'off', '--walk', 'off',
         '--world-save', checkpoint, '--naadf', 'on', '--naadf-radius', '8',
-        '--capture-far', '96', '--width', str(WIDTH), '--height', str(HEIGHT), '--msaa', '1',
+        '--capture-far', str(far), '--width', str(WIDTH), '--height', str(HEIGHT), '--msaa', '1',
         '--eye', ','.join(map(str, eye)), '--target', ','.join(map(str, target)),
         *visual, *([] if flight else ['--capture-linear']),
         '--capture-unresolved', '--no-adaptive-disk-cache', '--capture', png,
@@ -46,7 +46,7 @@ def capture(out, name, save, eye, target, recipe="regional", visual=(), flight=F
         raise RuntimeError('headless capture changed the save')
     encoded = png.with_suffix('.depth.f32').read_bytes()
     raw = struct.unpack_from('<f', encoded, 4 * ((HEIGHT // 2) * WIDTH + WIDTH // 2))[0]
-    near, far = 0.025, 96.
+    near = 0.025
     return far * near / (far - raw * (far - near))
 
 def horizon_edits(out, template):
@@ -76,6 +76,28 @@ def horizon_edits(out, template):
         if max(abs(a - b) for a, b in zip(*rgb)) < .035:
             raise AssertionError(f'{name} missing from the flight horizon: {rgb}')
         results[name] = dict(zip(['stock_linear_rgb', 'edited_linear_rgb'], rgb))
+    # Keep the observer and the sun fixed. Only the clip changes, so the
+    # two surfaces should agree before and after the horizon hands off.
+    write_fixture(template, out / 'horizon-wood.save', [(x, y, z, 4) for x, y, z, _ in mast])
+    for save, elevation, overcast in [('horizon-mast', 8, 0.), ('horizon-wood', 35, .85)]:
+        rgb = []
+        for far in [256., 4000.]:
+            tag = f'{save}-light-{int(far)}'
+            depth = capture(out, tag, save, (0, 100, -1020), (0, 100, -2020),
+                            flight=True, far=far, visual=[
+                                '--sun-elevation', str(elevation), '--sun-azimuth', '0',
+                                '--overcast', str(overcast), '--fog-density', '0',
+                                '--cloud-coverage', '0', '--ground-bounce', '0',
+                                '--terrain-shadows', 'off', '--fov-y', '12',
+                            ])
+            expected = min(999.9375, far)
+            if abs(depth - expected) > 3.:
+                raise AssertionError(f'{tag} measured {depth} m, expected {expected} m')
+            image = (out / (tag + '.linear_rgb.f32')).read_bytes()
+            rgb.append(struct.unpack_from('<fff', image, 12 * ((HEIGHT // 2) * WIDTH + WIDTH // 2)))
+        if max(abs(a - b) for a, b in zip(*rgb)) > .05:
+            raise AssertionError(f'{save} changed illumination across the active clip: {rgb}')
+        results[save + '-light'] = dict(zip(['horizon_linear_rgb', 'active_linear_rgb'], rgb))
     return results
 
 def sunlit_excavation(out, template):

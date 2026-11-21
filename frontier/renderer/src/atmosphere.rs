@@ -283,6 +283,7 @@ fn air_shader_source(samples: u32) -> String {
     let source = concat!(
         "const NAADF_GROUP:u32=1u;const NAADF_BASE:u32=3u;\n",
         include_str!("naadf/trace.wgsl"),
+        include_str!("sunlight.wgsl"),
         include_str!("ground_light.wgsl"),
         include_str!("atmosphere_air.wgsl"),
     );
