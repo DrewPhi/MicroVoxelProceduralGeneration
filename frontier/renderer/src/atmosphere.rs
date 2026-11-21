@@ -848,6 +848,7 @@ impl Atmosphere {
         world: &frontier_world::World,
         camera: Camera,
         settings: &VisualSettings,
+        adaptive: Option<&crate::adaptive_gpu::AdaptiveGpu>,
         capture: bool,
     ) {
         if !settings.atmosphere || !settings.beauty {
@@ -863,6 +864,7 @@ impl Atmosphere {
                 self.width as f32 / self.height as f32,
                 sun_direction(settings.sun_elevation, settings.sun_azimuth),
                 settings.overcast,
+                adaptive.and_then(|gpu| gpu.horizon_edits()),
                 capture,
             );
         }

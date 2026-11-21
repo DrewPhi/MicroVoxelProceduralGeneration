@@ -78,24 +78,6 @@ struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<
 @group(2) @binding(15) var flight_sampler: sampler;
 @group(2) @binding(13) var edited_columns: texture_2d<u32>;
 @group(1) @binding(2) var caster_edits: texture_2d<u32>;
-fn edit_owns_column(mask: texture_2d<u32>, cell: vec2<u32>) -> bool {
-    let dims = textureDimensions(mask);
-    if dims.y == 1u { return false; }
-    let capacity = dims.x * (dims.y - 1u);
-    let bounds = textureLoad(mask, vec2<i32>(0, i32(dims.y-1u)), 0);
-    if any(cell - bounds.xy > bounds.zw) { return false; }
-    let key = cell >> vec2(3u);
-    let h = key.x*0x9e3779b1u ^ key.y*0x85ebca77u;
-    var bucket = (h^(h>>16u)) & (capacity-1u);
-    let bit = (cell.x&7u) + (cell.y&7u)*8u;
-    for (var probe=0u; probe<capacity; probe++) {
-        let word = textureLoad(mask,vec2<i32>(i32(bucket%dims.x),i32(bucket/dims.x)),0);
-        if (word.z | word.w)==0u {return false;}
-        if all(key==word.xy) {return (select(word.z, word.w, bit>=32u) & (1u << (bit&31u))) != 0u;}
-        bucket = (bucket+1u) & (capacity-1u);
-    }
-    return false;
-}
 fn plant_shadow(local:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>)->f32 {
     if near_shadow.parameters.x<0.5 { return 1.; }
     // Bounded receiver normal/light bias in metres; avoid the broad normal
@@ -430,11 +412,6 @@ fn proxy_position(address:u32)->vec3<f32> {
     let positions=array<vec3<f32>,3>(a,b,c);
     return vertex_out(positions[vertex],MATERIAL_COLORS[material],normalize(cross(b-a,c-a)),profile_index);
 }
-const MATERIAL_COLORS:array<vec3<f32>,10> = array<vec3<f32>,10>(
-    vec3<f32>(0.,0.,0.),vec3<f32>(0.18,0.34,0.10),vec3<f32>(0.32,0.22,0.13),
-    vec3<f32>(0.35,0.37,0.39),vec3<f32>(0.41,0.25,0.13),
-    vec3<f32>(0.40,0.53,0.25),vec3<f32>(0.93,0.92,0.84),
-    vec3<f32>(0.035,0.19,0.29),vec3<f32>(0.62,0.52,0.32),vec3<f32>(0.88,0.92,0.96));
 @vertex fn vs_native(@builtin(vertex_index) vertex:u32,
     @location(0) anchor:vec3<f32>,@location(1) extent:vec2<f32>,
     @location(2) axis_sign:u32,@location(3) material:u32,@location(4) profile_index:u32)->VertexOut {

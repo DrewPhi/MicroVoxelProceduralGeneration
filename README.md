@@ -417,10 +417,21 @@ select materials. Edit within the resident exact region and exit normally
 to flush the save. Reopen with the same seed, recipe, and voxel size.
 Use `--world-save PATH` to edit and save without advancing water simulation.
 The adaptive renderer reconstructs edited columns and their exposed walls
-outside the native region. This preserves excavations, suspended blocks and
-openings in the active terrain view. Large edit sets can exceed the distant
-mesh budget, which reduces the area reconstructed around the camera. The
-35 km horizon still samples the unedited procedural source.
+outside the native region. The flight horizon shares the active renderer's
+edit faces and column mask out to the 35 km atmospheric fade. Large edit sets
+can exceed the distant mesh budget, which reduces the area reconstructed
+around the camera.
+
+A saved 6.25 cm voxel structure remained visible from 2.02 km, and a larger
+landmark on a 50 cm grid remained visible at 27 km. At 258 m and 254 m on
+opposite sides of a 256 m clip, the center of the approaching structure
+had the same displayed RGB. A 620 m overhead view exposed a snow floor below
+the original grass and a 10 cm grid test showed the underside of a platform.
+Pass `--horizon` to `tools/edit_distance_check.py` to check the distant
+structure and excavation alongside the native depth tests.
+At 1080p MSAA 1, paired flat-terrain flights measured 3.23–3.25 ms frame p95
+approaching the structure and 3.77 ms approaching the saved runway. The
+previous active-only renderer measured 3.15–3.34 and 3.67–3.75 ms.
 
 The distant edit mesh reads authored columns directly from the saved terrain
 pages and limits the result before allocation can grow with the entire save.

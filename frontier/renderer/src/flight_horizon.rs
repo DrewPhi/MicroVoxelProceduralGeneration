@@ -1,6 +1,6 @@
 //! Kilometre-scale relief beyond the active terrain clip. The lattice is
 //! anchored in world metres so moving the window preserves shared vertices.
-use crate::{atmosphere::texture, Camera};
+use crate::{adaptive_gpu::edit_landscape::HorizonEdits, atmosphere::texture, Camera};
 use frontier_world::{voxel_size, Cell, FbmParams, FbmTerrain, Material};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use std::ops::Range;
@@ -154,9 +154,19 @@ pub(crate) struct Horizon {
     dirty: std::cell::Cell<bool>,
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
+    masked_pipeline: wgpu::RenderPipeline,
+    edit_pipeline: wgpu::RenderPipeline,
+    edit_params: wgpu::Buffer,
+    edit_group: wgpu::BindGroup,
+    edits: Option<EditedFaces>,
     lattice: Option<Arc<Lattice>>,
     pending: Option<Receiver<Patch>>,
     source_key: Option<(u64, FbmParams, f64, bool)>,
+}
+struct EditedFaces {
+    faces: wgpu::Buffer,
+    count: u32,
+    mask_group: wgpu::BindGroup,
 }
 
 impl Horizon {
@@ -189,46 +199,83 @@ impl Horizon {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("water.wgsl"),
+                    include_str!("edited_columns.wgsl"),
+                    include_str!("material_palette.wgsl"),
                     include_str!("flight_horizon.wgsl")
                 )
                 .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
                 .into(),
             ),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("flight horizon"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 16,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Uint32x2, 1 => Float32x2],
-                }],
+        let make_pipeline = |label, vs, fs, layout| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[layout],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(format.into())],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let columns = wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Uint32x2, 1 => Float32x2],
+        };
+        let pipeline = make_pipeline("flight horizon", "vs", "fs", columns.clone());
+        let masked_pipeline =
+            make_pipeline("horizon with edit footprints", "vs", "fs_masked", columns);
+        let edit_pipeline = make_pipeline(
+            "horizon edit faces",
+            "vs_edit",
+            "fs",
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<crate::adaptive_geometry::NativeQuad>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint32, 3 => Uint32],
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(format.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
+        );
+        let edit_params = buffer(
+            "horizon edit origin",
+            32,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let edit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("horizon edit faces"),
+            layout: &edit_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edit_params.as_entire_binding(),
+                },
+            ],
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("flight horizon"),
@@ -250,6 +297,11 @@ impl Horizon {
             dirty: std::cell::Cell::new(true),
             pipeline,
             group,
+            masked_pipeline,
+            edit_pipeline,
+            edit_params,
+            edit_group,
+            edits: None,
             lattice: None,
             pending: None,
             source_key: None,
@@ -284,8 +336,35 @@ impl Horizon {
         aspect: f32,
         sun: Vec3,
         overcast: f32,
+        edits: Option<HorizonEdits<'_>>,
         capture: bool,
     ) {
+        if self.edits.as_ref().map(|e| &e.faces) != edits.as_ref().map(|e| e.faces) {
+            self.edits = edits.as_ref().map(|e| EditedFaces {
+                faces: e.faces.clone(),
+                count: e.count,
+                mask_group: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("horizon edit column mask"),
+                    layout: &self.masked_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(e.mask),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.edit_params.as_entire_binding(),
+                        },
+                    ],
+                }),
+            });
+            self.view = None;
+            self.dirty.set(true);
+        }
         let key = (source.seed(), source.params(), voxel_size(), vegetation);
         if self.source_key != Some(key) {
             self.lattice = None;
@@ -390,6 +469,15 @@ impl Horizon {
                 }
             }
             queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&data));
+            if let Some(e) = edits {
+                let eye = (camera.position - e.origin)
+                    .as_vec3()
+                    .extend(voxel_size().recip() as f32);
+                let mut frame = [0u32; 8];
+                frame[..4].copy_from_slice(&eye.to_array().map(f32::to_bits));
+                frame[4..7].copy_from_slice(&[e.cell.x as u32, e.cell.y as u32, e.cell.z as u32]);
+                queue.write_buffer(&self.edit_params, 0, bytemuck::cast_slice(&frame));
+            }
         }
     }
     pub(crate) fn draw(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -418,12 +506,23 @@ impl Horizon {
             timestamp_writes: None,
         });
         if let Some(faces) = &self.faces {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
+            if let Some(e) = &self.edits {
+                pass.set_pipeline(&self.masked_pipeline);
+                pass.set_bind_group(0, &e.mask_group, &[]);
+            } else {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.group, &[]);
+            }
             pass.set_vertex_buffer(0, faces.slice(..));
             for range in &self.visible {
                 pass.draw(0..4, range.clone());
             }
+        }
+        if let Some(e) = self.edits.as_ref().filter(|_| self.view.is_some()) {
+            pass.set_pipeline(&self.edit_pipeline);
+            pass.set_bind_group(0, &self.edit_group, &[]);
+            pass.set_vertex_buffer(0, e.faces.slice(..));
+            pass.draw(0..4, 0..e.count);
         }
     }
 }

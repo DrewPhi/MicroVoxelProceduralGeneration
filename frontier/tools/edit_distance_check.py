@@ -26,17 +26,19 @@ def write_fixture(template, destination, edits):
     destination.write_bytes(data[:72] + struct.pack('<Q', len(edits)) + records + data[tail:])
 
 
-def capture(out, name, save, eye, target, recipe="regional", visual=()):
+def capture(out, name, save, eye, target, recipe="regional", visual=(), flight=False):
     checkpoint = out / (save + '.save')
     before = hashlib.sha256(checkpoint.read_bytes()).digest()
     png = out / (name + '.png')
     args = [
-        ROOT / 'target/release/frontier', '--scene', 'adaptive', '--terrain-recipe', recipe,
+        ROOT / 'target/release/frontier', *(['--preset', 'flight', '--seed', '7'] if flight else []),
+        '--scene', 'adaptive', '--terrain-recipe', recipe,
         '--amplitude', '0', '--vegetation', 'off', '--walk', 'off',
         '--world-save', checkpoint, '--naadf', 'on', '--naadf-radius', '8',
         '--capture-far', '96', '--width', str(WIDTH), '--height', str(HEIGHT), '--msaa', '1',
         '--eye', ','.join(map(str, eye)), '--target', ','.join(map(str, target)),
-        *visual, '--capture-linear', '--capture-unresolved', '--no-adaptive-disk-cache', '--capture', png,
+        *visual, *([] if flight else ['--capture-linear']),
+        '--capture-unresolved', '--no-adaptive-disk-cache', '--capture', png,
     ]
     with png.with_suffix('.log').open('w') as log:
         subprocess.run(args, check=True, stdout=log, stderr=log, timeout=150)
@@ -47,7 +49,34 @@ def capture(out, name, save, eye, target, recipe="regional", visual=()):
     near, far = 0.025, 96.
     return far * near / (far - raw * (far - near))
 
-
+def horizon_edits(out, template):
+    # One feature lies in front of the sky. The other is below the procedural
+    # ground plane and can only appear when the horizon honors its column mask.
+    mast = [(x, y, -32320, 9) for x in range(-160, 160) for y in range(1488, 1712)]
+    pit = [(x, y, z, 9 if y == -4 else 0)
+           for x in range(-128, 128) for y in range(-4, 0) for z in range(-128, 128)]
+    results = {}
+    for name, edits, eye, target in [
+        ('horizon-mast', mast, (0, 100, 0), (0, 100, -2020)),
+        ('horizon-floor', pit, (0, 620, 0), (0, 0, -.14)),
+    ]:
+        write_fixture(template, out / (name + '.save'), edits)
+        rgb = []
+        for state in ['stock', name]:
+            tag = name + '-' + state
+            depth = capture(out, tag, state, eye, target, flight=True, visual=[
+                '--atmosphere', 'on', '--beauty', 'on',
+                '--fog-density', '0', '--cloud-coverage', '0', '--fov-y', '12',
+                '--terrain-shadows', 'off',
+            ])
+            if abs(depth - 96.) > .01:
+                raise AssertionError(f'{tag} hit active geometry at {depth} m')
+            image = (out / (tag + '.linear_rgb.f32')).read_bytes()
+            rgb.append(struct.unpack_from('<fff', image, 12 * ((HEIGHT // 2) * WIDTH + WIDTH // 2)))
+        if max(abs(a - b) for a, b in zip(*rgb)) < .035:
+            raise AssertionError(f'{name} missing from the flight horizon: {rgb}')
+        results[name] = dict(zip(['stock_linear_rgb', 'edited_linear_rgb'], rgb))
+    return results
 
 def sunlit_excavation(out, template):
     # A flat Alpine source exercises the actual directional shadow caster pass.
@@ -82,6 +111,8 @@ def main():
     parser.add_argument('--checkpoint', required=True, type=Path,
                         help='world.save from the 6.25 cm terrain-only player edit smoke test')
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--horizon', action='store_true',
+                        help='also check saved native surfaces past the active camera clip')
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -106,6 +137,8 @@ def main():
         results[name] = {'depth_m': depth, 'expected_m': expected}
         print(f'{name}  {depth:.4f} m', flush=True)
     results['sunlit_floor_linear_rgb'] = sunlit_excavation(out, args.checkpoint)
+    if args.horizon:
+        results.update(horizon_edits(out, args.checkpoint))
     (out / 'result.json').write_text(json.dumps(results, indent=2) + '\n')
 
 

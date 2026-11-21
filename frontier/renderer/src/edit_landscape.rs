@@ -324,11 +324,19 @@ struct Drawable {
     origin: glam::DVec3,
     cell: Cell,
     faces: wgpu::Buffer,
+    mask: wgpu::TextureView,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     count: u32,
     bytes: u64,
     columns: usize,
+}
+pub(crate) struct HorizonEdits<'a> {
+    pub origin: glam::DVec3,
+    pub cell: Cell,
+    pub faces: &'a wgpu::Buffer,
+    pub mask: &'a wgpu::TextureView,
+    pub count: u32,
 }
 #[derive(Default)]
 pub(super) struct Surface {
@@ -339,16 +347,27 @@ pub(super) struct Surface {
 }
 
 impl AdaptiveGpu {
+    pub(crate) fn horizon_edits(&self) -> Option<HorizonEdits<'_>> {
+        let draw = self.edits.draw.as_ref()?;
+        Some(HorizonEdits {
+            origin: draw.origin,
+            cell: draw.cell,
+            faces: &draw.faces,
+            mask: &draw.mask,
+            count: draw.count,
+        })
+    }
     pub(crate) fn settle_edit_surface(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         world: &World,
         camera: Camera,
+        horizon: bool,
     ) -> crate::Result<()> {
         let start = std::time::Instant::now();
         loop {
-            self.update_edit_surface(device, queue, world, camera);
+            self.update_edit_surface(device, queue, world, camera, horizon);
             if !self.edit_surface_pending() {
                 return Ok(());
             }
@@ -368,6 +387,7 @@ impl AdaptiveGpu {
         queue: &wgpu::Queue,
         world: &World,
         camera: Camera,
+        horizon: bool,
     ) {
         if world.fbm_terrain().is_none()
             || world.topology_base_cells().is_some()
@@ -396,9 +416,8 @@ impl AdaptiveGpu {
         let pos = Cell::from_meters(camera.position.to_array());
         // Perspective frustum corners can lie beyond the forward far distance.
         // Keep sparse ownership local to preserve native precision after travel.
-        let view = (camera.far as f64 * 4. / voxel_size())
-            .ceil()
-            .clamp(1., (1 << 23) as f64) as i64;
+        let reach_m = (camera.far as f64 * 4.).max(if horizon { 35000. } else { 0. });
+        let view = (reach_m / voxel_size()).ceil().clamp(1., (1 << 23) as f64) as i64;
         // Avoid periodic-address aliases when teleporting away from an old world.
         if self.edits.published.as_ref().is_some_and(|r| {
             !world.shares_source_lineage(&r.world)
@@ -491,17 +510,19 @@ impl AdaptiveGpu {
         let origin =
             glam::DVec3::from_array([cell.x, cell.y, cell.z].map(|v| v as f64 * voxel_size()));
         let bytes = faces.size() + uniform.size() + words.len() as u64 * 16;
+        let mask_view = texture.create_view(&Default::default());
         self.edits.draw = Some(Drawable {
             origin,
             cell,
             faces,
+            mask: mask_view.clone(),
             uniform,
             bind,
             count: data.quads.len() as u32,
             bytes,
             columns: data.columns.len(),
         });
-        self.set_edit_mask(device, queue, texture.create_view(&Default::default()));
+        self.set_edit_mask(device, queue, mask_view);
     }
 
     pub(crate) fn prepare_edit_draw(&self, queue: &wgpu::Queue, camera: Camera, aspect: f32) {

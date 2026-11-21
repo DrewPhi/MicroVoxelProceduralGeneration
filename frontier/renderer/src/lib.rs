@@ -1179,7 +1179,15 @@ impl Gpu {
                     0
                 };
             let (rw, rh) = atmosphere.dimensions();
-            atmosphere.prepare_horizon(&self.device, &self.queue, world, *camera, settings, true);
+            atmosphere.prepare_horizon(
+                &self.device,
+                &self.queue,
+                world,
+                *camera,
+                settings,
+                self.adaptive.as_ref(),
+                true,
+            );
             horizon_face_bytes = atmosphere.horizon_face_bytes();
             atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.set_lighting_context(
@@ -2753,6 +2761,7 @@ impl Viewer {
                 &self.world,
                 self.camera,
                 &self.visual_settings,
+                gpu.adaptive.as_ref(),
                 false,
             );
             let (width, height) = atmosphere.dimensions();
@@ -4199,6 +4208,9 @@ pub fn run() -> Result<()> {
                     &gpu.queue,
                     &viewer.world,
                     viewer.camera,
+                    viewer.visual_settings.flight_horizon
+                        && viewer.visual_settings.beauty
+                        && viewer.visual_settings.atmosphere,
                 )?;
             }
             gpu.capture(

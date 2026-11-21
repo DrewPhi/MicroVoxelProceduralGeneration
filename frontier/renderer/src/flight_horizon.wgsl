@@ -1,13 +1,22 @@
 const unit: f32 = GRID_UNIT;
 struct Camera { matrix: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, screen: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
+struct EditFrame { eye:vec4<f32>, origin:vec4<u32> };
+@group(0) @binding(1) var edited_columns:texture_2d<u32>;
+@group(0) @binding(2) var<uniform> edit:EditFrame;
 struct Vertex {
     @builtin(position) clip: vec4<f32>,
     @location(0) relative: vec3<f32>,
     @location(1) @interpolate(flat) color: vec3<f32>,
     @location(2) view_depth: f32,
     @location(3) @interpolate(flat) optics:vec2<f32>,
+    @location(4) @interpolate(flat) normal_xz:vec2<f32>,
 };
+fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
+    let fill=mix(vec3(.12,.145,.075),vec3(.25,.33,.43),sky)*(1.+.3*camera.sun.w);
+    let light=vec3(.93,.84,.65)*direct*(1.-.72*camera.sun.w);
+    return albedo*(fill+light);
+}
 @vertex fn vs(@builtin(vertex_index) i:u32, @location(0) packed:vec2<u32>, @location(1) heights:vec2<f32>) -> Vertex {
     let x = f32(bitcast<i32>(packed.x<<21u)>>21u)*unit;
     let z = f32(bitcast<i32>(packed.x<<10u)>>21u)*unit;
@@ -47,15 +56,28 @@ struct Vertex {
     let unresolved=1.-smoothstep(.5,2.5,pixel_span);
     let direct=mix(max(0.,dot(normal,camera.sun.xyz)),max(0.,dot(relief,camera.sun.xyz)),unresolved);
     let sky=.5+.5*mix(normal.y,relief.y,unresolved);
-    let fill=mix(vec3(.12,.145,.075),vec3(.25,.33,.43),sky)*(1.+.3*camera.sun.w);
-    let light=vec3(.93,.84,.65)*direct*(1.-.72*camera.sun.w);
-    let color=albedo*(fill+light);
+    let color=face_color(albedo,direct,sky);
     let clip=camera.matrix*vec4(p,1.);
     var optics=vec2(0.);
     if axis==0u {optics=vec2(f32(packed.y>>29u)/7.,f32(u32(heights.x)>>10u)*.25);}
-    return Vertex(clip,p-camera.eye.xyz,color,clip.w,optics);
+    return Vertex(clip,p-camera.eye.xyz,color,clip.w,optics,normal.xz);
 }
-@fragment fn fs(v:Vertex) -> @location(0) vec4<f32> {
+@vertex fn vs_edit(@builtin(vertex_index) i:u32, @location(0) anchor:vec3<f32>,
+    @location(1) extent:vec2<f32>, @location(2) axis_sign:u32, @location(3) material:u32)->Vertex {
+    let axis=axis_sign&3u;
+    let negative=(axis_sign&4u)!=0u;
+    var p=anchor;
+    let u=f32(i&1u);
+    p[(axis+1u)%3u]+=extent.x*select(u,1.-u,negative);
+    p[(axis+2u)%3u]+=extent.y*f32(i>>1u);
+    var normal=vec3(0.);
+    normal[axis]=select(1.,-1.,negative);
+    let relative=p-edit.eye.xyz;
+    let clip=camera.matrix*vec4(relative+camera.eye.xyz,1.);
+    let color=face_color(MATERIAL_COLORS[material],max(0.,dot(normal,camera.sun.xyz)),.5+.5*normal.y);
+    return Vertex(clip,relative,color,clip.w,vec2(0.),normal.xz);
+}
+fn surface(v:Vertex) -> vec4<f32> {
     if v.view_depth < camera.eye.w { discard; }
     var color=v.color;
     if v.optics.x>0. {
@@ -69,4 +91,10 @@ struct Vertex {
         color=mix(color,surface,v.optics.x);
     }
     return vec4(color,length(v.relative)*.001);
+}
+@fragment fn fs(v:Vertex) -> @location(0) vec4<f32> {return surface(v);}
+@fragment fn fs_masked(v:Vertex) -> @location(0) vec4<f32> {
+    let local=vec2<i32>(floor((v.relative.xz+edit.eye.xz)*edit.eye.w-v.normal_xz*.01));
+    if edit_owns_column(edited_columns,edit.origin.xz+bitcast<vec2<u32>>(local)) {discard;}
+    return surface(v);
 }

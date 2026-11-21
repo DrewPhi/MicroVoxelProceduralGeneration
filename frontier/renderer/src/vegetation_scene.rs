@@ -63,11 +63,12 @@ impl Gpu {
         height: u32,
     ) -> Result<()> {
         if let Some(adaptive) = &mut self.adaptive {
-            adaptive.update_edit_surface(&self.device, &self.queue, world, camera);
             let landscape = self
                 .visual_settings
                 .as_ref()
                 .is_some_and(|s| s.flight_horizon && s.beauty);
+            let horizon = landscape && self.visual_settings.as_ref().is_some_and(|s| s.atmosphere);
+            adaptive.update_edit_surface(&self.device, &self.queue, world, camera, horizon);
             adaptive.update_landscape_detail(&self.device, &self.queue, world, camera, landscape);
         }
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
