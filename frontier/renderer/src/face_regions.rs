@@ -3,38 +3,46 @@ use crate::adaptive_geometry::{NativeBin, NativeQuad};
 use glam::Vec3;
 use std::ops::Range;
 
-/// Split a direction bin into four contiguous quadrants. A long greedy face
+/// Split a direction bin into contiguous square regions. A long greedy face
 /// belongs to one quadrant and its complete extent contributes to the bounds.
 /// Assignment uses the anchor only. Geometry and material words are copied.
 pub(super) fn partition(
     source: &[NativeQuad],
     output: &mut [NativeQuad],
     bins: &[NativeBin],
-    center: Vec3,
+    bounds_xz: [Vec3; 2],
+    side: usize,
 ) -> (Vec<NativeBin>, Vec<[Vec3; 2]>) {
-    let mut ranges = Vec::with_capacity(4 * bins.len());
-    let mut bounds = Vec::with_capacity(4 * bins.len());
+    debug_assert!(matches!(side, 2 | 4));
+    let regions = side * side;
+    let [min, max] = bounds_xz;
+    let scale = Vec3::splat(side as f32) / (max - min).max(Vec3::splat(f32::MIN_POSITIVE));
+    let region = |q: &NativeQuad| {
+        let x = (((q.anchor[0] - min.x) * scale.x) as usize).min(side - 1);
+        let z = (((q.anchor[2] - min.z) * scale.z) as usize).min(side - 1);
+        // Morton order keeps neighbouring visible groups contiguous.
+        (x & 1) | ((z & 1) << 1) | ((x & 2) << 1) | ((z & 2) << 2)
+    };
+    let mut ranges = Vec::with_capacity(regions * bins.len());
+    let mut bounds = Vec::with_capacity(regions * bins.len());
     for bin in bins {
         let from = bin.first_quad as usize;
         let faces = &source[from..from + bin.quad_count as usize];
-        let mut counts = [0; 4];
-        let quadrant = |q: &NativeQuad| {
-            usize::from(q.anchor[0] >= center.x) + 2 * usize::from(q.anchor[2] >= center.z)
-        };
+        let mut counts = [0; 16];
         for q in faces {
-            counts[quadrant(q)] += 1;
+            counts[region(q)] += 1;
         }
-        let mut next = [from; 4];
-        for i in 1..4 {
+        let mut next = [from; 16];
+        for i in 1..regions {
             next[i] = next[i - 1] + counts[i - 1];
         }
         let starts = next;
-        let mut boxes = [[Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)]; 4];
+        let mut boxes = [[Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)]; 16];
         let axis = (bin.axis_sign & 3) as usize;
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         for q in faces {
-            let i = quadrant(q);
+            let i = region(q);
             output[next[i]] = *q;
             next[i] += 1;
             let lo = Vec3::from_array(q.anchor);
@@ -44,7 +52,7 @@ pub(super) fn partition(
             boxes[i][0] = boxes[i][0].min(lo);
             boxes[i][1] = boxes[i][1].max(hi);
         }
-        for i in 0..4 {
+        for i in 0..regions {
             if counts[i] > 0 {
                 let [lo, hi] = boxes[i];
                 ranges.push(NativeBin {
@@ -65,7 +73,7 @@ pub(super) fn partition(
 /// in the same GPU buffer and can be issued as a single indexed draw.
 pub(super) fn visible_runs(
     bins: &[NativeBin],
-    mut mask: u32,
+    mut mask: u128,
 ) -> impl Iterator<Item = Range<u32>> + '_ {
     std::iter::from_fn(move || {
         if mask == 0 {
@@ -74,7 +82,7 @@ pub(super) fn visible_runs(
         let first = mask.trailing_zeros();
         let length = (mask >> first).trailing_ones();
         let last = first + length - 1;
-        mask &= u32::MAX.checked_shl(last + 1).unwrap_or(0);
+        mask &= u128::MAX.checked_shl(last + 1).unwrap_or(0);
         let end = bins[last as usize];
         Some(bins[first as usize].first_quad..end.first_quad + end.quad_count)
     })
@@ -108,7 +116,13 @@ mod tests {
             });
         }
         let mut output = source.clone();
-        let (regions, bounds) = partition(&source, &mut output, &bins, Vec3::ZERO);
+        let (regions, bounds) = partition(
+            &source,
+            &mut output,
+            &bins,
+            [Vec3::splat(-16.), Vec3::splat(16.)],
+            2,
+        );
         assert_eq!(regions.len(), 24);
         let mut ids: Vec<_> = output.iter().map(|q| q.material).collect();
         ids.sort_unstable();
@@ -131,7 +145,7 @@ mod tests {
     }
     #[test]
     fn masked_runs_include_both_ends_of_a_full_word() {
-        let bins: Vec<_> = (0..32)
+        let bins: Vec<_> = (0..128)
             .map(|i| NativeBin {
                 axis_sign: 1,
                 first_quad: 3 * i,
@@ -140,11 +154,19 @@ mod tests {
                 max_plane: 1.,
             })
             .collect();
-        assert_eq!(visible_runs(&bins, u32::MAX).collect::<Vec<_>>(), [0..96]);
+        assert_eq!(
+            visible_runs(&bins, u128::from(u32::MAX)).collect::<Vec<_>>(),
+            [0..96]
+        );
         assert_eq!(
             visible_runs(&bins, 0x8000_001b).collect::<Vec<_>>(),
             [0..6, 9..15, 93..96]
         );
         assert_eq!(visible_runs(&bins, 0).count(), 0);
+        assert_eq!(
+            visible_runs(&bins, 3u128 << 95).collect::<Vec<_>>(),
+            [285..291]
+        );
+        assert_eq!(visible_runs(&bins, u128::MAX).collect::<Vec<_>>(), [0..384]);
     }
 }

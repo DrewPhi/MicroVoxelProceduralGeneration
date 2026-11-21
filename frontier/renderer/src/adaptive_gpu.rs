@@ -362,7 +362,7 @@ fn record_offender(top: &mut [Option<VisibleOffender>; 8], offender: VisibleOffe
 struct DrawItem {
     no_voxel_shadow: bool,
     key: TileKey,
-    bin_mask: Option<u32>,
+    bin_mask: Option<u128>,
 }
 // Keep direct and cached command encoding identical. Bundles cache commands,
 // never visibility or camera values; each prepare still evaluates current demand.
@@ -595,7 +595,7 @@ pub struct AdaptiveGpu {
     bundle_reuses: u64,
     bundle_build_ms: f64,
     native_bins_enabled: bool,
-    face_regions_enabled: bool,
+    face_region_side: usize,
     voxel_filter: bool,
     far_pipelines: Option<[wgpu::RenderPipeline; 7]>,
     cover_pipelines: Option<[wgpu::RenderPipeline; 7]>,
@@ -1022,9 +1022,17 @@ impl AdaptiveGpu {
             bundle_reuses: 0,
             bundle_build_ms: 0.,
             native_bins_enabled: true,
-            face_regions_enabled: std::env::var("FRONTIER_FACE_REGIONS").as_deref() != Ok("0")
-                && crate::adaptive_geometry::distant_voxels::Mode::current()
-                    == crate::adaptive_geometry::distant_voxels::Mode::Blocks,
+            face_region_side: if crate::adaptive_geometry::distant_voxels::Mode::current()
+                == crate::adaptive_geometry::distant_voxels::Mode::Blocks
+            {
+                match std::env::var("FRONTIER_FACE_REGIONS").as_deref() {
+                    Ok("0") => 0,
+                    Ok("2") => 2,
+                    _ => 4,
+                }
+            } else {
+                0
+            },
             voxel_filter: true,
             far_pipelines,
             cover_pipelines,
@@ -1866,7 +1874,7 @@ impl AdaptiveGpu {
                 && !c.bins.is_empty()
             {
                 let eye = (camera.position - c.origin).to_array();
-                let mut mask = 0u32;
+                let mut mask = 0u128;
                 let mut count = 0u32;
                 for (index, bin) in c.bins.iter().enumerate() {
                     stats.native_bin_tests += 1;
@@ -1881,7 +1889,7 @@ impl AdaptiveGpu {
                         stats.clipped_region_quads += u64::from(bin.quad_count);
                         continue;
                     }
-                    mask |= 1u32 << index;
+                    mask |= 1u128 << index;
                     count += bin.quad_count;
                 }
                 if count == 0 {
@@ -2127,14 +2135,15 @@ impl AdaptiveGpu {
             && quads.len() >= 512
             && !bins.is_empty()
             && self.coarse_batch.is_none()
-            && self.face_regions_enabled
+            && self.face_region_side > 0
         {
-            (bins, face_bounds) = face_regions::partition(
-                &tile.native_quads,
-                &mut quads,
-                &bins,
-                (bounds[0] + bounds[1]) * 0.5,
-            );
+            let side = if quads.len() < 2048 {
+                2
+            } else {
+                self.face_region_side
+            };
+            (bins, face_bounds) =
+                face_regions::partition(&tile.native_quads, &mut quads, &bins, bounds, side);
             if raised_cover {
                 for region in &mut face_bounds {
                     region[1].y += 1.;
