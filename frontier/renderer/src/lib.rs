@@ -52,6 +52,7 @@ mod streaming_haze;
 mod surface_compare;
 mod terrain;
 mod terrain_light;
+mod water_reflection;
 mod vegetation;
 mod vegetation_generation_lab;
 mod vegetation_gpu;
@@ -1130,7 +1131,7 @@ impl Gpu {
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
-    fn prepare_ground_light(&self, world: &World, camera: Camera) {
+    fn prepare_ground_light(&self, world: &World, camera: Camera, capture: bool) {
         let Some(settings) = &self.visual_settings else {
             return;
         };
@@ -1140,8 +1141,8 @@ impl Gpu {
         let field = self
             .ground_field
             .borrow_mut()
-            .prepare(world, camera, settings.ground_bounce);
-        let data = bytemuck::bytes_of(&field);
+            .prepare(world, camera, settings, capture);
+        let data = field.upload_bytes();
         if let Some(adaptive) = &self.adaptive {
             adaptive.prepare_ground_light(&self.queue, data);
         }
@@ -1165,7 +1166,7 @@ impl Gpu {
         height: u32,
     ) -> Result<()> {
         self.observe_water_camera(camera, world, 0.);
-        self.prepare_ground_light(world, *camera);
+        self.prepare_ground_light(world, *camera, true);
         let texture = self.texture(width, height, false);
         let floating = self.format == wgpu::TextureFormat::Rgba32Float;
         let bpp = if floating { 16 } else { 4 };
@@ -2789,7 +2790,7 @@ impl Viewer {
             &self.world,
             self.visual_started.elapsed().as_secs_f32(),
         );
-        gpu.prepare_ground_light(&self.world, self.camera);
+        gpu.prepare_ground_light(&self.world, self.camera, false);
         let target = frame.texture.create_view(&Default::default());
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.prepare_horizon(

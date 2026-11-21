@@ -127,6 +127,30 @@ Highlands seed 673 fell from **9 m to 25 cm**. The new source had 7,368 sampled
 bank crossings and a 6.25 cm 95th-percentile step. Watershed seed 997 fell
 from **2.44 m to 6.25 cm** across 12,230 crossings on the new source.
 
+![Sunlit Highlands stream reflecting its enclosing rock walls, with voxel grass and flowers on the near bank.](frontier/reference/gallery/highlands-river.jpg)
+
+*Highlands seed 673. The nearby water reflects individual voxel banks and
+plants. Rays that leave the native volume sample a panorama of the actual
+valley, including its skyline, ground colors and sun direction. A worker
+refreshes that panorama while you move. Player-built structures enter the
+reflection within the native ray's reach.*
+
+To visit this riverbank, run the following from `frontier/`.
+
+```sh
+./run.sh --preset flight --flight-view pilot --seed 673 --walk off \
+  --eye -2900.5718,852.8125,-1054.0096 --target -2931.1769,851.1875,-1089 \
+  --fov-y 62 --sun-elevation 46 --sun-azimuth 26.175 --cloud-speed 0 \
+  --cloud-coverage .25 --overcast .08 --fog-density .00011 \
+  --naadf-radius 32 --capture-far 2200 --pixel-error 10 --msaa 1
+```
+
+The 1920×1080 image has full terrain coverage. Some distant tiles were still
+refining at capture. In a separate fixed-refinement timing comparison at
+1080p MSAA 1, a 1.5 km active view and a 16 m native radius, median frames
+at water level measured 12.90–12.97 ms with valley reflections and
+12.94–13.23 ms with sky alone on the Radeon 760M.
+
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 
 *At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. This in-engine 1920×1080 view uses 4× MSAA, a 16° left bank and a 6 km active view.*

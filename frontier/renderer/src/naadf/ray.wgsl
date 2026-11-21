@@ -129,6 +129,9 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
 
     let mirror=reflect(d,n);
     var above=water_sky(mirror,naadf.sun.xyz,naadf.sky.x);
+    if normal.y>.5 && naadf.sun.w>.5 {
+        above=reflected_terrain(surface-naadf.eye.xyz,mirror,above);
+    }
     let reflection_weight=1.-smoothstep(28.,56.,distance);
     if reflection_weight>0. && dot(mirror,normal)>0. {
         let bank=trace_water_optics(surface*VOXELS_PER_METER+normal*0.012,mirror,384.);

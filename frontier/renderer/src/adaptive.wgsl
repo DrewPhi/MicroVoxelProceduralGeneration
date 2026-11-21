@@ -633,7 +633,10 @@ fn shade(input: VertexOut) -> vec4<f32> {
             }
         }
         let reflected=reflect(direction,normal);
-        let above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
+        var above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
+        if normal.y>.5 && (camera.paint_origin.w&4u)!=0u {
+            above=reflected_terrain(in.local-camera.eye.xyz,reflected,above);
+        }
         // A ray refracted into water travels farther than the vertical depth
         // at grazing incidence (Snell's law with n=1.333).
         let cos_air=clamp(-dot(direction,normal),0.,1.);

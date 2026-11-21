@@ -1,6 +1,9 @@
 struct GroundLight {
     origin_strength: vec4<f32>,
     nodes: array<vec4<f32>,169>,
+    reflection_origin:vec4<f32>,
+    skyline:array<vec4<f32>,16>,
+    terrain_panorama:array<vec4<u32>,256>,
 };
 @group(NAADF_GROUP) @binding(NAADF_BASE+9u) var<uniform> ground_light: GroundLight;
 
@@ -34,4 +37,48 @@ fn ground_irradiance(position:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>,
     let lit=max(sun.y,0.)*(1.-0.72*overcast)*mix(0.18,1.,ground_visibility);
     let edge=1.-smoothstep(48.,65.,max(abs(position.x),abs(position.z)));
     return ground.rgb*sunlight*(strength*range*directional*edge*(lit+0.09));
+}
+
+// Sample the actual valley around the nearest wet ground. The hit range lets
+// the second lookup correct for the offset from the probe to this water face.
+fn panorama_sample(direction:vec3<f32>)->vec4<f32> {
+    let azimuth=atan2(direction.x,direction.z)*(64./6.283185307);
+    let index=u32(i32(floor(azimuth))&63);
+    let next=(index+1u)&63u;
+    let angle=asin(clamp(direction.y,-1.,1.));
+    let row=clamp(angle*(15./1.3),0.,15.);
+    let j=u32(row);
+    let k=min(j+1u,15u);
+    let a=ground_light.terrain_panorama[index*4u+j/4u][j%4u];
+    let b=ground_light.terrain_panorama[index*4u+k/4u][k%4u];
+    let c=ground_light.terrain_panorama[next*4u+j/4u][j%4u];
+    let d=ground_light.terrain_panorama[next*4u+k/4u][k%4u];
+    let shift=vec4<u32>(0u,8u,16u,24u);
+    let ca=vec4<f32>((vec4(a)>>shift)&vec4(255u));
+    let cb=vec4<f32>((vec4(b)>>shift)&vec4(255u));
+    let cc=vec4<f32>((vec4(c)>>shift)&vec4(255u));
+    let cd=vec4<f32>((vec4(d)>>shift)&vec4(255u));
+    return mix(mix(ca,cb,fract(row)),mix(cc,cd,fract(row)),fract(azimuth));
+}
+fn reflected_terrain(relative:vec3<f32>,ray:vec3<f32>,sky:vec3<f32>)->vec3<f32> {
+    if ground_light.reflection_origin.w<=0. || ray.y<-.05 || ray.y>.985 {return sky;}
+    let offset=relative-ground_light.reflection_origin.xyz;
+    let local=(1.-smoothstep(90.,290.,length(offset)))*ground_light.reflection_origin.w;
+    if local<=0. {return sky;}
+    let first=panorama_sample(ray);
+    let range=16.*pow(1.35,first.a);
+    let projected=ray+offset*sqrt(max(.001,1.-ray.y*ray.y))/range;
+    let length2=dot(projected,projected);
+    if length2<.000001 {return sky;}
+    let corrected=projected*inverseSqrt(length2);
+    let az=atan2(corrected.x,corrected.z)*(64./6.283185307);
+    let i=u32(i32(floor(az))&63);
+    let j=(i+1u)&63u;
+    let limit=mix(ground_light.skyline[i/4u][i%4u],ground_light.skyline[j/4u][j%4u],fract(az));
+    let coverage=smoothstep(-.018,.018,limit-asin(clamp(corrected.y,-1.,1.)))*local;
+    if coverage<=0. {return sky;}
+    let sample=panorama_sample(corrected);
+    // A long return path picks up the same blue air that softens a distant ridge.
+    let air=exp(-.00013*16.*pow(1.35,sample.a));
+    return mix(sky,sample.rgb*(2./255.),coverage*air);
 }
