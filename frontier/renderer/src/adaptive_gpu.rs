@@ -288,6 +288,7 @@ pub struct DrawStats {
     pub indexed_proxy_peak_staging_estimate_bytes: u64,
     pub visible_native_quads: u64,
     pub occluded_clusters: usize,
+    pub clipped_draw_clusters: usize,
     pub occluded_triangles: u64,
     pub occluder_boxes: usize,
     pub current_max_error_px: Option<f64>,
@@ -1803,6 +1804,14 @@ impl AdaptiveGpu {
                 } else {
                     Mat4::look_to_rh(local_eye, direction, camera.view_up())
                 };
+            // Demand uses bounds on the procedural source. Rendering can use
+            // the tighter bounds of the published faces after recording that
+            // demand, including when the enclosing source interval crosses a
+            // ridge outside the actual camera frustum.
+            if !intersects_raster_clip(matrix, c.bounds) {
+                stats.clipped_draw_clusters += 1;
+                continue;
+            }
             let mut bytes = [0u8; 208];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(&local_eye.extend(1.).to_array()));
@@ -2390,6 +2399,33 @@ fn certificate_kind(tile: &GeometryTile) -> u8 {
     }
 }
 
+fn intersects_raster_clip(matrix: Mat4, [lo, hi]: [Vec3; 2]) -> bool {
+    let r = matrix.transpose();
+    let abs = lo.abs().max(hi.abs()).extend(1.);
+    // Clip coordinates are computed separately before the hardware comparison.
+    // Include their rounding error even when subtracting nearly parallel rows
+    // (the perspective far plane).
+    let clip_scale = [r.x_axis, r.y_axis, r.z_axis, r.w_axis]
+        .into_iter()
+        .map(|row| row.abs().dot(abs))
+        .fold(1_f32, f32::max);
+    let tolerance = 16. * f32::EPSILON * clip_scale;
+    let w = r.w_axis;
+    [
+        w + r.x_axis,
+        w - r.x_axis,
+        w + r.y_axis,
+        w - r.y_axis,
+        r.z_axis,
+        w - r.z_axis,
+    ]
+    .into_iter()
+    .all(|plane| {
+        let n = plane.truncate();
+        let support = Vec3::select(n.cmpge(Vec3::ZERO), hi, lo);
+        n.dot(support) + plane.w >= -tolerance
+    })
+}
 fn nearest_depth(origin: DVec3, bounds: [Vec3; 2], eye: DVec3, forward: DVec3) -> f64 {
     let local = Vec3::new(
         if forward.x >= 0. {
@@ -2888,6 +2924,57 @@ mod tests {
             100,
             100
         ));
+    }
+    #[test]
+    fn raster_clip_retains_touching_faces_and_matches_projected_corners() {
+        use super::{intersects_raster_clip, Mat4, Vec3};
+        // In WebGPU the front plane is z=0 and the far plane is z=w.
+        let inside = [Vec3::new(-1., -1., 0.), Vec3::ONE];
+        assert!(intersects_raster_clip(Mat4::IDENTITY, inside));
+        for axis in 0..3 {
+            for upper in [false, true] {
+                let limit = inside[usize::from(upper)][axis];
+                let mut p = Vec3::new(0., 0., 0.5);
+                p[axis] = limit;
+                assert!(intersects_raster_clip(Mat4::IDENTITY, [p, p]));
+                p[axis] += if upper { 0.01 } else { -0.01 };
+                assert!(!intersects_raster_clip(Mat4::IDENTITY, [p, p]));
+            }
+        }
+        let eye = Vec3::new(-3762., 440., 1198.);
+        let matrix = Mat4::perspective_rh(1., 1.7, 0.12, 6000.)
+            * Mat4::look_to_rh(eye, Vec3::new(0.3, -0.15, 0.9).normalize(), Vec3::Y);
+        for x in -4..=4 {
+            for y in -3..=3 {
+                for z in -3..=6 {
+                    let lo = eye + 180. * Vec3::new(x as f32, y as f32, z as f32);
+                    let hi = lo + Vec3::new(72., 103., 51.);
+                    let mut outside = [true; 6];
+                    for i in 0..8 {
+                        let p = matrix
+                            * Vec3::new(
+                                if i & 1 == 0 { lo.x } else { hi.x },
+                                if i & 2 == 0 { lo.y } else { hi.y },
+                                if i & 4 == 0 { lo.z } else { hi.z },
+                            )
+                            .extend(1.);
+                        for (flag, distance) in outside.iter_mut().zip([
+                            p.w + p.x,
+                            p.w - p.x,
+                            p.w + p.y,
+                            p.w - p.y,
+                            p.z,
+                            p.w - p.z,
+                        ]) {
+                            *flag &= distance < 0.;
+                        }
+                    }
+                    if outside.iter().all(|flag| !flag) {
+                        assert!(intersects_raster_clip(matrix, [lo, hi]));
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn owner_filter_before_sort_preserves_current_draw_and_occluder_order() {
