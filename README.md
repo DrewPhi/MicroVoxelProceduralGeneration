@@ -221,7 +221,14 @@ crests and local cliff grades to prioritize the visible ridgeline.
 
 The gallery view, with vegetation enabled, measured **12.29 / 14.93 / 16.18 ms**
 and **12.97 / 16.25 / 17.29 ms** over two 12-second cold refinement runs.
-Each coarse face carries its material and sampled color in a 32-byte instance.
+The renderer packs each eligible roof or wall into a 20-byte GPU instance.
+Its horizontal coordinates use native grid addresses when reconstruction is
+bit-exact. Other coordinates share a tile-local table of original floats.
+Heights and vertical spans retain full precision. The optional multi-draw
+backend uses the 32-byte layout. At the fixed seed 673 cloud pass, the same
+1.58 million resident faces occupied **30.2 MiB** including allocation
+padding, down from **48.3 MiB**. Radeon color and depth comparisons also
+matched at 6.25, 10 and 50 cm voxel sizes.
 The renderer checks dense tiles in four horizontal quadrants per face direction.
 At the banked gallery pose this reduced the final visible triangles from
 1,177,114 to 1,093,046. Draw calls rose from 217 to 279. With the same face

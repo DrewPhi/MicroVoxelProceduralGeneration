@@ -24,6 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
+#[path = "packed_voxel_face.rs"]
+mod packed_voxel_face;
+use packed_voxel_face::PackedFaces;
 #[path = "adaptive_shadow.rs"]
 pub(crate) mod adaptive_shadow;
 #[path = "coarse_batch.rs"]
@@ -180,6 +183,7 @@ struct Cluster {
     appearance_pending: bool,
     cover: bool,
     native_quads: bool,
+    compact_native: bool,
     proxy_triangles: bool,
     indexed_proxy: bool,
     derived_proxy: bool,
@@ -203,6 +207,18 @@ struct Cluster {
     slot: u32,
 }
 impl Cluster {
+    fn instance_stride(&self) -> u64 {
+        if self.compact_native || self.derived_proxy {
+            20
+        } else if self.indexed_proxy {
+            40
+        } else if self.native_quads {
+            32
+        } else {
+            64
+        }
+    }
+
     fn payload_bytes(&self) -> u64 {
         self.vertices.range.end - self.vertices.range.start
             + self
@@ -279,6 +295,8 @@ pub struct DrawStats {
     pub resident_bytes: u64,
     pub allocated_bytes: u64,
     pub resident_native_quad_bytes: u64,
+    pub resident_native_coordinate_bytes: u64,
+    pub resident_compact_native_quads: u64,
     pub resident_proxy_triangle_bytes: u64,
     pub resident_profile_bytes: u64,
     pub indexed_proxy_enabled: bool,
@@ -364,7 +382,9 @@ macro_rules! encode_cluster_draws {
             if $shell && (c.exact || !c.cover) {
                 continue;
             }
-            if c.native_quads {
+            if c.compact_native {
+                pass.set_pipeline(far.map_or(&renderer.compact_native_pipeline, |p| &p[6]));
+            } else if c.native_quads {
                 pass.set_pipeline(far.map_or(&renderer.native_pipeline, |p| &p[2]));
             } else if c.proxy_triangles {
                 pass.set_pipeline(if c.derived_proxy {
@@ -402,15 +422,7 @@ macro_rules! encode_cluster_draws {
                 &c.vertices.range,
                 page.size,
                 c.count,
-                if c.derived_proxy {
-                    20
-                } else if c.indexed_proxy {
-                    40
-                } else if c.native_quads {
-                    32
-                } else {
-                    64
-                },
+                c.instance_stride(),
             );
             let first_instance = if let Some(first) = packed_first {
                 if bound_vertex_page != Some(c.vertices.page) {
@@ -573,12 +585,13 @@ pub struct AdaptiveGpu {
     native_bins_enabled: bool,
     face_regions_enabled: bool,
     voxel_filter: bool,
-    far_pipelines: Option<[wgpu::RenderPipeline; 6]>,
-    cover_pipelines: Option<[wgpu::RenderPipeline; 6]>,
+    far_pipelines: Option<[wgpu::RenderPipeline; 7]>,
+    cover_pipelines: Option<[wgpu::RenderPipeline; 7]>,
     naadf_shadow_bounds: Option<[[f64; 3]; 2]>,
     pipeline: wgpu::RenderPipeline,
     profile_pipeline: wgpu::RenderPipeline,
     native_pipeline: wgpu::RenderPipeline,
+    compact_native_pipeline: wgpu::RenderPipeline,
     proxy_pipeline: wgpu::RenderPipeline,
     indexed_proxy_pipeline: wgpu::RenderPipeline,
     derived_proxy_pipeline: wgpu::RenderPipeline,
@@ -703,6 +716,8 @@ impl AdaptiveGpu {
         let profile_attributes = wgpu::vertex_attr_array![3=>Uint32];
         let native_attributes =
             wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Uint32,4=>Uint32];
+        let compact_attributes =
+            wgpu::vertex_attr_array![0=>Uint16x2,1=>Float32,2=>Float32,3=>Uint32,4=>Uint32];
         let proxy_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3,3=>Float32x3,4=>Float32x3,5=>Uint32];
         let indexed_proxy_attributes =
             wgpu::vertex_attr_array![0=>Uint32x3,1=>Float32x3,2=>Float32x3,3=>Uint32];
@@ -731,7 +746,8 @@ impl AdaptiveGpu {
                 &naadf_constants
             };
             let batched = kind == 5;
-            let native = kind == 1 || batched;
+            let compact = kind == 6;
+            let native = kind == 1 || batched || compact;
             let proxy = kind == 2;
             let indexed_proxy = kind == 3;
             let derived_proxy = kind == 4;
@@ -751,9 +767,17 @@ impl AdaptiveGpu {
                 attributes: &proxy_attributes,
             }];
             let native_buffers = [wgpu::VertexBufferLayout {
-                array_stride: 32,
+                array_stride: if compact {
+                    std::mem::size_of::<packed_voxel_face::PackedFace>() as u64
+                } else {
+                    32
+                },
                 step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &native_attributes,
+                attributes: if compact {
+                    &compact_attributes
+                } else {
+                    &native_attributes
+                },
             }];
             let mesh_buffers = [
                 wgpu::VertexBufferLayout {
@@ -786,6 +810,8 @@ impl AdaptiveGpu {
                     module: &shader,
                     entry_point: Some(if batched {
                         "vs_native_batch"
+                    } else if compact {
+                        "vs_compact_native"
                     } else if native {
                         "vs_native"
                     } else if derived_proxy {
@@ -872,6 +898,8 @@ impl AdaptiveGpu {
         let pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 0, false, false);
         let profile_pipeline = make_pipeline(wgpu::VertexStepMode::Vertex, 0, false, false);
         let native_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 1, false, false);
+        let compact_native_pipeline =
+            make_pipeline(wgpu::VertexStepMode::Instance, 6, false, false);
         let proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 2, false, false);
         let indexed_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 3, false, false);
         let derived_proxy_pipeline = make_pipeline(wgpu::VertexStepMode::Instance, 4, false, false);
@@ -884,6 +912,7 @@ impl AdaptiveGpu {
                     make_pipeline(wgpu::VertexStepMode::Instance, 2, true, false),
                     make_pipeline(wgpu::VertexStepMode::Instance, 3, true, false),
                     make_pipeline(wgpu::VertexStepMode::Instance, 4, true, false),
+                    make_pipeline(wgpu::VertexStepMode::Instance, 6, true, false),
                 ]
             });
         let cover_pipelines = crate::ground_cover::shell_enabled().then(|| {
@@ -894,6 +923,7 @@ impl AdaptiveGpu {
                 make_pipeline(wgpu::VertexStepMode::Instance, 2, false, true),
                 make_pipeline(wgpu::VertexStepMode::Instance, 3, false, true),
                 make_pipeline(wgpu::VertexStepMode::Instance, 4, false, true),
+                make_pipeline(wgpu::VertexStepMode::Instance, 6, false, true),
             ]
         });
         let caster_pipelines = |layout: &wgpu::PipelineLayout, masked| {
@@ -904,6 +934,7 @@ impl AdaptiveGpu {
                 (wgpu::VertexStepMode::Instance, 2),
                 (wgpu::VertexStepMode::Instance, 3),
                 (wgpu::VertexStepMode::Instance, 4),
+                (wgpu::VertexStepMode::Instance, 6),
             ]
             .map(|(mode, kind)| create_pipeline(mode, kind, Some((layout, masked)), false, false))
         };
@@ -990,6 +1021,7 @@ impl AdaptiveGpu {
             pipeline,
             profile_pipeline,
             native_pipeline,
+            compact_native_pipeline,
             proxy_pipeline,
             indexed_proxy_pipeline,
             derived_proxy_pipeline,
@@ -1041,6 +1073,7 @@ impl AdaptiveGpu {
         self.pipeline = fresh.pipeline;
         self.profile_pipeline = fresh.profile_pipeline;
         self.native_pipeline = fresh.native_pipeline;
+        self.compact_native_pipeline = fresh.compact_native_pipeline;
         if let (Some(current), Some(updated)) = (&mut self.coarse_batch, fresh.coarse_batch) {
             current.raster = updated.raster;
         }
@@ -1189,8 +1222,8 @@ impl AdaptiveGpu {
         bytes: u64,
         kind: u8,
     ) -> Result<Allocation, String> {
-        // Indexed records are 40B, so use lcm(40,64)=320B only for this
-        // allocation. Prefix gaps remain free for other allocations.
+        // 20B and 40B records share a 320B boundary with 64B records.
+        // Prefix gaps remain free for other allocations.
         let alignment = if kind == 4 && self.coalesce_vertex_pages {
             320
         } else {
@@ -1367,6 +1400,7 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
+                compact_native: false,
                 proxy_triangles: false,
                 indexed_proxy: false,
                 derived_proxy: false,
@@ -1626,8 +1660,12 @@ impl AdaptiveGpu {
                         - p.table.range.start
                 });
                 stats.resident_profile_bytes += profile_bytes - c.position_reserved_bytes;
-                stats.resident_proxy_position_bytes += c.position_bytes;
-                stats.resident_proxy_position_reserved_bytes += c.position_reserved_bytes;
+                if c.native_quads {
+                    stats.resident_native_coordinate_bytes += c.position_bytes;
+                } else {
+                    stats.resident_proxy_position_bytes += c.position_bytes;
+                    stats.resident_proxy_position_reserved_bytes += c.position_reserved_bytes;
+                }
                 stats.resident_indexed_proxy_clusters += u64::from(c.indexed_proxy);
                 stats.resident_derived_proxy_clusters += u64::from(c.derived_proxy);
                 if c.indexed_proxy {
@@ -1640,8 +1678,11 @@ impl AdaptiveGpu {
                         c.vertices.range.end - c.vertices.range.start;
                 }
                 if c.native_quads {
+                    if c.compact_native {
+                        stats.resident_compact_native_quads += u64::from(c.count);
+                    }
                     stats.resident_native_quad_bytes +=
-                        c.vertices.range.end - c.vertices.range.start;
+                        c.vertices.range.end - c.vertices.range.start + c.position_reserved_bytes;
                 }
                 stats.resident_bytes += c.payload_bytes();
             }
@@ -1882,15 +1923,7 @@ impl AdaptiveGpu {
                 &c.vertices.range,
                 self.vertices[c.vertices.page].size,
                 c.count,
-                if c.derived_proxy {
-                    20
-                } else if c.indexed_proxy {
-                    40
-                } else if c.native_quads {
-                    32
-                } else {
-                    64
-                },
+                c.instance_stride(),
             )
             .is_some()
             {
@@ -2032,6 +2065,14 @@ impl AdaptiveGpu {
         self.bundle_builds += 1;
         self.bundle_build_ms += started.elapsed().as_secs_f64() * 1000.;
     }
+    pub fn native_upload_savings(&self, key: &TileKey) -> u64 {
+        self.clusters
+            .get(key)
+            .filter(|c| c.compact_native)
+            .map_or(0, |c| {
+                u64::from(c.count) * (32 - c.instance_stride()) - c.position_bytes
+            })
+    }
     fn upload_native(
         &mut self,
         device: &wgpu::Device,
@@ -2044,31 +2085,6 @@ impl AdaptiveGpu {
             .any(|q| q.profile_index as usize >= tile.face_profiles.len())
         {
             return Err("native quad profile index outside table".into());
-        }
-        let vertices = self.allocate(device, (tile.native_quads.len() * 32) as u64, 0)?;
-        let table_bytes = bytemuck::cast_slice(&tile.face_profiles);
-        let table = match self.allocate(device, table_bytes.len() as u64, 3) {
-            Ok(table) => table,
-            Err(e) => {
-                self.vertices[vertices.page].release(vertices.range);
-                return Err(e);
-            }
-        };
-        while self.profile_binds.len() < self.profile_tables.len() {
-            let page = self.profile_binds.len();
-            self.profile_binds.push(profile_bind(
-                device,
-                &self.layout,
-                &self.uniform,
-                &self.profile_tables[page].buffer,
-            ));
-        }
-        let slot = self.slots.last().copied().unwrap();
-        if let Some(batch) = &mut self.coarse_batch {
-            while batch.profile_binds.len() < self.profile_tables.len() {
-                let page = batch.profile_binds.len();
-                batch.add_profile_page(device, &self.profile_tables[page].buffer);
-            }
         }
         let origin = DVec3::new(
             tile.mesh.origin.x as f64,
@@ -2104,20 +2120,80 @@ impl AdaptiveGpu {
                 }
             }
         }
-        for quad in &mut quads {
-            quad.profile_index += (table.range.start / 80) as u32;
-            quad.axis_sign |= slot << 3;
+        // The optional multi-draw backend uses the full record's camera slot.
+        let mut compact = self
+            .coarse_batch
+            .is_none()
+            .then(|| {
+                PackedFaces::pack(
+                    &quads,
+                    tile.face_profiles.len() as u32,
+                    frontier_world::voxel_size() as f32,
+                )
+            })
+            .flatten();
+        let table_bytes: &[u8] = bytemuck::cast_slice(&tile.face_profiles);
+        let coordinate_bytes = compact
+            .as_ref()
+            .map_or(0, |p| p.coordinates.len() as u64 * 4);
+        let table_extra = coordinate_bytes.next_multiple_of(80);
+        let table = self.allocate(device, table_bytes.len() as u64 + table_extra, 3)?;
+        while self.profile_binds.len() < self.profile_tables.len() {
+            let page = self.profile_binds.len();
+            self.profile_binds.push(profile_bind(
+                device,
+                &self.layout,
+                &self.uniform,
+                &self.profile_tables[page].buffer,
+            ));
         }
+        let slot = self.slots.last().copied().unwrap();
+        if let Some(batch) = &mut self.coarse_batch {
+            while batch.profile_binds.len() < self.profile_tables.len() {
+                let page = batch.profile_binds.len();
+                batch.add_profile_page(device, &self.profile_tables[page].buffer);
+            }
+        }
+        let profile_base = (table.range.start / 80) as u32;
+        if compact.as_mut().is_some_and(|p| !p.relocate(profile_base)) {
+            compact = None;
+        }
+        let (vertex_bytes, kind) = if let Some(packed) = &compact {
+            (bytemuck::cast_slice(packed.faces.as_slice()), 4)
+        } else {
+            for quad in &mut quads {
+                quad.profile_index += profile_base;
+                quad.axis_sign |= slot << 3;
+            }
+            (bytemuck::cast_slice(quads.as_slice()), 0)
+        };
+        let vertices = match self.allocate(device, vertex_bytes.len() as u64, kind) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                self.profile_tables[table.page].release(table.range);
+                return Err(error);
+            }
+        };
         queue.write_buffer(
             &self.vertices[vertices.page].buffer,
             vertices.range.start,
-            bytemuck::cast_slice(&quads),
+            vertex_bytes,
         );
         queue.write_buffer(
             &self.profile_tables[table.page].buffer,
             table.range.start,
             table_bytes,
         );
+        let coordinate_bytes = compact
+            .as_ref()
+            .map_or(0, |p| p.coordinates.len() as u64 * 4);
+        if let Some(packed) = compact.as_ref().filter(|p| !p.coordinates.is_empty()) {
+            queue.write_buffer(
+                &self.profile_tables[table.page].buffer,
+                table.range.start + table_bytes.len() as u64,
+                bytemuck::cast_slice(&packed.coordinates),
+            );
+        }
         self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
@@ -2125,11 +2201,12 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover,
                 native_quads: true,
+                compact_native: compact.is_some(),
                 proxy_triangles: false,
                 indexed_proxy: false,
                 derived_proxy: false,
-                position_bytes: 0,
-                position_reserved_bytes: 0,
+                position_bytes: coordinate_bytes,
+                position_reserved_bytes: table_extra,
                 bins,
                 face_bounds,
                 exact: tile.exact,
@@ -2363,6 +2440,7 @@ impl AdaptiveGpu {
                 appearance_pending: tile.cover_input.is_some(),
                 cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
                 native_quads: false,
+                compact_native: false,
                 proxy_triangles: true,
                 indexed_proxy: indexed.is_some(),
                 derived_proxy: derived,

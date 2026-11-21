@@ -11,8 +11,8 @@ pub(super) struct ShadowResources {
     view: wgpu::TextureView,
     pub sampling_bind: wgpu::BindGroup,
     pub near: NearShadowResources,
-    pipelines: [wgpu::RenderPipeline; 6],
-    masked_pipelines: [wgpu::RenderPipeline; 6],
+    pipelines: [wgpu::RenderPipeline; 7],
+    masked_pipelines: [wgpu::RenderPipeline; 7],
     mask_layout: wgpu::BindGroupLayout,
     caster_mask: Option<wgpu::BindGroup>,
     uniform: wgpu::Buffer,
@@ -97,8 +97,8 @@ impl ShadowResources {
     pub(super) fn new(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
-        pipelines: [wgpu::RenderPipeline; 6],
-        masked_pipelines: [wgpu::RenderPipeline; 6],
+        pipelines: [wgpu::RenderPipeline; 7],
+        masked_pipelines: [wgpu::RenderPipeline; 7],
         mask_layout: wgpu::BindGroupLayout,
     ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -496,7 +496,9 @@ impl AdaptiveGpu {
         };
         for (i, key) in keys.iter().enumerate() {
             let c = &self.clusters[key];
-            let kind = if c.native_quads {
+            let kind = if c.compact_native {
+                6
+            } else if c.native_quads {
                 2
             } else if c.derived_proxy {
                 5
