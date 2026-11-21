@@ -523,7 +523,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {
         Mode::Surface => {}
-        Mode::Blocks => put(&mut b, 0x424c4f434b0005),
+        Mode::Blocks => put(&mut b, 0x424c4f434b0006),
         Mode::Voxy => put(&mut b, 0x564f5859),
         Mode::Seed => put(&mut b, 0x534545440001),
     }
@@ -1013,6 +1013,8 @@ fn validate(t: &GeometryTile) -> bool {
                             && crate::adaptive_geometry::distant_voxels::valid_layered_wall(
                                 q.material,
                             ))
+                            || (q.axis_sign & 3 != 1
+                                && crate::adaptive_geometry::distant_voxels::valid_rapid_wall(q.material))
                             || (q.axis_sign == 1
                                 && crate::adaptive_geometry::distant_voxels::valid_sediment_roof(
                                     q.material,

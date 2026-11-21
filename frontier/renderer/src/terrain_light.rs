@@ -203,10 +203,14 @@ pub(crate) fn rapids(terrain: &FbmTerrain, x: i64, z: i64, top: i64) -> u8 {
         return 0;
     }
     let [x, z] = [x, z].map(|v| (v as f64 + 0.5) * voxel_size());
-    terrain.river_course(x, z).map_or(0, |(_, grade)| {
-        let t = (((grade / 0.14).sqrt() - 0.5) / 0.48).clamp(0., 1.);
-        (3. * t * t * (3. - 2. * t)).round() as u8
-    })
+    terrain
+        .river_course(x, z)
+        .map_or(0, |(_, grade)| aeration(grade))
+}
+
+pub(crate) fn aeration(grade: f64) -> u8 {
+    let t = (((grade / 0.14).sqrt() - 0.5) / 0.48).clamp(0., 1.);
+    (3. * t * t * (3. - 2. * t)).round() as u8
 }
 
 fn sample_ground(world: &World, x: f64, z: f64) -> GroundSample {

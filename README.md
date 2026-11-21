@@ -175,6 +175,17 @@ valley, including its skyline, ground colors and sun direction. A worker
 refreshes that panorama while you move. Player-built structures enter the
 reflection within the native ray's reach.*
 
+Looking uphill from the riverbank, the distant cascade crosses several
+terrain tiles. Along a falling reach, the renderer samples the bed and water
+more densely where the step between neighboring roofs exceeds half the local
+water depth. Connected water faces carry the direction and grade of the
+stream. In a 128 m square of the seed 673 gorge at an 8 m nominal pitch,
+wet roofs covered 2,300 of the 2,451 one-metre sample positions occupied by
+either the rendered or the native channel. In a separate approach to the
+cascade, the mean absolute RGB difference against the reprojected 32 m
+in-engine view fell from 38.4 to 33.1 levels at 128 m and from 34.7 to
+27.6 at 512 m. These samples include both water and bank.
+
 The rowan on the opposite bank stands 125 m from this camera. Streamed trees
 within 320 m can now shade the terrain using their occupied wood and crown
 columns. The detailed plant shadow map still resolves individual branches

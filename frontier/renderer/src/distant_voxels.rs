@@ -184,6 +184,7 @@ fn pack_water_bed(cells: i64, material: Material) -> u32 {
 // Positive-Y river roofs can carry four bed samples in vertex order (z, then x).
 // Homogeneous beds retain the regular water encoding and merge across flat runs.
 const SEDIMENT_ROOF: u32 = 0xa7;
+const RAPID_WALL: u32 = 0xc7;
 pub(crate) const SNOW_ROOF: u32 = 0x83;
 fn sediment_code(material: Material) -> Option<u32> {
     match material {
@@ -192,6 +193,32 @@ fn sediment_code(material: Material) -> Option<u32> {
         Material::Stone => Some(2),
         _ => None,
     }
+}
+
+// Keep the reach direction and hydraulic grade with the worker's column.
+// Only a wall meeting another wet column exports these bits to the GPU.
+fn water_course_paint(course: Option<([f64; 2], f64)>) -> u32 {
+    let Some(([dx, dz], grade)) = course else {
+        return 0;
+    };
+    let rapid = crate::terrain_light::aeration(grade);
+    // The first nonzero incline bin starts at half of a 5.625 degree step.
+    if grade < (std::f64::consts::PI / 64.).tan() {
+        return u32::from(rapid) << 24;
+    }
+    let slope = (grade.atan() * (32. / std::f64::consts::PI))
+        .round()
+        .clamp(0., 15.) as u32;
+    let bearing = (dz.atan2(dx) * (8. / std::f64::consts::PI)).round() as i32;
+    (u32::from(rapid) << 24) | (slope << 26) | ((bearing as u32 & 15) << 20)
+}
+
+pub(crate) fn valid_rapid_wall(word: u32) -> bool {
+    word & 255 == RAPID_WALL
+        && word >> 26 == 0
+        && (word >> 22) != 0
+        && (word >> 8) & 3 < 3
+        && (word >> 10) & 255 <= 192
 }
 
 fn sediment_roof_word(water: u32, corners: [Material; 4]) -> u32 {
@@ -238,7 +265,11 @@ impl Run {
     fn material_word(self, material: Material) -> u32 {
         material as u32
             | if material == self.top_material {
-                self.paint
+                if material == Material::Water {
+                    self.paint & 0x030fffff
+                } else {
+                    self.paint
+                }
             } else {
                 0
             }
@@ -296,12 +327,20 @@ fn wall_quads(
                 let mut word = high.material_word(high.top_material);
                 // A single native riser between wet columns is part of the
                 // same stream. Isolated water blocks keep all six face normals.
-                if lower_is_water
-                    && high.top - low == 1
-                    && high.top_material == Material::Water
-                    && word & 255 == 0x27
-                {
-                    word |= 0x40;
+                if lower_is_water && word & 255 == 0x27 {
+                    let slope = high.paint >> 26;
+                    let bed = high.soil_bands.and_then(|s| sediment_code(s[0]));
+                    if let Some(bed) = bed.filter(|_| slope != 0) {
+                        let depth = (word >> 12) & 255;
+                        let bearing = (high.paint >> 20) & 15;
+                        word = RAPID_WALL
+                            | (bed << 8)
+                            | (depth << 10)
+                            | (bearing << 18)
+                            | (slope << 22);
+                    } else if high.top - low == 1 {
+                        word |= 0x40;
+                    }
                 }
                 word
             } else {
@@ -734,9 +773,14 @@ impl Generator<'_> {
             let (col, color) =
                 terrain.landscape_column(at[0], at[1], self.world.vegetation_enabled());
             let paint = if col.top_material() == Material::Water {
-                let rapid = crate::terrain_light::rapids(terrain, at[0], at[1], col.visible_top);
+                let course = if col.visible_top > 0 {
+                    let [x, z] = at.map(|v| (v as f64 + 0.5) * voxel_size());
+                    terrain.river_course(x, z)
+                } else {
+                    None
+                };
                 pack_water_bed(col.visible_top - col.ground_top, col.ground_surface)
-                    | (u32::from(rapid) << 24)
+                    | water_course_paint(course)
             } else {
                 pack_color(color)
             };
@@ -890,9 +934,20 @@ impl Generator<'_> {
         // the outer half row keeps the tile's negotiated boundary spacing.
         let mut interior_pitch = pitch;
         let mut snow_profile = 0;
-        if pitch >= 4 && pitch as f64 * voxel_size() >= 4. {
+        let pitch_m = pitch as f64 * voxel_size();
+        if pitch >= 4 && pitch_m >= 1. {
             let mut heights = [0; 4];
             let mut shoreline = false;
+            let mut wet_range = [i64::MAX, i64::MIN];
+            let mut shallowest = i64::MAX;
+            let mut note_water = |top: i64, ground: i64| {
+                if top > ground && top > 0 {
+                    wet_range[0] = wet_range[0].min(top);
+                    wet_range[1] = wet_range[1].max(top);
+                    shallowest = shallowest.min(top - ground);
+                }
+            };
+            note_water(center.height, center.ground_height);
             let center_material = center.material(center.height - 1);
             let mut snow = center_material == Material::Snow;
             let mut rock = center_material == Material::Stone;
@@ -904,6 +959,7 @@ impl Generator<'_> {
             ]) {
                 let node = self.block_run(runs, sample)?;
                 *height = node.top;
+                note_water(node.top, node.ground);
                 snow |= node.top_material == Material::Snow;
                 rock |= node.top_material == Material::Stone;
                 shoreline |= (node.top > node.ground) != (center.height > center.ground_height);
@@ -918,7 +974,16 @@ impl Generator<'_> {
             {
                 snow_profile = self.snow_profile(runs, x, z, pitch)?;
             }
-            if shoreline || needs_finer_blocks(heights, center.height, pitch) {
+            // A sloping river can be perfectly planar and pass the curvature
+            // test. Once a sampled step rises through the depth of the water,
+            // its facade exposes a false dam of bed material between wet roofs.
+            let inland = shallowest != i64::MAX;
+            let falling = inland && wet_range[1] - wet_range[0] > (shallowest / 2).max(2);
+            if inland && (shoreline || falling) {
+                interior_pitch = if pitch_m >= 4. { pitch / 4 } else { half };
+            } else if pitch_m >= 4.
+                && (shoreline || needs_finer_blocks(heights, center.height, pitch))
+            {
                 interior_pitch = half;
             }
         }
@@ -1532,7 +1597,15 @@ mod tests {
         assert!(!valid_sediment_roof(mixed | (3 << 8)));
         assert!(valid_sediment_roof(mixed | (3 << 24)));
         assert!(!valid_sediment_roof(mixed | (1 << 26)));
-        let rapid = sediment_roof_word(water | (2 << 24), [Material::Sand, Material::Soil, Material::Stone, Material::Sand]);
+        let rapid = sediment_roof_word(
+            water | (2 << 24),
+            [
+                Material::Sand,
+                Material::Soil,
+                Material::Stone,
+                Material::Sand,
+            ],
+        );
         assert_eq!(rapid >> 24, 2);
         assert_eq!((rapid >> 16) & 255, (water >> 12) & 255);
         assert_eq!(
@@ -1698,6 +1771,78 @@ mod tests {
         assert_eq!(wet.extent, dry.extent);
         assert_eq!(side(26, true).material, dry.material);
         assert_eq!(roof_quad(&(0..4), &(0..4), run).material, dry.material);
+
+        let current = Run {
+            paint: run.paint | water_course_paint(Some(([-1., 0.], 0.625))),
+            ..run
+        };
+        let faces: Vec<_> = wall_quads(2, 4, false, 2..9, 24, true, current).collect();
+        let word = faces[0].material;
+        assert!(valid_rapid_wall(word));
+        assert_eq!((word >> 18) & 15, 8);
+        assert_eq!((word >> 10) & 255, 8);
+        assert_eq!((word >> 8) & 3, sediment_code(Material::Sand).unwrap());
+        assert!(!valid_rapid_wall(word | LAYERED_WALL));
+        let dry_side = wall_quads(2, 4, false, 2..9, 24, false, current)
+            .next()
+            .unwrap();
+        assert_eq!(dry_side.material & 255, 0x27);
+        assert_eq!(
+            roof_quad(&(0..4), &(0..4), current).material,
+            dry_side.material
+        );
+        assert_eq!(dry_side.material >> 26, 0);
+    }
+
+    #[test]
+    fn distant_rapids_follow_the_wet_native_columns_on_both_banks() {
+        let world = World::fbm(
+            673,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The headwater seen looking uphill from the gallery riverbank.
+        let min = [-4160 * 16, -1856 * 16];
+        let size = 128usize;
+        let tile = mixed_tile(Mode::Blocks, &world, min, 2048, 128, [128; 4]);
+        let mut wet = vec![false; size * size];
+        for q in tile
+            .native_quads
+            .iter()
+            .filter(|q| q.axis_sign == 1 && q.material & 15 == Material::Water as u32)
+        {
+            // Positive Y quads store Z extent first and X extent second.
+            let start = [q.anchor[0], q.anchor[2]];
+            let span = [q.extent[1], q.extent[0]];
+            let indices = |i: usize| {
+                (start[i] - 0.5).ceil().max(0.) as usize
+                    ..((start[i] + span[i] - 0.5).ceil() as usize).min(size)
+            };
+            for z in indices(1) {
+                for x in indices(0) {
+                    wet[z * size + x] = true;
+                }
+            }
+        }
+        let mut intersection = 0;
+        let mut union = 0;
+        for (i, &rendered) in wet.iter().enumerate() {
+            let c = world.column(
+                min[0] + (i % size) as i64 * 16 + 8,
+                min[1] + (i / size) as i64 * 16 + 8,
+            );
+            let source = c.height_cells() > c.ground_height_cells();
+            intersection += usize::from(source && rendered);
+            union += usize::from(source || rendered);
+        }
+        eprintln!("wet native roof overlap {intersection}/{union}");
+        assert!(
+            union > 1000 && 100 * intersection >= 87 * union,
+            "overlap {intersection}/{union}"
+        );
     }
 
     #[test]

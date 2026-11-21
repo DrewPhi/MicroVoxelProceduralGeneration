@@ -422,6 +422,11 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         let height=select(extent.y,extent.x,axis==0u)*VOXELS_PER_METER;
         out.color=vec3(select(0.,height,position.y==anchor.y),height,0.);
         out.surface_word=material;
+    } else if (material&255u)==0xc7u {
+        let bearing=f32((material>>18u)&15u)*(6.2831853/16.);
+        let slope=f32(material>>22u)*(1.5707963/16.);
+        out.color=vec3(cos(bearing)*sin(slope),cos(slope),sin(bearing)*sin(slope));
+        out.surface_word=material;
     } else if material==0x83u {
         out.surface_word=material;
     } else if (material&255u)==0xa7u {
@@ -742,12 +747,27 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // representations. Keep its hydraulic stage and animate only light.
         let block_water=(camera.paint_origin.w&32u)!=0u && in.surface_word!=0u;
         let sediment_roof=(in.surface_word&255u)==0xa7u;
-        let measured_column=(in.surface_word&0xbfu)==0x27u || sediment_roof;
+        let rapid_wall=(in.surface_word&255u)==0xc7u;
+        let measured_column=(in.surface_word&0xbfu)==0x27u || sediment_roof || rapid_wall;
         let connected_step=(in.surface_word&255u)==0x67u;
         if connected_step {
             normal=stream_step_normal(normal,NATIVE_VOXEL_METERS,length(vec2(dx.y,dy.y)));
         }
-        if sediment_roof {
+        if rapid_wall {
+            // A distant riser joins two wet samples of the same hillside.
+            // At native scale the water descends in many small steps along
+            // the reach. Integrate their optical normal within the pixel.
+            let pixel=near_shadow.water_phase.w/in.position.w;
+            // The observer below a cascade sees its vertical native facets;
+            // from above, the same footprint also contains horizontal roofs.
+            let roof_area=max(-direction.y,0.);
+            let side_area=dot(max(-direction.xz*sign(in.color.xz),vec2(0.)),abs(in.color.xz))/max(in.color.y,.001);
+            let roof_fraction=roof_area/max(.001,roof_area+side_area);
+            let hydraulic=normalize(mix(normal,in.color,roof_fraction*smoothstep(.6,3.3,pixel/NATIVE_VOXEL_METERS)));
+            if dot(direction,hydraulic)<-.002 {normal=hydraulic;}
+            bed=MATERIAL_COLORS[array<u32,4>(2u,8u,3u,2u)[(in.surface_word>>8u)&3u]];
+            depth=f32((in.surface_word>>10u)&255u)/16.;
+        } else if sediment_roof {
             bed=in.color;
             depth=f32((in.surface_word>>16u)&255u)/16.;
         } else if measured_column {
@@ -763,15 +783,19 @@ fn shade(input: VertexOut) -> vec4<f32> {
         }
         let pixel=max(length(dx.xz),length(dy.xz));
         var foam=0.;
-        let course=stream_current(relative.xz);
-        if (in.normal.y>.5 || connected_step) && world_height>0.
+        var course=stream_current(relative.xz);
+        if rapid_wall {
+            let grade=length(in.color.xz)/max(.001,in.color.y);
+            course=vec4(normalize(in.color.xz),clamp(sqrt(grade/.14),0.,1.),1.);
+        }
+        if (in.normal.y>.5 || connected_step || rapid_wall) && world_height>0.
                 && (camera.paint_origin.w&4u)!=0u && in.surface_word!=0u {
             let baked=f32((in.surface_word>>24u)&3u)/3.;
             let strength=mix(baked,smoothstep(.50,.98,course.z),course.w);
             let footprint=near_shadow.water_phase.w/(in.position.w*max(.18,abs(direction.y)));
             foam=rapid_foam(relative.xz+phase.xy,phase.z,footprint,strength,course.xy);
         }
-        if normal.y>.5 {
+        if normal.y>.5 && !rapid_wall {
             let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,
                 pixel,length(relative),course);
             normal=select(normal,slope,dot(direction,slope)<-.002);
@@ -799,17 +823,20 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // A ray refracted into water travels farther than the vertical depth
         // at grazing incidence (Snell's law with n=1.333).
         let cos_air=clamp(-dot(direction,normal),0.,1.);
-        let path=select(depth,depth*inverseSqrt(1.-.5628*(1.-cos_air*cos_air)),in.normal.y>.5);
+        let path=select(depth,depth*inverseSqrt(1.-.5628*(1.-cos_air*cos_air)),in.normal.y>.5 || rapid_wall);
         var bed_light=light;
-        if connected_step {
+        if rapid_wall {
+            bed_light=terrain_skylight(normal,visibility,sky_exposure);
+        } else if connected_step {
             bed_light=mix(light,terrain_skylight(vec3(0.,1.,0.),visibility,sky_exposure),normal.y);
         }
         let below=water_medium(bed*bed_light,path);
-        let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
-            visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
+        let fresnel=water_fresnel(-dot(direction,normal));
+        let color=mix(below,above,fresnel)+
+            visibility*min(1.,3.*fresnel)*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
         if in.surface_word!=0u {
             var foam_light=bed_light;
-            if connected_step && foam>.001 {foam_light=terrain_skylight(vec3(0.,1.,0.),visibility,sky_exposure);}
+            if (connected_step || rapid_wall) && foam>.001 {foam_light=terrain_skylight(vec3(0.,1.,0.),visibility,sky_exposure);}
             return vec4(foam_color(color,foam_light,foam),1.);
         }
         return vec4(mix(in.color*tint*light,color,river),1.);
