@@ -9,7 +9,7 @@ use crate::{voxel_size, Material};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    rc::Rc,
 };
 pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
@@ -330,7 +330,7 @@ struct Key {
     z: i64,
 }
 thread_local! {
-    static REGIONS: RefCell<VecDeque<(Key, Arc<Region>)>> = const {
+    static REGIONS: RefCell<VecDeque<(Key, Rc<Region>)>> = const {
         RefCell::new(VecDeque::new())
     };
 }
@@ -382,7 +382,7 @@ fn downstream(nodes: &[Node], side: usize, i: usize) -> usize {
     best
 }
 
-fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
+fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
@@ -401,7 +401,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
             .borrow()
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, v)| Arc::clone(v))
+            .map(|(_, v)| Rc::clone(v))
     }) {
         return hit;
     }
@@ -599,7 +599,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
             }
         }
     }
-    let value = Arc::new(Region {
+    let value = Rc::new(Region {
         reaches,
         bins,
         origin,
@@ -611,7 +611,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
         while c.len() >= capacity {
             c.pop_front();
         }
-        c.push_back((key, Arc::clone(&value)));
+        c.push_back((key, Rc::clone(&value)));
     });
     value
 }
@@ -634,7 +634,16 @@ fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
         r.a.stage + t * (r.b.stage - r.a.stage),
     )
 }
-pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
+struct Hydrography {
+    land: Land,
+    ground: f64,
+    water: Option<f64>,
+    riparian: bool,
+}
+
+// Height probes need the same channel bed and hydraulic stage as material
+// queries. Tracking the nearest green bank is only necessary for biome paint.
+fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hydrography {
     let l = land(seed, p, x, z);
     let mut ground = l.h;
     let mut water = if ground < 0. { Some(0.) } else { None };
@@ -676,7 +685,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
             total_weight += weight;
-            if watershed && stage > 0. {
+            if BANKS && watershed && stage > 0. {
                 // Use the locally capped water level and a channel-scaled floodplain.
                 // Compare the final combined bed against this stage after blending.
                 let bank_width = (width * 4.5).max(28. * p.horizontal_scale / 1800.);
@@ -714,11 +723,44 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                 .min((ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.))
         });
     }
-    let [temperature, moisture] = climate(seed, p, x, z);
-    let effective_temperature = temperature - 0.00019 * ground.max(0.);
     let riparian = nearest_bank.is_some_and(|(_, stage)| {
         stage > 0. && (stage - 2. * relief..=stage + 7. * relief).contains(&ground)
     });
+    Hydrography {
+        land: l,
+        ground,
+        water: water.filter(|w| *w > ground),
+        riparian,
+    }
+}
+
+fn quantized_tops(ground: f64, water: Option<f64>) -> [i64; 2] {
+    let pitch = voxel_size();
+    let bed = (ground / pitch).floor() as i64;
+    [
+        bed,
+        water
+            .map_or(bed, |stage| (stage / pitch).floor() as i64)
+            .max(bed),
+    ]
+}
+
+pub(super) fn column_tops(seed: u64, p: FbmParams, cx: i64, cz: i64) -> [i64; 2] {
+    let x = (cx as f64 + 0.5) * voxel_size();
+    let z = (cz as f64 + 0.5) * voxel_size();
+    let profile = hydrography::<false>(seed, p, x, z);
+    quantized_tops(profile.ground, profile.water)
+}
+
+pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
+    let Hydrography {
+        land: l,
+        ground,
+        water,
+        riparian,
+    } = hydrography::<true>(seed, p, x, z);
+    let [temperature, moisture] = climate(seed, p, x, z);
+    let effective_temperature = temperature - 0.00019 * ground.max(0.);
     let biome = if ground < -4. {
         SeededBiome::Ocean
     } else if ground >= 0. && effective_temperature >= 0.29 && riparian {
@@ -745,7 +787,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
         mountain: l.mountain,
         biome,
         ground_height_m: ground,
-        water_height_m: water.filter(|w| *w > ground),
+        water_height_m: water,
     }
 }
 pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
@@ -753,11 +795,7 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
 }
 
 fn column_from_fields(seed: u64, p: FbmParams, x: f64, z: f64, f: SeededFields) -> TerrainColumn {
-    let ground_top = (f.ground_height_m / voxel_size()).floor() as i64;
-    let visible_top = f
-        .water_height_m
-        .map_or(ground_top, |w| (w / voxel_size()).floor() as i64)
-        .max(ground_top);
+    let [ground_top, visible_top] = quantized_tops(f.ground_height_m, f.water_height_m);
     let mut surface = match f.biome {
         SeededBiome::Ocean | SeededBiome::Coast => Material::Sand,
         SeededBiome::Woodland | SeededBiome::Wetland => Material::Grass,
@@ -1059,8 +1097,8 @@ mod tests {
         };
         let original = region(997, seeded, -1., 1.);
         let other = region(997, watershed, -1., 1.);
-        assert!(!Arc::ptr_eq(&original, &other));
-        assert!(Arc::ptr_eq(&original, &region(997, seeded, -1., 1.)));
+        assert!(!Rc::ptr_eq(&original, &other));
+        assert!(Rc::ptr_eq(&original, &region(997, seeded, -1., 1.)));
     }
 
     #[test]
@@ -1610,10 +1648,7 @@ pub(crate) fn reaches_intersecting(
     for x in [min[0], max[0]] {
         for z in [min[1], max[1]] {
             let region = region(seed, p, x, z);
-            if visited
-                .iter()
-                .any(|previous| Arc::ptr_eq(previous, &region))
-            {
+            if visited.iter().any(|previous| Rc::ptr_eq(previous, &region)) {
                 continue;
             }
             for &r in region.reaches.iter().filter(|r| intersects(r)) {

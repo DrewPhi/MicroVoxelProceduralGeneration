@@ -185,7 +185,7 @@ impl FbmTerrain {
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
         if self.params.recipe.has_static_water() {
-            return self.column_cells(x, z).visible_top;
+            return seeded_world::column_tops(self.seed, self.params, x, z)[1];
         }
         let x = (x as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
         let z = (z as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
@@ -590,7 +590,12 @@ impl FbmTerrain {
     }
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
-        self.column_cells(c.x, c.z).ground_top as f64 * voxel_size()
+        let top = if self.params.recipe.has_static_water() {
+            seeded_world::column_tops(self.seed, self.params, c.x, c.z)[0]
+        } else {
+            self.height_cells(c.x, c.z)
+        };
+        top as f64 * voxel_size()
     }
     /// Return the canonical visible surface and its landscape-scale albedo.
     pub fn landscape_column(&self, x: i64, z: i64, vegetation: bool) -> (TerrainColumn, [f32; 3]) {
@@ -855,6 +860,39 @@ pub(crate) fn noise(x: f64, z: f64, seed: u64) -> f64 {
 mod tests {
     use super::*;
     use crate::{raycast, World};
+
+    #[test]
+    fn height_probes_match_material_columns_across_seeded_waterlines() {
+        for recipe in [
+            FbmRecipe::SeededWorld,
+            FbmRecipe::Watershed,
+            FbmRecipe::Highlands,
+        ] {
+            let terrain = FbmTerrain::new(
+                997,
+                FbmParams {
+                    recipe,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut wet_and_dry = [false; 2];
+            for z in -16..=16 {
+                for x in -16..=16 {
+                    let [cx, cz] = [x, z].map(|v| v * 4099);
+                    let col = terrain.column_cells(cx, cz);
+                    assert_eq!(terrain.height_cells(cx, cz), col.visible_top);
+                    let [xm, zm] = [cx, cz].map(|v| (v as f64 + 0.5) * voxel_size());
+                    assert_eq!(
+                        terrain.ground_height_m(xm, zm),
+                        col.ground_top as f64 * voxel_size()
+                    );
+                    wet_and_dry[usize::from(col.ground_top < col.visible_top)] = true;
+                }
+            }
+            assert_eq!(wet_and_dry, [true, true], "{recipe:?}");
+        }
+    }
 
     #[test]
     fn legacy_frozen_default_samples() {

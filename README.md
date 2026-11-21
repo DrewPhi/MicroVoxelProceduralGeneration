@@ -165,6 +165,11 @@ order, culling on and off gave identical color and depth at 1280×720.
 The flight scheduler samples the approaching ridgeline and publishes up to two
 refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. Some block-size changes remain visible during refinement.
 
+Flight height probes evaluate the procedural land and water stage directly.
+Across four seeds, 57,024 samples per pass ran 5–8% faster at 6.25 cm and
+5–7% faster at 10 cm in alternating release CPU measurements. Every height
+checksum matched the full-column path on both grids.
+
 The block renderer also probes each patch center against its four corner
 heights. A sharp bend or a shoreline gets smaller square columns inside the
 patch. On the same three routes, this gave ridgeline p95 of **4.96 px** on
