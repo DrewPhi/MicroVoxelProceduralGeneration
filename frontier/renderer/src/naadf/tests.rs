@@ -503,6 +503,7 @@ fn gpu_matches_canonical_rays_for_source(
                         edit_min: [i32::MIN; 4],
                         edit_max: [i32::MAX; 4],
                         water: [0.; 4],
+                        paint_origin: [0; 4],
                         ring: [
                             volume.ring[0],
                             volume.ring[1],

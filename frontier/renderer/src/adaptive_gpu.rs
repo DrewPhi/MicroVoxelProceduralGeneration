@@ -8,6 +8,7 @@ const ADAPTIVE_SHADER: &str = concat!(
     include_str!("water.wgsl"),
     include_str!("edited_columns.wgsl"),
     include_str!("material_palette.wgsl"),
+    include_str!("terrain_paint.wgsl"),
     include_str!("adaptive.wgsl")
 );
 
@@ -3055,8 +3056,12 @@ mod tests {
             .unwrap()
             .replace("fn legacy_terrain_lighting(", "fn terrain_lighting(");
         assert!(native.starts_with(&legacy));
-        let paint = shader.split("// Coordinate-only paint").nth(1).unwrap();
-        assert!(native.contains(paint.split("struct Camera").next().unwrap().trim()));
+        let paint = include_str!("terrain_paint.wgsl")
+            .split("// Optional grain")
+            .next()
+            .unwrap()
+            .trim();
+        assert!(native.contains(paint));
     }
     #[test]
     fn frustum_culling_keeps_near_plane_intersections() {

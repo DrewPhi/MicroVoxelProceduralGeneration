@@ -438,6 +438,11 @@ with complete coarse coverage in all 10,587 measured frames. It measured
 frame met the five-pixel refinement target. A concurrent build makes the
 long route's tail timings less comparable to the isolated 10-second passes.
 
+The ray-traced editable terrain and the raster terrain share world-space voxel
+grain and daylight. A flat grass surface matched pixel-for-pixel at the 99th
+percentile of stable cell interiors on 6.25 cm, 10 cm and 50 cm grids, with
+both lighting modes. Native terrain seen through water uses the same pigments.
+
 The native renderer uses a shorter shader when the published volume is proven
 dry and the camera is above water. On a flat, dry regional walking route at
 1080p, it measured **6.36 / 8.66 / 9.07 ms**. Two runs with

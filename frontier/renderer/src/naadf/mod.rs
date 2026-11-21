@@ -47,6 +47,7 @@ const SHADER: &str = concat!(
     include_str!("../water.wgsl"),
     include_str!("../sunlight.wgsl"),
     include_str!("../ground_light.wgsl"),
+    include_str!("../terrain_paint.wgsl"),
     include_str!("ray.wgsl")
 );
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +256,7 @@ struct Uniform {
     edit_min: [i32; 4],
     edit_max: [i32; 4],
     water: [f32; 4],
+    paint_origin: [u32; 4],
 }
 struct Volume {
     occupied: Option<stream::Region>,
@@ -1783,7 +1785,7 @@ impl Experiment {
         let origin = DVec3::from_array(a.bounds[0]);
         let matrix = camera.matrix(origin, width as f32 / height as f32);
         let s = gpu.visual_settings.clone().unwrap_or_default();
-        let sun = if s.beauty {
+        let sun = if s.beauty || gpu.regional_appearance {
             crate::atmosphere::sun_direction(s.sun_elevation, s.sun_azimuth)
         } else {
             glam::Vec3::new(-0.5, 0.8, -0.3).normalize()
@@ -1818,7 +1820,14 @@ impl Experiment {
                 sky: [
                     s.overcast,
                     a.static_shadow_ceiling(),
-                    0.,
+                    // Standalone fixture, legacy terrain, or regional daylight.
+                    if gpu.regional_appearance {
+                        2.
+                    } else if gpu.adaptive.is_some() {
+                        1.
+                    } else {
+                        0.
+                    },
                     if s.visibility_benchmark { 1. } else { 0. },
                 ],
                 far_matrix: far_shadow
@@ -1840,6 +1849,16 @@ impl Experiment {
                     f32::from(u8::from(ray_profile().0)),
                     f32::from(u8::from(ray_profile().1)),
                     0.,
+                ],
+                // The root lattice uses sixteen native cells per side. Keep the
+                // low cell address bits even for negative or very distant regions.
+                paint_origin: [
+                    (a.region.lo[0] as u32).wrapping_mul(stream::ROOT_EDGE_VOXELS),
+                    (a.region.lo[1] as u32).wrapping_mul(stream::ROOT_EDGE_VOXELS),
+                    (a.region.lo[2] as u32).wrapping_mul(stream::ROOT_EDGE_VOXELS),
+                    crate::appearance_method::voxel_grain()
+                        .unwrap_or(-1.)
+                        .to_bits(),
                 ],
                 water: [
                     origin.x.rem_euclid(128.) as f32,

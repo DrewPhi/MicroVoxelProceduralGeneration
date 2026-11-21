@@ -17,29 +17,40 @@ fn distant_sun_visibility(hit:vec3<f32>,sun:vec3<f32>)->f32 {
     return textureSampleCompareLevel(far_depth,far_sampler,uv,q.z-0.0002);
 }
 fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
-    var sun=normalize(vec3(-0.5,0.8,-0.3));if naadf.sun.w>0.5{sun=naadf.sun.xyz;}
+    if naadf.sky.z>1.5 || (naadf.sky.z<0.5 && naadf.sun.w>0.5) {
+        return regional_skylight(normal,naadf.sun.xyz,naadf.sky.x,visibility,1.,naadf.sun.w>0.5);
+    }
+    let sun=normalize(vec3(-0.5,0.8,-0.3));
     let sky=0.5+0.5*normal.y;
-    let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky)*(1.+naadf.sky.x*0.3);
-    let direct=outdoor_sun_color(sun.y)*max(dot(normal,sun),0.)*(1.-0.72*naadf.sky.x);
-    if naadf.sun.w>0.5{return ambient+direct*visibility;}
     return mix(vec3(0.12,0.105,0.085),vec3(0.28,0.33,0.40),sky)+vec3(0.78,0.70,0.58)*max(dot(normal,sun),0.);
 }
 fn bounce_at(position:vec3<f32>,normal:vec3<f32>,visibility:f32)->vec3<f32> {
-    if naadf.sun.w<0.5 {return vec3(0.);}
+    if naadf.sky.z<1.5 && naadf.sun.w<0.5 {return vec3(0.);}
     return ground_irradiance(position-naadf.eye.xyz,normal,naadf.sun.xyz,
         outdoor_sun_color(naadf.sun.y),naadf.sky.x,visibility);
 }
+// Terrain and player-built cells use the raster terrain's world-anchored
+// paint. Plant-specific pigments already carry their own native-cell color.
+fn voxel_albedo(grid_hit:vec3<f32>,h:VoxelHit)->vec3<f32> {
+    let base=palette[h.pigment].rgb;
+    if naadf.sky.z<0.5 || h.pigment>=10u { return base; }
+    let local=vec3<i32>(floor(grid_hit-h.normal*.01));
+    let cell=bitcast<vec3<u32>>(local)+naadf.paint_origin.xyz;
+    let distance=length((vec3<f32>(local)+.5)*NATIVE_VOXEL_METERS-naadf.eye.xyz);
+    return base*display_terrain_tint(cell,1.-smoothstep(12.,40.,distance),bitcast<f32>(naadf.paint_origin.w));
+}
 fn shade_voxel(hit:vec3<f32>,h:VoxelHit)->vec3<f32> {
     var visibility=1.;
-    if naadf.sun.w>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
+    if (naadf.sky.z>1.5 || naadf.sun.w>0.5) && naadf.shadow.x>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
         if naadf.shadow.y<0.5{visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
         if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
     }
-    if naadf.sun.w<0.5 || ground_light.origin_strength.z<=0. {return palette[h.pigment].rgb*light(h.normal,visibility);}
+    let color=voxel_albedo(hit*VOXELS_PER_METER,h);
+    if ground_light.origin_strength.z<=0. || (naadf.sky.z<1.5 && naadf.sun.w<0.5) {return color*light(h.normal,visibility);}
     let contact=voxel_contact(hit,h.normal);
     // Contact occlusion affects indirect light; the direct sun uses visibility.
     let indirect=light(h.normal,0.)+bounce_at(hit,h.normal,visibility);
-    return palette[h.pigment].rgb*(light(h.normal,visibility)-light(h.normal,0.)+indirect*contact);
+    return color*(light(h.normal,visibility)-light(h.normal,0.)+indirect*contact);
 }
 
 // Exact occupancy lookup in the published native snapshot. Skip proofs encode
@@ -110,7 +121,7 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
         // Filter the lighting of subpixel bed risers, without moving the hit.
         let resolve=1.-0.70*smoothstep(3.,18.,distance);
         let bed_light=mix(light(vec3(0.,1.,0.),0.48),light(bed.normal,0.48),resolve);
-        let color=palette[bed.pigment].rgb*(bed_light+bounce_at(surface+transmitted*bed.t*NATIVE_VOXEL_METERS,bed.normal,0.48));
+        let color=voxel_albedo(surface*VOXELS_PER_METER-normal*.012+transmitted*bed.t,bed)*(bed_light+bounce_at(surface+transmitted*bed.t*NATIVE_VOXEL_METERS,bed.normal,0.48));
         let phase=sin(dot(p.xz,vec2(43.,-35.)*0.049087385)-naadf.water.z)*1.9;
         let caustic=sin(dot(p.xz,vec2(183.,82.)*0.049087385)+naadf.water.z*1.5+phase);
         below=water_medium(color*(1.+0.065*caustic),bed.t*NATIVE_VOXEL_METERS);
@@ -122,7 +133,7 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
     if reflection_weight>0. && dot(mirror,normal)>0. {
         let bank=trace_water_optics(surface*VOXELS_PER_METER+normal*0.012,mirror,384.);
         if bank.found {
-            let color=palette[bank.pigment].rgb*(light(bank.normal,0.82)+bounce_at(surface+mirror*bank.t*NATIVE_VOXEL_METERS,bank.normal,0.82));
+            let color=voxel_albedo(surface*VOXELS_PER_METER+normal*.012+mirror*bank.t,bank)*(light(bank.normal,0.82)+bounce_at(surface+mirror*bank.t*NATIVE_VOXEL_METERS,bank.normal,0.82));
             above=mix(above,color,reflection_weight*(1.-smoothstep(256.,384.,bank.t)));
         }
     }
@@ -168,7 +179,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     var travel=select(limit,bed.t,bed.found);
     var color=vec3(0.020,0.095,0.085);
     if bed.found {
-        color=palette[bed.pigment].rgb*(light(bed.normal,0.55)+bounce_at((o+ray*bed.t)*NATIVE_VOXEL_METERS,bed.normal,0.55));
+        color=voxel_albedo(o+ray*bed.t,bed)*(light(bed.normal,0.55)+bounce_at((o+ray*bed.t)*NATIVE_VOXEL_METERS,bed.normal,0.55));
     }
     if ray.y>0.02 {
         let boundary=submerged_exit(o,ray,travel);
@@ -182,7 +193,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
                 color=water_sky(outgoing,naadf.sun.xyz,naadf.sky.x);
                 let shore=trace_water_optics(point*VOXELS_PER_METER+outward*0.012,outgoing,256.);
                 if shore.found {
-                    color=palette[shore.pigment].rgb*light(shore.normal,0.85);
+                    color=voxel_albedo(point*VOXELS_PER_METER+outward*.012+outgoing*shore.t,shore)*light(shore.normal,0.85);
                 }
                 color=mix(color,vec3(0.031,0.13,0.12),water_fresnel(dot(outgoing,n)));
             } else {
@@ -190,7 +201,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
                 let floor_hit=trace_water_optics(point*VOXELS_PER_METER-outward*0.012,reflected,128.);
                 color=vec3(0.031,0.13,0.12);
                 if floor_hit.found {
-                    color=water_medium(palette[floor_hit.pigment].rgb*light(floor_hit.normal,0.6),floor_hit.t*NATIVE_VOXEL_METERS);
+                    color=water_medium(voxel_albedo(point*VOXELS_PER_METER-outward*.012+reflected*floor_hit.t,floor_hit)*light(floor_hit.normal,0.6),floor_hit.t*NATIVE_VOXEL_METERS);
                 }
             }
         }

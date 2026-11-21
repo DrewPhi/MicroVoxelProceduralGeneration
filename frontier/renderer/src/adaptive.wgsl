@@ -13,56 +13,12 @@ fn terrain_lighting(normal:vec3<f32>,visibility:f32)->vec3<f32> {
     return terrain_skylight(normal,visibility,1.);
 }
 fn terrain_skylight(normal:vec3<f32>, visibility:f32, exposure:f32) -> vec3<f32> {
-    let n=normalize(normal);
     if camera.sun.w > 0.5 {
-        let sky=0.5+0.5*n.y;
-        let overcast=camera.sky.x;
-        var ambient=mix(vec3(0.15,0.14,0.115),vec3(0.29,0.36,0.44),sky);
-        var sun_color=vec3(0.83,0.75,0.60);
-        if (camera.paint_origin.w&4u)!=0u {
-            ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
-            sun_color=outdoor_sun_color(camera.sun.y);
-        }
-        let direct=sun_color*max(dot(n,camera.sun.xyz),0.);
-        return ambient*exposure*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
+        return regional_skylight(normal,camera.sun.xyz,camera.sky.x,visibility,exposure,(camera.paint_origin.w&4u)!=0u);
     }
     return legacy_terrain_lighting(normal);
 }
-// Coordinate-only paint: stable across chunk publication, no per-cell payload.
-fn paint_hash(p:vec3<u32>) -> f32 {
-    var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u;
-    h=(h^(h>>16u))*2246822519u; h=(h^(h>>13u))*3266489917u;
-    return f32((h^(h>>16u))&65535u)/65535.;
-}
-fn paint_field(cell:vec3<u32>, shift:u32) -> f32 {
-    let mask=0xffffffffu>>shift;
-    let q=cell.xz>>vec2<u32>(shift);
-    let fraction=(vec2<f32>(cell.xz&vec2<u32>((1u<<shift)-1u))+0.5)/f32(1u<<shift);
-    let t=fraction*fraction*(3.-2.*fraction);
-    let a=paint_hash(vec3<u32>(q.x,19u,q.y));
-    let b=paint_hash(vec3<u32>((q.x+1u)&mask,19u,q.y));
-    let c=paint_hash(vec3<u32>(q.x,19u,(q.y+1u)&mask));
-    let d=paint_hash(vec3<u32>((q.x+1u)&mask,19u,(q.y+1u)&mask));
-    return mix(mix(a,b,t.x),mix(c,d,t.x),t.y);
-}
-fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
-    let broad=paint_field(cell,9u)-0.5; // 32m patches
-    let local=paint_field(cell,6u)-0.5; // 4m patches
-    let speckle=(paint_hash(cell)-0.5)*0.055*grain;
-    return vec3<f32>(1.+broad*0.24+local*0.10+speckle,
-                     1.+broad*0.15+local*0.08+speckle,
-                     1.+broad*0.07+local*0.06+speckle);
-}
 struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, sun:vec4<f32>, sky:vec4<f32>, paint:vec4<f32>, shadow_projection:mat4x4<f32> };
-// Optional grain is a display override, independent of canonical tint parity.
-fn display_terrain_tint(cell:vec3<u32>,grain:f32)->vec3<f32> {
-    let original=terrain_tint(cell,grain);
-    if camera.paint.z<0. {return original;}
-    let old_grain=(paint_hash(cell)-0.5)*0.055*grain;
-    let brightness=(paint_hash(cell)-0.5)*camera.paint.z*grain;
-    let hue=(paint_hash(cell^vec3<u32>(761u,157u,1103u))-0.5)*camera.paint.z*0.15*grain;
-    return original+vec3<f32>(brightness-old_grain+hue,brightness-old_grain,brightness-old_grain-hue);
-}
 @group(0) @binding(0) var<uniform> draw_camera: Camera;
 struct CameraSlot { value: Camera, padding: array<vec4<f32>, 3> };
 @group(0) @binding(3) var<storage, read> batch_cameras: array<CameraSlot>;
@@ -591,7 +547,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
         let distance=length((vec3<f32>(local_cell)+0.5)/VOXELS_PER_METER-camera.eye.xyz);
-        tint=display_terrain_tint(cell,1.-smoothstep(12.,40.,distance));
+        tint=display_terrain_tint(cell,1.-smoothstep(12.,40.,distance),camera.paint.z);
     }
     // Evaluate footprint before branching. The smaller singular value retains
     // exact native face response while either tangent direction still resolves
@@ -709,7 +665,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
         if diagnostic==8u {return vec4<f32>(filtered/area,1.);}
         let albedo=(top*profile.top.rgb+w.x*profile.px.rgb+w.y*profile.nx.rgb
             +w.z*profile.pz.rgb+w.w*profile.nz.rgb)/area;
-        let radiance=(filtered/area+albedo*indirect)*display_terrain_tint(cell,0.);
+        let radiance=(filtered/area+albedo*indirect)*display_terrain_tint(cell,0.,camera.paint.z);
         return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,mix(resolved,radiance,blend),visibility),1.);
     }
     return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.0);
