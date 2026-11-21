@@ -116,6 +116,7 @@ pub(crate) fn debug_view() -> u32 {
             Ok("raw-light") => 6,
             Ok("material") => 7,
             Ok("profile") => 8,
+            Ok("water") => 9,
             _ => 0,
         },
     )

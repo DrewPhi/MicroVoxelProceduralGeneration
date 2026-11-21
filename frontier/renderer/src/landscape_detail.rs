@@ -143,6 +143,14 @@ const RIDGES: Resolution = Resolution {
     step: STEP_M * 16.,
     occluders: [1, 2, 4],
 };
+// Valley walls and tributaries are narrower than a 128 m ridge sample.
+// This lattice shares mip one with the ridge field in two additional layers.
+const VALLEY: Resolution = Resolution {
+    side: SIDE / 2,
+    halo: 6,
+    step: STEP_M * 4.,
+    occluders: [1, 3, 6],
+};
 
 struct ShadingGrid {
     min: [i64; 2],
@@ -240,6 +248,7 @@ struct Grid {
     source: Source,
     fine: ShadingGrid,
     ridges: Option<ShadingGrid>,
+    valley: Option<ShadingGrid>,
     rivers: Option<Rivers>,
 }
 
@@ -260,13 +269,27 @@ impl Grid {
                 reusable.and_then(|g| g.ridges.as_ref()),
             )
         });
+        let valley = source.blocks.then(|| {
+            let min = center.map(|v| v.div_euclid(4) - VALLEY.side as i64 / 2);
+            ShadingGrid::make(
+                &terrain,
+                source,
+                min,
+                VALLEY,
+                reusable.and_then(|g| g.valley.as_ref()),
+            )
+        });
         let rivers = (!source.blocks && source.params.recipe == FbmRecipe::Highlands)
             .then(|| Rivers::make(&terrain, center, reusable.and_then(|g| g.rivers.as_ref())));
         let area = SIDE * SIDE;
-        let layers = if rivers.is_some() { 4 } else { 2 };
+        let layers = if ridges.is_some() || rivers.is_some() {
+            4
+        } else {
+            2
+        };
         let base_bytes = area * 4 * layers;
         let ridge_bytes = if ridges.is_some() {
-            RIDGES.side * RIDGES.side * 8
+            RIDGES.side * RIDGES.side * 4 * layers
         } else {
             0
         };
@@ -275,6 +298,12 @@ impl Grid {
         fine.encode(&mut pixels[..area * 8], terrain_sky);
         if let Some(grid) = &ridges {
             grid.encode(&mut pixels[base_bytes..], terrain_sky);
+        }
+        if let Some(grid) = &valley {
+            grid.encode(
+                &mut pixels[base_bytes + RIDGES.side * RIDGES.side * 8..],
+                terrain_sky,
+            );
         }
         if let Some(rivers) = &rivers {
             for v in 0..SIDE {
@@ -294,6 +323,7 @@ impl Grid {
                 source,
                 fine,
                 ridges,
+                valley,
                 rivers,
             },
             pixels,
@@ -443,7 +473,11 @@ impl super::AdaptiveGpu {
                     if grid.source == source
                         && (0..2).all(|a| grid.fine.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
                     {
-                        let layers = if grid.rivers.is_some() { 4 } else { 2 };
+                        let layers = if grid.ridges.is_some() || grid.rivers.is_some() {
+                            4
+                        } else {
+                            2
+                        };
                         let texture = &self.shadows.near.detail.texture;
                         let mips = 1 + u32::from(grid.ridges.is_some());
                         if texture.width() != SIDE as u32
@@ -635,7 +669,7 @@ mod tests {
         let b = moved.ridges.as_ref().unwrap();
         assert_eq!(a.min, [-66, -68]);
         assert_eq!(b.min, [-64, -70]);
-        let base = SIDE * SIDE * 8;
+        let base = SIDE * SIDE * 16;
         let area = RIDGES.side * RIDGES.side * 4;
         for v in 2..RIDGES.side {
             for u in 0..RIDGES.side - 2 {

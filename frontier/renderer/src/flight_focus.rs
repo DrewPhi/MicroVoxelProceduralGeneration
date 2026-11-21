@@ -92,6 +92,18 @@ fn skyline_crests(
     }
 }
 
+// Four source samples estimate how much a displaced block edge can change
+// visible elevation. Use the same physical radius on both sides of the hit.
+fn terrain_grade(world: &World, point: DVec2, height: f64, radius: f64) -> f64 {
+    [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y]
+        .into_iter()
+        .map(|axis| {
+            let q = point + axis * radius;
+            (world.height_m(q.x, q.y) - height).abs() / radius
+        })
+        .fold(0., f64::max)
+}
+
 impl Focus {
     fn survey(&mut self, world: &World, camera: &Camera, viewport: [u32; 2], pixel_error: f64) {
         let aspect = f64::from(viewport[0]) / f64::from(viewport[1].max(1));
@@ -152,13 +164,7 @@ impl Focus {
                     // A coarse column on a cliff can shift its visible height by
                     // several times its horizontal sampling error.
                     let radius = (best * 0.008).clamp(6., 32.);
-                    grade = [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y]
-                        .into_iter()
-                        .map(|axis| {
-                            let q = p + axis * radius;
-                            (world.height_m(q.x, q.y) - h).abs() / radius
-                        })
-                        .fold(0.0, f64::max);
+                    grade = terrain_grade(world, p, h, radius);
                 }
                 self.hits.push(Hit {
                     column: p.to_array().map(|v| (v / voxel_size()).floor() as i64),
@@ -188,6 +194,12 @@ impl Focus {
             (0.90, -0.84),
             (-0.38, -0.19),
             (0.38, -0.19),
+            (-0.92, -0.20),
+            (0.92, -0.20),
+            (-0.39, 0.32),
+            (0.39, 0.32),
+            (-0.82, 0.62),
+            (0.82, 0.62),
         ];
         for &(h, v) in base.iter().chain(foreground.iter().filter(|_| blocks)) {
             let direction =
@@ -208,8 +220,21 @@ impl Focus {
                     let p = eye + direction * hi;
                     self.hits.push(Hit {
                         column: [p.x, p.z].map(|x| (x / voxel_size()).floor() as i64),
-                        depth: hi,
-                        grade: 1.,
+                        depth: if blocks {
+                            hi * direction.dot(forward)
+                        } else {
+                            hi
+                        },
+                        grade: if blocks {
+                            terrain_grade(
+                                world,
+                                p.xz(),
+                                world.height_m(p.x, p.z),
+                                (hi * 0.008).clamp(3., 24.),
+                            )
+                        } else {
+                            1.
+                        },
                     });
                     break;
                 }
@@ -315,6 +340,7 @@ impl Focus {
             == crate::adaptive_geometry::distant_voxels::Mode::Blocks;
         let mut priorities = Vec::new();
         let mut skyline = None;
+        let mut foreground = None;
         for c in candidates {
             let key = c.key;
             let side = i64::from(key.width_cells);
@@ -327,7 +353,9 @@ impl Focus {
                         (hit.depth * pixel_angle * pixel_error / (0.75 + 0.45 * hit.grade.min(4.)))
                             .clamp(1., 40.)
                     } else if blocks {
-                        (hit.depth * 0.006).clamp(2., 32.)
+                        let pixels = pixel_error.clamp(2., 9.);
+                        (hit.depth * pixel_angle * pixels / (0.8 + 0.55 * hit.grade.min(4.)))
+                            .clamp(0.5, 40.)
                     } else {
                         (hit.depth * 0.012).clamp(4., 48.)
                     };
@@ -338,6 +366,11 @@ impl Focus {
             if debt[0] > 1. && skyline.is_none_or(|(d, k)| debt[0] > d || (debt[0] == d && key < k))
             {
                 skyline = Some((debt[0], key));
+            }
+            if debt[1] > 1.
+                && foreground.is_none_or(|(d, k)| debt[1] > d || (debt[1] == d && key < k))
+            {
+                foreground = Some((debt[1], key));
             }
             let worst = debt[0].max(debt[1]);
             if worst > 1. {
@@ -353,12 +386,20 @@ impl Focus {
             if let Some((_, key)) = skyline {
                 selected.insert(key);
             }
+            // A nearby cliff may occupy half the screen while two distinct
+            // ridges compete for the skyline. Give the cliff a turn when its
+            // error is of the same order as the worst projected debt.
+            if let Some((debt, key)) = foreground {
+                if debt >= priorities[0].0 * 0.35 {
+                    selected.insert(key);
+                }
+            }
         }
         for (_, key) in priorities {
-            selected.insert(key);
             if selected.len() >= budget.min(2) {
                 break;
             }
+            selected.insert(key);
         }
         Some(selected)
     }

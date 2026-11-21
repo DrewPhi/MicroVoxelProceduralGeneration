@@ -38,6 +38,29 @@ impl TerrainColumn {
     }
 }
 
+/// Tapered river segments near a terrain tile. These guide display sampling.
+/// Occupancy and surface height still come from the canonical voxel column.
+pub struct RiverSurvey {
+    reaches: Vec<seeded_world::Reach>,
+    depth_scale: f64,
+}
+
+impl RiverSurvey {
+    /// A sampling interval small enough to put several roofs across the
+    /// channel and keep a typical stream step inside its water layer.
+    pub fn sample_spacing(&self, min: [f64; 2], max: [f64; 2]) -> Option<f64> {
+        self.reaches
+            .iter()
+            .filter_map(|r| {
+                let [radius, _] = r.core_radii(min, max)?;
+                let bed_spacing =
+                    0.75 * self.depth_scale * r.depth.min(r.depth_b) / r.grade.max(0.001);
+                Some((radius * 0.38).min(bed_spacing))
+            })
+            .reduce(f64::min)
+    }
+}
+
 /// Noise/composition and material definition version, independent of the fixture.
 pub const FBM_SOURCE_VERSION: u32 = 1;
 /// Regional composition version; recipe must also be included in source/cache keys.
@@ -547,6 +570,26 @@ impl FbmTerrain {
             return None;
         }
         seeded_world::river_course(self.seed, self.params, x_m, z_m)
+    }
+
+    pub fn river_survey(&self, min: [f64; 2], max: [f64; 2]) -> Option<RiverSurvey> {
+        if !self.params.recipe.has_static_water()
+            || self.params.amplitude == 0.
+            || (0..2).any(|i| max[i] - min[i] > 9600. * self.params.horizontal_scale / 1800.)
+        {
+            return None;
+        }
+        let reaches: Vec<_> = self
+            .seeded_reaches(min, max)
+            .into_iter()
+            .filter(|r| {
+                !r.lake && r.a.stage.max(r.b.stage) > 0. && r.core_radii(min, max).is_some()
+            })
+            .collect();
+        (!reaches.is_empty()).then_some(RiverSurvey {
+            reaches,
+            depth_scale: self.params.amplitude / 1000.,
+        })
     }
     /// Candidate horizontal bounds for inland static water. The native column
     /// still determines whether a candidate is wet. None means the requested

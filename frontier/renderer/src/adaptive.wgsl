@@ -425,7 +425,14 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     } else if (material&255u)==0xc7u {
         let bearing=f32((material>>18u)&15u)*(6.2831853/16.);
         let slope=f32(material>>22u)*(1.5707963/16.);
-        out.color=vec3(cos(bearing)*sin(slope),cos(slope),sin(bearing)*sin(slope));
+        let grade=vec2(cos(bearing),sin(bearing))*tan(slope);
+        var center=anchor;
+        center[(axis+1u)%3u]+=.5*extent.x;
+        center[(axis+2u)%3u]+=.5*extent.y;
+        // Distance above the local hydraulic plane, including the change
+        // across the span of a side face. Interpolation is affine on it.
+        let offset=position-center;
+        out.color=vec3(grade.x,offset.y+dot(grade,offset.xz),grade.y);
         out.surface_word=material;
     } else if material==0x83u {
         out.surface_word=material;
@@ -478,7 +485,7 @@ fn river_texel(cell:vec2<i32>,height:f32,tolerance:f32)->f32 {
     return coverage*(1.-smoothstep(tolerance,2.*tolerance,separation));
 }
 fn river_coverage(relative:vec2<f32>, spacing:f32,height:f32)->f32 {
-    if textureNumLayers(flight_detail)<4u {return 0.;}
+    if textureNumLayers(flight_detail)<4u || textureNumLevels(flight_detail)>1u {return 0.;}
     let side=vec2<f32>(textureDimensions(flight_detail));
     let center=(side-1.)*.5;
     let cell=(relative+near_shadow.parameters.zw-center*8.)/16.+2.*center;
@@ -577,25 +584,35 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // The fine grid is centered on a 256 m lattice, which also fixes
         // the origin of the 128 m samples in mip one at negative positions.
         let broad_cell=(cell-.5*(side-1.))/16.+.5*broad_side;
+        let valley_cell=(cell-.5*(side-1.))/4.+.5*broad_side;
+        var valley=0.;
         var broad=0.;
         if fine<1. && textureNumLevels(flight_detail)>1u {
-            broad=detail_window(broad_cell,broad_side,transition.xy/16.,transition.zw,8.);
+            valley=detail_window(valley_cell,broad_side,transition.xy/4.,transition.zw,8.);
+            if valley<1. {broad=detail_window(broad_cell,broad_side,transition.xy/16.,transition.zw,8.);}
         }
-        let weight=max(fine,broad);
+        let weight=max(fine,max(valley,broad));
         // Keep the distinct light of a roof or riser once its narrower
         // dimension projects to several pixels. Subpixel stairs converge
         // to the same integrated light on either side of a tile boundary.
         let facing_eye=abs(dot(in.normal,normalize(relative)));
         let span=min(pitch,in.face_width)*facing_eye/max(.00001,footprint);
-        let strength=smoothstep(1.,3.2,footprint/NATIVE_VOXEL_METERS)
-            *weight*voxel_face_filter(span);
+        let native_span=footprint/NATIVE_VOXEL_METERS;
+        let strength=smoothstep(1.,3.2,native_span)*weight
+            *mix(voxel_face_filter(span),.97,smoothstep(2.,8.,native_span));
         if strength>.001 {
             let uv=(cell+.5)/side;
             let far_uv=(broad_cell+.5)/broad_side;
+            let valley_uv=(valley_cell+.5)/broad_side;
             let fine_fraction=fine/weight;
+            let valley_fraction=min(1.-fine_fraction,valley/weight);
+            let broad_fraction=max(0.,1.-fine_fraction-valley_fraction);
             var slope=vec4(0.);
-            if fine_fraction<1. {
-                slope=(1.-fine_fraction)*textureSampleLevel(flight_detail,flight_sampler,far_uv,0,1.);
+            if broad_fraction>0. {
+                slope=broad_fraction*textureSampleLevel(flight_detail,flight_sampler,far_uv,0,1.);
+            }
+            if valley_fraction>0. {
+                slope+=valley_fraction*textureSampleLevel(flight_detail,flight_sampler,valley_uv,2,1.);
             }
             if fine_fraction>0. {
                 slope+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
@@ -608,22 +625,26 @@ fn shade(input: VertexOut) -> vec4<f32> {
             if total>.0001 {
                 visible_faces=areas/total;
                 facing=sign(n);
-                filter_weight=strength*slope.w;
+                filter_weight=strength;
                 sky_exposure=mix(1.,slope.b,filter_weight);
                 let skin=min(vec2(1.),vec2(n.y)/max(abs(n.xz),vec2(.0001)));
                 let exposed_skin=visible_faces.y+dot(visible_faces.xz,skin);
                 var paint=vec3(0.);
-                if fine_fraction<1. {
+                if broad_fraction>0. {
                     // A distant normal can span a whole hillside. Its color
                     // supplies only the regional background so the native
                     // roof's snow, grass and exposed stone keep their borders.
                     let regional=textureSampleLevel(flight_detail,flight_sampler,far_uv,1,1.).rgb;
-                    paint=(1.-fine_fraction)*mix(skin_color,regional,.20);
+                    paint=broad_fraction*mix(skin_color,regional,.20);
+                }
+                if valley_fraction>0. {
+                    let regional=textureSampleLevel(flight_detail,flight_sampler,valley_uv,3,1.).rgb;
+                    paint+=valley_fraction*mix(skin_color,regional,.32);
                 }
                 if fine_fraction>0. {
                     paint+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,1,0.).rgb;
                 }
-                in.color=mix(in.color,paint,filter_weight*exposed_skin);
+                in.color=mix(in.color,paint,filter_weight*exposed_skin*slope.w);
             }
         }
     }
@@ -711,10 +732,13 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
     var river=0.;
     let world_height=in.local.y+f32(bitcast<i32>(camera.paint_origin.y))*NATIVE_VOXEL_METERS;
-    if diagnostic==0u && in.surface_word==0u && near_shadow.parameters.z > -1e10
+    if (diagnostic==0u || diagnostic==9u) && in.surface_word==0u && near_shadow.parameters.z > -1e10
         && (camera.paint_origin.w & 26u)==0u && in.normal.y>.35 && world_height>0. {
         let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
         river=river_coverage(in.local.xz-camera.eye.xz,spacing,world_height);
+    }
+    if diagnostic==9u {
+        return vec4(vec3(select(river,1.,in.surface_word!=0u)),1.);
     }
     if in.surface_word==1u && (camera.paint_origin.w&2u)!=0u {
         let header=face_profiles[in.profile_index].top;
@@ -761,9 +785,11 @@ fn shade(input: VertexOut) -> vec4<f32> {
             // The observer below a cascade sees its vertical native facets;
             // from above, the same footprint also contains horizontal roofs.
             let roof_area=max(-direction.y,0.);
-            let side_area=dot(max(-direction.xz*sign(in.color.xz),vec2(0.)),abs(in.color.xz))/max(in.color.y,.001);
-            let roof_fraction=roof_area/max(.001,roof_area+side_area);
-            let hydraulic=normalize(mix(normal,in.color,roof_fraction*smoothstep(.6,3.3,pixel/NATIVE_VOXEL_METERS)));
+            let side_area=max(-direction.xz*in.color.xz,vec2(0.));
+            let area=side_area.x+side_area.y+roof_area;
+            let native=vec3(sign(in.color.x)*side_area.x,roof_area,sign(in.color.z)*side_area.y);
+            var hydraulic=normal;
+            if area>.001 { hydraulic=normalize(mix(normal,normalize(native),smoothstep(.6,3.3,pixel/NATIVE_VOXEL_METERS))); }
             if dot(direction,hydraulic)<-.002 {normal=hydraulic;}
             bed=MATERIAL_COLORS[array<u32,4>(2u,8u,3u,2u)[(in.surface_word>>8u)&3u]];
             depth=f32((in.surface_word>>10u)&255u)/16.;
@@ -784,16 +810,28 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let pixel=max(length(dx.xz),length(dy.xz));
         var foam=0.;
         var course=stream_current(relative.xz);
+        var foam_position=relative.xz;
+        var projection=abs(direction.y);
         if rapid_wall {
-            let grade=length(in.color.xz)/max(.001,in.color.y);
+            let grade=length(in.color.xz);
             course=vec4(normalize(in.color.xz),clamp(sqrt(grade/.14),0.,1.),1.);
+            // A vertical proxy wall has constant horizontal coordinates up
+            // its face. Locate the corresponding point on the falling stream
+            // along the eye ray so a pool is not extruded into a broad band.
+            let incidence=direction.y+dot(direction.xz,in.color.xz);
+            if incidence<-.12 {
+                let pitch=f32(1u<<(u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
+                let travel=clamp(-in.color.y/incidence,-pitch,pitch);
+                foam_position+=direction.xz*travel;
+                projection=min(1.,-incidence);
+            }
         }
         if (in.normal.y>.5 || connected_step || rapid_wall) && world_height>0.
                 && (camera.paint_origin.w&4u)!=0u && in.surface_word!=0u {
             let baked=f32((in.surface_word>>24u)&3u)/3.;
             let strength=mix(baked,smoothstep(.50,.98,course.z),course.w);
-            let footprint=near_shadow.water_phase.w/(in.position.w*max(.18,abs(direction.y)));
-            foam=rapid_foam(relative.xz+phase.xy,phase.z,footprint,strength,course.xy);
+            let footprint=near_shadow.water_phase.w/(in.position.w*max(.18,projection));
+            foam=rapid_foam(foam_position+phase.xy,phase.z,footprint,strength,course.xy);
         }
         if normal.y>.5 && !rapid_wall {
             let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,

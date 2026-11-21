@@ -11,8 +11,9 @@ use frontier_world::{
     affine_bounds::{BoundBudget, ColumnBox},
     voxel_size, FbmRecipe, Material, World,
 };
+use rustc_hash::FxHashMap as HashMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     sync::{
@@ -924,6 +925,7 @@ impl Generator<'_> {
         z: i64,
         pitch: i64,
         center: NativeColumn,
+        rivers: Option<&frontier_world::terrain::RiverSurvey>,
         edges: &mut Edges,
         runs: &mut HashMap<[i64; 2], Run>,
     ) -> Result<[i64; 2], String> {
@@ -932,7 +934,7 @@ impl Generator<'_> {
         // Test the existing center probe against the regular node samples.
         // Shorelines and narrow ridge crests gain a half-pitch lattice while
         // the outer half row keeps the tile's negotiated boundary spacing.
-        let mut interior_pitch = pitch;
+        let mut interior_pitch = [pitch; 2];
         let mut snow_profile = 0;
         let pitch_m = pitch as f64 * voxel_size();
         if pitch >= 4 && pitch_m >= 1. {
@@ -980,11 +982,13 @@ impl Generator<'_> {
             let inland = shallowest != i64::MAX;
             let falling = inland && wet_range[1] - wet_range[0] > (shallowest / 2).max(2);
             if inland && (shoreline || falling) {
-                interior_pitch = if pitch_m >= 4. { pitch / 4 } else { half };
-            } else if pitch_m >= 4.
-                && (shoreline || needs_finer_blocks(heights, center.height, pitch))
-            {
-                interior_pitch = half;
+                interior_pitch = [if pitch_m >= 4. { pitch / 4 } else { half }; 2];
+            } else if pitch_m >= 4. {
+                interior_pitch = if shoreline {
+                    [half; 2]
+                } else {
+                    relief_pitch(heights, center.height, pitch)
+                };
             }
         }
         let mut top_range = [i64::MAX, i64::MIN];
@@ -1007,6 +1011,7 @@ impl Generator<'_> {
                 Ok(())
             };
         let strides = self.key.edge_steps.map(i64::from);
+        let tile_min = self.key.min;
         for (zrange, zedge) in [
             (z..z + half, (z == 0).then_some(3)),
             (z + half..z + pitch, (z + pitch == width).then_some(1)),
@@ -1015,26 +1020,68 @@ impl Generator<'_> {
                 (x..x + half, (x == 0).then_some(0)),
                 (x + half..x + pitch, (x + pitch == width).then_some(2)),
             ] {
-                let sx = zedge
+                let mut sx = zedge
                     .map_or(
                         if xedge.is_some() {
                             pitch
                         } else {
-                            interior_pitch
+                            interior_pitch[0]
                         },
                         |e| strides[e],
                     )
                     .max((pitch / 4).max(1));
-                let sz = xedge
+                let mut sz = xedge
                     .map_or(
                         if zedge.is_some() {
                             pitch
                         } else {
-                            interior_pitch
+                            interior_pitch[1]
                         },
                         |e| strides[e],
                     )
                     .max((pitch / 4).max(1));
+                if let Some(rivers) = rivers {
+                    let lo = [xrange.start, zrange.start];
+                    let hi = [xrange.end, zrange.end];
+                    let meters = |p: [i64; 2]| {
+                        std::array::from_fn(|a| (tile_min[a] + p[a]) as f64 * voxel_size())
+                    };
+                    if let Some(mut spacing) = rivers.sample_spacing(meters(lo), meters(hi)) {
+                        // These spans end just inside the negotiated one-cell
+                        // border. The adjacent tile owns the same edge schedule
+                        // even if its interior follows the bend more closely.
+                        // The nominal bed depth describes the center of a
+                        // reach. At the banks the wet layer can thin to a
+                        // single voxel. Measure the actual rise and depth
+                        // here before choosing the finest display interval.
+                        let mut wet = 0;
+                        let mut depth = i64::MAX;
+                        let mut low = i64::MAX;
+                        let mut high = i64::MIN;
+                        for p in [lo, [hi[0], lo[1]], [lo[0], hi[1]], hi] {
+                            let c = self.column(p)?;
+                            if c.height > c.ground_height && c.height > 0 {
+                                wet += 1;
+                                depth = depth.min(c.height - c.ground_height);
+                                low = low.min(c.height);
+                                high = high.max(c.height);
+                            }
+                        }
+                        if wet > 0 && wet < 4 {
+                            spacing = spacing.min(0.5);
+                        } else if wet == 4 && high > low {
+                            spacing =
+                                spacing.min(0.38 * pitch_m * depth as f64 / (high - low) as f64);
+                        }
+                        let spacing = spacing.max(0.5);
+                        let mut step = pitch;
+                        while step > (pitch / 16).max(1) && step as f64 * voxel_size() > spacing {
+                            step /= 2;
+                        }
+                        sx = sx.min(step);
+                        sz = sz.min(step);
+                    }
+                }
                 for (xx, cx) in node_spans(xrange.start.max(1)..xrange.end.min(width - 1), sx) {
                     for (zz, cz) in node_spans(zrange.start.max(1)..zrange.end.min(width - 1), sz) {
                         add(self, xx.clone(), zz, [cx, cz])?;
@@ -1086,7 +1133,7 @@ impl Generator<'_> {
     fn bound_block_groups(
         &mut self,
         side: u32,
-        roofs: &[[i64; 2]; 16],
+        roofs: &[[i64; 2]],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), String> {
         let started = std::time::Instant::now();
@@ -1154,12 +1201,31 @@ impl Generator<'_> {
         let needs_affine = key.width_cells > MAX_CERTIFICATE_WIDTH;
         let can_certify = !needs_affine || patches <= MAX_AFFINE_QUADS;
         let blocks = mode == Mode::Blocks;
+        let step_m = pitch as f64 * voxel_size();
+        let rivers = if blocks && (2. ..=128.).contains(&step_m) {
+            self.world.fbm_terrain().and_then(|terrain| {
+                terrain.river_survey(
+                    key.min.map(|p| p as f64 * voxel_size()),
+                    key.min.map(|p| (p + width) as f64 * voxel_size()),
+                )
+            })
+        } else {
+            None
+        };
         let group_side = if blocks && !can_certify {
-            1 << grid.trailing_zeros().min(2)
+            // At flight scale a 4x4 certificate group can span an entire
+            // ridge despite every individual roof following the slope.
+            // Narrow the native intervals on these broad tiles.
+            let divisions = if f64::from(key.width_cells) * voxel_size() >= 128. {
+                3
+            } else {
+                2
+            };
+            1 << grid.trailing_zeros().min(divisions)
         } else {
             0
         };
-        let mut group_roofs = [[i64::MAX, i64::MIN]; 16];
+        let mut group_roofs = [[i64::MAX, i64::MIN]; 64];
         // An incomplete certificate is discarded by the caller. Avoid doing
         // the first 256 analyses when the entire tile needs a global fallback.
         if !can_certify && group_side == 0 {
@@ -1203,7 +1269,7 @@ impl Generator<'_> {
             .transpose()?;
         let mut profiles = Vec::with_capacity(interior.as_ref().map_or(0, |i| i.patches.len()));
         let mut edges = Edges::default();
-        let mut block_runs = HashMap::new();
+        let mut block_runs = HashMap::default();
         for z in (0..width).step_by(pitch as usize) {
             for x in (0..width).step_by(pitch as usize) {
                 if cancelled() {
@@ -1212,8 +1278,15 @@ impl Generator<'_> {
                 let first_roof = self.coarse_quads.len();
                 if blocks {
                     let center = self.column([x + pitch / 2, z + pitch / 2])?;
-                    let range =
-                        self.block_patch(x, z, pitch, center, &mut edges, &mut block_runs)?;
+                    let range = self.block_patch(
+                        x,
+                        z,
+                        pitch,
+                        center,
+                        rivers.as_ref(),
+                        &mut edges,
+                        &mut block_runs,
+                    )?;
                     let center = center.height;
                     self.empirical_error_m = self.empirical_error_m.max(
                         (center - range[0]).abs().max((center - range[1]).abs()) as f64
@@ -1425,21 +1498,31 @@ impl Generator<'_> {
     }
 }
 
-// Center deviation catches narrow peaks. A planar cliff or a diagonal saddle
-// can pass exactly through that center while spanning several block heights.
-fn needs_finer_blocks(corners: [i64; 4], center: i64, pitch: i64) -> bool {
-    let [a, b, c, d] = corners.map(i128::from);
-    let midpoint_error = (4 * i128::from(center) - a - b - c - d).abs();
-    if midpoint_error > i128::from(pitch / 2) {
-        return true;
-    }
+// Sample across a steep hillside more often than along its contour. A crest
+// or saddle can have zero mean grade, so also test the center and twist.
+// Each introduced roof still takes its exact height from a native column.
+fn relief_pitch(corners: [i64; 4], center: i64, pitch: i64) -> [i64; 2] {
+    let [a, b, c, d] = corners;
+    // The block source is restricted to exactly representable native heights.
+    let curvature = (4 * center - a - b - c - d).abs();
+    let half = pitch / 2;
+    let mut step = [if curvature > half { half } else { pitch }; 2];
     if pitch as f64 * voxel_size() < 12. {
-        return false;
+        return step;
     }
-    let dx = (b + d - a - c) as f64;
-    let dz = (c + d - a - b) as f64;
-    let threshold = 3.5 * pitch as f64;
-    dx * dx + dz * dz > threshold * threshold || (a + d - b - c).abs() > 2 * i128::from(pitch)
+    if (a + d - b - c).abs() > 2 * pitch {
+        step = [half; 2];
+    }
+    let rise = [(b + d - a - c).abs(), (c + d - a - b).abs()];
+    let steep_axis = usize::from(rise[1] > rise[0]);
+    for axis in 0..2 {
+        if rise[axis] > 4 * pitch && axis == steep_axis {
+            step[axis] = pitch / 4;
+        } else if rise[axis] > 3 * half {
+            step[axis] = half;
+        }
+    }
+    step
 }
 
 fn edge_axes(edge: usize) -> [usize; 2] {
@@ -1565,12 +1648,14 @@ mod tests {
     use frontier_world::{FbmParams, World};
 
     #[test]
-    fn planar_cliffs_and_saddles_receive_square_subcolumns() {
+    fn cliff_sampling_follows_the_gradient_and_keeps_saddles_two_dimensional() {
         let p = (32. / voxel_size()).ceil() as i64;
-        assert!(needs_finer_blocks([0, 2 * p, 0, 2 * p], p, p));
-        assert!(needs_finer_blocks([2 * p, 0, 0, 2 * p], p, p));
-        assert!(!needs_finer_blocks([0, p / 2, 0, p / 2], p / 4, p));
-        assert!(needs_finer_blocks([p, p, p, p], p + p / 4, p));
+        assert_eq!(relief_pitch([0, 3 * p, 0, 3 * p], 3 * p / 2, p), [p / 4, p]);
+        assert_eq!(relief_pitch([3 * p, 3 * p, 0, 0], 3 * p / 2, p), [p, p / 4]);
+        assert_eq!(relief_pitch([0, p, 0, p], p / 2, p), [p / 2, p]);
+        assert_eq!(relief_pitch([2 * p, 0, 0, 2 * p], p, p), [p / 2; 2]);
+        assert_eq!(relief_pitch([0, p / 2, 0, p / 2], p / 4, p), [p; 2]);
+        assert_eq!(relief_pitch([p; 4], p + p / 4, p), [p / 2; 2]);
     }
 
     #[test]

@@ -290,7 +290,7 @@ pub(crate) struct Reach {
     pub(crate) width_b: f64,
     pub(crate) depth: f64,
     pub(crate) depth_b: f64,
-    grade: f64,
+    pub(crate) grade: f64,
     valley_radius: f64,
     pub(crate) lake: bool,
     pub(crate) owner: [i64; 2],

@@ -197,6 +197,15 @@ the finite footprint. The foliage contains 1,731,204 occupied plant cells.
 The radius of the light source sets the penumbra around the leaves. The
 reference uses one reflected bounce and approximate underwater illumination.
 
+A matched 720×432 telephoto view measures the shape of the distant channel
+against a 36-ray-per-pixel native water mask. Within rows 50–349 of the
+cascade, overlap rose from 88.9% to 96.3% and mean row-width error fell from
+2.61 to 0.78 pixels at the same 60-pixel tile error budget. Both runs used
+the same 10° field of view and completed refinement. The renderer consults
+the tapered river segments, then measures the actual wet depth and rise in
+each patch. These measurements change where it samples the voxel surface.
+The source still decides which columns contain water.
+
 Looking uphill from the riverbank, the distant cascade crosses several
 terrain tiles. Along a falling reach, the renderer samples the bed and water
 more densely where the step between neighboring roofs exceeds half the local
