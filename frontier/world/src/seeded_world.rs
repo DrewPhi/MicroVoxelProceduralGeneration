@@ -714,6 +714,24 @@ struct ChannelMargin {
     lake: bool,
 }
 
+// Both the point evaluator and its outward-rounded certificate use the same
+// seeded fields. The long band shapes bars; the short band cuts shallow coves.
+pub(crate) const MAX_BANK_INSET: f64 = 0.59;
+
+pub(crate) fn bank_inset<V: Value>(bar: V, cove: V) -> V {
+    let t = V::point(0.49)
+        .add(bar.scale(1.05))
+        .add(cove.scale(0.42))
+        .clamp01();
+    t.mul(t)
+        .mul(V::point(3.).add(t.scale(-2.)))
+        .scale(MAX_BANK_INSET + 0.53)
+        .add(V::point(-0.53))
+}
+
+pub(crate) const BAR_BAND: (f64, u64) = (58., 0xb421);
+pub(crate) const COVE_BAND: (f64, u64) = (19., 0xb422);
+
 struct Hydrography {
     land: Land,
     ground: f64,
@@ -735,10 +753,29 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
     if p.amplitude > 0. {
         let region = region(seed, p, x, z);
         let mut weighted_ground = ground;
+        let mut original_weighted_ground = ground;
         let mut total_weight = 1.;
         let mut river_stage = f64::NEG_INFINITY;
         let mut lake_stage: Option<f64> = None;
         let mut near_lake = false;
+        let mut inset = None;
+        let mut profile_distance = |d: f64, width: f64| {
+            if !p.has_shaped_banks() || d >= 1.8 * width {
+                return d;
+            }
+            let inset = *inset.get_or_insert_with(|| {
+                let sx = x * 1800. / p.horizontal_scale;
+                let sz = z * 1800. / p.horizontal_scale;
+                let band = |(w, salt)| noise(sx / w, sz / w, seed ^ salt);
+                bank_inset(band(BAR_BAND), band(COVE_BAND))
+            });
+            let r = d / width;
+            let bar = inset.max(0.) * (1. - smooth((r - 1.) / 0.8));
+            // A scoured cove returns to bank height at the original outer
+            // water radius. Its visible waterline always runs into solid ground.
+            let cove = inset.min(0.) * (1. - smooth((r - 0.66) / 0.34));
+            d + d.min(width).min(32. * p.horizontal_scale / 1800.) * (bar + cove)
+        };
         for r in region.candidates(x, z) {
             let (d, stage) = project(r, x, z);
             let outer = r.outer_radius();
@@ -751,22 +788,29 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
             let amplitude = p.amplitude / 1000.;
             let depth = r.depth * amplitude;
             let bank_height = 0.7 * amplitude;
-            let profile = if d <= width {
-                stage - depth + (depth + bank_height) * smooth(d / width)
-            } else {
-                stage
-                    + bank_height
-                    + (l.h - stage - bank_height) * smooth((d - width) / (outer - width))
+            let bank_d = profile_distance(d, width);
+            let bed_profile = |radius: f64| {
+                let height = if radius <= width {
+                    stage - depth + (depth + bank_height) * smooth(radius / width)
+                } else {
+                    stage
+                        + bank_height
+                        + (l.h - stage - bank_height) * smooth((radius - width) / (outer - width))
+                };
+                if watershed || (stage == 0. && l.h < 0.) {
+                    height.min(l.h)
+                } else {
+                    height
+                }
             };
-            // Sea-level reach caps may cut the seabed, never raise a ring.
-            let profile = if p.recipe.uses_watersheds() || (stage == 0. && l.h < 0.) {
-                profile.min(l.h)
-            } else {
-                profile
-            };
+            let profile = bed_profile(bank_d);
             let taper = 1. - smooth(d / outer);
             let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
+            if p.has_shaped_banks() {
+                let original = if bank_d == d { profile } else { bed_profile(d) };
+                original_weighted_ground += weight * original;
+            }
             total_weight += weight;
             if BANKS && watershed && stage > 0. {
                 // Use the locally capped water level and a channel-scaled floodplain.
@@ -777,7 +821,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
                     nearest_bank = Some(ChannelMargin {
                         bank_distance: distance,
                         stage: stage.min(land_water_ceiling),
-                        width_fraction: d / width,
+                        width_fraction: bank_d / width,
                         grade: r.grade,
                         lake: r.lake,
                     });
@@ -791,6 +835,11 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
             }
         }
         ground = weighted_ground / total_weight;
+        let original_ground = if p.has_shaped_banks() {
+            original_weighted_ground / total_weight
+        } else {
+            ground
+        };
         if let Some(stage) = lake_stage {
             // Tributaries can lift the blended shore above the lake level.
             // Flat lake priority applies only to its actual wet interior.
@@ -809,8 +858,18 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
                 let (d, stage) = project(r, x, z);
                 if d < width && stage > supported_stage {
                     let depth = r.depth * relief;
-                    let head = (depth - (depth + 0.7 * relief) * smooth(d / width)).max(0.);
-                    supported_stage = supported_stage.max(stage.min(ground + head));
+                    let bank_d = profile_distance(d, width);
+                    let head = (depth - (depth + 0.7 * relief) * smooth(bank_d / width)).max(0.);
+                    let mut waterline = stage.min(ground + head);
+                    if p.has_shaped_banks() {
+                        // Sediment can redirect the shoreline while the old hydraulic
+                        // ceiling still controls shared wet columns at confluences.
+                        let old_head = (depth - (depth + 0.7 * relief) * smooth(d / width)).max(0.);
+                        waterline = waterline
+                            .min(original_ground + old_head)
+                            .min((original_ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.));
+                    }
+                    supported_stage = supported_stage.max(waterline);
                 }
             }
             river_stage = river_stage.min(supported_stage);
@@ -1333,6 +1392,7 @@ mod tests {
     #[test]
     fn alluvial_source_sorts_native_beds_and_keeps_the_previous_water_stage() {
         let params = FbmParams {
+            shaped_banks: false,
             recipe: FbmRecipe::Watershed,
             ..Default::default()
         };
@@ -1373,6 +1433,56 @@ mod tests {
             }
             assert!(wet > 100 && deposits > wet / 2 && exposed_bank > 0);
         }
+    }
+
+    #[test]
+    fn bars_and_coves_move_both_banks_within_the_existing_hydraulic_ceiling() {
+        let params = FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..params()
+        };
+        let source = super::super::FbmTerrain::new(997, params).unwrap();
+        let earlier = super::super::FbmTerrain::new(
+            997,
+            FbmParams {
+                shaped_banks: false,
+                ..params
+            },
+        )
+        .unwrap();
+        assert_eq!((earlier.source_version(), source.source_version()), (3, 4));
+        let mut bars = 0;
+        let mut coves = 0;
+        let mut shared_water = 0;
+        for (x, z) in [(-791., 987.), (-1194., 1223.)] {
+            for dz in -55..=55 {
+                for dx in -55..=55 {
+                    let cell = crate::Cell::from_meters([x + f64::from(dx), 0., z + f64::from(dz)]);
+                    let before = earlier.column_cells(cell.x, cell.z);
+                    let after = source.column_cells(cell.x, cell.z);
+                    let was_wet = before.visible_top > before.ground_top;
+                    let wet = after.visible_top > after.ground_top;
+                    if was_wet && wet {
+                        shared_water += 1;
+                        assert!(
+                            after.visible_top <= before.visible_top,
+                            "raised stage at {cell:?}"
+                        );
+                    } else if was_wet {
+                        bars += 1;
+                        assert_ne!(after.material(after.visible_top - 1), Material::Water);
+                    } else if wet {
+                        coves += 1;
+                        assert_eq!(after.material(after.ground_top), Material::Water);
+                        assert_ne!(after.material(after.ground_top - 1), Material::Water);
+                    }
+                }
+            }
+        }
+        assert!(
+            bars > 60 && coves > 60 && shared_water > 1000,
+            "{bars} {coves} {shared_water}"
+        );
     }
 
     #[test]

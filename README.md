@@ -175,7 +175,7 @@ used a 1.5 km active view, a 16 m native radius and fixed coarse detail.
 
 ![A shallow sand bar in a Watershed meadow and a stony bank beside the faster reach upstream.](frontier/reference/gallery/watershed-alluvium.jpg)
 
-*Two banks of the same seed 997 stream, captured at 1920×1080 with 4× MSAA.
+*Two banks of the same seed 997 stream in generator version three, captured at 1920×1080 with 4× MSAA.
 The left bank is at (−777, 194.5, 985). The right bank is at (−1205, 252.7,
 1209), looking down the steeper reach toward the meadow.*
 
@@ -185,11 +185,32 @@ and onto low banks. A cobble occupies several native cells at 6.25 cm, so
 digging into it exposes its actual material. Existing saves select their
 original bed and bank generation before terrain, vegetation or edits load.
 
+The current generator also cuts shallow coves and builds sandbars along
+each channel. Two seeded fields vary the cross-section over 58 m and 19 m
+at the default world scale. Bars rise from the bed and coves meet the
+outer bank at ground level. The previous channel's hydraulic ceiling keeps
+water in shared wet columns at or below its former elevation.
+
+Across 151 transects at each of three reaches, all 453 still crossed
+water. The bank moved by up to 3.5 m. At the seed 997 sandbar and rapids,
+the largest measured step between adjacent wet columns was one 6.25 cm
+voxel. At the Highlands seed 673 site it was zero. A wider 4.8 km square
+survey on seed 997 found 11,935 wet-to-dry crossings with a 6.25 cm p95
+and 12.5 cm maximum. On seed 673 the 7,185 crossings had a 6.25 cm p95
+and 25 cm maximum. Version-three saves reproduced both the earlier
+walking and aerial test frames pixel for pixel, including depth.
+
+With a 10-pixel error target, a 1.5 km active view and a 16 m native radius,
+the settled 1080p MSAA 1 sandbar view measured 14.27 / 15.48 / 16.00 ms
+at p50/p95/p99 on the Radeon 760M. A cold 100 m/s flight across the river
+measured 9.20 / 13.36 / 16.82 ms. All 927 flight frames had terrain coverage.
+Distant tiles were still refining throughout the flight.
+
 ![Clouds above a stepped Watershed sandbar, with the same formations reflected in the river.](frontier/reference/gallery/watershed-cloud-reflection.jpg)
 
-*Watershed seed 997, looking downstream from the sandbar at (−777, 194.525,
-985). This 1920×1080 frame uses 4× MSAA, a 1.6 km active view, 43% cloud
-coverage and a 31° sun at azimuth 241°. The native and distant terrain had
+*Watershed seed 997, looking downstream from the flowered bank at (−776,
+194.7125, 982) toward (−763.8647, 192.7, 973.1832). This 1920×1080 frame
+uses 4× MSAA, a 1.8 km active view, 39% cloud coverage and a 27° sun at azimuth 241°. The native and distant terrain had
 finished refining at capture.*
 
 Near water, a 64×32 directional map samples the same moving cloud volume

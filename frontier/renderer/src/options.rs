@@ -884,6 +884,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         if let Some(version) = crate::grid_checkpoint::watershed_version(path, params.recipe)? {
             params.legacy_riverbanks = version == 1;
             params.alluvial_deposits = version >= 3;
+            params.shaped_banks = version >= 4;
         }
     }
     params.validate()?;

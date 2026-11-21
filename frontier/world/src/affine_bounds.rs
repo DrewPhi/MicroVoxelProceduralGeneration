@@ -1076,9 +1076,12 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let mut stage_upper = 0.0_f64;
     let mut guaranteed_stage: Option<f64> = None;
     let mut guaranteed_head = 0.;
+    let mut original_head = 0.;
+    let mut original_floor_delta = 0.0_f64;
     let mut possible_lake_lower = f64::INFINITY;
     let mut wet_lakes = Vec::new();
     let mut only_sea_reaches = true;
+    let mut inset = None;
     for r in reaches {
         let dx = r.b.x - r.a.x;
         let dz = r.b.z - r.a.z;
@@ -1123,6 +1126,36 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         let amplitude = p.amplitude / 1000.;
         let depth = r.depth * amplitude;
         let bank = I::point(0.7 * amplitude);
+        let shaped = p.has_shaped_banks() && d.lo < width.scale(1.8).hi;
+        let bank_d = if shaped {
+            use crate::terrain::seeded_world::{bank_inset, BAR_BAND, COVE_BAND};
+            let inset = *inset.get_or_insert_with(|| {
+                let mut band =
+                    |(w, salt)| noise(sx.div_scalar(w), sz.div_scalar(w), t.seed() ^ salt, c);
+                bank_inset(band(BAR_BAND), band(COVE_BAND)).range()
+            });
+            let r = d.div(width);
+            let positive = I {
+                lo: inset.lo.max(0.),
+                hi: inset.hi.max(0.),
+            };
+            let negative = I {
+                lo: inset.lo.min(0.),
+                hi: inset.hi.min(0.),
+            };
+            let bar =
+                positive.mul(I::point(1.).sub(smooth(r.sub(I::point(1.)).div(I::point(0.8)))));
+            let cove =
+                negative.mul(I::point(1.).sub(smooth(r.sub(I::point(0.66)).div(I::point(0.34)))));
+            let limit = I::point(32.).scale(p.horizontal_scale).div(I::point(1800.));
+            let lever = I {
+                lo: d.lo.min(width.lo).min(limit.lo),
+                hi: d.hi.min(width.hi).min(limit.hi),
+            };
+            d.add(lever.mul(bar.add(cove)))
+        } else {
+            d
+        };
         let inner = |d: I| {
             stage
                 .sub(I::point(depth))
@@ -1132,34 +1165,44 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             let q = smooth(d.sub(width).div(I::point(outer).sub(width)));
             stage.add(bank).add(base_range.sub(stage).sub(bank).mul(q))
         };
-        let mut profile = if d.hi <= width.lo {
-            inner(d)
-        } else if d.lo >= width.hi {
-            outer_profile(d)
-        } else {
-            let a = inner(I {
-                lo: d.lo,
-                hi: d.hi.min(width.hi),
-            });
-            let b = outer_profile(I {
-                lo: d.lo.max(width.lo),
-                hi: d.hi,
-            });
-            I {
-                lo: a.lo.min(b.lo),
-                hi: a.hi.max(b.hi),
-            }
-        };
-        if p.recipe.uses_watersheds() {
-            profile.lo = profile.lo.min(base_range.lo);
-            profile.hi = profile.hi.min(base_range.hi);
-        } else if stage.lo == 0. && base_range.lo < 0. {
-            // The source permits cuts, but no raised banks, where a zero-stage
-            // reach is already below sea level.
-            profile.lo = profile.lo.min(base_range.lo);
-            if r.a.stage == 0. && r.b.stage == 0. && base_range.hi < 0. {
+        let profile_at = |bank_d: I| {
+            let mut profile = if bank_d.hi <= width.lo {
+                inner(bank_d)
+            } else if bank_d.lo >= width.hi {
+                outer_profile(bank_d)
+            } else {
+                let a = inner(I {
+                    lo: bank_d.lo,
+                    hi: bank_d.hi.min(width.hi),
+                });
+                let b = outer_profile(I {
+                    lo: bank_d.lo.max(width.lo),
+                    hi: bank_d.hi,
+                });
+                I {
+                    lo: a.lo.min(b.lo),
+                    hi: a.hi.max(b.hi),
+                }
+            };
+            if p.recipe.uses_watersheds() {
+                profile.lo = profile.lo.min(base_range.lo);
                 profile.hi = profile.hi.min(base_range.hi);
+            } else if stage.lo == 0. && base_range.lo < 0. {
+                // The source permits cuts, but no raised banks, where a zero-stage
+                // reach is already below sea level.
+                profile.lo = profile.lo.min(base_range.lo);
+                if r.a.stage == 0. && r.b.stage == 0. && base_range.hi < 0. {
+                    profile.hi = profile.hi.min(base_range.hi);
+                }
             }
+            profile
+        };
+        let profile = profile_at(bank_d);
+        if shaped {
+            // Both beds use identical positive weights, including the original
+            // land with weight one. Their difference lies within the convex
+            // hull of the individual profile differences.
+            original_floor_delta = original_floor_delta.min(profile_at(d).sub(profile).lo);
         }
         let taper = I::point(1.).sub(smooth(d.div(I::point(outer))));
         let square = I {
@@ -1191,9 +1234,14 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             if fully_active && distance.hi < width.lo {
                 if guaranteed_stage.is_none_or(|old| stage.lo > old) {
                     guaranteed_stage = Some(stage.lo);
-                    guaranteed_head = I::point(depth)
+                    original_head = I::point(depth)
                         .sub(I::point(depth).add(bank).mul(smooth(d.div(width))))
-                        .lo.max(0.);
+                        .lo
+                        .max(0.);
+                    guaranteed_head = I::point(depth)
+                        .sub(I::point(depth).add(bank).mul(smooth(bank_d.div(width))))
+                        .lo
+                        .max(0.);
                 }
                 if r.lake && profile.hi < stage.lo {
                     wet_lakes.push(stage);
@@ -1271,7 +1319,21 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     if let Some(stage) = guaranteed_stage {
         let mut lower = stage.min(possible_lake_lower);
         if p.recipe.uses_watersheds() && !p.legacy_riverbanks {
-            lower = lower.min(I::point(ground.lo).add(I::point(guaranteed_head)).lo.max(0.));
+            lower = lower.min(
+                I::point(ground.lo)
+                    .add(I::point(guaranteed_head))
+                    .lo
+                    .max(0.),
+            );
+        }
+        if p.has_shaped_banks() {
+            let original_ground = I::point(ground.lo)
+                .add(I::point(original_floor_delta))
+                .sub(I::point(2. * roundoff));
+            let old_head = original_head.min(
+                crate::terrain::seeded_world::WATERSHED_MAX_WATER_DEPTH * (p.amplitude / 1000.),
+            );
+            lower = lower.min(original_ground.add(I::point(old_head)).lo.max(0.));
         }
         // Prove a wholly wet region without carrying its hidden bed into the
         // visible error. Test the signed weighted excess above the water level;
@@ -1586,6 +1648,7 @@ mod tests {
                     FbmParams {
                         legacy_riverbanks: false,
                         alluvial_deposits: true,
+                        shaped_banks: true,
                         recipe,
                         horizontal_scale: 1800.0,
                         amplitude: 1000.0,

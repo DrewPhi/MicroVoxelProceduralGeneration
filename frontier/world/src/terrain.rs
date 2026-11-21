@@ -84,6 +84,8 @@ pub struct FbmParams {
     /// Give channel beds and the low bank their source-derived sediment.
     /// Version-two Watershed and Highlands saves use their original materials.
     pub alluvial_deposits: bool,
+    /// Shape low banks into bars and shallow coves in new Watershed and Highlands worlds.
+    pub shaped_banks: bool,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
@@ -101,6 +103,7 @@ impl Default for FbmParams {
             recipe: FbmRecipe::Legacy,
             legacy_riverbanks: false,
             alluvial_deposits: true,
+            shaped_banks: true,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -117,6 +120,13 @@ impl std::fmt::Display for FbmError {
 }
 impl std::error::Error for FbmError {}
 impl FbmParams {
+    pub(crate) fn has_shaped_banks(self) -> bool {
+        self.recipe.uses_watersheds()
+            && !self.legacy_riverbanks
+            && self.alluvial_deposits
+            && self.shaped_banks
+    }
+
     pub fn validate(&self) -> Result<(), FbmError> {
         if !self.horizontal_scale.is_finite()
             || !(16.0..=10_000_000.0).contains(&self.horizontal_scale)
@@ -168,6 +178,8 @@ impl FbmTerrain {
             FbmRecipe::Watershed | FbmRecipe::Highlands => {
                 if self.params.legacy_riverbanks {
                     1
+                } else if self.params.has_shaped_banks() {
+                    4
                 } else if self.params.alluvial_deposits {
                     3
                 } else {
@@ -530,6 +542,15 @@ impl FbmTerrain {
         )
     }
 
+    fn water_core_spacing(&self, radius: f64) -> f64 {
+        let maximum_contraction = if self.params.has_shaped_banks() {
+            1. + seeded_world::MAX_BANK_INSET
+        } else {
+            1.
+        };
+        0.5 * radius / maximum_contraction
+    }
+
     /// Conservative river/lake core-support spacing hint, in meters. This is
     /// a display sampling rule, not a height certificate or water-area estimate.
     /// Segment endpoint AABBs expanded by maximum width contain every possible
@@ -541,7 +562,9 @@ impl FbmTerrain {
         let scale = self.params.horizontal_scale / 1800.;
         let spacing = 2400. * scale;
         if (0..2).any(|a| max[a] - min[a] > spacing * 4.) {
-            return Some(0.5 * seeded_world::minimum_radius(self.params) * scale);
+            return Some(
+                self.water_core_spacing(seeded_world::minimum_radius(self.params) * scale),
+            );
         }
         self.seeded_reaches(min, max)
             .into_iter()
@@ -558,7 +581,7 @@ impl FbmTerrain {
                 {
                     None
                 } else {
-                    Some(0.5 * r.width.min(r.width_b))
+                    Some(self.water_core_spacing(r.width.min(r.width_b)))
                 }
             })
             .reduce(f64::min)
@@ -575,7 +598,9 @@ impl FbmTerrain {
         // Large boxes use source-wide maximum lake diameter, without enumerating
         // an unbounded collection of drainage descriptors.
         if (0..2).any(|a| max[a] - min[a] > 9600. * scale) {
-            return if step_m > 0.5 * seeded_world::minimum_radius(self.params) * scale {
+            return if step_m
+                > self.water_core_spacing(seeded_world::minimum_radius(self.params) * scale)
+            {
                 (step_m * std::f64::consts::SQRT_2)
                     .min(2. * seeded_world::maximum_lake_radius(self.params) * scale)
             } else {
@@ -586,7 +611,7 @@ impl FbmTerrain {
         self.seeded_reaches(min, max)
             .into_iter()
             .filter(|r| r.a.stage.max(r.b.stage) >= 0.)
-            .filter(|r| step_m > 0.5 * r.width.min(r.width_b))
+            .filter(|r| step_m > self.water_core_spacing(r.width.min(r.width_b)))
             .filter(|r| {
                 let radius = r.width.max(r.width_b) + pad;
                 r.a.x.min(r.b.x) - radius <= max[0]

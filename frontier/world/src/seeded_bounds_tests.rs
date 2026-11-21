@@ -60,6 +60,40 @@ fn verify(terrain: &FbmTerrain, region: ColumnBox, budget: BoundBudget) -> usize
 }
 
 #[test]
+fn bars_and_coves_fit_native_height_and_residual_certificates() {
+    let source = FbmTerrain::new(
+        997,
+        FbmParams {
+            recipe: FbmRecipe::Watershed,
+            ..params()
+        },
+    )
+    .unwrap();
+    let mut wet = 0;
+    for (x, z) in [(-791., 987.), (-1194., 1223.)] {
+        for dz in [-10., -3., 4., 11.] {
+            for dx in [-10., -3., 4., 11.] {
+                let min = [x + dx, z + dz].map(|m| (m / voxel_size()).floor() as i64);
+                let region = ColumnBox {
+                    min,
+                    size_cells: [31, 23],
+                };
+                wet += verify(&source, region, BoundBudget::default());
+                verify(
+                    &source,
+                    region,
+                    BoundBudget {
+                        max_noise_cells: 0,
+                        max_cells_per_noise: 1,
+                    },
+                );
+            }
+        }
+    }
+    assert!(wet > 0);
+}
+
+#[test]
 fn seeded_certificates_cover_river_cross_sections_lakes_and_negative_cache_corners() {
     let mut tested_lakes = 0;
     let mut wet = 0;
