@@ -642,8 +642,9 @@ fn lerp_hessian(a: I, b: I, t: I) -> I {
         lerp_i(a, b, t)
     }
 }
-/// Value, U/V gradient and UU/UV/VV Hessian of one noise-cell polynomial.
-fn noise_jet<const SECOND: bool>(u: I, v: I, gradients: [[f64; 2]; 4]) -> [I; 6] {
+/// Evaluate either the value and U/V gradient at the expansion point, or the
+/// UU/UV/VV Hessian over a box in one noise-cell polynomial.
+fn noise_jet<const SECOND: bool>(u: I, v: I, gradients: [[f64; 2]; 4]) -> [I; 3] {
     let (fu, du, ddu) = fade_range::<SECOND>(u);
     let (fv, dv, ddv) = fade_range::<SECOND>(v);
     let grad = |dx: usize, dz: usize| {
@@ -675,61 +676,54 @@ fn noise_jet<const SECOND: bool>(u: I, v: I, gradients: [[f64; 2]; 4]) -> [I; 6]
     };
     let a = line(0);
     let b = line(1);
-    [
-        lerp_i(a[0], b[0], fv),
-        lerp_i(a[1], b[1], fv),
-        lerp_i(a[2], b[2], fv).add(dv.mul(b[0].sub(a[0]))),
-        if SECOND {
-            lerp_hessian(a[3], b[3], fv)
-        } else {
-            I::point(0.0)
-        },
-        if SECOND {
-            lerp_hessian(a[4], b[4], fv).add(dv.mul(b[1].sub(a[1])))
-        } else {
-            I::point(0.0)
-        },
-        if SECOND {
+    if SECOND {
+        [
+            lerp_hessian(a[3], b[3], fv),
+            lerp_hessian(a[4], b[4], fv).add(dv.mul(b[1].sub(a[1]))),
             dv.mul(b[2].sub(a[2]))
-                .scale(2.0)
-                .add(ddv.mul(b[0].sub(a[0])))
-        } else {
-            I::point(0.0)
-        },
-    ]
+                .scale(2.)
+                .add(ddv.mul(b[0].sub(a[0]))),
+        ]
+    } else {
+        [
+            lerp_i(a[0], b[0], fv),
+            lerp_i(a[1], b[1], fv),
+            lerp_i(a[2], b[2], fv).add(dv.mul(b[0].sub(a[0]))),
+        ]
+    }
     .map(|x| x.scale(1.6))
 }
-fn noise_taylor(u: Aa, v: Aa, i: i64, j: i64, seed: u64) -> Aa {
-    let gradients = std::array::from_fn(|index| {
+fn cell_gradients(i: i64, j: i64, seed: u64) -> [[f64; 2]; 4] {
+    std::array::from_fn(|index| {
         gradient_pair(
             i.wrapping_add((index % 2) as i64),
             j.wrapping_add((index / 2) as i64),
             seed,
         )
-    });
+    })
+}
+fn noise_taylor(u: Aa, v: Aa, i: i64, j: i64, seed: u64) -> Aa {
+    let gradients = cell_gradients(i, j, seed);
     let point = noise_jet::<false>(I::point(u.c), I::point(v.c), gradients);
     let range = noise_jet::<true>(u.range(), v.range(), gradients);
-    let mut r = up_add(
+    taylor_enclosure(u, v, point, range.map(I::abs_max))
+}
+fn taylor_enclosure(u: Aa, v: Aa, point: [I; 3], hessian: [f64; 3]) -> Aa {
+    let ru = u.radius();
+    let rv = v.radius();
+    let first = up_add(
         up_mul(point[1].abs_max(), u.r),
         up_mul(point[2].abs_max(), v.r),
     );
-    r = up_add(
-        r,
-        up_mul(
-            0.5,
-            up_add(
-                up_add(
-                    up_mul(range[3].abs_max(), up_mul(u.radius(), u.radius())),
-                    up_mul(2.0 * range[4].abs_max(), up_mul(u.radius(), v.radius())),
-                ),
-                up_mul(range[5].abs_max(), up_mul(v.radius(), v.radius())),
-            ),
+    let second = up_add(
+        up_add(
+            up_mul(hessian[0], up_mul(ru, ru)),
+            up_mul(2. * hessian[1], up_mul(ru, rv)),
         ),
+        up_mul(hessian[2], up_mul(rv, rv)),
     );
-    // The actual branch is evaluated only inside its unit cell. 32768 eps
-    // covers source gradient/fade/interpolation roundoff there; polynomial
-    // extensions outside the cell are only conservative mathematical enclosures.
-    r = up_add(r, fp_pad(4096.0));
+    // Cover floating-point evaluation of the source gradient, fade and interpolation.
+    let r = up_add(up_add(first, up_mul(0.5, second)), fp_pad(4096.0));
     Aa::coefficients(
         point[0],
         [0, 1].map(|a| {
@@ -741,6 +735,35 @@ fn noise_taylor(u: Aa, v: Aa, i: i64, j: i64, seed: u64) -> Aa {
     )
     .clamp(-1.0, 1.0)
 }
+// Quintic fade has zero first and second derivatives at each cell edge.
+// Shared corner gradients therefore define a C2 field across all crossed cells.
+// Bound its Hessian on each cell intersection and expand once at the real center.
+fn crossing_taylor(x: Aa, z: Aa, ix: I, iz: I, lo: [i64; 2], hi: [i64; 2], seed: u64) -> Aa {
+    let cell = [x.c.floor() as i64, z.c.floor() as i64];
+    let coord = |at: f64, origin: i64| I::point(at).sub(I::point(origin as f64));
+    let point = noise_jet::<false>(
+        coord(x.c, cell[0]),
+        coord(z.c, cell[1]),
+        cell_gradients(cell[0], cell[1], seed),
+    );
+    let clip = |range: I, n: i64| {
+        let r = range.sub(I::point(n as f64));
+        I {
+            lo: r.lo.max(0.),
+            hi: r.hi.min(1.),
+        }
+    };
+    let mut hessian = [0.0_f64; 3];
+    for j in lo[1]..=hi[1] {
+        for i in lo[0]..=hi[0] {
+            let jet = noise_jet::<true>(clip(ix, i), clip(iz, j), cell_gradients(i, j, seed));
+            for k in 0..3 {
+                hessian[k] = hessian[k].max(jet[k].abs_max());
+            }
+        }
+    }
+    taylor_enclosure(x, z, point, hessian)
+}
 struct Context {
     budget: BoundBudget,
     cells: u32,
@@ -748,17 +771,10 @@ struct Context {
 }
 #[cfg(test)]
 thread_local! {
-    // Preserve the previous allocation/reduction path for exact same-binary A/B.
+    // Compare against the original whole-box polynomial extensions in CPU tests.
     static RETAIN_NOISE_BRANCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 fn noise(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
-    #[cfg(test)]
-    if RETAIN_NOISE_BRANCHES.get() {
-        return noise_impl::<true>(x, z, seed, c);
-    }
-    noise_impl::<false>(x, z, seed, c)
-}
-fn noise_impl<const RETAIN: bool>(x: Aa, z: Aa, seed: u64, c: &mut Context) -> Aa {
     let ix = x.range();
     let iz = z.range();
     if !ix.lo.is_finite() || !ix.hi.is_finite() || !iz.lo.is_finite() || !iz.hi.is_finite() {
@@ -775,74 +791,61 @@ fn noise_impl<const RETAIN: bool>(x: Aa, z: Aa, seed: u64, c: &mut Context) -> A
         c.fallbacks += 1;
         return Aa::interval(-1.0, 1.0);
     }
+    c.cells += count as u32;
+    #[cfg(test)]
+    if RETAIN_NOISE_BRANCHES.get() {
+        return retained_cell_extension(x, z, lo, hi, seed);
+    }
+    if count == 1 {
+        single_cell_noise(x, z, lo[0], lo[1], seed)
+    } else {
+        crossing_taylor(x, z, ix, iz, lo, hi, seed)
+    }
+}
+
+fn single_cell_noise(x: Aa, z: Aa, i: i64, j: i64, seed: u64) -> Aa {
+    let u = x.sub(Aa::point(i as f64));
+    let v = z.sub(Aa::point(j as f64));
+    let fu = u.fade();
+    let fv = v.fade();
+    let grad = |dx: i64, dz: i64| {
+        let a = u.sub(Aa::point(dx as f64));
+        let b = v.sub(Aa::point(dz as f64));
+        let k = std::f64::consts::FRAC_1_SQRT_2;
+        match hash(i.wrapping_add(dx), j.wrapping_add(dz), seed) & 7 {
+            0 => a,
+            1 => a.neg(),
+            2 => b,
+            3 => b.neg(),
+            4 => a.add(b).scale(k),
+            5 => a.sub(b).scale(k),
+            6 => a.neg().add(b).scale(k),
+            _ => a.neg().sub(b).scale(k),
+        }
+    };
+    let lerp = |a: Aa, b: Aa, t: Aa| a.add(b.sub(a).mul(t));
+    let ordinary = lerp(
+        lerp(grad(0, 0), grad(1, 0), fu),
+        lerp(grad(0, 1), grad(1, 1), fu),
+        fv,
+    )
+    .scale(1.6)
+    .clamp(-1.0, 1.0);
+    let taylor = noise_taylor(u, v, i, j, seed);
+    if taylor.r < ordinary.r {
+        taylor
+    } else {
+        ordinary
+    }
+}
+
+#[cfg(test)]
+fn retained_cell_extension(x: Aa, z: Aa, lo: [i64; 2], hi: [i64; 2], seed: u64) -> Aa {
     let mut branches = Vec::new();
-    let mut first: Option<Aa> = None;
-    let mut radius = 0.0_f64;
     for j in lo[1]..=hi[1] {
         for i in lo[0]..=hi[0] {
-            c.cells += 1;
-            let u = x.sub(Aa::point(i as f64));
-            let v = z.sub(Aa::point(j as f64));
-            let fu = u.fade();
-            let fv = v.fade();
-            let grad = |dx: i64, dz: i64| {
-                let a = u.sub(Aa::point(dx as f64));
-                let b = v.sub(Aa::point(dz as f64));
-                let k = std::f64::consts::FRAC_1_SQRT_2;
-                match hash(i.wrapping_add(dx), j.wrapping_add(dz), seed) & 7 {
-                    0 => a,
-                    1 => a.neg(),
-                    2 => b,
-                    3 => b.neg(),
-                    4 => a.add(b).scale(k),
-                    5 => a.sub(b).scale(k),
-                    6 => a.neg().add(b).scale(k),
-                    _ => a.neg().sub(b).scale(k),
-                }
-            };
-            let lerp = |a: Aa, b: Aa, t: Aa| a.add(b.sub(a).mul(t));
-            let ordinary = lerp(
-                lerp(grad(0, 0), grad(1, 0), fu),
-                lerp(grad(0, 1), grad(1, 1), fu),
-                fv,
-            )
-            .scale(1.6)
-            .clamp(-1.0, 1.0);
-            let taylor = noise_taylor(u, v, i, j, seed);
-            let branch = if taylor.r < ordinary.r {
-                taylor
-            } else {
-                ordinary
-            };
-            if RETAIN {
-                branches.push(branch);
-            } else {
-                let reference = *first.get_or_insert_with(|| {
-                    radius = branch.r;
-                    branch
-                });
-                // Keep the original first-branch comparison and j/i reduction
-                // order, including outward rounding. Only storage is removed.
-                let delta = up_add(
-                    I::point(branch.c).sub(I::point(reference.c)).abs_max(),
-                    up_add(
-                        I::point(branch.a[0])
-                            .sub(I::point(reference.a[0]))
-                            .abs_max(),
-                        I::point(branch.a[1])
-                            .sub(I::point(reference.a[1]))
-                            .abs_max(),
-                    ),
-                );
-                radius = radius.max(up_add(delta, branch.r));
-            }
+            branches.push(single_cell_noise(x, z, i, j, seed));
         }
-    }
-    if !RETAIN {
-        return Aa {
-            r: radius,
-            ..first.expect("positive branch count was checked above")
-        };
     }
     // Test oracle: retain the previous Vec implementation verbatim.
     let reference = branches[0];
@@ -1458,25 +1461,6 @@ mod tests {
         let _reset = Reset(RETAIN_NOISE_BRANCHES.replace(enabled));
         f()
     }
-    fn bound_bits(bound: HeightBound) -> ([u64; 10], u32, u32) {
-        (
-            [
-                bound.center_xz[0],
-                bound.center_xz[1],
-                bound.half_extent_m[0],
-                bound.half_extent_m[1],
-                bound.center_height_m,
-                bound.coefficients[0],
-                bound.coefficients[1],
-                bound.remainder_m,
-                bound.height_range[0],
-                bound.height_range[1],
-            ]
-            .map(f64::to_bits),
-            bound.noise_cells,
-            bound.full_range_fallbacks,
-        )
-    }
     #[test]
     fn positive_weighted_mean_extrema_enclose_all_adversarial_corners() {
         for base in [
@@ -1576,11 +1560,13 @@ mod tests {
     }
 
     #[test]
-    fn streamed_noise_branches_match_retained_bounds_bit_for_bit() {
+    fn crossed_cell_and_reference_bounds_enclose_native_terrain_across_budgets() {
         for recipe in [
             FbmRecipe::Legacy,
             FbmRecipe::Regional,
             FbmRecipe::RegionalUnwarped,
+            FbmRecipe::Highlands,
+            FbmRecipe::Watershed,
         ] {
             for seed in [7, 113] {
                 let terrain = FbmTerrain::new(
@@ -1621,18 +1607,86 @@ mod tests {
                             retained(true, || bound_native_height(&terrain, region, budget));
                         let after =
                             retained(false, || bound_native_height(&terrain, region, budget));
-                        assert_eq!(
-                            before.map(bound_bits),
-                            after.map(bound_bits),
-                            "{recipe:?} seed={seed} region={region:?} budget={budget:?}"
-                        );
+                        for bound in [before.unwrap(), after.unwrap()] {
+                            assert!(bound.noise_cells <= budget.max_noise_cells);
+                            for i in 0..12 {
+                                let cell = [0, 1].map(|a| {
+                                    min[a] + i64::from((i * [73, 113][a]) % size_cells[a])
+                                });
+                                let point = cell.map(|v| (v as f64 + 0.5) * voxel_size());
+                                let height =
+                                    terrain.height_cells(cell[0], cell[1]) as f64 * voxel_size();
+                                let plane = bound.center_height_m
+                                    + (0..2)
+                                        .map(|a| {
+                                            bound.coefficients[a] * (point[a] - bound.center_xz[a])
+                                                / bound.half_extent_m[a]
+                                        })
+                                        .sum::<f64>();
+                                assert!(
+                                    (plane - height).abs()
+                                        <= bound.remainder_m + fp_pad(plane.abs() + height.abs()),
+                                    "{recipe:?} seed={seed} region={region:?} budget={budget:?}"
+                                );
+                                assert!(
+                                    height >= bound.height_range[0]
+                                        && height <= bound.height_range[1]
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
     }
     #[test]
-    fn streamed_noise_branch_counts_match_retained_oracle() {
+    fn crossing_noise_encloses_correlated_warps_and_independent_residuals() {
+        for seed in [7, 19, 673, 40961] {
+            for center in [[-13., 7.], [-0.97, -8.02], [0.0, 0.49], [1000.001, -999.99]] {
+                for radius in [0.0001, 0.05, 0.35, 0.65] {
+                    let x = Aa {
+                        c: center[0],
+                        a: [radius, -0.38 * radius],
+                        r: 0.08 * radius,
+                    };
+                    let z = Aa {
+                        c: center[1],
+                        a: [0.51 * radius, radius],
+                        r: 0.13 * radius,
+                    };
+                    let mut context = Context {
+                        budget: BoundBudget {
+                            max_noise_cells: 64,
+                            max_cells_per_noise: 16,
+                        },
+                        cells: 0,
+                        fallbacks: 0,
+                    };
+                    let bound = noise(x, z, seed, &mut context);
+                    assert_eq!(context.fallbacks, 0);
+                    for i in -8..=8 {
+                        for j in -8..=8 {
+                            let a = f64::from(i) / 8.;
+                            let b = f64::from(j) / 8.;
+                            let plane = bound.c + bound.a[0] * a + bound.a[1] * b;
+                            for sx in [-1., 1.] {
+                                for sz in [-1., 1.] {
+                                    let u = x.c + x.a[0] * a + x.a[1] * b + sx * x.r;
+                                    let v = z.c + z.a[0] * a + z.a[1] * b + sz * z.r;
+                                    let source = terrain::noise(u, v, seed);
+                                    assert!((source-plane).abs() <= bound.r + fp_pad(1.),
+                                    "seed={seed} at {u},{v} actual={source} plane={plane} bound={bound:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crossed_cell_noise_respects_the_original_work_budget() {
         // A single cell, either crossed axis, both axes, and a budget fallback.
         for (center, extent, limit, cells, fallbacks) in [
             ([0.5, 0.5], 0.1, 4, 1, 0),
@@ -1669,12 +1723,12 @@ mod tests {
             };
             let before = run(true);
             let after = run(false);
-            assert_eq!(before, after);
+            assert_eq!((before.1, before.2), (cells, fallbacks));
             assert_eq!((after.1, after.2), (cells, fallbacks));
         }
     }
     #[test]
-    #[ignore = "bounded same-binary CPU allocation A/B; no timing threshold"]
+    #[ignore = "bounded same-binary noise enclosure A/B; no timing threshold"]
     fn profile_streamed_noise_bounds() {
         let terrain = FbmTerrain::new(
             7,

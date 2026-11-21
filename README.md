@@ -244,6 +244,15 @@ Across four seeds, 57,024 samples per pass ran 5–8% faster at 6.25 cm and
 5–7% faster at 10 cm in alternating release CPU measurements. Every height
 checksum matched the full-column path on both grids.
 
+When a terrain patch crosses a noise lattice edge, the flight planner now
+bounds curvature on each side of that edge. Across six Highlands seeds,
+the median uncertainty in its local height estimate fell by 9–17% for
+patches 8–256 m across. All 90,720 sampled native heights across Highlands,
+Regional and Watershed lay inside their bounds. On four cold 16-second
+Radeon runs at 1080p, measured ridgeline p95 was 2.21 px on seed 673,
+3.56 on 29123, 2.27 on 19 and 0.60 on 40961. The previous figures were
+2.34, 3.22, 2.34 and 0.60 px at the same fixed poses.
+
 The pilot survey follows 33 directions and tracks a second crest when it
 could compete for the same skyline. Fixed-pose p95 after 12 seconds was
 5.67, 3.63, 1.24, 4.09 and 0.68 px on seeds 29123, 673, 8123, 19 and
