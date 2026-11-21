@@ -119,6 +119,16 @@ Horizon walls take their color from the thickness of the exposed snow or grass
 cap, soil, bedrock and water. Deep cuts through a snowy summit expose the
 underlying rock. The additional CPU samples use 1.78 MiB per horizon lattice.
 
+Each horizon roof takes its elevation from the native column at its center.
+In five level-camera profiles, sampled every 2 m along 160 sightlines beyond
+6 km, skyline p95 fell from 7.06 to 2.93 px on seed 19, 24.12 to 8.58 on 673,
+17.08 to 7.34 on 29123, 13.45 to 5.64 on 40961 and 6.41 to 3.18 on 8123
+at 1080p. These are geometric errors against the unedited procedural terrain.
+The roof cache adds 1.17 MiB per window and the five GPU face buffers grew
+by 0.54–0.69 MiB. Two 8-second seed 19 flights measured 11.10–11.11 ms frame
+p95. On 20-second seed 673 flights the measured ranges overlapped at
+13.89–15.16 ms with center sampling and 12.72–14.70 ms with interpolation.
+
 A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
 finished image. To measure the skyline over unedited Highlands, use
 `cargo run --release -p frontier-reference --bin flight_skyline -- --help`

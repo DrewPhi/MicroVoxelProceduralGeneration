@@ -89,10 +89,58 @@ fn hole(level: usize, x: i32, z: i32) -> bool {
             .all(|v| (-HALF / 2..HALF / 2).contains(&v))
 }
 
-fn columns(samples: &[Sample], voxel: f32) -> Vec<Column> {
+/// A visible roof represents the native column at its world-aligned center.
+/// Its color can cover a wider area, but averaging elevations erases crests.
+pub(super) fn sample_heights(
+    center: [i64; 2],
+    previous: Option<&super::Lattice>,
+    mut height: impl FnMut(f64, f64) -> f32,
+) -> Vec<f32> {
+    let mut roofs = vec![0.; LEVELS * (CELLS * CELLS) as usize];
+    for level in 0..LEVELS {
+        let base = level * (CELLS * CELLS) as usize;
+        let step = f64::from(UNIT) * (1 << level) as f64;
+        let old = previous.and_then(|lattice| {
+            let scale = 1_i128 << (LEVELS - level);
+            let [dx, dz] = std::array::from_fn(|k| {
+                (i128::from(center[k]) - i128::from(lattice.center[k])) * scale
+            });
+            (dx.abs() < i128::from(CELLS) && dz.abs() < i128::from(CELLS)).then_some((
+                &lattice.roof_heights[base..],
+                dx as i32,
+                dz as i32,
+            ))
+        });
+        let index = |x, z| ((z + HALF) * CELLS + x + HALF) as usize;
+        for z in -HALF..HALF {
+            for x in -HALF..HALF {
+                if hole(level, x, z) {
+                    continue;
+                }
+                let value = &mut roofs[base + index(x, z)];
+                if let Some((heights, dx, dz)) = old {
+                    let (ox, oz) = (x + dx, z + dz);
+                    if (-HALF..HALF).contains(&ox)
+                        && (-HALF..HALF).contains(&oz)
+                        && !hole(level, ox, oz)
+                    {
+                        *value = heights[index(ox, oz)];
+                        continue;
+                    }
+                }
+                *value = height(
+                    center[0] as f64 * SPACING + (x as f64 + 0.5) * step,
+                    center[1] as f64 * SPACING + (z as f64 + 0.5) * step,
+                );
+            }
+        }
+    }
+    roofs
+}
+
+fn columns(samples: &[Sample], heights: &[f32]) -> Vec<Column> {
     let mut result = vec![Column::default(); LEVELS * (CELLS * CELLS) as usize];
     for level in 0..LEVELS {
-        let vertical_step = ((UNIT * (1 << level) as f32 / 64.) / voxel).round().max(1.) * voxel;
         for z in 0..CELLS {
             for x in 0..CELLS {
                 if hole(level, x - HALF, z - HALF) {
@@ -126,14 +174,11 @@ fn columns(samples: &[Sample], voxel: f32) -> Vec<Column> {
                 } else {
                     0
                 };
-                result[level * (CELLS * CELLS) as usize + (z * CELLS + x) as usize] = Column {
+                let index = level * (CELLS * CELLS) as usize + (z * CELLS + x) as usize;
+                result[index] = Column {
                     water,
                     depth,
-                    y: if a == b && a == c && a == d {
-                        a
-                    } else {
-                        (at(3) / vertical_step).round() * vertical_step
-                    },
+                    y: heights[index],
                     slope: encode(dx) | (encode(dz) << 5),
                     rgb: rgb(0),
                     soil_rgb: rgb(6),
@@ -215,8 +260,8 @@ fn roofs(columns: &[Column], level: usize, cx: i32, cz: i32, output: &mut Vec<[u
     }
 }
 
-pub(super) fn build(samples: &[Sample], voxel: f32) -> Mesh {
-    let columns = columns(samples, voxel);
+pub(super) fn build(samples: &[Sample], heights: &[f32], voxel: f32) -> Mesh {
+    let columns = columns(samples, heights);
     let mut mesh = Mesh {
         faces: Vec::with_capacity((CELLS * CELLS) as usize * 6),
         batches: Vec::new(),
@@ -380,7 +425,8 @@ mod tests {
     fn flat_horizon_roofs_cover_each_column_once_without_buried_faces() {
         let lattice =
             vec![[0.5, 0.25, 0.1, 7.5, 0., 0., 0.3, 0.2, 0.1, 0.3, 0.3, 0.3]; LEVELS * SIDE * SIDE];
-        let mesh = build(&lattice, 0.0625);
+        let heights = sample_heights([0, 0], None, |_, _| 7.5);
+        let mesh = build(&lattice, &heights, 0.0625);
         let ring = (CELLS * CELLS) as usize;
         assert!(mesh.faces.len() < 400);
         let mut covered = vec![false; ring * LEVELS];
@@ -407,5 +453,28 @@ mod tests {
             .faces
             .iter()
             .all(|f| (f[1] >> 24) & 7 == 0 && f32::from_bits(f[3]) == 7.5));
+    }
+
+    #[test]
+    fn narrow_crest_between_lighting_samples_has_one_roof_and_four_risers() {
+        let paint = vec![[0.; 12]; LEVELS * SIDE * SIDE];
+        let heights = sample_heights([-1, 1], None, |x, z| {
+            if x == -SPACING - 0.5 * f64::from(UNIT) && z == SPACING + 0.5 * f64::from(UNIT) {
+                73.0625
+            } else {
+                0.
+            }
+        });
+        let mesh = build(&paint, &heights, 0.0625);
+        let mut axes = [0; 5];
+        for face in mesh
+            .faces
+            .iter()
+            .filter(|face| f32::from_bits(face[3]) == 73.0625)
+        {
+            axes[((face[1] >> 24) & 7) as usize] += 1;
+            assert_eq!(f32::from_bits(face[2]), 0.);
+        }
+        assert_eq!(axes, [1; 5]);
     }
 }

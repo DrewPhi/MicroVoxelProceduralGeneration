@@ -23,6 +23,7 @@ const HALF: i64 = SIDE as i64 / 2;
 struct Lattice {
     center: [i64; 2],
     samples: Vec<Sample>,
+    roof_heights: Vec<f32>,
 }
 struct Patch {
     lattice: Arc<Lattice>,
@@ -33,6 +34,7 @@ fn lattice(
     center: [i64; 2],
     previous: Option<&Lattice>,
     mut sample: impl FnMut(f64, f64) -> Sample,
+    height: impl FnMut(f64, f64) -> f32,
 ) -> Lattice {
     let mut out = vec![[0.; 12]; SIDE * SIDE * LEVELS];
     for level in 0..LEVELS {
@@ -89,6 +91,7 @@ fn lattice(
     Lattice {
         center,
         samples: out,
+        roof_heights: blocks::sample_heights(center, previous, height),
     }
 }
 
@@ -98,39 +101,44 @@ fn samples(
     center: [i64; 2],
     old: Option<&Lattice>,
 ) -> Patch {
-    let lattice = Arc::new(lattice(center, old, |x, z| {
-        let cell = Cell::from_meters([x, 0., z]);
-        let (col, surface) = terrain.landscape_column(cell.x, cell.z, vegetation);
-        let wet = col.visible_top > col.ground_top;
-        let [r, g, b] = if wet {
-            col.ground_surface.color()
-        } else {
-            surface
-        };
-        let depth =
-            ((col.visible_top - col.ground_top) as f64 * voxel_size()).clamp(0., 12.) as f32;
-        let soil = col.ground_subsurface.color();
-        let rock = if col.ground_surface == Material::Stone && !wet {
-            surface
-        } else {
-            Material::Stone.color()
-        };
-        [
-            r,
-            g,
-            b,
-            (col.visible_top as f64 * voxel_size()) as f32,
-            u8::from(wet) as f32,
-            depth,
-            soil[0],
-            soil[1],
-            soil[2],
-            rock[0],
-            rock[1],
-            rock[2],
-        ]
-    }));
-    let mesh = blocks::build(&lattice.samples, voxel_size() as f32);
+    let lattice = Arc::new(lattice(
+        center,
+        old,
+        |x, z| {
+            let cell = Cell::from_meters([x, 0., z]);
+            let (col, surface) = terrain.landscape_column(cell.x, cell.z, vegetation);
+            let wet = col.visible_top > col.ground_top;
+            let [r, g, b] = if wet {
+                col.ground_surface.color()
+            } else {
+                surface
+            };
+            let depth =
+                ((col.visible_top - col.ground_top) as f64 * voxel_size()).clamp(0., 12.) as f32;
+            let soil = col.ground_subsurface.color();
+            let rock = if col.ground_surface == Material::Stone && !wet {
+                surface
+            } else {
+                Material::Stone.color()
+            };
+            [
+                r,
+                g,
+                b,
+                (col.visible_top as f64 * voxel_size()) as f32,
+                u8::from(wet) as f32,
+                depth,
+                soil[0],
+                soil[1],
+                soil[2],
+                rock[0],
+                rock[1],
+                rock[2],
+            ]
+        },
+        |x, z| terrain.height_m(x, z) as f32,
+    ));
+    let mesh = blocks::build(&lattice.samples, &lattice.roof_heights, voxel_size() as f32);
     Patch { lattice, mesh }
 }
 
@@ -441,23 +449,45 @@ mod tests {
                 x as f32,
             ]
         };
-        let old = lattice([-3, 7], None, sample);
+        let height = |x: f64, z: f64| (x * 0.19 + z * 0.47).sin() as f32;
+        let old = lattice([-3, 7], None, sample, height);
         for center in [[1, 7], [-8, 3], [5000, -5000]] {
             let mut misses = 0;
-            let moved = lattice(center, Some(&old), |x, z| {
-                misses += 1;
-                sample(x, z)
-            });
+            let mut roof_misses = 0;
+            let moved = lattice(
+                center,
+                Some(&old),
+                |x, z| {
+                    misses += 1;
+                    sample(x, z)
+                },
+                |x, z| {
+                    roof_misses += 1;
+                    height(x, z)
+                },
+            );
             let mut cold_count = 0;
-            let cold = lattice(center, None, |x, z| {
-                cold_count += 1;
-                sample(x, z)
-            });
+            let mut cold_roofs = 0;
+            let cold = lattice(
+                center,
+                None,
+                |x, z| {
+                    cold_count += 1;
+                    sample(x, z)
+                },
+                |x, z| {
+                    cold_roofs += 1;
+                    height(x, z)
+                },
+            );
             assert_eq!(moved.samples, cold.samples);
+            assert_eq!(moved.roof_heights, cold.roof_heights);
             if center[0].abs() < 10 {
                 assert!(misses < cold_count / 4);
+                assert!(roof_misses < cold_roofs / 4);
             } else {
                 assert_eq!(misses, cold_count);
+                assert_eq!(roof_misses, cold_roofs);
             }
         }
     }
