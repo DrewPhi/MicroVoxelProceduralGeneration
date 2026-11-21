@@ -41,9 +41,15 @@ impl Column {
             [skin, soil, h - skin - soil]
         };
         let dry_bands = bands(height);
-        let wet_bands = bands(height - water);
-        let weight: [f32; 3] =
-            std::array::from_fn(|k| (dry_bands[k] + wet * (wet_bands[k] - dry_bands[k])) / height);
+        let weight = if self.water == 0 || self.depth == 0 {
+            if height <= voxel || (self.rgb == self.soil_rgb && self.rgb == self.rock_rgb) {
+                return self.rgb;
+            }
+            dry_bands.map(|h| h / height)
+        } else {
+            let wet_bands = bands(height - water);
+            std::array::from_fn(|k| (dry_bands[k] + wet * (wet_bands[k] - dry_bands[k])) / height)
+        };
         let water_rgb = frontier_world::Material::Water.color();
         let mut packed = 0;
         for (k, channel) in water_rgb.into_iter().enumerate() {
@@ -294,17 +300,24 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
     for level in first..LEVELS {
         let step = 1 << level;
         let half = extent(level);
+        let inner = if level > first { extent(level - 1) } else { 0 };
+        let base = (level - first) * RING;
         for cz in (-half..half).step_by(CHUNK as usize) {
             for cx in (-half..half).step_by(CHUNK as usize) {
                 let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
                 roofs(&columns, first, level, cx, cz, &mut directions[0]);
                 for z in cz..(cz + CHUNK).min(half) {
                     for x in cx..(cx + CHUNK).min(half) {
-                        if hole(first, level, x, z) {
+                        // Twice the cell-center radius is odd. Only the first
+                        // row outside the hole and the last row of the ring
+                        // can have a neighbor at a different resolution.
+                        let radius = (2 * x + 1).abs().max((2 * z + 1).abs());
+                        if radius < inner {
                             continue;
                         }
-                        let high = columns
-                            [(level - first) * RING + ((z + HALF) * CELLS + x + HALF) as usize];
+                        let edge = radius == 2 * half - 1 || (inner != 0 && radius == inner + 1);
+                        let index = (z + HALF) * CELLS + x + HALF;
+                        let high = columns[base + index as usize];
                         let (x, z) = (x * step, z * step);
                         min_y = min_y.min(high.y);
                         max_y = max_y.max(high.y);
@@ -314,8 +327,13 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
                             let az = z + if dz > 0 { step } else { 0 };
                             let nx = ax - i32::from(dx < 0);
                             let nz = az - i32::from(dz < 0);
-                            let Some((other, i)) = address(first, nx, nz) else {
-                                continue;
+                            let (other, i) = if edge {
+                                let Some(neighbor) = address(first, nx, nz) else {
+                                    continue;
+                                };
+                                neighbor
+                            } else {
+                                (level, (index + dz * CELLS + dx) as usize)
                             };
                             let wall_level = other.min(level);
                             let mut wall = |off, other: usize, index: usize| {

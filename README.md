@@ -153,6 +153,10 @@ The roof cache adds 1.17 MiB per window and the five GPU face buffers grew
 by 0.54–0.69 MiB. Two 8-second seed 19 flights measured 11.10–11.11 ms frame
 p95. On 20-second seed 673 flights the measured ranges overlapped at
 13.89–15.16 ms with center sampling and 12.72–14.70 ms with interpolation.
+Only ring-edge cells need a cross-resolution neighbor search. On six Highlands
+seeds at 6.25 cm, direct indexing inside the rings and simpler dry-wall
+shading reduced median background mesh construction by 2.4–4.5 ms.
+The packed faces, draw ranges and bounds matched at both 6.25 and 10 cm.
 
 The atmosphere pass owns the scene depth and multisample color attachments
 while it is active. Removing the duplicate full-resolution attachments saved
