@@ -2,7 +2,8 @@
 //! skyline in flight. Repeat at half the sampling interval to check convergence.
 #[path = "../skyline.rs"]
 mod skyline;
-use frontier_world::{FbmParams, FbmRecipe, FbmTerrain};
+use frontier_reference::landscape::{LandscapeRays, SparseLandscape};
+use frontier_world::{voxel_size, FbmParams, FbmRecipe, FbmTerrain};
 use std::error::Error;
 
 fn vector<const N: usize>(s: &str) -> Result<[f64; N], Box<dyn Error>> {
@@ -17,13 +18,22 @@ fn vector<const N: usize>(s: &str) -> Result<[f64; N], Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let usage="flight_skyline COVERAGE.f32 WIDTH HEIGHT EYE_X,Y,Z TARGET_X,Y,Z FOV_Y FAR_M SEED [FORWARD_STEP_M] [PIXEL_STRIDE] [--roll-degrees BANK] [--voxel-size METERS]\nUse an unedited default Highlands world with vegetation and the exterior aircraft off. Banked or pitched views measure displacement along projected vertical world planes.";
+    let usage="flight_skyline COVERAGE.f32 WIDTH HEIGHT EYE_X,Y,Z TARGET_X,Y,Z FOV_Y FAR_M SEED [FORWARD_STEP_M] [PIXEL_STRIDE] [--roll-degrees BANK] [--voxel-size METERS] [--depth DEPTH.f32 --depth-stride 40]\nUse an unedited default Highlands world with vegetation and the exterior aircraft off. Banked or pitched views measure displacement along projected vertical world planes.";
     let mut input = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     let mut args = Vec::new();
     let mut roll = 0_f64;
+    let mut depth_path = None;
+    let mut depth_stride = 40usize;
     while let Some(arg) = input.next() {
         if arg == "--roll-degrees" {
             roll = input.next().ok_or("missing bank angle")?.parse()?;
+        } else if arg == "--depth" {
+            depth_path = Some(input.next().ok_or("missing depth file")?);
+        } else if arg == "--depth-stride" {
+            depth_stride = input.next().ok_or("missing depth sample stride")?.parse()?;
+            if depth_stride == 0 {
+                return Err("zero depth sample stride".into());
+            }
         } else {
             args.push(arg);
         }
@@ -135,5 +145,73 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pct = |q: f64| errors[((errors.len() - 1) as f64 * q).round() as usize];
     println!("{{\"columns\":{},\"metric\":\"{metric}\",\"{spacing}\":{step},\"pixel_stride\":{stride},\"p50_abs_px\":{:.4},\"p95_abs_px\":{:.4},\"max_abs_px\":{:.4},\"mean_signed_px\":{:.4},\"columns_over_five_px\":{over_five}}}",
         errors.len(),pct(0.5),pct(0.95),errors.last().unwrap(),signed/errors.len() as f64);
+    if let Some(path) = depth_path {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() != coverage.len() {
+            return Err("depth file size differs from coverage".into());
+        }
+        let mut min = [eye[0], eye[2]];
+        let mut max = min;
+        for x in [0., width as f64] {
+            for y in [0., height as f64] {
+                let d = view.ray(x, y);
+                for (i, axis) in [0, 2].into_iter().enumerate() {
+                    let q = eye[axis] + far * d[axis];
+                    min[i] = min[i].min(q);
+                    max[i] = max[i].max(q);
+                }
+            }
+        }
+        let origin = min.map(|v| (v / voxel_size()).floor() as i64 - 2);
+        let size = (0..2)
+            .map(|i| ((max[i] / voxel_size()).ceil() as i64 - origin[i] + 2) as usize)
+            .max()
+            .unwrap()
+            .max(64)
+            .next_power_of_two();
+        let terrain = SparseLandscape::new(source, origin, size)?;
+        let mut errors = Vec::new();
+        let mut disagreement = 0;
+        let mut count = 0;
+        for y in (depth_stride / 2..height).step_by(depth_stride) {
+            for x in (depth_stride / 2..width).step_by(depth_stride) {
+                count += 1;
+                let d = view.ray(x as f64 + 0.5, y as f64 + 0.5);
+                let length = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let native = terrain.ray(eye, d, 0.025 * length, far * length);
+                if native.is_some() != occupied(x, y) {
+                    disagreement += 1;
+                }
+                if let Some(hit) = native.filter(|_| occupied(x, y)) {
+                    let i = 4 * (y * width + x);
+                    let value = f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+                    if !value.is_finite() || !(0. ..1.).contains(&value) {
+                        return Err("invalid occupied depth".into());
+                    }
+                    // Captures convert reversed Z to forward f32. Give the GPU
+                    // the whole rounding bin, including the last occupied bin.
+                    let lo = 0.5 * (f64::from(value) + f64::from(value.next_down()));
+                    let hi = if value.next_up() == 1. {
+                        1.
+                    } else {
+                        0.5 * (f64::from(value) + f64::from(value.next_up()))
+                    };
+                    let reconstruct = |z: f64| 0.025 * far / (far - z * (far - 0.025));
+                    let native_depth = hit.distance / length;
+                    errors.push(
+                        (reconstruct(lo) - native_depth)
+                            .max(native_depth - reconstruct(hi))
+                            .max(0.),
+                    );
+                }
+            }
+        }
+        errors.sort_by(f64::total_cmp);
+        if errors.is_empty() {
+            return Err("no matching terrain depth samples".into());
+        }
+        let pct = |q: f64| errors[((errors.len() - 1) as f64 * q).round() as usize];
+        println!("{{\"depth_metric\":\"forward_metres_outside_f32_rounding_bin\",\"depth_stride\":{depth_stride},\"rays\":{count},\"both_hit\":{},\"hit_mismatch\":{disagreement},\"p50_m\":{:.4},\"p95_m\":{:.4},\"max_m\":{:.4}}}",errors.len(),pct(0.5),pct(0.95),pct(1.));
+    }
     Ok(())
 }

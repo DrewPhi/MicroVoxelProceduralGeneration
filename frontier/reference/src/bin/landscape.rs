@@ -1,5 +1,7 @@
+#[path = "../daylight.rs"]
+mod daylight;
 use frontier_reference::{
-    landscape::{Landscape, MultiScaleLandscape},
+    landscape::{Landscape, LandscapeRays, MultiScaleLandscape, SparseLandscape},
     material, shade, srgb, Camera, Hit, SKY,
 };
 use frontier_world::{voxel_size, FbmParams, FbmRecipe, FbmTerrain};
@@ -19,6 +21,7 @@ enum LightingProfile {
     #[default]
     Legacy,
     Regional,
+    Daylight,
 }
 #[derive(Clone, Copy, Debug)]
 struct Lighting {
@@ -55,6 +58,7 @@ impl Lighting {
         match self.profile {
             LightingProfile::Legacy => "legacy",
             LightingProfile::Regional => "regional",
+            LightingProfile::Daylight => "daylight",
         }
     }
     fn sun_direction(self) -> [f64; 3] {
@@ -175,6 +179,17 @@ impl PixelCrop {
         [self.x + x, self.y + y]
     }
 }
+// Neighbouring primary rays and their shadow rays reuse the same native pages.
+fn pixel_tiles(width: usize, height: usize) -> impl Iterator<Item = (usize, usize)> {
+    const TILE: usize = 16;
+    (0..height).step_by(TILE).flat_map(move |top| {
+        (0..width).step_by(TILE).flat_map(move |left| {
+            (top..height.min(top + TILE))
+                .flat_map(move |y| (left..width.min(left + TILE)).map(move |x| (x, y)))
+        })
+    })
+}
+
 fn sample_position(
     x: usize,
     y: usize,
@@ -305,6 +320,7 @@ fn main() -> Result<()> {
     let mut cache = None;
     let mut sample_stride = 1usize;
     let mut native_extent = 128f64;
+    let mut plant_extent = 0f64;
     let mut shadows = false;
     let mut shadow_distance = 4096f64;
     let mut camera = Camera {
@@ -316,15 +332,20 @@ fn main() -> Result<()> {
         .map_or(1, usize::from)
         .min(12);
     let mut build_only = false;
+    let mut sparse = false;
     let mut paint = true;
     let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed|highlands --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
+            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed|highlands --sample-stride 1 [--sparse] --native-extent 128 [--plant-extent METERS] [--shadows] --shadow-distance 4096 --lighting legacy|regional|daylight --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; daylight adds native water optics, sky visibility and aerial perspective)");
             return Ok(());
         }
         if a == "--shadows" {
             shadows = true;
+            continue;
+        }
+        if a == "--sparse" {
+            sparse = true;
             continue;
         }
         if a == "--build-only" {
@@ -340,6 +361,7 @@ fn main() -> Result<()> {
             "--output" => output = v.into(),
             "--cache" => cache = Some(PathBuf::from(v)),
             "--sample-stride" => sample_stride = v.parse()?,
+            "--plant-extent" => plant_extent = v.parse()?,
             "--native-extent" => native_extent = v.parse()?,
             "--shadow-distance" => shadow_distance = v.parse()?,
             "--center" => center = vector(&v)?.try_into().map_err(|_| "center needs X,Z")?,
@@ -372,7 +394,8 @@ fn main() -> Result<()> {
                 lighting.profile = match v.as_str() {
                     "legacy" => LightingProfile::Legacy,
                     "regional" => LightingProfile::Regional,
-                    _ => return Err("lighting must be legacy|regional".into()),
+                    "daylight" => LightingProfile::Daylight,
+                    _ => return Err("lighting must be legacy|regional|daylight".into()),
                 }
             }
             "--sun-elevation" => lighting.sun_elevation = v.parse()?,
@@ -389,6 +412,14 @@ fn main() -> Result<()> {
     let grid = (spp as f64).sqrt() as usize;
     let extent = extent.unwrap_or_else(|| 16384. * voxel_size());
     let size = (extent / voxel_size()).round() as usize;
+    if !plant_extent.is_finite()
+        || !(0. ..=extent).contains(&plant_extent)
+        || plant_extent > 0. && lighting.profile != LightingProfile::Daylight
+    {
+        return Err(
+            "plant extent must fit the reference footprint and uses daylight lighting".into(),
+        );
+    }
     if !sample_stride.is_power_of_two()
         || sample_stride > 256
         || !native_extent.is_finite()
@@ -434,10 +465,14 @@ fn main() -> Result<()> {
     let (width, height) = (crop.width, crop.height);
     let spacing = voxel_size() * sample_stride as f64;
     let sample_size = size / sample_stride;
+    if sparse && (sample_stride != 1 || cache.is_some() || build_only) {
+        return Err("sparse traversal builds native pages on demand; use stride 1 with no dense cache or build-only option".into());
+    }
     if size % sample_stride != 0
         || !sample_size.is_power_of_two()
         || sample_size < 16
-        || sample_size > 32768
+        || (!sparse && sample_size > 32768)
+        || (sparse && !(64..=1 << 23).contains(&sample_size))
     {
         return Err("extent / sample spacing must be a power of two in 16..32768 columns".into());
     }
@@ -505,27 +540,60 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let scene = MultiScaleLandscape {
-        far: Landscape::build_sampled(
-            terrain,
-            sample_min,
-            sample_size,
-            sample_stride,
+    let (landscape, cache_identity, near_cache_identity): (Box<dyn LandscapeRays>, u64, u64) =
+        if sparse {
+            (
+                Box::new(SparseLandscape::new(terrain.clone(), min, size)?),
+                0,
+                0,
+            )
+        } else {
+            let dense = MultiScaleLandscape {
+                far: Landscape::build_sampled(
+                    terrain.clone(),
+                    sample_min,
+                    sample_size,
+                    sample_stride,
+                    threads,
+                    cache.as_deref(),
+                )?,
+                near,
+            };
+            let ids = (
+                dense.far.cache_identity,
+                dense.near.as_ref().map_or(0, |s| s.cache_identity),
+            );
+            (Box::new(dense), ids.0, ids.1)
+        };
+    let plant_width = (plant_extent / voxel_size()).ceil() as i64;
+    let plant_min = [0, 1].map(|a| min[a] + (size as i64 - plant_width) / 2);
+    let plants = if plant_width > 0 {
+        let world = frontier_world::World::fbm(seed, terrain.params())?.with_vegetation();
+        frontier_reference::vegetation::Vegetation::build(
+            &world,
+            plant_min,
+            plant_min.map(|v| v + plant_width),
             threads,
-            cache.as_deref(),
-        )?,
-        near,
+        )
+    } else {
+        frontier_reference::vegetation::Vegetation::empty()
     };
+    let scene = daylight::Scene {
+        landscape: &*landscape,
+        plants: &plants,
+    };
+    let plant_voxels = plants.voxel_count;
+    let snapshot_bytes = landscape.memory_bytes() + plants.memory_bytes();
     let build_seconds = start.elapsed().as_secs_f64();
     eprintln!(
         "Native columns ready in {build_seconds:.2}s; {} bytes",
-        scene.memory_bytes()
+        snapshot_bytes
     );
     if build_only {
         return Ok(());
     }
     fs::create_dir_all(&output)?;
-    let mut pixels = vec![[0f32; 5]; width * height];
+    let mut pixels = vec![[0f32; 6]; width * height];
     let rows = height.div_ceil(threads.min(height));
     let render = Instant::now();
     let boundary_misses = AtomicU64::new(0);
@@ -534,11 +602,17 @@ fn main() -> Result<()> {
             let scene = &scene;
             let camera = &camera;
             let boundary_misses = &boundary_misses;
+            let terrain = &terrain;
             scope.spawn(move || {
+                let mut daylight = (lighting.profile == LightingProfile::Daylight).then(|| {
+                    daylight::Daylight::new(terrain, lighting.sun_direction(), lighting.overcast)
+                });
                 let mut incomplete = 0u64;
-                for (i, p) in out.iter_mut().enumerate() {
-                    let [x, y] = crop.pixel(i % width, part * rows + i / width);
+                for (ix, iy) in pixel_tiles(width, out.len() / width) {
+                    let p = &mut out[iy * width + ix];
+                    let [x, y] = crop.pixel(ix, part * rows + iy);
                     let mut rgb = [0.; 3];
+                    let mut water_hits = 0u32;
                     let mut covered = 0.;
                     let mut depth = 0.;
                     for sy in 0..grid {
@@ -546,12 +620,27 @@ fn main() -> Result<()> {
                             let [px, py] =
                                 sample_position(x, y, viewport_width, grid, sx, sy, sample_seed);
                             let (d, n, f) = camera.ray(px, py, viewport_width, viewport_height);
-                            let c = if let Some(hit) = scene.ray(camera.eye, d, n, f) {
+                            let c = if let Some((hit, plant)) = scene.ray(camera.eye, d, n, f) {
                                 covered += 1.;
+                                water_hits += u32::from(hit.material == 7);
                                 depth += hit.distance;
-                                let sun = lighting.sun_direction();
+                                let sample = ((y * viewport_width + x) as u64)
+                                    .wrapping_mul(0x9e3779b97f4a7c15)
+                                    ^ sample_seed
+                                    ^ ((sy * grid + sx) as u64).wrapping_mul(0xd1b54a32d192ed03);
+                                let sun = daylight.as_ref().map_or_else(
+                                    || lighting.sun_direction(),
+                                    |l| {
+                                        l.sun_sample(
+                                            jitter(sample ^ 0x9ab3ea6f),
+                                            jitter(sample ^ 0x17312f6a),
+                                        )
+                                    },
+                                );
                                 let normal_sign = if hit.face % 2 == 0 { -1. } else { 1. };
-                                let visibility = if shadows && sun[hit.face / 2] * normal_sign > 0.
+                                let visibility = if shadows
+                                    && (sun[hit.face / 2] * normal_sign > 0.
+                                        || (daylight.is_some() && hit.material == 7))
                                 {
                                     let mut origin = std::array::from_fn(|a| {
                                         camera.eye[a] + d[a] * hit.distance
@@ -565,8 +654,24 @@ fn main() -> Result<()> {
                                 } else {
                                     1.
                                 };
-                                let c = lighting.shade_visibility(hit, visibility);
-                                let tint = if paint {
+                                let c = match &mut daylight {
+                                    Some(light) => light.shade(
+                                        scene,
+                                        hit,
+                                        plant,
+                                        camera.eye,
+                                        d,
+                                        visibility,
+                                        [jitter(sample ^ 0x81b71dd5), jitter(sample ^ 0x72c28641)],
+                                        camera.far,
+                                        if shadows { shadow_distance } else { 0. },
+                                    ),
+                                    None => lighting.shade_visibility(hit, visibility),
+                                };
+                                let tint = if paint
+                                    && plant.is_none()
+                                    && (daylight.is_none() || hit.material != 7)
+                                {
                                     shaded_tint(hit.cell, camera.eye, lighting.profile)
                                 } else {
                                     [1.; 3]
@@ -576,7 +681,7 @@ fn main() -> Result<()> {
                                 if !ray_within_native_footprint(min, size, camera.eye, d, n, f) {
                                     incomplete += 1;
                                 }
-                                SKY
+                                daylight.as_ref().map_or(SKY, |light| light.sky(d))
                             };
                             for a in 0..3 {
                                 rgb[a] += c[a];
@@ -586,6 +691,7 @@ fn main() -> Result<()> {
                     for a in 0..3 {
                         p[a] = (rgb[a] / spp as f64) as f32;
                     }
+                    p[5] = water_hits as f32 / spp as f32;
                     p[3] = (covered / spp as f64) as f32;
                     p[4] = if covered > 0. {
                         (depth / covered) as f32
@@ -616,7 +722,12 @@ fn main() -> Result<()> {
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
     encoder.write_header()?.write_image_data(&data)?;
-    for (name, lo, hi) in [("linear_rgb", 0, 3), ("coverage", 3, 4), ("depth", 4, 5)] {
+    let water_output =
+        (lighting.profile == LightingProfile::Daylight).then_some(("water_coverage", 5, 6));
+    for (name, lo, hi) in [("linear_rgb", 0, 3), ("coverage", 3, 4), ("depth", 4, 5)]
+        .into_iter()
+        .chain(water_output)
+    {
         let mut w = BufWriter::new(File::create(output.join(format!("{name}.f32")))?);
         for p in &pixels {
             for v in &p[lo..hi] {
@@ -630,6 +741,11 @@ fn main() -> Result<()> {
     let source_fingerprint = [
         include_str!("landscape.rs"),
         include_str!("../landscape.rs"),
+        include_str!("../sparse_landscape.rs"),
+        include_str!("../daylight.rs"),
+        include_str!("../vegetation.rs"),
+        include_str!("../../../world/src/vegetation.rs"),
+        include_str!("../../../world/src/seeded_world.rs"),
         include_str!("../lib.rs"),
         include_str!("../../../world/src/lib.rs"),
         include_str!("../../../world/src/terrain.rs"),
@@ -640,10 +756,11 @@ fn main() -> Result<()> {
     .fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     });
-    let cache_identity = scene.far.cache_identity;
-    let near_cache_identity = scene.near.as_ref().map_or(0, |s| s.cache_identity);
+    let snapshot_bytes = landscape.memory_bytes() + plants.memory_bytes();
     let approximate = sample_stride > 1;
-    let geometry = if approximate {
+    let geometry = if sparse {
+        "native columns on demand; conservative affine rejection and exact native page intersection"
+    } else if approximate {
         "approximate sampled far columns plus disjoint exact native near columns; max hierarchy bounds sampled columns only, not canonical terrain"
     } else {
         "all native columns; conservative exact-max rejection hierarchy"
@@ -662,21 +779,32 @@ fn main() -> Result<()> {
     let sun_elevation = lighting.sun_elevation;
     let sun_azimuth = lighting.sun_azimuth;
     let overcast = lighting.overcast;
+    let daylight = lighting.profile == LightingProfile::Daylight;
+    let shadow_method = if daylight {
+        "finite solar disk visibility per covered subpixel, 1mm face offset; occluders beyond the footprint or shadow distance omitted"
+    } else {
+        "one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; occluders beyond finite footprint or shadow distance omitted"
+    };
+    let light_model = if daylight {
+        "source landscape pigment, native-face sun, cosine-weighted sky visibility, reflected terrain and native refracted bed rays"
+    } else {
+        "independent CPU f64 face lighting; canonical material palette"
+    };
     let tint_description = match lighting.profile {
         LightingProfile::Legacy => "same renderer 32m/4m coherent paint; fine grain zero",
-        LightingProfile::Regional => "32m/4m coherent paint plus cell hash grain fading over 12..40m from eye to native cell center; f64 distance, f32 paint",
+        LightingProfile::Daylight | LightingProfile::Regional => "32m/4m coherent paint plus cell hash grain fading over 12..40m from eye to native cell center; f64 distance, f32 paint",
     };
     let native_voxel_m = voxel_size();
     fs::write(
         output.join("manifest.json"),
         format!(
-            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":{shadows},"shadow_distance_m":{shadow_distance},"shadow_method":"one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; no AO; occluders beyond finite footprint or shadow distance omitted","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"independent CPU f64 face lighting; canonical material palette","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional profile only; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":false,"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
+            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"sparse_native_traversal":{sparse},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":{daylight},"shadows":{shadows},"shadow_distance_m":{shadow_distance},"plant_extent_m":{plant_extent},"plant_min_xz":{plant_min:?},"plant_width_cells":{plant_width},"plant_voxels":{plant_voxels},"water_coverage_output":{daylight},"shadow_method":"{shadow_method}","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"{light_model}","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional and daylight profiles; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":{daylight},"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,
             camera.near,
             camera.far,
-            scene.memory_bytes()
+            snapshot_bytes
         ),
     )?;
     eprintln!("Wrote {} in {render_seconds:.2}s", output.display());

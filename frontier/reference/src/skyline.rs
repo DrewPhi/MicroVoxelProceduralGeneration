@@ -42,7 +42,7 @@ impl View {
         }
     }
 
-    fn ray(&self, x: f64, y: f64) -> V3 {
+    pub fn ray(&self, x: f64, y: f64) -> V3 {
         let u = (x - self.width as f64 * 0.5) / self.focal;
         let v = (self.height as f64 * 0.5 - y) / self.focal;
         std::array::from_fn(|i| self.forward[i] + self.right[i] * u + self.up[i] * v)

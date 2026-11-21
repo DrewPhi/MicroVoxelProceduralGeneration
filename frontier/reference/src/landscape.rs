@@ -7,6 +7,15 @@ use std::{
     io::{self, BufReader, BufWriter, Read, Write},
     path::Path,
 };
+#[path = "sparse_landscape.rs"]
+mod sparse;
+pub use sparse::SparseLandscape;
+
+pub trait LandscapeRays: Sync {
+    fn ray(&self, origin: [f64; 3], direction: [f64; 3], near: f64, far: f64) -> Option<Hit>;
+    fn memory_bytes(&self) -> usize;
+}
+
 const BLOCK: usize = 16;
 pub struct Landscape {
     pub min: [i64; 2],
@@ -15,7 +24,7 @@ pub struct Landscape {
     /// Horizontal grid spacing; native vertical quantization always remains 6.25 cm.
     pub sample_stride: usize,
     heights: Vec<i32>,
-    levels: Vec<(usize, Vec<i32>)>,
+    levels: Vec<(usize, Vec<i64>)>,
     terrain: FbmTerrain,
 }
 impl Landscape {
@@ -129,19 +138,42 @@ impl Landscape {
                 std::fs::rename(temporary, path)?;
             }
         }
+        Ok(Self::from_heights(
+            terrain,
+            min,
+            size,
+            sample_stride,
+            heights,
+            hash,
+        ))
+    }
+    fn from_heights(
+        terrain: FbmTerrain,
+        min: [i64; 2],
+        size: usize,
+        sample_stride: usize,
+        heights: Vec<i32>,
+        cache_identity: u64,
+    ) -> Self {
         let n = size / BLOCK;
-        let mut base = vec![i32::MIN; n * n];
+        let mut base = vec![i64::MIN; n * n];
         for z in 0..size {
             for x in 0..size {
                 let v = &mut base[(z / BLOCK) * n + x / BLOCK];
-                *v = (*v).max(heights[z * size + x]);
+                *v = (*v).max(Self::decoded_height(
+                    &terrain,
+                    sample_stride,
+                    min[0] + x as i64,
+                    min[1] + z as i64,
+                    heights[z * size + x],
+                ));
             }
         }
         let mut levels = vec![(n, base)];
         while levels.last().unwrap().0 > 1 {
             let (old, data) = levels.last().unwrap();
             let n = old / 2;
-            let mut next = vec![i32::MIN; n * n];
+            let mut next = vec![i64::MIN; n * n];
             for z in 0..n {
                 for x in 0..n {
                     next[z * n + x] = [
@@ -157,27 +189,42 @@ impl Landscape {
             }
             levels.push((n, next));
         }
-        Ok(Self {
+        Self {
             min,
             size,
-            cache_identity: hash,
+            cache_identity,
             sample_stride,
             heights,
             levels,
             terrain,
-        })
+        }
     }
     pub fn memory_bytes(&self) -> usize {
-        self.heights.len() * 4 + self.levels.iter().map(|(_, v)| v.len() * 4).sum::<usize>()
+        self.heights.len() * 4 + self.levels.iter().map(|(_, v)| v.len() * 8).sum::<usize>()
     }
     fn spacing(&self) -> f64 {
         voxel_size() * self.sample_stride as f64
+    }
+    // Keep ordinary pages and their on-disk format compact. On unusually
+    // fine grids, either saturation value requests the actual i64 height.
+    fn decoded_height(terrain: &FbmTerrain, stride: usize, x: i64, z: i64, raw: i32) -> i64 {
+        if raw != i32::MAX && raw != i32::MIN {
+            return i64::from(raw);
+        }
+        let stride = stride as i64;
+        terrain.height_cells(x * stride + stride / 2, z * stride + stride / 2)
     }
     fn height(&self, x: i64, z: i64) -> i64 {
         let a = x - self.min[0];
         let b = z - self.min[1];
         if a >= 0 && b >= 0 && a < self.size as i64 && b < self.size as i64 {
-            self.heights[b as usize * self.size + a as usize] as i64
+            Self::decoded_height(
+                &self.terrain,
+                self.sample_stride,
+                x,
+                z,
+                self.heights[b as usize * self.size + a as usize],
+            )
         } else {
             (self.terrain.height_m(
                 (x as f64 + 0.5) * self.spacing(),
@@ -487,6 +534,15 @@ impl MultiScaleLandscape {
     }
 }
 
+impl LandscapeRays for MultiScaleLandscape {
+    fn ray(&self, origin: [f64; 3], direction: [f64; 3], near: f64, far: f64) -> Option<Hit> {
+        self.ray(origin, direction, near, far)
+    }
+    fn memory_bytes(&self) -> usize {
+        self.memory_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,7 +629,7 @@ mod tests {
                             top = top.max(scene.heights[(z * 16 + dz) * 32 + x * 16 + dx]);
                         }
                     }
-                    scene.levels[0].1[z * 2 + x] = top;
+                    scene.levels[0].1[z * 2 + x] = i64::from(top);
                 }
             }
             scene.levels[1].1[0] = 2;
@@ -625,7 +681,7 @@ mod tests {
     fn set_height(scene: &mut Landscape, height: i32) {
         scene.heights.fill(height);
         for (_, level) in &mut scene.levels {
-            level.fill(height);
+            level.fill(i64::from(height));
         }
     }
     #[test]

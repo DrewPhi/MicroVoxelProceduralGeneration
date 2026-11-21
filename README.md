@@ -175,6 +175,28 @@ valley, including its skyline, ground colors and sun direction. A worker
 refreshes that panorama while you move. Player-built structures enter the
 reflection within the native ray's reach.*
 
+The offline reference traces the unedited native voxel columns, including
+their exposed vertical faces. Its sparse traversal rejects empty space using
+terrain bounds and resolves hits inside 64×64 native pages. Daylight mode
+adds direct sun, sky visibility, voxel vegetation, reflected terrain and
+refracted rays to the riverbed. It saves linear RGB, first-hit depth, terrain
+and plant coverage, water coverage, and the full camera and sampling manifest.
+To render a close riverbank study, run this from `frontier/`.
+
+```sh
+cargo run --release -p frontier-reference --bin landscape -- \
+  --output /tmp/highlands-native-river --terrain-recipe highlands --seed 673 \
+  --sparse --voxel-size .0625 --extent 1024 --center -2952,-1116 --plant-extent 138 \
+  --eye -2940,785.6,-1099 --target -2951,777.4,-1119 --fov-y 35 --far 450 \
+  --width 1152 --height 720 --spp 64 --lighting daylight --shadows \
+  --sun-elevation 40 --sun-azimuth 310 --overcast .08 --shadow-distance 180
+```
+
+This study traces 53,084,160 primary rays. All of its primary rays hit inside
+the finite footprint. The foliage contains 1,731,204 occupied plant cells.
+The radius of the light source sets the penumbra around the leaves. The
+reference uses one reflected bounce and approximate underwater illumination.
+
 Looking uphill from the riverbank, the distant cascade crosses several
 terrain tiles. Along a falling reach, the renderer samples the bed and water
 more densely where the step between neighboring roofs exceeds half the local
