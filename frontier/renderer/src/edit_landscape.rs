@@ -24,29 +24,76 @@ pub(super) struct Geometry {
     radius: i64,
 }
 
-impl Geometry {
-    fn face(&mut self, p: Xz, y: i64, height: i64, axis: usize, negative: bool, mat: Material) {
-        let cell = voxel_size();
-        let mut anchor = [p[0], y, p[1]];
+// Keep rectangle boundaries in integer cells until publication. This also
+// preserves adjacency when the selected voxel size has no exact f32 encoding.
+#[derive(Clone, Copy)]
+struct Face {
+    at: [i64; 3],
+    size: [i64; 2],
+    direction: u32,
+    material: Material,
+}
+impl Face {
+    fn new(p: Xz, y: i64, height: i64, axis: usize, negative: bool, material: Material) -> Self {
+        let mut at = [p[0], y, p[1]];
         if !negative && axis != 1 {
-            anchor[axis] = anchor[axis].saturating_add(1);
+            at[axis] = at[axis].saturating_add(1);
         }
-        let origin = [self.origin.x, self.origin.y, self.origin.z];
-        let anchor =
-            std::array::from_fn(|i| ((anchor[i] as i128 - origin[i] as i128) as f64 * cell) as f32);
-        let mut extent = [cell as f32; 2];
-        if axis == 0 {
-            extent[0] = (height as f64 * cell) as f32;
+        let size = match axis {
+            0 => [height, 1],
+            2 => [1, height],
+            _ => [1, 1],
+        };
+        Self {
+            at,
+            size,
+            direction: axis as u32 | (u32::from(negative) << 2),
+            material,
         }
-        if axis == 2 {
-            extent[1] = (height as f64 * cell) as f32;
-        }
-        self.quads.push(NativeQuad {
-            anchor,
-            extent,
-            axis_sign: axis as u32 | (u32::from(negative) << 2),
-            material: mat as u32,
+    }
+    fn native(self, origin: Cell) -> NativeQuad {
+        let cell = voxel_size();
+        let base = [origin.x, origin.y, origin.z];
+        NativeQuad {
+            anchor: std::array::from_fn(|i| {
+                ((self.at[i] as i128 - base[i] as i128) as f64 * cell) as f32
+            }),
+            extent: self.size.map(|s| (s as f64 * cell) as f32),
+            axis_sign: self.direction,
+            material: self.material as u32,
             profile_index: 0,
+        }
+    }
+}
+
+// Merge coplanar runs first along one tangent and then along the other. Faces
+// only join when the plane, orientation, material and entire shared edge agree.
+fn merge_faces(faces: &mut Vec<Face>) {
+    for along in 0..2 {
+        let across = 1 - along;
+        let key = |f: &Face| {
+            let axis = (f.direction & 3) as usize;
+            (
+                f.direction,
+                f.material as u32,
+                f.at[axis],
+                f.at[(axis + 1 + across) % 3],
+                f.size[across],
+            )
+        };
+        faces
+            .sort_unstable_by_key(|f| (key(f), f.at[((f.direction & 3) as usize + 1 + along) % 3]));
+        faces.dedup_by(|next, prev| {
+            let a = ((prev.direction & 3) as usize + 1 + along) % 3;
+            if key(prev) == key(next)
+                && prev.at[a].checked_add(prev.size[along]) == Some(next.at[a])
+            {
+                if let Some(length) = prev.size[along].checked_add(next.size[along]) {
+                    prev.size[along] = length;
+                    return true;
+                }
+            }
+            false
         });
     }
 }
@@ -80,22 +127,19 @@ fn build_within(world: &World, origin: Cell, radius: i64) -> Option<Geometry> {
     };
     let min = [origin.x, origin.z].map(|v| v.saturating_sub(radius));
     let max = [origin.x, origin.z].map(|v| v.saturating_add(radius).saturating_add(1));
-    let mut edited = BTreeMap::<Xz, Vec<i64>>::new();
-    // Include an extra halo of overrides for neighbors at the query boundary.
+    // Bound total saved edits and the published mask independently of the
+    // temporary column neighborhood used by each extraction batch.
     let mut addresses = world.edit_cells_in_columns(
         min.map(|v| v.saturating_sub(3)),
         max.map(|v| v.saturating_add(3)),
     );
     addresses.retain(|&c| world.terrain_override(c).is_some());
-    if addresses.len() > 65536 {
+    if addresses.len() > 524288 {
         return None;
     }
-    for c in addresses {
+    addresses.sort_unstable_by_key(|c| (c.x, c.z, c.y));
+    for c in &addresses {
         let p = [c.x, c.z];
-        edited
-            .entry(p)
-            .or_default()
-            .extend([c.y, c.y.saturating_add(1)]);
         if (0..2).all(|a| min[a] <= p[a] && p[a] < max[a]) {
             result.columns.insert(p);
             for (axis, step) in NEIGHBORS {
@@ -103,76 +147,99 @@ fn build_within(world: &World, origin: Cell, radius: i64) -> Option<Geometry> {
             }
         }
     }
-    if result.columns.len() > 32768 {
+    if result.columns.len() > 262144 {
         return None;
     }
-    let selected = result.columns.clone();
-    let mut samples = BTreeMap::new();
-    for &p in &selected {
-        for q in std::iter::once(p).chain(NEIGHBORS.map(|(a, s)| neighbor(p, a, s))) {
-            samples.entry(q).or_insert_with(|| {
-                let source = world.column(q[0], q[1]);
-                let ground = source.ground_height_cells();
-                let mut breaks = edited.remove(&q).unwrap_or_default();
-                breaks.extend([
-                    ground.saturating_sub(12),
-                    ground.saturating_sub(1),
-                    ground,
-                    source.height_cells(),
-                ]);
-                breaks.sort_unstable();
-                breaks.dedup();
-                // Collapse contiguous edits into material runs before comparing
-                // neighbors. A hundred-cell timber post needs just four sides.
-                breaks.retain(|&y| {
-                    source.material_without_fluid(y)
-                        != source.material_without_fluid(y.saturating_sub(1))
+    let mut all_faces = Vec::new();
+    let mut selected = result.columns.iter().copied();
+    loop {
+        let batch: Vec<_> = selected.by_ref().take(2048).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let mut samples = BTreeMap::new();
+        for &p in &batch {
+            for q in std::iter::once(p).chain(NEIGHBORS.map(|(a, s)| neighbor(p, a, s))) {
+                samples.entry(q).or_insert_with(|| {
+                    let source = world.column(q[0], q[1]);
+                    let ground = source.ground_height_cells();
+                    let start = addresses.partition_point(|c| [c.x, c.z] < q);
+                    let mut breaks: Vec<i64> = addresses[start..]
+                        .iter()
+                        .take_while(|c| [c.x, c.z] == q)
+                        .flat_map(|c| [c.y, c.y.saturating_add(1)])
+                        .collect();
+                    breaks.extend([
+                        ground.saturating_sub(12),
+                        ground.saturating_sub(1),
+                        ground,
+                        source.height_cells(),
+                    ]);
+                    breaks.sort_unstable();
+                    breaks.dedup();
+                    // Collapse contiguous edits into material runs before comparing
+                    // neighbors. A hundred-cell timber post needs just four sides.
+                    breaks.retain(|&y| {
+                        source.material_without_fluid(y)
+                            != source.material_without_fluid(y.saturating_sub(1))
+                    });
+                    Column { source, breaks }
                 });
-                Column { source, breaks }
-            });
-        }
-    }
-    for p in selected {
-        if result.quads.len() > 524288 {
-            return None;
-        }
-        let col = &samples[&p];
-        for &y in &col.breaks {
-            let below = col.source.material_without_fluid(y.saturating_sub(1));
-            let above = col.source.material_without_fluid(y);
-            if below != Material::Air && above == Material::Air {
-                result.face(p, y, 1, 1, false, below);
-            } else if above != Material::Air && below == Material::Air {
-                result.face(p, y, 1, 1, true, above);
             }
         }
-        for (xz, step) in NEIGHBORS {
-            let q = neighbor(p, xz, step);
-            let other = &samples[&q];
-            let mut breaks = col.breaks.clone();
-            breaks.extend_from_slice(&other.breaks);
-            breaks.sort_unstable();
-            breaks.dedup();
-            let axis = xz * 2;
-            for interval in breaks.windows(2) {
-                let y = interval[0];
-                let h = interval[1].saturating_sub(y);
-                let mat = col.source.material_without_fluid(y);
-                let adjacent = other.source.material_without_fluid(y);
-                if mat != Material::Air && adjacent == Material::Air {
-                    result.face(p, y, h, axis, step < 0, mat);
-                } else if mat == Material::Air
-                    && adjacent != Material::Air
-                    && !result.columns.contains(&q)
-                {
-                    // At the footprint boundary the neighboring solid can own
-                    // the inward-facing wall of a cut in an edited column.
-                    result.face(q, y, h, axis, step > 0, adjacent);
+        let mut faces = Vec::new();
+        for p in batch {
+            if faces.len() > 524288 {
+                return None;
+            }
+            let col = &samples[&p];
+            for &y in &col.breaks {
+                let below = col.source.material_without_fluid(y.saturating_sub(1));
+                let above = col.source.material_without_fluid(y);
+                if below != Material::Air && above == Material::Air {
+                    faces.push(Face::new(p, y, 1, 1, false, below));
+                } else if above != Material::Air && below == Material::Air {
+                    faces.push(Face::new(p, y, 1, 1, true, above));
+                }
+            }
+            for (xz, step) in NEIGHBORS {
+                let q = neighbor(p, xz, step);
+                let other = &samples[&q];
+                let mut breaks = col.breaks.clone();
+                breaks.extend_from_slice(&other.breaks);
+                breaks.sort_unstable();
+                breaks.dedup();
+                let axis = xz * 2;
+                for interval in breaks.windows(2) {
+                    let y = interval[0];
+                    let h = interval[1].saturating_sub(y);
+                    let mat = col.source.material_without_fluid(y);
+                    let adjacent = other.source.material_without_fluid(y);
+                    if mat != Material::Air && adjacent == Material::Air {
+                        faces.push(Face::new(p, y, h, axis, step < 0, mat));
+                    } else if mat == Material::Air
+                        && adjacent != Material::Air
+                        && !result.columns.contains(&q)
+                    {
+                        // At the footprint boundary the neighboring solid can own
+                        // the inward-facing wall of a cut in an edited column.
+                        faces.push(Face::new(q, y, h, axis, step > 0, adjacent));
+                    }
                 }
             }
         }
+        merge_faces(&mut faces);
+        if all_faces.len() + faces.len() > 524288 {
+            return None;
+        }
+        all_faces.append(&mut faces);
     }
-    (result.quads.len() <= 524288).then_some(result)
+    merge_faces(&mut all_faces);
+    result.quads = all_faces
+        .into_iter()
+        .map(|face| face.native(origin))
+        .collect();
+    Some(result)
 }
 
 // Eight by eight native columns share one occupancy word pair. The key uses
@@ -593,6 +660,41 @@ mod tests {
             }
         }
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn a_runway_beyond_the_native_window_keeps_its_whole_deck_and_soffit() {
+        let mut world = World::fbm(
+            7,
+            FbmParams {
+                recipe: FbmRecipe::Regional,
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 100 m by 6 m of individual 6.25 cm edits in one suspended course.
+        world.set_batch(
+            (0..1600).flat_map(|x| (0..96).map(move |z| (Cell { x, y: 47, z }, Material::Wood))),
+        );
+        let origin = Cell {
+            x: -2000,
+            y: 500,
+            z: 48,
+        };
+        let geometry = build(&world, origin, 8192);
+        assert_eq!(geometry.radius, 8192);
+        assert!(geometry.columns.contains(&[1599, 95]) && geometry.columns.contains(&[0, 0]));
+        let wood: Vec<_> = geometry
+            .quads
+            .iter()
+            .filter(|q| q.material == Material::Wood as u32)
+            .collect();
+        assert_eq!(wood.len(), 6);
+        for dir in [1, 5] {
+            let face = wood.iter().find(|q| q.axis_sign == dir).unwrap();
+            assert_eq!(face.extent, [96., 1600.].map(|n| (n * voxel_size()) as f32));
+        }
     }
 
     #[test]

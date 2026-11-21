@@ -32,6 +32,12 @@ To land, bring the wings level, slow below 48 m/s and descend at less than
 you reach 29 m/s. Both wheels need support. You can build a runway from
 placed voxels or enter the aircraft with **V** while standing on level ground.
 
+A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
+6.25 cm voxels. From the approach, the distant renderer draws its deck, underside,
+edges and surrounding ground in nine quads using 130 KiB including the column
+mask. The near threshold and both faces at 110–120 m were checked against the
+saved strip on the Radeon.
+
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. The preset renders a 6 km active terrain view with a
 world-aligned landscape horizon fading out to 35 km. The horizon samples the
