@@ -71,6 +71,30 @@ impl EditIndex {
             self.buckets.get_mut(&bucket).unwrap()[bit / 64] |= 1 << (bit % 64);
         }
     }
+    pub(crate) fn upper_y(&self, min: [i64; 2], max: [i64; 2], snapshot_max: i64) -> Option<i64> {
+        if (0..2).any(|a| min[a] >= max[a]) {
+            return None;
+        }
+        if !self.complete {
+            return Some(snapshot_max);
+        }
+        let [first, last] = self.extent?;
+        let lo = min.map(|v| v.div_euclid(16));
+        let hi = max.map(|v| (v - 1).div_euclid(16));
+        if lo[0] > last[0] || lo[1] > last[2] || hi[0] < first[0] || hi[1] < first[2] {
+            return None;
+        }
+        let y = if lo[0] <= first[0] && lo[1] <= first[2] && hi[0] >= last[0] && hi[1] >= last[2] {
+            last[1]
+        } else {
+            self.buckets
+                .range([lo[0], i64::MIN, i64::MIN]..=[hi[0], i64::MAX, i64::MAX])
+                .filter(|(p, _)| (lo[1]..=hi[1]).contains(&p[2]))
+                .map(|(p, _)| p[1])
+                .max()?
+        };
+        Some(snapshot_max.min(y * 16 + 15))
+    }
     /// i128 upper bounds permit an all-height query including i64::MAX, while
     /// the public 3-D API retains ordinary half-open i64 bounds.
     #[cfg(test)]
@@ -167,6 +191,36 @@ impl EditIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ceiling_covers_exact_negative_extreme_and_unindexed_overrides() {
+        let mut index = EditIndex::default();
+        let rows = [
+            Cell {
+                x: -17,
+                y: 43,
+                z: 5,
+            },
+            Cell {
+                x: 37,
+                y: 80,
+                z: -100,
+            },
+            Cell {
+                x: 8,
+                y: i64::MAX,
+                z: 8,
+            },
+        ];
+        index.record(&rows);
+        assert_eq!(index.upper_y([-20, 0], [-16, 16], i64::MAX), Some(47));
+        assert_eq!(index.upper_y([0, 0], [16, 16], i64::MAX), Some(i64::MAX));
+        assert_eq!(index.upper_y([0, 0], [16, 16], 10), Some(10));
+        assert_eq!(index.upper_y([17, 17], [22, 22], 100), None);
+        assert_eq!(index.upper_y([37, -100], [37, -90], 100), None);
+        let mut tiny = EditIndex::with_budget(0);
+        tiny.record(&rows);
+        assert_eq!(tiny.upper_y([17, 17], [22, 22], 87), Some(87));
+    }
     #[test]
     fn negative_half_open_and_extreme_bounds_are_exact() {
         let cells = [

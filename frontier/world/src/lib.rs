@@ -14,6 +14,7 @@ mod alpine;
 pub mod discrete_water;
 pub mod edit;
 mod edit_index;
+mod edit_pages;
 pub use edit_index::EditQueryStats;
 pub mod fluid;
 mod grid;
@@ -163,10 +164,11 @@ pub struct World {
     terrain: Option<FbmTerrain>,
     vegetation: Option<Arc<vegetation::TileCache>>,
     topology_base: Option<i64>,
-    edits: Arc<BTreeMap<Cell, Material>>,
+    edits: Arc<edit_pages::EditPages>,
     fluid: Arc<BTreeMap<Cell, bool>>,
     revision: u64,
     change_token: u64,
+    highest_touched_y: Option<i64>,
     changes: Arc<Mutex<ChangeJournal>>,
     edit_index: Arc<Mutex<edit_index::EditIndex>>,
     counter: Arc<AtomicU64>,
@@ -253,6 +255,7 @@ impl World {
             fluid: Arc::default(),
             revision: 0,
             change_token: 0,
+            highest_touched_y: None,
             changes: Arc::default(),
             edit_index: Arc::default(),
             counter: Arc::new(AtomicU64::new(0)),
@@ -309,6 +312,17 @@ impl World {
         )
         .0
     }
+    /// Conservative inclusive upper Y of terrain or fluid overrides whose X/Z
+    /// may intersect this half-open box. Stale lineage buckets can enlarge a
+    /// bound; a missing bound proves the region has no overrides.
+    pub fn override_y_ceiling(&self, min: [i64; 2], max: [i64; 2]) -> Option<i64> {
+        let own = self.highest_touched_y?;
+        if self.edits.is_empty() && self.fluid.is_empty() {
+            return None;
+        }
+        self.edit_index.lock().unwrap().upper_y(min, max, own)
+    }
+
     fn indexed_edit_cells(&self, min: [i128; 3], max: [i128; 3]) -> (Vec<Cell>, EditQueryStats) {
         let (candidates, mut stats) = self.edit_index.lock().unwrap().query(min, max, |c| {
             self.edits.contains_key(&c) || self.fluid.contains_key(&c)
@@ -402,7 +416,7 @@ impl World {
     /// matches the generator. Such cells still participate in edit ownership.
     pub fn restore_terrain_edits(&mut self, values: impl IntoIterator<Item = (Cell, Material)>) {
         let edits: BTreeMap<_, _> = values.into_iter().collect();
-        if edits == *self.edits {
+        if self.edits.iter().eq(edits.iter()) {
             return;
         }
         let changed = self
@@ -418,7 +432,7 @@ impl World {
             .copied()
             .collect();
         self.record_changes(changed);
-        self.edits = Arc::new(edits);
+        self.edits = Arc::new(edit_pages::EditPages::from_sorted(edits));
         self.bump_revision();
     }
     /// Physical terrain/vegetation before live water composition. Air edits open
@@ -543,6 +557,9 @@ impl World {
     }
 
     fn record_changes(&mut self, cells: Vec<Cell>) {
+        if let Some(y) = cells.iter().map(|c| c.y).max() {
+            self.highest_touched_y = Some(self.highest_touched_y.map_or(y, |old| old.max(y)));
+        }
         self.edit_index.lock().unwrap().record(&cells);
         self.change_token = self
             .changes

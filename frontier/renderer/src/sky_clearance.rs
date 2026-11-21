@@ -69,13 +69,11 @@ impl SkyClearance {
             } else {
                 1
             };
+            let base = height + vegetation as f64 * voxel_size();
             Some(
                 world
-                    .edit_cells_in_columns(lower, upper)
-                    .into_iter()
-                    .fold(height + vegetation as f64 * voxel_size(), |y, c| {
-                        y.max((c.y as f64 + 1.) * voxel_size())
-                    }),
+                    .override_y_ceiling(lower, upper)
+                    .map_or(base, |y| base.max((y as f64 + 1.) * voxel_size())),
             )
         })()
         .unwrap_or(f64::INFINITY);

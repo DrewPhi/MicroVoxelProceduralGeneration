@@ -17,7 +17,7 @@ cargo build --release --locked --bin frontier
 
 ![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
 
-*Exterior chase view above the seed 19 Highlands, captured in-engine on the Radeon 760M.*
+*Exterior chase view above the seed 19 Highlands, captured in-engine on an isolated display using llvmpipe.*
 
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
@@ -37,6 +37,14 @@ A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
 edges and surrounding ground in nine quads using 130 KiB including the column
 mask. The near threshold and both faces at 110–120 m were checked against the
 saved strip on the Radeon.
+
+Terrain snapshots share ordered edit pages. With the same 153,600-cell strip,
+400 writes while retaining the previous world measured **0.0052 ms median**
+and **0.0081 ms p95**. Copying the full edit map measured **0.5471 ms** and
+**0.9042 ms**. Reproduce with `cargo run --release -p frontier-world --example edit_snapshots`.
+On two 9-second passes flying over the saved strip at 45 m/s, querying the
+occupied edit buckets reduced measured frames over 16.67 ms from 13 and 15
+to zero. Frame p95 was 5.58 and 5.50 ms with the index.
 
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. The preset renders a 6 km active terrain view with a
