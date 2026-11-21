@@ -295,13 +295,15 @@ impl AdaptiveGpu {
         eye: [f64; 3],
         comparison: bool,
         water_time: f32,
+        pixel_angle: f32,
     ) {
-        let mut params = [0f32; 14];
-        params[10..].copy_from_slice(&[
+        let mut params = [0f32; 18];
+        params[14..].copy_from_slice(&self.landscape_transition());
+        params[10..14].copy_from_slice(&[
             eye[0].rem_euclid(2048.) as f32,
             eye[2].rem_euclid(2048.) as f32,
             water_time,
-            0.,
+            pixel_angle,
         ]);
         params[..2].copy_from_slice(&self.landscape_offset(eye));
         let values = &mut params[2..];
@@ -577,6 +579,8 @@ fn near_size() -> u32 {
         }
     })
 }
+pub(crate) const NEAR_UNIFORM_BYTES: usize = 144;
+
 pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("close plant shadow sampling"),
@@ -604,7 +608,7 @@ pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: std::num::NonZeroU64::new(128),
+                        min_binding_size: std::num::NonZeroU64::new(NEAR_UNIFORM_BYTES as u64),
                     },
                     count: None,
                 },
@@ -684,7 +688,7 @@ impl NearShadowResources {
         });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("eye-relative close plant shadow transform"),
-            contents: &[0u8; 128],
+            contents: &[0u8; NEAR_UNIFORM_BYTES],
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let naadf_empty = crate::naadf::Bindings::empty(device);

@@ -118,6 +118,15 @@ views of grass and snow ledges kept identical depth and coverage across all
 pixels. On the Radeon 760M, the layered snow view at 1080p MSAA 1 took
 7.11–7.24 ms median GPU time, up from 6.60–6.86 ms for the single-color wall.
 
+In flight, an 8 m lattice of source heights and colors estimates the visible
+areas of the native tops and risers as they shrink below a pixel. The renderer
+combines their individual sunlight responses while keeping the stepped outline.
+In an alpine pass on seed 673, moving the camera 38 cm sideways changed
+reprojected terrain brightness by 8.21 levels on average before filtering
+and 2.32 levels afterward. Both 768×432 views had full coverage and met their
+14-pixel geometry target. On the 1080p seed 997 flight, the filtered renderer
+measured 10.73–10.77 ms median and 14.81–15.74 ms p95 over two 100 m/s runs.
+
 ![Eye-level view of square grass blades, a stepped tree trunk and distant voxel terraces.](frontier/reference/gallery/watershed-ground.jpg)
 
 *Watershed seed 997 at walking height. Grass blades, branches and the steps
@@ -250,7 +259,7 @@ depth matched the wind-swell renderer pixel for pixel in the 800×450 check.
 
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 
-*At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. This in-engine 1920×1080 view uses 4× MSAA, a 16° left bank and a 6 km active view.*
+*At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. The aircraft is banked 16° left. This 1920×1080 in-engine frame uses 4× MSAA and a 6 km active view. Terrain covered the full view at capture time, with distant blocks still refining toward the five-pixel target.*
 
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,

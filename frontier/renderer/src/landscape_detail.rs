@@ -125,7 +125,7 @@ struct Grid {
     // Lattice address of the first *visible* texel; the CPU grid has a halo.
     min: [i64; 2],
     samples: Vec<Sample>,
-    rivers: Rivers,
+    rivers: Option<Rivers>,
 }
 impl Grid {
     fn get(&self, x: i64, z: i64) -> Option<Sample> {
@@ -168,11 +168,13 @@ impl Grid {
                 samples.push(sample);
             }
         }
-        let rivers = Rivers::make(
-            &terrain,
-            min.map(|i| i + SIDE as i64 / 2),
-            reusable.map(|g| &g.rivers),
-        );
+        let rivers = (source.params.recipe == FbmRecipe::Highlands).then(|| {
+            Rivers::make(
+                &terrain,
+                min.map(|i| i + SIDE as i64 / 2),
+                reusable.and_then(|g| g.rivers.as_ref()),
+            )
+        });
         let area = SIDE * SIDE;
         let mut pixels = vec![0; area * 16];
         let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
@@ -196,20 +198,17 @@ impl Grid {
                     255
                 };
                 let [r, g, b, depth] = samples[j].albedo;
-                for k in 0..4 {
-                    let [lo, hi] =
-                        rivers.texels[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2].to_le_bytes();
-                    pixels[8 * area + at + k] = lo;
-                    pixels[12 * area + at + k] = hi;
+                if let Some(rivers) = &rivers {
+                    for k in 0..4 {
+                        let [lo, hi] = rivers.texels[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2]
+                            .to_le_bytes();
+                        pixels[8 * area + at + k] = lo;
+                        pixels[12 * area + at + k] = hi;
+                    }
                 }
                 let dry = depth == 255;
                 pixels[at..at + 4].copy_from_slice(&[x, z, sky, if dry { 255 } else { 0 }]);
-                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[
-                    r,
-                    g,
-                    b,
-                    if dry { 0 } else { depth },
-                ]);
+                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[r, g, b, depth]);
             }
         }
         (
@@ -273,7 +272,7 @@ impl Texture {
     }
     pub(crate) fn new(device: &wgpu::Device, side: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Highlands detail normals and albedo"),
+            label: Some("flight terrain normals and albedo"),
             size: wgpu::Extent3d {
                 width: side,
                 height: side,
@@ -308,6 +307,7 @@ pub(super) struct Detail {
     grid: Option<Arc<Grid>>,
     pending: Option<Receiver<(Grid, Vec<u8>)>>,
     source: Option<Source>,
+    transition: Option<(std::time::Instant, Option<[i64; 2]>)>,
 }
 
 impl super::AdaptiveGpu {
@@ -326,7 +326,7 @@ impl super::AdaptiveGpu {
             });
         let Some(terrain) = world
             .fbm_terrain()
-            .filter(|t| allowed && t.params().recipe == FbmRecipe::Highlands)
+            .filter(|t| allowed && t.params().recipe.uses_watersheds())
         else {
             self.landscape_detail = Detail::default();
             return;
@@ -368,6 +368,12 @@ impl super::AdaptiveGpu {
                             },
                             texture.size(),
                         );
+                        let shift = self
+                            .landscape_detail
+                            .grid
+                            .as_ref()
+                            .map(|old| [0, 1].map(|a| grid.min[a] - old.min[a]));
+                        self.landscape_detail.transition = Some((std::time::Instant::now(), shift));
                         self.landscape_detail.grid = Some(Arc::new(grid));
                     }
                 }
@@ -398,6 +404,23 @@ impl super::AdaptiveGpu {
             ]
         })
     }
+    pub(super) fn landscape_transition(&self) -> [f32; 4] {
+        if let Some((started, shift)) = self.landscape_detail.transition {
+            let t = (started.elapsed().as_secs_f32() / 0.45).min(1.);
+            let offset = shift.unwrap_or([0; 2]);
+            return [
+                offset[0] as f32,
+                offset[1] as f32,
+                t * t * (3. - 2. * t),
+                f32::from(shift.is_some()),
+            ];
+        }
+        [0., 0., 1., 0.]
+    }
+    pub(crate) fn settle_landscape_transition(&mut self) {
+        self.landscape_detail.transition = None;
+    }
+
     pub(crate) fn landscape_detail_pending(&self) -> bool {
         self.landscape_detail.source.is_some() && self.landscape_detail.pending.is_some()
     }
@@ -498,8 +521,9 @@ mod tests {
         for v in river_shift..RIVER_SIDE {
             for u in 0..RIVER_SIDE - river_shift {
                 assert_eq!(
-                    old.rivers.texels[(v - river_shift) * RIVER_SIDE + u + river_shift],
-                    new.rivers.texels[v * RIVER_SIDE + u]
+                    old.rivers.as_ref().unwrap().texels
+                        [(v - river_shift) * RIVER_SIDE + u + river_shift],
+                    new.rivers.as_ref().unwrap().texels[v * RIVER_SIDE + u]
                 );
             }
         }
@@ -515,6 +539,7 @@ mod tests {
                 }
                 let x = new.min[0] + u as i64;
                 let z = new.min[1] + v as i64;
+                assert_eq!(after[area + j + 3], new.get(x, z).unwrap().albedo[3]);
                 assert_eq!(
                     new.get(x, z).unwrap().height.to_bits(),
                     old.get(x, z).unwrap().height.to_bits()

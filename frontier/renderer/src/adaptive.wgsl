@@ -26,7 +26,7 @@ var<private> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
-struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32>, water_phase:vec4<f32> };
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32>, water_phase:vec4<f32>, detail_transition:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
@@ -515,7 +515,51 @@ fn shade(input: VertexOut) -> vec4<f32> {
         in.color=cliff_albedo(in.surface_word,in.color.xy,wall_footprint);
         in.surface_word=0u;
     }
+    let dx=dpdx(in.local); let dy=dpdy(in.local);
     var sky_exposure=1.;
+    var filter_weight=0.;
+    var visible_faces=vec3(0.);
+    var facing=vec3(0.);
+    let block=(camera.paint_origin.w&37u)==37u;
+    if block && near_shadow.parameters.z > -1e10 && in.surface_word==0u {
+        let relative=in.local-camera.eye.xyz;
+        let cell=(relative.xz+near_shadow.parameters.zw)/8.;
+        let side=vec2<f32>(textureDimensions(flight_detail));
+        let edge=min(cell,side-1.-cell);
+        // Fragment position.w is reciprocal clip depth. This footprint is
+        // stable across the top and both risers of the same subpixel stair.
+        let footprint=near_shadow.water_phase.w/in.position.w;
+        let pitch=f32(1u<<(u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
+        var window=smoothstep(1.,15.,min(edge.x,edge.y));
+        let transition=near_shadow.detail_transition;
+        if transition.z<1. {
+            let old_cell=cell+transition.xy;
+            let old_edge=min(old_cell,side-1.-old_cell);
+            let old=transition.w*smoothstep(1.,15.,min(old_edge.x,old_edge.y));
+            window=mix(min(old,window),window,transition.z);
+        }
+        let strength=smoothstep(1.,3.2,footprint/NATIVE_VOXEL_METERS)
+            *window*(.82+.14*smoothstep(.15,1.2,footprint/pitch));
+        if strength>.001 {
+            let uv=(cell+.5)/side;
+            let slope=textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
+            let oct=2.*slope.rg-1.;
+            let n=vec3(oct.x,max(.0001,1.-abs(oct.x)-abs(oct.y)),oct.y);
+            // Native roof and riser areas project independently onto the eye ray.
+            let areas=max(vec3(0.),-relative*n);
+            let total=dot(areas,vec3(1.));
+            if total>.0001 {
+                visible_faces=areas/total;
+                facing=sign(n);
+                filter_weight=strength*slope.w;
+                sky_exposure=mix(1.,slope.b,filter_weight);
+                let skin=min(vec2(1.),vec2(n.y)/max(abs(n.xz),vec2(.0001)));
+                let exposed_skin=visible_faces.y+dot(visible_faces.xz,skin);
+                let paint=textureSampleLevel(flight_detail,flight_sampler,uv,1,0.);
+                in.color=mix(in.color,paint.rgb,filter_weight*exposed_skin);
+            }
+        }
+    }
     // The flight field is aligned to canonical 8 m samples. Fine meshes and
     // native stairs retain their own material and face response.
     if near_shadow.parameters.z > -1e10 && (camera.paint_origin.w & 26u) == 0u
@@ -547,7 +591,15 @@ fn shade(input: VertexOut) -> vec4<f32> {
         indirect=ground_irradiance(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz,
             outdoor_sun_color(camera.sun.y),camera.sky.x,visibility);
     }
-    let light=terrain_skylight(in.normal,visibility,sky_exposure)+indirect;
+    var light:vec3<f32>;
+    if filter_weight>0. {
+        let direct=dot(visible_faces,max(vec3(0.),facing*camera.sun.xyz));
+        let up=mix(in.normal.y,visible_faces.y,filter_weight);
+        let cosine=mix(max(dot(in.normal,camera.sun.xyz),0.),direct,filter_weight);
+        light=regional_face_light(up,cosine,camera.sun.xyz,camera.sky.x,visibility,sky_exposure,true)+indirect;
+    } else {
+        light=terrain_skylight(in.normal,visibility,sky_exposure)+indirect;
+    }
     var tint=vec3<f32>(1.);
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
@@ -557,7 +609,6 @@ fn shade(input: VertexOut) -> vec4<f32> {
     // Evaluate footprint before branching. The smaller singular value retains
     // exact native face response while either tangent direction still resolves
     // a voxel. Filtering changes radiance only, never normal, depth or coverage.
-    let dx=dpdx(in.local); let dy=dpdy(in.local);
     if cover_shell {
         if face_profiles[in.profile_index].top.w != -6. || in.normal.y<0.45 {discard;}
         let p=cover_sample(in.profile_index,in.local,in.normal);let view=normalize(camera.eye.xyz-in.local);
@@ -635,12 +686,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
                     w*=smoothstep(6.,20.,spacing);
                 }
                 if w>0. {
-                    var measured=vec4(bed,depth);
-                    if block_water {
-                        measured=block_water_bed(cell,measured);
-                    } else {
-                        measured=textureSampleLevel(flight_detail,flight_sampler,(cell+.5)/side,1,0.)*vec4(1.,1.,1.,12.*255./254.);
-                    }
+                    let measured=block_water_bed(cell,vec4(bed,depth));
                     bed=mix(bed,measured.rgb,w);
                     depth=mix(depth,measured.a,w);
                 }

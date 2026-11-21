@@ -210,6 +210,9 @@ impl Gpu {
                     )
                     .into());
                 }
+                if let Some(adaptive) = &mut self.adaptive {
+                    adaptive.settle_landscape_transition();
+                }
                 return Ok(());
             }
             if started.elapsed().as_secs() >= 60 {

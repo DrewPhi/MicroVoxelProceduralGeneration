@@ -964,6 +964,7 @@ impl Gpu {
                     .as_ref()
                     .is_some_and(|s| s.visibility_benchmark),
                 self.water_time.get(),
+                2. * (camera.fov_y.to_radians() * 0.5).tan() / height.max(1) as f32,
             );
         }
         let capture_layer = naadf::capture_layer();
