@@ -48,6 +48,20 @@ To land, bring the wings level, slow below 48 m/s and descend at less than
 you reach 29 m/s. Both wheels need support. You can build a runway from
 placed voxels or enter the aircraft with **V** while standing on level ground.
 
+To build a strip on foot, launch the creative terrain editor from `frontier/`.
+
+```sh
+./run.sh --preset watershed --creative-brush 32,1,32 --world-save output/worlds/airfield.save
+```
+
+At 6.25 cm, this brush covers a **2 m × 2 m** square one voxel thick.
+Aim at a solid face within 8 m. **Right click** fills empty cells inside
+the yellow outline. **Left click** digs into the face. Use **1–6** to choose
+grass, soil, stone, wood, sand or snow. **Z** restores the last stamp, including
+any procedural terrain it removed. Brush dimensions follow the world X, Y
+and Z axes. Edits and material selection persist on close. Undo is available
+during the current session.
+
 A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
 6.25 cm voxels. From the approach, the distant renderer draws its deck, underside,
 edges and surrounding ground in nine quads using 130 KiB including the column

@@ -15,6 +15,7 @@ pub mod brick_ray;
 mod build_memory;
 mod cold_source_cache;
 pub mod column_mesh;
+mod creative_brush;
 mod derived_disk_cache;
 mod derived_disk_writeback;
 mod development_resources;
@@ -1642,6 +1643,7 @@ impl Default for EditTest {
 struct Viewer {
     live_water: Option<discrete_water_live::WaterDriver>,
     player_edit: player_edit::PlayerEdit,
+    brush: Option<creative_brush::Brush>,
     queued_player_action: Option<(frontier_world::edit::EditTransaction, Instant, Camera)>,
     visual_settings: settings::VisualSettings,
     settings_ui: Option<settings_ui::SettingsUi>,
@@ -2257,6 +2259,21 @@ impl Viewer {
                     self.width as f32 / self.height.max(1) as f32,
                 ));
             }
+        }
+        if let (Some(brush), Some(ui), Some(live), None) = (
+            &mut self.brush,
+            &mut self.settings_ui,
+            &self.live_water,
+            &self.aircraft,
+        ) {
+            ui.set_player_overlay(brush.overlay(
+                &self.world,
+                self.camera,
+                self.gpu.as_ref().and_then(|g| g.naadf.as_ref()),
+                live.inventory().selected,
+                self.width as f32 / self.height.max(1) as f32,
+                self.grabbed && self.pending_teleport.is_none(),
+            ));
         }
         self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
@@ -3072,7 +3089,22 @@ impl ApplicationHandler for Viewer {
                     if self.player_edit.enabled {
                         self.player_mouse(button, state);
                     } else if state == ElementState::Pressed {
-                        self.edit(button == MouseButton::Right);
+                        if let (Some(brush), Some(discrete_water_live::WaterDriver::Ca(live))) =
+                            (&mut self.brush, &mut self.live_water)
+                        {
+                            brush.stamp(
+                                &mut self.world,
+                                live,
+                                self.camera,
+                                self.walking
+                                    .physical_eye()
+                                    .unwrap_or(self.camera.position.to_array()),
+                                self.gpu.as_ref().and_then(|g| g.naadf.as_ref()),
+                                button == MouseButton::Right,
+                            );
+                        } else {
+                            self.edit(button == MouseButton::Right);
+                        }
                     }
                 }
             }
@@ -3087,7 +3119,26 @@ impl ApplicationHandler for Viewer {
                     }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
-                        if self.player_edit.enabled && !event.repeat {
+                        if key == KeyCode::KeyZ
+                            && !event.repeat
+                            && self.grabbed
+                            && self.aircraft.is_none()
+                            && self.pending_teleport.is_none()
+                        {
+                            if let (Some(brush), Some(discrete_water_live::WaterDriver::Ca(live))) =
+                                (&mut self.brush, &mut self.live_water)
+                            {
+                                brush.undo(
+                                    &mut self.world,
+                                    live,
+                                    self.walking
+                                        .physical_eye()
+                                        .unwrap_or(self.camera.position.to_array()),
+                                    self.gpu.as_ref().and_then(|g| g.naadf.as_ref()),
+                                );
+                            }
+                        }
+                        if (self.player_edit.enabled || self.brush.is_some()) && !event.repeat {
                             let slot = match key {
                                 KeyCode::Digit1 => Some(0),
                                 KeyCode::Digit2 => Some(1),
@@ -3251,6 +3302,7 @@ pub fn run() -> Result<()> {
         water_river_rate,
         player_edit: player_edit_enabled,
         native_edit_driver,
+        creative_brush,
         hand,
         inventory_capacity,
         water_active_radius,
@@ -3983,6 +4035,7 @@ pub fn run() -> Result<()> {
     let mut viewer = Viewer {
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
+        brush: creative_brush.map(creative_brush::Brush::new),
         queued_player_action: None,
         aircraft,
         visual_settings,

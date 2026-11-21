@@ -236,11 +236,17 @@ impl LiveWater {
             return Err("Placement into water needs supported displacement");
         }
         let changed = transaction.apply(world, &mut self.inventory, owns)?;
-        for c in &changed {
-            self.fluid.notify_edit(*c, solid(world, *c));
-        }
-        self.publish(world, changed);
+        self.terrain_changed(world, &changed);
         Ok(())
+    }
+    pub fn terrain_changed(&mut self, world: &mut World, changed: &[Cell]) {
+        if self.fluid.diagnostics().stored_cells == 0 {
+            return;
+        }
+        for &c in changed {
+            self.fluid.notify_edit(c, solid(world, c));
+        }
+        self.publish(world, changed.iter().copied());
     }
     /// A sealed two-chamber native-cell basin, with a removable central dam.
     /// Initial water is an explicitly counted addition, never an infinite source.

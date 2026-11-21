@@ -11,7 +11,26 @@ use std::time::Instant;
 pub struct Overlay {
     pub text: String,
     pub lines: Vec<[[f32; 2]; 2]>,
-    pub charge: f32,
+    pub charge: Option<f32>,
+}
+impl Overlay {
+    pub fn outline(&mut self, min: [i64; 3], end: [i64; 3], matrix: glam::Mat4, camera: Camera) {
+        let corners: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
+            let corner = std::array::from_fn(|axis| if i & (1 << axis) == 0 { min[axis] } else { end[axis] } as f64);
+            let local = glam::DVec3::from_array(corner) * voxel_size() - camera.position;
+            let clip = matrix * local.as_vec3().extend(1.);
+            (clip.w > 0.025).then(|| [clip.x / clip.w, clip.y / clip.w])
+        });
+        for i in 0..8 {
+            for axis in [1, 2, 4] {
+                if i & axis == 0 {
+                    if let (Some(a), Some(b)) = (corners[i], corners[i | axis]) {
+                        self.lines.push([a, b]);
+                    }
+                }
+            }
+        }
+    }
 }
 struct Gesture {
     anchor: Cell,
@@ -172,9 +191,11 @@ impl PlayerEdit {
                 .push_str(&format!("\nGrid minimum: one voxel ({voxel_liters:.6} L)"));
         }
         if let Some(g) = &self.gesture {
-            out.charge = ((g.started.elapsed().as_secs_f64() - self.settings.quick_seconds)
-                / (self.settings.full_seconds - self.settings.quick_seconds))
-                .clamp(0., 1.) as f32;
+            out.charge = Some(
+                ((g.started.elapsed().as_secs_f64() - self.settings.quick_seconds)
+                    / (self.settings.full_seconds - self.settings.quick_seconds))
+                    .clamp(0., 1.) as f32,
+            );
             out.text.push_str(&format!(
                 "\nPickup: {} {:?} · {:.3} L",
                 g.count,
@@ -184,24 +205,7 @@ impl PlayerEdit {
             let matrix = camera.matrix(camera.position, aspect);
             for &(cell, _) in &g.candidates[..g.count] {
                 let p = [cell.x, cell.y, cell.z];
-                let corners: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
-                    let local = glam::DVec3::new(
-                        (p[0] as f64 + ((i & 1) as f64)) * voxel_size(),
-                        (p[1] as f64 + (((i >> 1) & 1) as f64)) * voxel_size(),
-                        (p[2] as f64 + (((i >> 2) & 1) as f64)) * voxel_size(),
-                    ) - camera.position;
-                    let clip = matrix * local.as_vec3().extend(1.);
-                    (clip.w > 0.025).then(|| [clip.x / clip.w, clip.y / clip.w])
-                });
-                for i in 0..8 {
-                    for axis in [1, 2, 4] {
-                        if i & axis == 0 {
-                            if let (Some(a), Some(b)) = (corners[i], corners[i | axis]) {
-                                out.lines.push([a, b]);
-                            }
-                        }
-                    }
-                }
+                out.outline(p, p.map(|v| v.saturating_add(1)), matrix, camera);
             }
         }
         out

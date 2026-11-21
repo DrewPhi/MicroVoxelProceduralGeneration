@@ -174,7 +174,9 @@ impl SettingsUi {
                     .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {
                         egui::Frame::popup(ui.style()).show(ui,|ui| {
                             ui.label(&self.player_overlay.text);
-                            ui.add(egui::ProgressBar::new(self.player_overlay.charge).desired_width(240.));
+                            if let Some(charge) = self.player_overlay.charge {
+                                ui.add(egui::ProgressBar::new(charge).desired_width(240.));
+                            }
                         });
                     });
                 let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("native pickup preview")));

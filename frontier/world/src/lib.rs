@@ -174,6 +174,18 @@ pub struct World {
     counter: Arc<AtomicU64>,
 }
 
+/// One reversible terrain operation. The page snapshots share untouched leaves.
+pub struct TerrainUndo {
+    before: Arc<edit_pages::EditPages>,
+    after: Arc<edit_pages::EditPages>,
+    cells: Vec<Cell>,
+}
+impl TerrainUndo {
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+}
+
 /// Terrain-only column snapshot borrowing its world; excludes vegetation.
 /// Reuses the canonical source
 /// height for many native y queries; material overrides and fixture volumes still
@@ -233,7 +245,7 @@ impl WorldColumn<'_> {
             base
         }
     }
-    fn canonical_material(&self, y: i64) -> Material {
+    pub fn canonical_material(&self, y: i64) -> Material {
         self.world.compose_fluid(
             Cell {
                 x: self.x,
@@ -614,12 +626,55 @@ impl World {
     /// Apply last-write-wins terrain edits atomically in one world revision.
     /// Entries whose final material already matches the snapshot are omitted.
     pub fn set_batch(&mut self, values: impl IntoIterator<Item = (Cell, Material)>) {
-        let updates: Vec<_> = values
+        let updates = self.effective_terrain_batch(values);
+        self.apply_terrain_batch(updates);
+    }
+
+    /// A creative stamp can restore the exact authored map, including addresses
+    /// which originally came solely from the procedural source.
+    pub fn set_batch_reversible(
+        &mut self,
+        values: impl IntoIterator<Item = (Cell, Material)>,
+    ) -> Option<TerrainUndo> {
+        let updates = self.effective_terrain_batch(values);
+        if updates.is_empty() {
+            return None;
+        }
+        let cells = updates.iter().map(|(cell, _)| *cell).collect();
+        let before = self.edits.clone();
+        self.apply_terrain_batch(updates);
+        Some(TerrainUndo {
+            before,
+            after: self.edits.clone(),
+            cells,
+        })
+    }
+
+    /// A later terrain write invalidates the stamp. Fluid and other world state
+    /// keep their current values, and renderers observe a new forward revision.
+    pub fn undo_terrain_batch(&mut self, undo: &TerrainUndo) -> bool {
+        if !Arc::ptr_eq(&self.edits, &undo.after) {
+            return false;
+        }
+        self.record_changes(undo.cells.clone());
+        self.edits = undo.before.clone();
+        self.bump_revision();
+        true
+    }
+
+    fn effective_terrain_batch(
+        &self,
+        values: impl IntoIterator<Item = (Cell, Material)>,
+    ) -> Vec<(Cell, Material)> {
+        values
             .into_iter()
             .collect::<BTreeMap<_, _>>()
             .into_iter()
             .filter(|&(c, m)| self.material(c) != m)
-            .collect();
+            .collect()
+    }
+
+    fn apply_terrain_batch(&mut self, updates: Vec<(Cell, Material)>) {
         if updates.is_empty() {
             return;
         }
@@ -1227,6 +1282,39 @@ mod tests {
             world.changed_edit_cells(&before),
             full_edit_diff(&world, &before)
         );
+    }
+
+    #[test]
+    fn terrain_undo_restores_authorship_and_publishes_a_forward_revision() {
+        let mut world = World::new(19);
+        let a = Cell {
+            x: -3,
+            y: 300,
+            z: 2,
+        };
+        let b = Cell { x: -2, ..a };
+        world.set(a, Material::Wood);
+        let before = world.clone();
+        let undo = world
+            .set_batch_reversible([
+                (a, Material::Air),
+                (b, Material::Stone),
+                (b, Material::Snow),
+            ])
+            .unwrap();
+        let stamped = world.clone();
+        assert_eq!(undo.cells(), &[a, b]);
+        assert!(world.undo_terrain_batch(&undo));
+        assert!(world.revision() > stamped.revision());
+        assert!(world.shares_terrain_edits(&before));
+        assert_eq!(world.terrain_override(a), Some(Material::Wood));
+        assert_eq!(world.terrain_override(b), None);
+        assert_eq!(world.changed_edit_cells(&stamped), vec![a, b]);
+        assert!(!world.undo_terrain_batch(&undo));
+        let mut advanced = stamped.clone();
+        advanced.set(b, Material::Sand);
+        assert!(!advanced.undo_terrain_batch(&undo));
+        assert_eq!(advanced.terrain_override(b), Some(Material::Sand));
     }
 
     #[test]

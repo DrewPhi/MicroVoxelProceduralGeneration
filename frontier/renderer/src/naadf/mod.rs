@@ -1600,15 +1600,6 @@ impl Experiment {
     /// Whether a complete native voxel remains resident through the current
     /// ownership handoff. Callers still validate hits against the live world.
     pub fn owns_native_edit_cell(&self, cell: frontier_world::Cell) -> bool {
-        if !self.ready() || self.restoring_raster {
-            return false;
-        }
-        let Some(active) = &self.active else {
-            return false;
-        };
-        if active.sparse_roots {
-            return false;
-        }
         let lo = [cell.x, cell.y, cell.z];
         let Some(hi) = cell
             .x
@@ -1619,6 +1610,19 @@ impl Experiment {
         else {
             return false;
         };
+        self.owns_native_edit_bounds(lo, hi)
+    }
+
+    pub(crate) fn owns_native_edit_bounds(&self, lo: [i64; 3], hi: [i64; 3]) -> bool {
+        if !self.ready() || self.restoring_raster {
+            return false;
+        }
+        let Some(active) = &self.active else {
+            return false;
+        };
+        if active.sparse_roots {
+            return false;
+        }
         let bounds = [
             lo.map(|x| x as f64 * voxel_size()),
             hi.map(|x| x as f64 * voxel_size()),
