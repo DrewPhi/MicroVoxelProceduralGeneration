@@ -26,7 +26,7 @@ var<private> camera: Camera;
 @group(1) @binding(0) var shadow_depth: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
-struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32>, water_phase:vec4<f32>, detail_transition:vec4<f32> };
+struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32>, water_phase:vec4<f32>, detail_transition:vec4<f32>, source_sun:f32, local_inverse_spacing:f32, local_relief:vec4<f32>, local_transition:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
 @group(2) @binding(1) var near_shadow_sampler:sampler_comparison;
 @group(2) @binding(2) var<uniform> near_shadow:NearShadow;
@@ -414,7 +414,19 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     if (material&16u)!=0u {
         color=vec3<f32>((vec3(material)>>vec3(8u,14u,20u))&vec3(63u))/63.;
     }
-    var out=vertex_out(position,color,normal,profile_index);
+    var raster=position;
+    if (camera.paint_origin.w & 34u)==32u && !cover_shell {
+        // Long merged roofs meet several shorter side edges. Fixed-point
+        // triangle setup can round the middle vertex to the other side of a
+        // projected T junction, leaving a sky sample inside a closed cliff.
+        // Extend just the raster footprint along the two face tangents.
+        let depth=abs(position-camera.eye.xyz);
+        let guard=min(.04*extent,vec2(max(max(depth.x,depth.y),depth.z)*.000025));
+        raster[(axis+1u)%3u]+=select(-guard.x,guard.x,corner==1u || corner==2u);
+        raster[(axis+2u)%3u]+=select(-guard.y,guard.y,corner>=2u);
+    }
+    var out=vertex_out(raster,color,normal,profile_index);
+    if !cover_shell {out.local=position;}
     out.face_width=min(extent.x,extent.y);
     if (material & LAYERED_WALL)!=0u {
         // Reuse vertex color for the two face coordinates on layered walls.
@@ -434,14 +446,14 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         let offset=position-center;
         out.color=vec3(grade.x,offset.y+dot(grade,offset.xz),grade.y);
         out.surface_word=material;
-    } else if material==0x83u {
+    } else if (material&255u)==0x83u {
         out.surface_word=material;
     } else if (material&255u)==0xa7u {
         // The native face corners run around the roof in z, then x.
         let code=(material>>(8u+2u*corner))&3u;
         out.color=MATERIAL_COLORS[array<u32,4>(2u,8u,3u,2u)[code]];
         out.surface_word=material;
-    } else if (material&0xbfu)==0x27u {out.surface_word=material;}
+    } else if (material&0xbfu)==0x27u || (material&16u)!=0u {out.surface_word=material;}
     return out;
 }
 @fragment fn fs_shadow_cut(in: VertexOut) {
@@ -555,20 +567,38 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
     let dx=dpdx(in.local); let dy=dpdy(in.local);
     let wall_footprint=(abs(dx.y)+abs(dy.y))*VOXELS_PER_METER;
-    if in.surface_word==0x83u {
+    let word=in.surface_word;
+    let snow=(word&255u)==0x83u;
+    if snow {
         in.color=snow_roof_color(in.profile_index,in.local.xz,abs(dx.xz)+abs(dy.xz));
-        in.surface_word=0u;
     }
     var skin_color=in.color;
-    if (in.surface_word&LAYERED_WALL)!=0u {
-        skin_color=cliff_skin(in.surface_word);
-        in.color=cliff_albedo(in.surface_word,skin_color,in.color.xy,wall_footprint);
+    var middle_color=skin_color;
+    var deep_color=skin_color;
+    if (word&LAYERED_WALL)!=0u {
+        skin_color=cliff_skin(word);
+        in.color=cliff_albedo(word,skin_color,in.color.xy,wall_footprint);
+        let bed=select(word&15u,(word>>12u)&15u,(word&15u)==15u);
+        let soil=(word>>4u)&15u;
+        middle_color=select(MATERIAL_COLORS[min(soil,9u)],skin_color,soil==14u);
+        deep_color=select(MATERIAL_COLORS[min(bed,9u)],skin_color,bed==14u);
+        in.surface_word=0u;
+    } else if snow || (word&16u)!=0u {
+        let layer=select((word>>5u)&3u,(word>>8u)&3u,snow);
+        middle_color=select(MATERIAL_COLORS[array<u32,4>(3u,3u,8u,2u)[layer]],skin_color,layer==0u);
+        deep_color=select(MATERIAL_COLORS[3u],skin_color,(word&15u)==3u && !snow);
         in.surface_word=0u;
     }
+    let unfiltered=in.color;
     var sky_exposure=1.;
     var filter_weight=0.;
     var visible_faces=vec3(0.);
-    var facing=vec3(0.);
+    var direct_pigment=vec3(0.);
+    var roof_pigment=vec3(0.);
+    var mean_pigment=vec3(0.);
+    var direct_cosine=0.;
+    var survey_sun=1.;
+    var survey_weight=0.;
     let block=(camera.paint_origin.w&37u)==37u;
     if block && near_shadow.parameters.z > -1e10 && in.surface_word==0u {
         let relative=in.local-camera.eye.xyz;
@@ -598,8 +628,9 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let facing_eye=abs(dot(in.normal,normalize(relative)));
         let span=min(pitch,in.face_width)*facing_eye/max(.00001,footprint);
         let native_span=footprint/NATIVE_VOXEL_METERS;
-        let strength=smoothstep(1.,3.2,native_span)*weight
-            *mix(voxel_face_filter(span),.97,smoothstep(2.,8.,native_span));
+        let nominal=pitch/NATIVE_VOXEL_METERS;
+        let source_weight=max(smoothstep(1.,3.2,native_span),smoothstep(3.,12.,nominal));
+        let strength=source_weight*weight*mix(voxel_face_filter(span),.985,max(smoothstep(2.,8.,native_span),smoothstep(4.,16.,nominal)));
         if strength>.001 {
             let uv=(cell+.5)/side;
             let far_uv=(broad_cell+.5)/broad_side;
@@ -617,6 +648,33 @@ fn shade(input: VertexOut) -> vec4<f32> {
             if fine_fraction>0. {
                 slope+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
             }
+            let window=near_shadow.local_relief;
+            let close=relative.xz*near_shadow.local_inverse_spacing+window.xy;
+            let temporal=near_shadow.local_transition;
+            let close_weight=select(0.,detail_window(close,side,temporal.xy,temporal.zw,18.),window.w>0.);
+            var stair_plane=vec3(0.);
+            var resolved_stairs=0.;
+            if close_weight>0. {
+                let near_sample=textureSampleLevel(flight_detail,flight_sampler,(close+.5)/side,3,0.);
+                let op=2.*near_sample.rg-1.;
+                let tangent=vec3(op.x,max(.0001,1.-abs(op.x)-abs(op.y)),op.y);
+                let height=window.z+window.w*dot(near_sample.ba,vec2(65280.,255.));
+                let incidence=dot(tangent,relative);
+                var measured=near_sample;
+                var along=vec2(0.);
+                if incidence<-.06*length(relative) {
+                    // Follow the viewing ray back to the measured hillside.
+                    // Bound the correction to the block that supplied the hit.
+                    let offset=relative.xz*((height-relative.y)*tangent.y/incidence);
+                    along=offset*min(1.,min(pitch*1.5,12.)/max(.001,length(offset)));
+                    measured=textureSampleLevel(flight_detail,flight_sampler,(close+along*near_shadow.local_inverse_spacing+.5)/side,3,0.);
+                }
+                slope=vec4(mix(slope.rg,measured.rg,close_weight),slope.ba);
+                let h=window.z+window.w*dot(measured.ba,vec2(65280.,255.));
+                stair_plane=vec3(in.local.x+along.x,camera.eye.y+h,in.local.z+along.y);
+                resolved_stairs=close_weight*(1.-smoothstep(.6,2.,native_span));
+
+            }
             let oct=2.*slope.rg-1.;
             let n=vec3(oct.x,max(.0001,1.-abs(oct.x)-abs(oct.y)),oct.y);
             // Native roof and riser areas project independently onto the eye ray.
@@ -624,11 +682,14 @@ fn shade(input: VertexOut) -> vec4<f32> {
             let total=dot(areas,vec3(1.));
             if total>.0001 {
                 visible_faces=areas/total;
-                facing=sign(n);
                 filter_weight=strength;
                 sky_exposure=mix(1.,slope.b,filter_weight);
-                let skin=min(vec2(1.),vec2(n.y)/max(abs(n.xz),vec2(.0001)));
-                let exposed_skin=visible_faces.y+dot(visible_faces.xz,skin);
+                let stair=native_stair_visibility(n,camera.sun.xyz,-relative);
+                // From below a slope, the next lower column hides the bottom
+                // of each riser. Its visible strip begins at the painted cap.
+                let rise=max(vec2(.0001),abs(n.xz)*select(1.,stair.y,relative.y>0.));
+                let skin=min(vec2(1.),vec2(n.y)/rise);
+                let shallow=min(vec2(1.),12.*vec2(n.y)/rise);
                 var paint=vec3(0.);
                 if broad_fraction>0. {
                     // A distant normal can span a whole hillside. Its color
@@ -644,7 +705,64 @@ fn shade(input: VertexOut) -> vec4<f32> {
                 if fine_fraction>0. {
                     paint+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,1,0.).rgb;
                 }
-                in.color=mix(in.color,paint,filter_weight*exposed_skin*slope.w);
+                if near_shadow.source_sun>.5 && camera.sky.y>.5 {
+                    survey_sun=0.;
+                    if fine_fraction>0. {survey_sun+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,2,0.).r;}
+                    if valley_fraction>0. {survey_sun+=valley_fraction*textureSampleLevel(flight_detail,flight_sampler,(valley_cell+.5)/side,2,0.).g;}
+                    if broad_fraction>0. {survey_sun+=broad_fraction*textureSampleLevel(flight_detail,flight_sampler,(broad_cell+.5)/side,2,0.).b;}
+                    survey_weight=strength*.93*smoothstep(50.,185.,length(relative));
+                    if near_shadow.parameters.y>.5 {survey_weight=0.;}
+                }
+                let cap=mix(skin_color,paint,slope.w);
+                let side_x=skin.x*cap+(shallow.x-skin.x)*middle_color+(1.-shallow.x)*deep_color;
+                let side_z=skin.y*cap+(shallow.y-skin.y)*middle_color+(1.-shallow.y)*deep_color;
+                let x=side_x*visible_faces.x;
+                let top=cap*visible_faces.y;
+                let z=side_z*visible_faces.z;
+                let ambient=stair_ambient(n);
+                roof_pigment=top*ambient.y;
+                mean_pigment=x*ambient.x+roof_pigment+z*ambient.z;
+                // The signed projected area is the sun flux admitted by an
+                // infinite staircase. Opposing risers shade some of its roofs.
+                let cosine=max(sign(n)*camera.sun.xyz,vec3(0.))*stair.x;
+                direct_pigment=x*cosine.x+top*cosine.y+z*cosine.z;
+                direct_cosine=dot(visible_faces,cosine);
+                if resolved_stairs>.005 {
+                    let ray=normalize(relative);
+                    let incidence=dot(n,ray);
+                    let cosine_view=-incidence/max(.001,length(n));
+                    if cosine_view>.20 {
+                        let travel=dot(n,stair_plane-in.local)/incidence;
+                        if abs(travel)<max(2.,3.*pitch) {
+                            let point=(in.local+ray*travel)*VOXELS_PER_METER;
+                            let pixel=(dx*.23+dy*.17)*VOXELS_PER_METER;
+                            let jitter=pixel-ray*(dot(n,pixel)/incidence);
+                            var colors=vec3(0.);
+                            var roofs=vec3(0.);
+                            var sunlit=vec3(0.);
+                            var up=0.;
+                            var direct=0.;
+                            var count=0.;
+                            for(var tap=0u;tap<2u;tap++) {
+                                let shift=select(-jitter,jitter,tap==1u);
+                                let hit=stair_pixel(fract(point+shift),ray,n,camera.sun.xyz,stair.x);
+                                if hit.w>=0. {
+                                    let pigment=select(select(deep_color,middle_color,hit.w<12.),cap,hit.w==0.);
+                                    let sky_pigment=pigment*ambient[u32(hit.z)];
+                                    colors+=sky_pigment;roofs+=sky_pigment*hit.x;sunlit+=pigment*hit.y;
+                                    up+=hit.x;direct+=hit.y;count+=1.;
+                                }
+                            }
+                            let w=resolved_stairs*smoothstep(.20,.45,cosine_view)*.5;
+                            mean_pigment=mean_pigment*(1.-w*count)+w*colors;
+                            roof_pigment=roof_pigment*(1.-w*count)+w*roofs;
+                            direct_pigment=direct_pigment*(1.-w*count)+w*sunlit;
+                            visible_faces.y=visible_faces.y*(1.-w*count)+w*up;
+                            direct_cosine=direct_cosine*(1.-w*count)+w*direct;
+                        }
+                    }
+                }
+                in.color=mix(unfiltered,mean_pigment,filter_weight);
             }
         }
     }
@@ -671,7 +789,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
     }
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
-    var visibility = min(terrain_shadow(in.local),plant_shadow(in.local,in.normal,camera.sun.xyz));
+    var visibility = min(mix(terrain_shadow(in.local),survey_sun,survey_weight),plant_shadow(in.local,in.normal,camera.sun.xyz));
     // An opaque raster shadow already proves the sun ray is blocked.
     if visibility>0. {visibility=min(visibility,naadf_mesh_sun_visibility(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz));}
     var indirect=vec3(0.);
@@ -679,14 +797,17 @@ fn shade(input: VertexOut) -> vec4<f32> {
         indirect=ground_irradiance(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz,
             outdoor_sun_color(camera.sun.y),camera.sky.x,visibility);
     }
-    var light:vec3<f32>;
+    var light=terrain_skylight(in.normal,visibility,sky_exposure)+indirect;
+    var radiance=unfiltered*light;
     if filter_weight>0. {
-        let direct=dot(visible_faces,max(vec3(0.),facing*camera.sun.xyz));
-        let up=mix(in.normal.y,visible_faces.y,filter_weight);
-        let cosine=mix(max(dot(in.normal,camera.sun.xyz),0.),direct,filter_weight);
-        light=regional_face_light(up,cosine,camera.sun.xyz,camera.sky.x,visibility,sky_exposure,true)+indirect;
+        let side=regional_face_light(0.,0.,camera.sun.xyz,camera.sky.x,visibility,sky_exposure,true);
+        let roof=regional_face_light(1.,0.,camera.sun.xyz,camera.sky.x,visibility,sky_exposure,true);
+        let sun=outdoor_sun_color(camera.sun.y)*(1.-.72*camera.sky.x)*visibility;
+        let integrated=mean_pigment*(side+indirect)+roof_pigment*(roof-side)+direct_pigment*sun;
+        radiance=mix(radiance,integrated,filter_weight);
+        light=mix(light,side+indirect+visible_faces.y*(roof-side)+direct_cosine*sun,filter_weight);
     } else {
-        light=terrain_skylight(in.normal,visibility,sky_exposure)+indirect;
+        radiance=in.color*light;
     }
     var tint=vec3<f32>(1.);
     if camera.eye.w>0. {
@@ -879,7 +1000,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
         }
         return vec4(mix(in.color*tint*light,color,river),1.);
     }
-    let resolved=in.color*tint*light;
+    let resolved=radiance*tint;
     if blend<=0. && diagnostic!=8u {return vec4<f32>(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,resolved,visibility),1.);}
     // All three triangle vertices share this ID. Fetch only for unresolved
     // radiance, rather than exporting80bytes of repeated vertex varyings.

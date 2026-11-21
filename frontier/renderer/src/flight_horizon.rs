@@ -262,6 +262,7 @@ impl Horizon {
                     include_str!("flight_horizon.wgsl")
                 )
                 .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
+                .replace("NATIVE_EDGE", &format!("{:?}", voxel_size() as f32))
                 .into(),
             ),
         });

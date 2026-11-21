@@ -68,6 +68,7 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if let Some(adaptive) = &mut self.adaptive {
             let landscape = self
                 .visual_settings
@@ -76,8 +77,15 @@ impl Gpu {
             let horizon = landscape && self.visual_settings.as_ref().is_some_and(|s| s.atmosphere);
             adaptive.update_edit_surface(&self.device, &self.queue, world, camera, horizon);
             adaptive.update_landscape_detail(&self.device, &self.queue, world, camera, landscape);
+            if let Some(terrain) = world.fbm_terrain() {
+                adaptive.update_local_relief(
+                    &self.queue,
+                    terrain,
+                    camera,
+                    self.medium_ground_height,
+                );
+            }
         }
-        self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
             if let Some(adaptive) = &mut self.adaptive {
                 adaptive.clear_canopy_shadows();

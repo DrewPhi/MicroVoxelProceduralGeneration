@@ -56,8 +56,9 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     let projected=max(vec3(0.),to_eye*relief);
     let sum=dot(projected,vec3(1.));
     let areas=projected/max(sum,.0001);
-    let native_sun=dot(areas,max(vec3(0.),sign(relief)*camera.sun.xyz));
-    let filtered=select(0.,voxel_face_filter(pixel_span),sum>.0001);
+    let native_sun=dot(areas,max(vec3(0.),sign(relief)*camera.sun.xyz))*native_stair_visibility(relief,camera.sun.xyz,to_eye).x;
+    let native_span=length(to_eye)/max(.0001,camera.screen.x*NATIVE_EDGE);
+    let filtered=select(0.,mix(voxel_face_filter(pixel_span),.98,smoothstep(2.,8.,native_span)),sum>.0001);
     let direct=mix(max(0.,dot(normal,camera.sun.xyz)),native_sun,filtered);
     let sky=.5+.5*mix(normal.y,areas.y,filtered);
     let color=face_color(albedo,direct,sky);

@@ -564,6 +564,10 @@ impl AdaptiveStream {
         let highlands = world
             .fbm_terrain()
             .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands);
+        let landscape_focus = world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe.uses_watersheds())
+            && world.topology_base_cells().is_none();
         let min_direct_split_width = if world_has_distant_voxels || highlands {
             match std::env::var("FRONTIER_LOD_DIRECT_SPLIT").as_deref() {
                 Ok("0") => None,
@@ -609,7 +613,7 @@ impl AdaptiveStream {
             recent_turn_poses: VecDeque::new(),
             last_side_prefetch: None,
             min_direct_split_width,
-            flight_focus: (highlands
+            flight_focus: (landscape_focus
                 && std::env::var_os("FRONTIER_FLIGHT_FOCUS").is_none_or(|v| v != "0"))
             .then(flight_focus::Focus::default),
             macro_segments: if highlands
@@ -955,17 +959,32 @@ impl AdaptiveStream {
             self.settings.refinements_per_transaction,
         );
         let alpine = is_alpine(&self.world);
-        let flight = if camera.far >= 3000. && self.next_publication_id % 4 != 3 {
-            self.flight_focus.as_mut().and_then(|focus| {
-                focus.select(
-                    &self.world,
-                    camera,
-                    [width, height],
-                    self.settings.pixel_error,
-                    &urgent,
-                    self.settings.refinements_per_transaction,
-                )
-            })
+        let flight = if self.flight_focus.is_some() && camera.far >= 1200. {
+            let p = camera.position;
+            let low = p.y - self.world.height_m(p.x, p.z) < 45.;
+            let eligible = if low {
+                near.is_empty() && self.next_publication_id % 4 == 0
+            } else {
+                self.next_publication_id % 4 != 3
+            };
+            if !eligible {
+                None
+            } else {
+                self.flight_focus.as_mut().and_then(|focus| {
+                    focus.select(
+                        &self.world,
+                        camera,
+                        [width, height],
+                        self.settings.pixel_error,
+                        &urgent,
+                        if low {
+                            1
+                        } else {
+                            self.settings.refinements_per_transaction
+                        },
+                    )
+                })
+            }
         } else {
             None
         };

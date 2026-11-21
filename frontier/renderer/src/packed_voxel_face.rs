@@ -15,6 +15,7 @@ pub(super) struct PackedFace {
     width_profile: u32,
 }
 
+#[derive(Clone)]
 pub(super) struct PackedFaces {
     pub faces: Vec<PackedFace>,
     pub coordinates: Vec<f32>,
@@ -98,6 +99,41 @@ impl PackedFaces {
         })
     }
 
+    /// Restore the unrelocated CPU record, including non-binary grid rounding
+    /// and negative zero. The same layout is consumed in the vertex shader.
+    pub(crate) fn decode(&self, face: PackedFace, profiles: u32, grid: f32) -> NativeQuad {
+        let id = face.width_profile & (PROFILE_LIMIT - 1);
+        let width = (face.width_profile >> 17) as u16;
+        let [x, z, y, u, v] = [
+            face.coordinates[0],
+            face.coordinates[1],
+            face.coordinates[2],
+            face.coordinates[3],
+            width,
+        ]
+        .map(|a| {
+            if face.axis_material & LOOKUP == 0 {
+                f32::from(a) * grid
+            } else {
+                self.coordinates[(u32::from(a) - (profiles - id) * 20) as usize]
+            }
+        });
+        NativeQuad {
+            anchor: [
+                x,
+                if face.axis_material & NEGATIVE_Y != 0 {
+                    -y
+                } else {
+                    y
+                },
+                z,
+            ],
+            extent: [u, v],
+            axis_sign: face.axis_material >> 29,
+            material: face.axis_material & (NEGATIVE_Y - 1),
+            profile_index: id,
+        }
+    }
     pub(super) fn relocate(&mut self, profile_base: u32) -> bool {
         if profile_base >= PROFILE_LIMIT - self.max_profile {
             return false;
@@ -109,6 +145,20 @@ impl PackedFaces {
     }
 }
 
+pub(crate) struct CachedFaces {
+    pub packed: PackedFaces,
+    pub regions: Vec<crate::adaptive_geometry::NativeBin>,
+    pub bounds: Vec<[glam::Vec3; 2]>,
+}
+impl CachedFaces {
+    pub fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.packed.faces.capacity() * std::mem::size_of::<PackedFace>()
+            + self.packed.coordinates.capacity() * 4
+            + self.regions.capacity() * std::mem::size_of::<crate::adaptive_geometry::NativeBin>()
+            + self.bounds.capacity() * std::mem::size_of::<[glam::Vec3; 2]>()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +203,10 @@ mod tests {
             }
             let mut packed = PackedFaces::pack(&source, 3, grid).unwrap();
             assert!(!packed.coordinates.is_empty());
+            for (&face, original) in packed.faces.iter().zip(&source) {
+                let restored = packed.decode(face, 3, grid);
+                assert_eq!(bytemuck::bytes_of(&restored), bytemuck::bytes_of(original));
+            }
             assert!(!packed.relocate(PROFILE_LIMIT - 2));
             assert!(packed.relocate(90000));
             for (face, q) in packed.faces.iter().zip(source) {

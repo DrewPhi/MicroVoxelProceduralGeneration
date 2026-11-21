@@ -144,6 +144,7 @@ pub struct GeometryTile {
     pub key: TileKey,
     pub mesh: Mesh,
     pub native_quads: Vec<NativeQuad>,
+    pub(crate) packed_native: Option<Box<crate::packed_voxel_face::CachedFaces>>,
     pub proxy_triangles: Vec<ProxyTriangle>,
     pub native_bins: Vec<NativeBin>,
     /// World meter bounds of actual generated vertices (not unsampled terrain).
@@ -180,17 +181,89 @@ pub struct GeometryTile {
 }
 
 impl GeometryTile {
+    pub(crate) fn native_quad_count(&self) -> usize {
+        self.packed_native
+            .as_ref()
+            .map_or(self.native_quads.len(), |c| c.packed.faces.len())
+    }
+    pub(crate) fn native_records(&self) -> impl Iterator<Item = NativeQuad> + '_ {
+        let profiles = self.face_profiles.len() as u32;
+        let edge = voxel_size() as f32;
+        self.native_quads
+            .iter()
+            .copied()
+            .chain(self.packed_native.iter().flat_map(move |c| {
+                c.packed
+                    .faces
+                    .iter()
+                    .map(move |&f| c.packed.decode(f, profiles, edge))
+            }))
+    }
+    pub(crate) fn pack_native_cache(&mut self, side: usize) {
+        if self.exact
+            || self.cover_input.is_some()
+            || self.native_quads.len() < 256
+            || self.native_bins.is_empty()
+        {
+            return;
+        }
+        use crate::packed_voxel_face::{CachedFaces, PackedFaces};
+        let edge = voxel_size();
+        let mut sorted = Vec::new();
+        let (regions, bounds) = if side != 0 && self.native_quads.len() >= 512 {
+            let tile_origin = [self.mesh.origin.x, self.mesh.origin.y, self.mesh.origin.z]
+                .map(|c| c as f64 * edge);
+            let local = self.bounds.map(|p| {
+                glam::Vec3::from_array(std::array::from_fn(|a| (p[a] - tile_origin[a]) as f32))
+            });
+            sorted = self.native_quads.clone();
+            crate::face_regions::partition(
+                &self.native_quads,
+                &mut sorted,
+                &self.native_bins,
+                local,
+                if self.native_quads.len() < 2048 {
+                    2
+                } else {
+                    side
+                },
+            )
+        } else {
+            (vec![], vec![])
+        };
+        let quads = if sorted.is_empty() {
+            &self.native_quads
+        } else {
+            &sorted
+        };
+        let Some(packed) = PackedFaces::pack(quads, self.face_profiles.len() as u32, edge as f32)
+        else {
+            return;
+        };
+        let cached = CachedFaces {
+            packed,
+            regions,
+            bounds,
+        };
+        let before = self.native_quads.capacity() * std::mem::size_of::<NativeQuad>();
+        let after = cached.bytes();
+        if after < before {
+            self.bytes = self.bytes - before + after;
+            self.native_quads = Vec::new();
+            self.packed_native = Some(Box::new(cached));
+        }
+    }
     pub fn triangle_count(&self) -> u64 {
         if !self.proxy_triangles.is_empty() {
             self.proxy_triangles.len() as u64
-        } else if self.native_quads.is_empty() {
+        } else if self.native_quad_count() == 0 {
             self.mesh.indices.len() as u64 / 3
         } else {
-            self.native_quads.len() as u64 * 2
+            self.native_quad_count() as u64 * 2
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.native_quads.is_empty()
+        self.native_quad_count() == 0
             && self.proxy_triangles.is_empty()
             && self.mesh.indices.is_empty()
     }
@@ -1396,6 +1469,7 @@ fn finish(
         key,
         mesh,
         native_quads: vec![],
+        packed_native: None,
         proxy_triangles: vec![],
         native_bins: vec![],
         conservative_surface_bounds: bounds,
@@ -1581,12 +1655,21 @@ fn native_profiles_with_summary_reuse(
                     (origin[0] + owned[0]).div_euclid(BLOCK) * BLOCK,
                     (origin[2] + owned[2]).div_euclid(BLOCK) * BLOCK,
                 ];
-                let id = if quad[0].color == Material::Water.color() && terrain.params().recipe.has_static_water() {
-                    *wet_blocks.entry(block).or_insert_with(|| native_water::append(
-                        &mut profiles, heights, terrain, block, [origin[0] + owned[0], origin[2] + owned[2]],
-                    ))
+                let id = if quad[0].color == Material::Water.color()
+                    && terrain.params().recipe.has_static_water()
+                {
+                    *wet_blocks.entry(block).or_insert_with(|| {
+                        native_water::append(
+                            &mut profiles,
+                            heights,
+                            terrain,
+                            block,
+                            [origin[0] + owned[0], origin[2] + owned[2]],
+                        )
+                    })
                 } else {
-                    *ids.get(&block).ok_or("native face profile ownership outside tile")?
+                    *ids.get(&block)
+                        .ok_or("native face profile ownership outside tile")?
                 };
                 let base = out.vertices.len() as u32;
                 for (du, dv) in [
@@ -1641,7 +1724,9 @@ fn native_profile_entry<const TRACK_EXTREMA: bool>(
     let mut profile = [[0.; 4]; 5];
     for z in key.min[1]..max[1] {
         for x in key.min[0]..max[0] {
-            let source = heights.column(x, z).ok_or("missing native profile column")?;
+            let source = heights
+                .column(x, z)
+                .ok_or("missing native profile column")?;
             let h = source.height;
             if TRACK_EXTREMA {
                 note([x, z], h);
@@ -3965,6 +4050,9 @@ impl GeometryCache {
         let mut built = built?;
         let packing_started = std::time::Instant::now();
         pack_proxy_triangles(&mut built)?;
+        if distant_voxels::Mode::current() == distant_voxels::Mode::Blocks {
+            built.pack_native_cache(crate::face_regions::configured_side());
+        }
         built.bytes += built
             .cover_input
             .as_ref()

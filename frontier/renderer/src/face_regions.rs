@@ -3,6 +3,19 @@ use crate::adaptive_geometry::{NativeBin, NativeQuad};
 use glam::Vec3;
 use std::ops::Range;
 
+pub(crate) fn configured_side() -> usize {
+    if crate::adaptive_geometry::distant_voxels::Mode::current()
+        != crate::adaptive_geometry::distant_voxels::Mode::Blocks
+    {
+        return 0;
+    }
+    match std::env::var("FRONTIER_FACE_REGIONS").as_deref() {
+        Ok("0") => 0,
+        Ok("2") => 2,
+        _ => 4,
+    }
+}
+
 /// Split a direction bin into contiguous square regions. A long greedy face
 /// belongs to one quadrant and its complete extent contributes to the bounds.
 /// Assignment uses the anchor only. Geometry and material words are copied.

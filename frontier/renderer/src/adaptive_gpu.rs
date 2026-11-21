@@ -10,9 +10,11 @@ const ADAPTIVE_SHADER: &str = concat!(
     include_str!("edited_columns.wgsl"),
     include_str!("material_palette.wgsl"),
     include_str!("terrain_paint.wgsl"),
+    include_str!("native_stairs.wgsl"),
     include_str!("adaptive.wgsl")
 );
 
+use crate::packed_voxel_face::{self, PackedFaces};
 use crate::{
     adaptive_geometry::{GeometryTile, NativeBin, TileKey},
     gpu_ordered_profiles::GpuOrderedProfiles,
@@ -26,17 +28,13 @@ use std::{
     time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
-#[path = "packed_voxel_face.rs"]
-mod packed_voxel_face;
-use packed_voxel_face::PackedFaces;
 #[path = "adaptive_shadow.rs"]
 pub(crate) mod adaptive_shadow;
 #[path = "coarse_batch.rs"]
 pub(crate) mod coarse_batch;
 #[path = "edit_landscape.rs"]
 pub(crate) mod edit_landscape;
-#[path = "face_regions.rs"]
-mod face_regions;
+use crate::face_regions;
 #[path = "landscape_detail.rs"]
 pub(crate) mod landscape_detail;
 #[path = "proxy_indexed.rs"]
@@ -1022,17 +1020,7 @@ impl AdaptiveGpu {
             bundle_reuses: 0,
             bundle_build_ms: 0.,
             native_bins_enabled: true,
-            face_region_side: if crate::adaptive_geometry::distant_voxels::Mode::current()
-                == crate::adaptive_geometry::distant_voxels::Mode::Blocks
-            {
-                match std::env::var("FRONTIER_FACE_REGIONS").as_deref() {
-                    Ok("0") => 0,
-                    Ok("2") => 2,
-                    _ => 4,
-                }
-            } else {
-                0
-            },
+            face_region_side: face_regions::configured_side(),
             voxel_filter: true,
             far_pipelines,
             cover_pipelines,
@@ -1317,7 +1305,7 @@ impl AdaptiveGpu {
         {
             return Err("deferred GPU profiles require enabled proxy consumer".into());
         }
-        if !tile.native_quads.is_empty() {
+        if tile.native_quad_count() != 0 {
             if !tile.mesh.indices.is_empty() || !tile.proxy_triangles.is_empty() {
                 return Err("quad tile must have exclusive primitive storage".into());
             }
@@ -2108,10 +2096,12 @@ impl AdaptiveGpu {
         queue: &wgpu::Queue,
         tile: &GeometryTile,
     ) -> Result<(), String> {
-        if tile
-            .native_quads
-            .iter()
-            .any(|q| q.profile_index as usize >= tile.face_profiles.len())
+        let count = tile.native_quad_count();
+        if tile.packed_native.is_none()
+            && tile
+                .native_quads
+                .iter()
+                .any(|q| q.profile_index as usize >= tile.face_profiles.len())
         {
             return Err("native quad profile index outside table".into());
         }
@@ -2128,40 +2118,50 @@ impl AdaptiveGpu {
         if raised_cover {
             bounds[1].y += 1.;
         }
-        let mut quads = tile.native_quads.clone();
-        let mut bins = validated_bins(&tile.native_bins, quads.len() as u32);
+        let mut quads = Vec::new();
+        let mut bins = validated_bins(&tile.native_bins, count as u32);
         let mut face_bounds = Vec::new();
-        if !tile.exact
-            && quads.len() >= 512
-            && !bins.is_empty()
-            && self.coarse_batch.is_none()
-            && self.face_region_side > 0
+        let mut compact = None;
+        if let Some(cached) = tile
+            .packed_native
+            .as_deref()
+            .filter(|_| self.coarse_batch.is_none())
         {
-            let side = if quads.len() < 2048 {
-                2
-            } else {
-                self.face_region_side
-            };
-            (bins, face_bounds) =
-                face_regions::partition(&tile.native_quads, &mut quads, &bins, bounds, side);
-            if raised_cover {
-                for region in &mut face_bounds {
-                    region[1].y += 1.;
-                }
+            if !cached.regions.is_empty() {
+                bins = cached.regions.clone();
+                face_bounds = cached.bounds.clone();
             }
-        }
-        // The optional multi-draw backend uses the full record's camera slot.
-        let mut compact = self
-            .coarse_batch
-            .is_none()
-            .then(|| {
-                PackedFaces::pack(
+            compact = Some(cached.packed.clone());
+        } else {
+            quads = tile.native_records().collect();
+            if !tile.exact
+                && count >= 512
+                && !bins.is_empty()
+                && self.coarse_batch.is_none()
+                && self.face_region_side > 0
+            {
+                let side = if count < 2048 {
+                    2
+                } else {
+                    self.face_region_side
+                };
+                let input = quads.clone();
+                (bins, face_bounds) =
+                    face_regions::partition(&input, &mut quads, &bins, bounds, side);
+            }
+            if self.coarse_batch.is_none() {
+                compact = PackedFaces::pack(
                     &quads,
                     tile.face_profiles.len() as u32,
                     frontier_world::voxel_size() as f32,
-                )
-            })
-            .flatten();
+                );
+            }
+        }
+        if raised_cover {
+            for region in &mut face_bounds {
+                region[1].y += 1.;
+            }
+        }
         let table_bytes: &[u8] = bytemuck::cast_slice(&tile.face_profiles);
         let coordinate_bytes = compact
             .as_ref()
@@ -2191,6 +2191,9 @@ impl AdaptiveGpu {
         let (vertex_bytes, kind) = if let Some(packed) = &compact {
             (bytemuck::cast_slice(packed.faces.as_slice()), 0)
         } else {
+            if quads.is_empty() {
+                quads = tile.native_records().collect();
+            }
             for quad in &mut quads {
                 quad.profile_index += profile_base;
                 quad.axis_sign |= slot << 3;
@@ -2246,7 +2249,7 @@ impl AdaptiveGpu {
                 }),
                 vertices,
                 indices: None,
-                count: quads.len() as u32,
+                count: count as u32,
                 origin,
                 bounds,
                 canonical_bounds: Aabb {

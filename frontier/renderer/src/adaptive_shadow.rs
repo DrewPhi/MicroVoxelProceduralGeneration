@@ -305,8 +305,11 @@ impl AdaptiveGpu {
         water_time: f32,
         pixel_angle: f32,
     ) {
-        let mut params = [0f32; 18];
-        params[14..].copy_from_slice(&self.landscape_transition());
+        let mut params = [0f32; 30];
+        params[22..30].copy_from_slice(&self.local_relief_params(eye));
+        params[18] = f32::from(self.landscape_sun_ready());
+        params[19] = self.local_inverse_spacing();
+        params[14..18].copy_from_slice(&self.landscape_transition());
         params[10..14].copy_from_slice(&[
             eye[0].rem_euclid(2048.) as f32,
             eye[2].rem_euclid(2048.) as f32,
@@ -606,7 +609,7 @@ fn near_size() -> u32 {
         }
     })
 }
-pub(crate) const NEAR_UNIFORM_BYTES: usize = 144;
+pub(crate) const NEAR_UNIFORM_BYTES: usize = 192;
 
 pub(crate) fn near_sampling_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

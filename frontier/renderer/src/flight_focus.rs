@@ -111,9 +111,7 @@ impl Focus {
         self.hits.clear();
         self.skyline_count = 0;
         let eye = camera.position;
-        if eye.y - world.height_m(eye.x, eye.z) < 45. {
-            return;
-        }
+        let low = eye.y - world.height_m(eye.x, eye.z) < 45.;
         let forward = camera.direction().as_dvec3();
         let right = forward
             .cross(camera.view_up().as_dvec3())
@@ -126,6 +124,9 @@ impl Focus {
         // Those summits still form the terrain's most visible boundary.
         let blocks = crate::adaptive_geometry::distant_voxels::Mode::current()
             == crate::adaptive_geometry::distant_voxels::Mode::Blocks;
+        if low && !blocks {
+            return;
+        }
         let half_samples = if blocks { 16 } else { 5 };
         let view_fraction = if blocks { 0.99 } else { 0.95 };
         let angular_tolerance = 4. * half_height * pixel_error / f64::from(viewport[1].max(1));
@@ -159,6 +160,13 @@ impl Focus {
             for best in crests.into_iter().flatten() {
                 let (_, p, h) = terrain(best);
                 let relative = DVec3::new(p.x - eye.x, h - eye.y, p.y - eye.z);
+                if low && (best < 100. || relative.y < 0.025 * best) {
+                    continue;
+                }
+                let depth = relative.dot(forward);
+                if blocks && (depth <= 0. || relative.dot(up).abs() > 1.10 * depth * half_height) {
+                    continue;
+                }
                 let mut grade = 1.;
                 if blocks {
                     // A coarse column on a cliff can shift its visible height by
@@ -178,6 +186,11 @@ impl Focus {
             }
         }
         self.skyline_count = self.hits.len();
+        if low {
+            // Collision, editable columns and the terrain underfoot already
+            // have their own scheduling priority. Only promote distant crests.
+            return;
+        }
         let base = [
             (0., 0.05),
             (-0.65, 0.03),
@@ -273,6 +286,9 @@ impl Focus {
         let Some(root) = roots.first().copied() else {
             return;
         };
+        if camera.position.y - world.height_m(camera.position.x, camera.position.z) < 45. {
+            return;
+        }
         self.update(world, camera, viewport, pixel_error);
         let pixel_angle =
             2. * (f64::from(camera.fov_y).to_radians() * 0.5).tan() / f64::from(viewport[1].max(1));
@@ -350,8 +366,9 @@ impl Focus {
                 if (0..2).all(|a| hit.column[a] >= key.min[a] && hit.column[a] < key.min[a] + side)
                 {
                     let limit = if blocks && i < self.skyline_count {
-                        (hit.depth * pixel_angle * pixel_error / (0.75 + 0.45 * hit.grade.min(4.)))
-                            .clamp(1., 40.)
+                        (hit.depth * pixel_angle * pixel_error.clamp(1., 7.)
+                            / (0.75 + 0.45 * hit.grade.min(4.)))
+                        .clamp(1., 40.)
                     } else if blocks {
                         let pixels = pixel_error.clamp(2., 9.);
                         (hit.depth * pixel_angle * pixels / (0.8 + 0.55 * hit.grade.min(4.)))

@@ -642,7 +642,7 @@ impl AdaptiveView {
                     + tile.mesh.indices.len() * 4
                     + tile.face_profiles.len() * 80
                     + tile.face_profile_indices.len() * 4
-                    + tile.native_quads.len() * 32
+                    + tile.native_quad_count() * 32
                     + tile.proxy_triangles.len() * 64
                     + tile
                         .gpu_profiles

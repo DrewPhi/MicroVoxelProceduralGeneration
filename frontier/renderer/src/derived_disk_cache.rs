@@ -523,7 +523,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {
         Mode::Surface => {}
-        Mode::Blocks => put(&mut b, 0x424c4f434b000a),
+        Mode::Blocks => put(&mut b, 0x424c4f434b000e),
         Mode::Voxy => put(&mut b, 0x564f5859),
         Mode::Seed => put(&mut b, 0x534545440001),
     }
@@ -629,7 +629,7 @@ fn encoded_size(t: &GeometryTile) -> Option<usize> {
     [
         (t.mesh.vertices.len(), 36),
         (t.mesh.indices.len(), 4),
-        (t.native_quads.len(), 32),
+        (t.native_quad_count(), 32),
         (t.proxy_triangles.len(), 64),
         (t.native_bins.len(), 20),
         (t.face_profiles.len(), 80),
@@ -710,8 +710,8 @@ fn encode(t: &GeometryTile, b: &mut Vec<u8>) {
     for v in &t.mesh.indices {
         p32(b, *v);
     }
-    put(b, t.native_quads.len() as u64);
-    for q in &t.native_quads {
+    put(b, t.native_quad_count() as u64);
+    for q in t.native_records() {
         for v in q.anchor.into_iter().chain(q.extent) {
             p32(b, v.to_bits());
         }
@@ -927,6 +927,7 @@ fn decode(b: &[u8], key: TileKey) -> Option<GeometryTile> {
             exposed_native_faces,
         },
         native_quads,
+        packed_native: None,
         proxy_triangles,
         native_bins,
         bounds,
@@ -967,7 +968,7 @@ fn validate(t: &GeometryTile) -> bool {
         && t.water_feature_error_m >= 0.
         && crate::spatial_appearance::valid_table(&t.face_profiles)
         && (t.proxy_triangles.is_empty()
-            || (t.native_quads.is_empty()
+            || (t.native_quad_count() == 0
                 && t.mesh.vertices.is_empty()
                 && t.mesh.indices.is_empty()
                 && t.face_profile_indices.is_empty()))
@@ -1002,7 +1003,7 @@ fn validate(t: &GeometryTile) -> bool {
         && t.face_profile_indices
             .iter()
             .all(|v| renderable_profile(*v))
-        && t.native_quads.iter().all(|q| {
+        && t.native_records().all(|q| {
             q.axis_sign & !7 == 0
                 && q.axis_sign & 3 < 3
                 && ((q.material < 10)
@@ -1014,13 +1015,15 @@ fn validate(t: &GeometryTile) -> bool {
                                 q.material,
                             ))
                             || (q.axis_sign & 3 != 1
-                                && crate::adaptive_geometry::distant_voxels::valid_rapid_wall(q.material))
+                                && crate::adaptive_geometry::distant_voxels::valid_rapid_wall(
+                                    q.material,
+                                ))
                             || (q.axis_sign == 1
                                 && crate::adaptive_geometry::distant_voxels::valid_sediment_roof(
                                     q.material,
                                 ))
                             || (q.axis_sign == 1
-                                && q.material
+                                && q.material & !0x300
                                     == crate::adaptive_geometry::distant_voxels::SNOW_ROOF
                                 && t.face_profiles.get(q.profile_index as usize).is_some_and(
                                     |p| {
@@ -1035,7 +1038,9 @@ fn validate(t: &GeometryTile) -> bool {
                                         }
                                     },
                                 ))
-                            || (q.material & 0xfc0000f0 == 0x10 && q.material & 15 < 10)
+                            || (q.material & 0xfc000090 == 0x10
+                                && q.material & 15 < 10
+                                && q.material & 15 != 7)
                             || ((q.material & 0xfcf000ff == 0x27
                                 || (q.material & 0xfcf000ff == 0x67 && q.axis_sign & 3 != 1))
                                 && (q.material >> 8) & 15 < 10
@@ -1049,14 +1054,15 @@ fn validate(t: &GeometryTile) -> bool {
                 && b.min_plane <= b.max_plane
                 && (b.first_quad as usize)
                     .checked_add(b.quad_count as usize)
-                    .is_some_and(|end| end <= t.native_quads.len())
+                    .is_some_and(|end| end <= t.native_quad_count())
         })
 }
 
 fn valid_bins(t: &GeometryTile) -> bool {
-    if t.native_quads.is_empty() {
+    if t.native_quad_count() == 0 {
         return t.native_bins.is_empty();
     }
+    let mut faces = t.native_records();
     let mut next = 0usize;
     for b in &t.native_bins {
         if b.first_quad as usize != next || b.quad_count == 0 || b.axis_sign & 3 > 2 {
@@ -1064,11 +1070,11 @@ fn valid_bins(t: &GeometryTile) -> bool {
         }
         let Some(end) = next
             .checked_add(b.quad_count as usize)
-            .filter(|end| *end <= t.native_quads.len())
+            .filter(|end| *end <= t.native_quad_count())
         else {
             return false;
         };
-        for q in &t.native_quads[next..end] {
+        for q in faces.by_ref().take(end - next) {
             let plane = q.anchor[(b.axis_sign & 3) as usize];
             if q.axis_sign != b.axis_sign || plane < b.min_plane || plane > b.max_plane {
                 return false;
@@ -1076,7 +1082,7 @@ fn valid_bins(t: &GeometryTile) -> bool {
         }
         next = end;
     }
-    next == t.native_quads.len()
+    next == t.native_quad_count()
 }
 
 #[cfg(test)]
@@ -1550,6 +1556,53 @@ mod tests {
             t.native_bins[0].min_plane = f32::INFINITY;
             assert!(decode(&bytes(&t), t.key).is_none());
         }
+    }
+    #[test]
+    fn compact_residency_preserves_face_bits_direction_bins_and_disk_restart() {
+        let key = key(4);
+        let mut tile = build(&world(), key, || false).unwrap();
+        tile.exact = false;
+        tile.mesh.vertices.clear();
+        tile.mesh.indices.clear();
+        tile.proxy_triangles.clear();
+        tile.face_profile_indices.clear();
+        tile.native_quads.clear();
+        tile.native_bins.clear();
+        let edge = voxel_size() as f32;
+        let origin = [tile.mesh.origin.x,tile.mesh.origin.y,tile.mesh.origin.z].map(|v| v as f64 * voxel_size());
+        tile.bounds = [origin.map(|v| v-2.), origin.map(|v| v+2.)];
+        for axis_sign in [0, 1, 2, 4, 5, 6] {
+            let first = tile.native_quads.len();
+            for z in 0..16 {
+                for x in 0..16 {
+                    tile.native_quads.push(NativeQuad {
+                        anchor: [x as f32 * edge, if x % 2 == 0 {-0.0} else {-0.317}, z as f32 * edge],
+                        extent: [edge, edge], axis_sign, material: Material::Stone as u32, profile_index: 0,
+                    });
+                }
+            }
+            tile.native_bins.push(NativeBin {axis_sign, first_quad:first as u32,quad_count:256,min_plane:-2.,max_plane:2.});
+        }
+        tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
+            + tile.native_bins.capacity()*std::mem::size_of::<NativeBin>() + tile.face_profiles.capacity()*80;
+        let bits = |q: NativeQuad| bytemuck::cast::<NativeQuad, [u32; 8]>(q);
+        let mut original: Vec<_> = tile.native_records().map(bits).collect();
+        assert!(original.len() >= 512);
+        original.sort_unstable();
+        let original_bytes = tile.bytes;
+        tile.pack_native_cache(4);
+        assert!(tile.native_quads.is_empty());
+        assert!(tile.bytes < original_bytes);
+        assert!(tile
+            .packed_native
+            .as_ref()
+            .is_some_and(|p| !p.regions.is_empty()));
+        assert!(valid_bins(&tile));
+        let restored = decode(&bytes(&tile), key).unwrap();
+        assert_eq!(restored.native_quad_count(), original.len());
+        let mut actual: Vec<_> = restored.native_records().map(bits).collect();
+        actual.sort_unstable();
+        assert_eq!(actual, original);
     }
     #[test]
     fn key_reservation_rejects_large_record_before_reading() {

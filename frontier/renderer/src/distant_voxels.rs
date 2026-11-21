@@ -783,7 +783,18 @@ impl Generator<'_> {
                 pack_water_bed(col.visible_top - col.ground_top, col.ground_surface)
                     | water_course_paint(course)
             } else {
-                pack_color(color)
+                // Bits 5..6 describe the eleven cells beneath the surface. A
+                // distant pixel can see these even when it lands on a proxy roof.
+                let layer = if col.ground_subsurface == col.ground_surface {
+                    0
+                } else {
+                    match col.ground_subsurface {
+                        Material::Stone => 1,
+                        Material::Sand => 2,
+                        _ => 3,
+                    }
+                };
+                pack_color(color) | layer << 5
             };
             (col, paint)
         };
@@ -916,6 +927,45 @@ impl Generator<'_> {
         Ok(id)
     }
 
+    // Each negotiated interval is addressed in the shared world lattice.
+    // Both tiles sample exactly the same three columns even at a T-junction.
+    fn relief_edges(&mut self) -> Result<[Vec<i64>; 4], String> {
+        let width = i64::from(self.key.width_cells);
+        let mut edges: [Vec<i64>; 4] = Default::default();
+        for (edge, steps) in edges.iter_mut().enumerate() {
+            let stride = i64::from(self.key.edge_steps[edge]);
+            if stride < 4 || stride as f64 * voxel_size() < 2. {
+                continue;
+            }
+            let [axis, along] = edge_axes(edge);
+            let plane = if edge == 0 || edge == 3 { 0 } else { width };
+            let mut at = [0; 2];
+            at[axis] = plane;
+            let mut first = self.column(at)?;
+            for t in (0..width).step_by(stride as usize) {
+                at[along] = t + stride / 2;
+                let mid = self.column(at)?;
+                at[along] = t + stride;
+                let last = self.column(at)?;
+                let rise = (first.height - mid.height)
+                    .abs()
+                    .max((mid.height - last.height).abs());
+                let bend = (first.height + last.height - 2 * mid.height).abs();
+                let broad = stride as f64 * voxel_size() >= 4.;
+                let step = if rise > stride || broad && 3 * rise > stride {
+                    stride / 4
+                } else if 4 * rise > stride || broad && 12 * rise > stride || bend > stride / 4 {
+                    stride / 2
+                } else {
+                    stride
+                };
+                steps.push(step);
+                first = last;
+            }
+        }
+        Ok(edges)
+    }
+
     // Anchor coarse blocks at lattice nodes. A regular node owns half a cell
     // on either side, so its two halves also agree across a tile boundary.
     // A finer shared edge introduces smaller blocks for the adjacent half row.
@@ -926,14 +976,14 @@ impl Generator<'_> {
         pitch: i64,
         center: NativeColumn,
         rivers: Option<&frontier_world::terrain::RiverSurvey>,
+        seam_steps: &[Vec<i64>; 4],
         edges: &mut Edges,
         runs: &mut HashMap<[i64; 2], Run>,
     ) -> Result<[i64; 2], String> {
         let width = i64::from(self.key.width_cells);
         let half = pitch / 2;
         // Test the existing center probe against the regular node samples.
-        // Shorelines and narrow ridge crests gain a half-pitch lattice while
-        // the outer half row keeps the tile's negotiated boundary spacing.
+        // Shorelines and steep slopes gain a finer lattice up to the shared border.
         let mut interior_pitch = [pitch; 2];
         let mut snow_profile = 0;
         let pitch_m = pitch as f64 * voxel_size();
@@ -983,8 +1033,8 @@ impl Generator<'_> {
             let falling = inland && wet_range[1] - wet_range[0] > (shallowest / 2).max(2);
             if inland && (shoreline || falling) {
                 interior_pitch = [if pitch_m >= 4. { pitch / 4 } else { half }; 2];
-            } else if pitch_m >= 4. {
-                interior_pitch = if shoreline {
+            } else if pitch_m >= 2. {
+                interior_pitch = if shoreline && pitch_m >= 4. {
                     [half; 2]
                 } else {
                     relief_pitch(heights, center.height, pitch)
@@ -1003,7 +1053,8 @@ impl Generator<'_> {
                 let mut roof = this.block_roof(&xx, &zz, run)?;
                 if snow_profile != 0 && matches!(run.top_material, Material::Snow | Material::Stone)
                 {
-                    roof.material = SNOW_ROOF;
+                    // Retain the individual source column's substrate.
+                    roof.material = SNOW_ROOF | ((run.paint >> 5) & 3) << 8;
                     roof.profile_index = snow_profile;
                 }
                 this.append_quads([roof])?;
@@ -1020,25 +1071,14 @@ impl Generator<'_> {
                 (x..x + half, (x == 0).then_some(0)),
                 (x + half..x + pitch, (x + pitch == width).then_some(2)),
             ] {
-                let mut sx = zedge
-                    .map_or(
-                        if xedge.is_some() {
-                            pitch
-                        } else {
-                            interior_pitch[0]
-                        },
-                        |e| strides[e],
-                    )
+                // The one-cell border below carries the negotiated seam.
+                // The full half-row inside it can follow the hillside; its
+                // transition to the border uses ordinary closed side faces.
+                let mut sx = interior_pitch[0]
+                    .min(zedge.map_or(pitch, |e| strides[e]))
                     .max((pitch / 4).max(1));
-                let mut sz = xedge
-                    .map_or(
-                        if zedge.is_some() {
-                            pitch
-                        } else {
-                            interior_pitch[1]
-                        },
-                        |e| strides[e],
-                    )
+                let mut sz = interior_pitch[1]
+                    .min(xedge.map_or(pitch, |e| strides[e]))
                     .max((pitch / 4).max(1));
                 if let Some(rivers) = rivers {
                     let lo = [xrange.start, zrange.start];
@@ -1101,25 +1141,32 @@ impl Generator<'_> {
             let inside = if plane == 0 { 0 } else { width - 1 };
             let start = [x, z][along];
             let stride = strides[edge];
-            for t in (start..start + pitch).step_by(stride as usize) {
-                // The cells closest to each node meet native and T-junction
-                // corners exactly. Both intervening spans share the same
-                // lattice samples as the interior on an equal-pitch edge.
-                let end = t + stride;
-                for (span, horizontal, normal) in [
-                    (t..t + 1, t, inside),
-                    (t + 1..t + stride / 2, t, plane),
-                    (t + stride / 2..end - 1, end, plane),
-                    (end - 1..end, end - 1, inside),
-                ]
-                .into_iter()
-                .take(if stride == 1 { 1 } else { 4 })
-                {
-                    if axis == 0 {
-                        add(self, inside..inside + 1, span, [normal, horizontal])?;
-                    } else {
-                        let span = span.start.max(1)..span.end.min(width - 1);
-                        add(self, span, inside..inside + 1, [horizontal, normal])?;
+            for interval in (start..start + pitch).step_by(stride as usize) {
+                let step = seam_steps[edge]
+                    .get((interval / stride) as usize)
+                    .copied()
+                    .unwrap_or(stride);
+                for t in (interval..interval + stride).step_by(step as usize) {
+                    let stride = step;
+                    // The cells closest to each node meet native and T-junction
+                    // corners exactly. Both intervening spans share the same
+                    // lattice samples as the interior on an equal-pitch edge.
+                    let end = t + stride;
+                    for (span, horizontal, normal) in [
+                        (t..t + 1, t, inside),
+                        (t + 1..t + stride / 2, t, plane),
+                        (t + stride / 2..end - 1, end, plane),
+                        (end - 1..end, end - 1, inside),
+                    ]
+                    .into_iter()
+                    .take(if stride == 1 { 1 } else { 4 })
+                    {
+                        if axis == 0 {
+                            add(self, inside..inside + 1, span, [normal, horizontal])?;
+                        } else {
+                            let span = span.start.max(1)..span.end.min(width - 1);
+                            add(self, span, inside..inside + 1, [horizontal, normal])?;
+                        }
                     }
                 }
             }
@@ -1212,6 +1259,11 @@ impl Generator<'_> {
         } else {
             None
         };
+        let seam_steps = if blocks {
+            self.relief_edges()?
+        } else {
+            Default::default()
+        };
         let group_side = if blocks && !can_certify {
             // At flight scale a 4x4 certificate group can span an entire
             // ridge despite every individual roof following the slope.
@@ -1284,6 +1336,7 @@ impl Generator<'_> {
                         pitch,
                         center,
                         rivers.as_ref(),
+                        &seam_steps,
                         &mut edges,
                         &mut block_runs,
                     )?;
@@ -1433,12 +1486,17 @@ impl Generator<'_> {
                     (0, true) => 2,
                     _ => 3,
                 };
+                let edge_index = edge;
                 let stride = i64::from(key.edge_steps[edge]);
                 // Middle spans have identical tops in the two tiles. Only
                 // native edge cells need an exposed face across the seam.
                 for edge in &sides[usize::from(positive)] {
                     let t = i64::from(edge.span.start);
-                    if edge.span.end - edge.span.start != 1 || !seam_native(t, stride) {
+                    let step = seam_steps[edge_index]
+                        .get((t / stride) as usize)
+                        .copied()
+                        .unwrap_or(stride);
+                    if edge.span.end - edge.span.start != 1 || !seam_native(t, step) {
                         continue;
                     }
                     let outside = if positive { width } else { -1 };
@@ -1507,7 +1565,7 @@ fn relief_pitch(corners: [i64; 4], center: i64, pitch: i64) -> [i64; 2] {
     let curvature = (4 * center - a - b - c - d).abs();
     let half = pitch / 2;
     let mut step = [if curvature > half { half } else { pitch }; 2];
-    if pitch as f64 * voxel_size() < 12. {
+    if pitch as f64 * voxel_size() < 2. {
         return step;
     }
     if (a + d - b - c).abs() > 2 * pitch {
@@ -1515,10 +1573,16 @@ fn relief_pitch(corners: [i64; 4], center: i64, pitch: i64) -> [i64; 2] {
     }
     let rise = [(b + d - a - c).abs(), (c + d - a - b).abs()];
     let steep_axis = usize::from(rise[1] > rise[0]);
+    let broad = pitch as f64 * voxel_size() >= 4.;
     for axis in 0..2 {
-        if rise[axis] > 4 * pitch && axis == steep_axis {
+        // A shallow hillside can rise through several metres of voxels in a
+        // single flight block. Spend the extra strips across that slope.
+        let dominant = axis == steep_axis;
+        if dominant && (rise[axis] > 4 * pitch || broad && 3 * rise[axis] > 4 * pitch) {
             step[axis] = pitch / 4;
-        } else if rise[axis] > 3 * half {
+        } else if rise[axis] > 3 * half
+            || broad && 3 * rise[axis] > if dominant { pitch } else { 2 * pitch }
+        {
             step[axis] = half;
         }
     }
@@ -1652,9 +1716,10 @@ mod tests {
         let p = (32. / voxel_size()).ceil() as i64;
         assert_eq!(relief_pitch([0, 3 * p, 0, 3 * p], 3 * p / 2, p), [p / 4, p]);
         assert_eq!(relief_pitch([3 * p, 3 * p, 0, 0], 3 * p / 2, p), [p, p / 4]);
-        assert_eq!(relief_pitch([0, p, 0, p], p / 2, p), [p / 2, p]);
+        assert_eq!(relief_pitch([0, p, 0, p], p / 2, p), [p / 4, p]);
         assert_eq!(relief_pitch([2 * p, 0, 0, 2 * p], p, p), [p / 2; 2]);
-        assert_eq!(relief_pitch([0, p / 2, 0, p / 2], p / 4, p), [p; 2]);
+        assert_eq!(relief_pitch([0, p / 2, 0, p / 2], p / 4, p), [p / 2, p]);
+        assert_eq!(relief_pitch([0, p / 8, 0, p / 8], p / 16, p), [p; 2]);
         assert_eq!(relief_pitch([p; 4], p + p / 4, p), [p / 2; 2]);
     }
 
@@ -1771,7 +1836,11 @@ mod tests {
         let tile = mixed_tile(Mode::Blocks, &world, min, 4096, 1024, [1024; 4]);
         let mut roofs = 0;
         let mut checked = std::collections::BTreeSet::new();
-        for q in tile.native_quads.iter().filter(|q| q.material == SNOW_ROOF) {
+        for q in tile
+            .native_quads
+            .iter()
+            .filter(|q| q.material & 255 == SNOW_ROOF)
+        {
             roofs += 1;
             assert_eq!(q.axis_sign, 1);
             if !checked.insert(q.profile_index) {
@@ -2023,6 +2092,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn steep_mixed_width_tiles_share_the_refined_edge_and_own_each_riser_once() {
+        let world = World::fbm(
+            673,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Locate a flight-scale slope with >2:1 grade along the shared edge.
+        let [x, z] = (-16..16)
+            .flat_map(|i| (-16..16).map(move |j| [(-90 + i) * 512, (-188 + j) * 512]))
+            .find(|&[x, z]| {
+                (world.column(x, z + 32).height_cells() - world.column(x, z).height_cells()).abs()
+                    > 64
+            })
+            .expect("steep native ridge");
+        let coarse = mixed_tile(
+            Mode::Blocks,
+            &world,
+            [x - 512, z],
+            512,
+            128,
+            [128, 128, 64, 128],
+        );
+        let mut differing = 0;
+        for offset in [0, 256] {
+            let fine = mixed_tile(Mode::Blocks, &world, [x, z + offset], 256, 64, [64; 4]);
+            for i in 0..256 {
+                let local = ((i as f64 + 0.5) * voxel_size()) as f32;
+                let along = local + (offset as f64 * voxel_size()) as f32;
+                let plane = (512. * voxel_size()) as f32;
+                let a = edge_top(&coarse, plane, true, along);
+                let b = edge_top(&fine, 0., false, local);
+                let left = side_span(&coarse, 0, plane, along);
+                let right = side_span(&fine, 4, 0., local);
+                if a != b {
+                    differing += 1;
+                    assert_eq!(a, world.column(x - 1, z + offset + i).height_m() as f32);
+                    assert_eq!(b, world.column(x, z + offset + i).height_m() as f32);
+                }
+                assert_eq!(left, if a > b { vec![[b, a]] } else { vec![] });
+                assert_eq!(right, if b > a { vec![[a, b]] } else { vec![] });
+                // The second half of a 16-cell interval takes its upper
+                // lattice node. The original 64-cell interval still uses t=0.
+                if offset == 0 && i == 8 {
+                    assert_eq!(a, world.column(x, z + 16).height_m() as f32);
+                    assert_eq!(b, a);
+                }
+            }
+        }
+        assert!(differing > 0);
     }
 
     #[test]

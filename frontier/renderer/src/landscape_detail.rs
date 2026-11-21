@@ -244,8 +244,110 @@ impl ShadingGrid {
     }
 }
 
+/// The lowest ray height that clears the sampled ridges toward the sun.
+/// Children inherit heights in world metres so a narrow summit can rise
+/// above a shadow that covers the surrounding valley on the coarser grid.
+struct SolarHorizon {
+    min: [i64; 2],
+    side: usize,
+    step: f64,
+    distant: Vec<f32>,
+}
+
+impl SolarHorizon {
+    fn sample(&self, world: [f64; 2]) -> Option<f32> {
+        let p: [f64; 2] = std::array::from_fn(|i| world[i] / self.step - self.min[i] as f64);
+        if p.iter().any(|&x| x < 0. || x >= (self.side - 1) as f64) {
+            return None;
+        }
+        let [x, z] = p.map(|v| v as usize);
+        let [u, v] = p.map(|v| v.fract() as f32);
+        let at = z * self.side + x;
+        let h = &self.distant;
+        Some(
+            (h[at] * (1. - u) + h[at + 1] * u) * (1. - v)
+                + (h[at + self.side] * (1. - u) + h[at + self.side + 1] * u) * v,
+        )
+    }
+
+    fn survey(
+        grid: &ShadingGrid,
+        sun: [f32; 3],
+        parent: Option<&Self>,
+        image: &mut [u8],
+        channel: usize,
+    ) -> Self {
+        let r = grid.resolution;
+        let mut field = Self {
+            min: grid.min,
+            side: r.side,
+            step: r.step,
+            distant: vec![-1e8; r.side * r.side],
+        };
+        let horizontal = sun[0].hypot(sun[2]);
+        let source_side = (r.side + 2 * r.halo) as isize;
+        // Each address and bilinear weight is shared by the whole grid.
+        let mut taps = Vec::new();
+        if horizontal > 1e-4 && sun[1] > 0. {
+            for k in 1..=40 {
+                let d = k as f32;
+                let x = d * sun[0] / horizontal;
+                let z = d * sun[2] / horizontal;
+                let u = x - x.floor();
+                let v = z - z.floor();
+                taps.push((
+                    x.floor() as isize,
+                    z.floor() as isize,
+                    [(1. - u) * (1. - v), u * (1. - v), (1. - u) * v, u * v],
+                    d * r.step as f32 * sun[1] / horizontal,
+                    k >= 8,
+                ));
+            }
+        }
+        for z in 0..r.side {
+            for x in 0..r.side {
+                let world = [
+                    (grid.min[0] + x as i64) as f64 * r.step,
+                    (grid.min[1] + z as i64) as f64 * r.step,
+                ];
+                let mut distant = parent.and_then(|p| p.sample(world)).unwrap_or(-1e8);
+                let mut horizon = distant;
+                let sx = (x + r.halo) as isize;
+                let sz = (z + r.halo) as isize;
+                for &(dx, dz, w, rise, far) in &taps {
+                    let (u, v) = (sx + dx, sz + dz);
+                    if u < 0 || v < 0 || u + 1 >= source_side || v + 1 >= source_side {
+                        break;
+                    }
+                    let at = (v * source_side + u) as usize;
+                    let next = at + source_side as usize;
+                    let a = &grid.samples;
+                    let height = a[at].height * w[0]
+                        + a[at + 1].height * w[1]
+                        + a[next].height * w[2]
+                        + a[next + 1].height * w[3]
+                        - rise;
+                    horizon = horizon.max(height);
+                    if far {
+                        distant = distant.max(height);
+                    }
+                }
+                field.distant[z * r.side + x] = distant;
+                let height = grid.samples[(sz * source_side + sx) as usize].height;
+                // Source gradients between samples leave uncertainty near a
+                // crest. Fade across that interval instead of stamping a cell.
+                let radius = (r.step as f32 * 0.16).max(0.125);
+                let t = (0.5 + 0.5 * (height - horizon) / radius).clamp(0., 1.);
+                image[4 * (z * SIDE + x) + channel] = unorm(t * t * (3. - 2. * t));
+            }
+        }
+        field
+    }
+}
+
 struct Grid {
     source: Source,
+    sun: [f32; 3],
     fine: ShadingGrid,
     ridges: Option<ShadingGrid>,
     valley: Option<ShadingGrid>,
@@ -253,7 +355,12 @@ struct Grid {
 }
 
 impl Grid {
-    fn make(source: Source, min: [i64; 2], previous: Option<&Grid>) -> (Self, Vec<u8>) {
+    fn make(
+        source: Source,
+        min: [i64; 2],
+        sun: [f32; 3],
+        previous: Option<&Grid>,
+    ) -> (Self, Vec<u8>) {
         let terrain =
             FbmTerrain::new(source.seed, source.params).expect("validated flight terrain");
         let reusable = previous.filter(|g| g.source == source);
@@ -305,6 +412,14 @@ impl Grid {
                 terrain_sky,
             );
         }
+        // Block mode leaves two unused full-resolution layers at mip zero.
+        // Pack all three solar surveys in one. Keep the river layout intact.
+        if let (Some(ridges), Some(valley)) = (&ridges, &valley) {
+            let data = &mut pixels[8 * area..12 * area];
+            let broad = SolarHorizon::survey(ridges, sun, None, data, 2);
+            let middle = SolarHorizon::survey(valley, sun, Some(&broad), data, 1);
+            SolarHorizon::survey(&fine, sun, Some(&middle), data, 0);
+        }
         if let Some(rivers) = &rivers {
             for v in 0..SIDE {
                 for u in 0..SIDE {
@@ -321,6 +436,7 @@ impl Grid {
         (
             Self {
                 source,
+                sun,
                 fine,
                 ridges,
                 valley,
@@ -418,9 +534,155 @@ impl Texture {
     }
 }
 
+// One-metre source elevations resolve narrow folds just beyond the exact
+// volume. The ordinary block texture reserves its fourth base layer for this
+// independent 257 m moving window; a shift only evaluates newly exposed rows.
+struct LocalRelief {
+    source: Source,
+    min: [i64; 2],
+    spacing: f64,
+    heights: Vec<f32>,
+    base: f32,
+    unit: f32,
+    pixels: Vec<u8>,
+}
+// At altitude the detailed terrain lies ahead of the aircraft. Survey a ray
+// through the lower-middle viewport and place the small source window there.
+fn local_target(
+    terrain: &FbmTerrain,
+    camera: crate::Camera,
+    ground: f32,
+) -> Option<([i64; 2], f64)> {
+    let eye = camera.position;
+    let mut center = [eye.x, eye.z];
+    let mut spacing = 1.;
+    if eye.y - f64::from(ground) > 95. {
+        let forward = camera.direction().as_dvec3();
+        let right = forward
+            .cross(camera.view_up().as_dvec3())
+            .normalize_or_zero();
+        let down = forward.cross(right);
+        let ray = (forward + down * (0.28 * (0.5 * f64::from(camera.fov_y).to_radians()).tan()))
+            .normalize();
+        let mut last = 0.;
+        let mut t = 32.;
+        let limit = f64::from(camera.far).min(5000.);
+        loop {
+            let p = eye + t * ray;
+            if p.y <= terrain.height_m(p.x, p.z) {
+                for _ in 0..6 {
+                    let mid = 0.5 * (last + t);
+                    let p = eye + mid * ray;
+                    if p.y > terrain.height_m(p.x, p.z) {
+                        last = mid;
+                    } else {
+                        t = mid;
+                    }
+                }
+                let p = eye + t * ray;
+                center = [p.x, p.z];
+                spacing = if t < 420. {
+                    1.
+                } else if t < 1350. {
+                    2.
+                } else {
+                    4.
+                };
+                break;
+            }
+            if t >= limit {
+                return None;
+            }
+            last = t;
+            t = (t + (0.12 * t).clamp(32., 160.)).min(limit);
+        }
+    }
+    let min = center.map(|v| (v / (spacing * 32.)).round() as i64 * 32 - SIDE as i64 / 2);
+    Some((min, spacing))
+}
+impl LocalRelief {
+    fn make(source: Source, min: [i64; 2], spacing: f64, old: Option<&Self>) -> Self {
+        const STRIDE: usize = SIDE + 2;
+        let terrain = FbmTerrain::new(source.seed, source.params).expect("validated local terrain");
+        let old = old.filter(|g| g.source == source && g.spacing == spacing);
+        let mut heights = Vec::with_capacity(STRIDE * STRIDE);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for z in 0..STRIDE {
+            for x in 0..STRIDE {
+                let at = [min[0] + x as i64 - 1, min[1] + z as i64 - 1];
+                let previous = old.and_then(|g| {
+                    let u = at[0] - g.min[0] + 1;
+                    let v = at[1] - g.min[1] + 1;
+                    ((0..STRIDE as i64).contains(&u) && (0..STRIDE as i64).contains(&v))
+                        .then(|| g.heights[v as usize * STRIDE + u as usize])
+                });
+                let height = previous.unwrap_or_else(|| {
+                    terrain.height_m(at[0] as f64 * spacing, at[1] as f64 * spacing) as f32
+                });
+                heights.push(height);
+                lo = lo.min(height);
+                hi = hi.max(height);
+            }
+        }
+        let unit = ((hi - lo) / 65535.).max(source.edge as f32);
+        let mut pixels = Vec::with_capacity(SIDE * SIDE * 4);
+        for z in 0..SIDE {
+            for x in 0..SIDE {
+                let i = (z + 1) * STRIDE + x + 1;
+                let n = glam::Vec3::new(
+                    heights[i - 1] - heights[i + 1],
+                    2. * spacing as f32,
+                    heights[i - STRIDE] - heights[i + STRIDE],
+                );
+                let oct = n / n.abs().element_sum();
+                let word = ((heights[i] - lo) / unit).round().clamp(0., 65535.) as u16;
+                let [high, low] = word.to_be_bytes();
+                pixels.extend_from_slice(&[
+                    unorm(0.5 + 0.5 * oct.x),
+                    unorm(0.5 + 0.5 * oct.z),
+                    high,
+                    low,
+                ]);
+            }
+        }
+        Self {
+            source,
+            min,
+            spacing,
+            heights,
+            base: lo,
+            unit,
+            pixels,
+        }
+    }
+    fn upload(&self, queue: &wgpu::Queue, texture: &wgpu::Texture) {
+        let mut dst = texture.as_image_copy();
+        dst.origin.z = 3;
+        queue.write_texture(
+            dst,
+            &self.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIDE as u32 * 4),
+                rows_per_image: Some(SIDE as u32),
+            },
+            wgpu::Extent3d {
+                width: SIDE as u32,
+                height: SIDE as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Detail {
     grid: Option<Arc<Grid>>,
+    local: Option<Arc<LocalRelief>>,
+    pending_local: Option<Receiver<LocalRelief>>,
+    local_aim: Option<(crate::Camera, Option<([i64; 2], f64)>)>,
+    local_transition: Option<(std::time::Instant, Option<[i64; 2]>)>,
     pending: Option<Receiver<(Grid, Vec<u8>)>>,
     source: Option<Source>,
     transition: Option<(std::time::Instant, Option<[i64; 2]>)>,
@@ -457,9 +719,13 @@ impl super::AdaptiveGpu {
             edge: voxel_size(),
             vegetation: world.vegetation_enabled(),
         };
+        let sun = [self.lighting[0], self.lighting[1], self.lighting[2]];
         if self.landscape_detail.source != Some(source) {
             self.landscape_detail.source = Some(source);
             self.landscape_detail.grid = None;
+            self.landscape_detail.local = None;
+            self.landscape_detail.pending_local = None;
+            self.landscape_detail.local_aim = None;
         }
         let center = [camera.position.x, camera.position.z]
             .map(|v| (v / (STEP_M * RECENTER as f64)).round() as i64 * RECENTER);
@@ -471,6 +737,7 @@ impl super::AdaptiveGpu {
                     // Retain alignment while flying. Obsolete or teleported
                     // patches never cover the current eye by coincidence.
                     if grid.source == source
+                        && grid.sun == sun
                         && (0..2).all(|a| grid.fine.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
                     {
                         let layers = if grid.ridges.is_some() || grid.rivers.is_some() {
@@ -511,6 +778,9 @@ impl super::AdaptiveGpu {
                             );
                             offset += len;
                         }
+                        if let Some(local) = &self.landscape_detail.local {
+                            local.upload(queue, texture);
+                        }
                         let shift = self
                             .landscape_detail
                             .grid
@@ -528,7 +798,7 @@ impl super::AdaptiveGpu {
             .landscape_detail
             .grid
             .as_ref()
-            .is_some_and(|g| g.fine.min == min)
+            .is_some_and(|g| g.fine.min == min && g.sun == sun)
         {
             return;
         }
@@ -536,8 +806,105 @@ impl super::AdaptiveGpu {
         let (tx, rx) = mpsc::sync_channel(1);
         self.landscape_detail.pending = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(Grid::make(source, min, old.as_deref()));
+            let _ = tx.send(Grid::make(source, min, sun, old.as_deref()));
         });
+    }
+    pub(crate) fn update_local_relief(
+        &mut self,
+        queue: &wgpu::Queue,
+        terrain: &FbmTerrain,
+        camera: crate::Camera,
+        ground: f32,
+    ) {
+        let Some(source) = self.landscape_detail.grid.as_ref().map(|g| g.source) else {
+            return;
+        };
+        if !source.blocks {
+            return;
+        }
+        let detail = &mut self.landscape_detail;
+        if detail.local_aim.is_none_or(|(c, _)| {
+            c.position.distance_squared(camera.position) > 16. * 16.
+                || c.direction().dot(camera.direction()) < 0.998
+                || (c.roll - camera.roll).abs() > 0.08
+                || c.fov_y != camera.fov_y
+                || c.far != camera.far
+        }) {
+            detail.local_aim = Some((camera, local_target(terrain, camera, ground)));
+        }
+        let target = detail.local_aim.and_then(|(_, aim)| aim);
+        if let Some(rx) = &detail.pending_local {
+            match rx.try_recv() {
+                Ok(local) => {
+                    detail.pending_local = None;
+                    if local.source == source
+                        && target.is_some_and(|(min, step)| {
+                            step == local.spacing
+                                && (0..2).all(|a| local.min[a].abs_diff(min[a]) <= 64)
+                        })
+                    {
+                        local.upload(queue, &self.shadows.near.detail.texture);
+                        let shift = detail
+                            .local
+                            .as_ref()
+                            .filter(|g| {
+                                g.spacing == local.spacing
+                                    && (0..2).all(|a| local.min[a].abs_diff(g.min[a]) < SIDE as u64)
+                            })
+                            .map(|g| [0, 1].map(|a| local.min[a] - g.min[a]));
+                        detail.local_transition = Some((std::time::Instant::now(), shift));
+                        detail.local = Some(Arc::new(local));
+                    }
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => detail.pending_local = None,
+            }
+        }
+        let Some((min, spacing)) = target else {
+            return;
+        };
+        if detail
+            .local
+            .as_ref()
+            .is_some_and(|g| g.min == min && g.spacing == spacing)
+        {
+            return;
+        }
+        let old = detail.local.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        detail.pending_local = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(LocalRelief::make(source, min, spacing, old.as_deref()));
+        });
+    }
+    pub(super) fn local_inverse_spacing(&self) -> f32 {
+        self.landscape_detail
+            .local
+            .as_ref()
+            .map_or(0., |g| (1. / g.spacing) as f32)
+    }
+    pub(super) fn local_relief_params(&self, eye: [f64; 3]) -> [f32; 8] {
+        let Some(g) = &self.landscape_detail.local else {
+            return [0.; 8];
+        };
+        let [sx, sz, t, w] = transition(self.landscape_detail.local_transition);
+        [
+            (eye[0] / g.spacing - g.min[0] as f64) as f32,
+            (eye[2] / g.spacing - g.min[1] as f64) as f32,
+            (f64::from(g.base) - eye[1]) as f32,
+            g.unit,
+            sx,
+            sz,
+            t,
+            w,
+        ]
+    }
+
+    pub(super) fn landscape_sun_ready(&self) -> bool {
+        self.landscape_detail
+            .grid
+            .as_ref()
+            .is_some_and(|g| g.ridges.is_some() && g.sun == self.lighting[..3])
     }
     pub(super) fn landscape_offset(&self, eye: [f64; 3]) -> [f32; 2] {
         self.landscape_detail.grid.as_ref().map_or([-1e20; 2], |g| {
@@ -548,27 +915,33 @@ impl super::AdaptiveGpu {
         })
     }
     pub(super) fn landscape_transition(&self) -> [f32; 4] {
-        if let Some((started, shift)) = self.landscape_detail.transition {
-            let t = (started.elapsed().as_secs_f32() / 0.45).min(1.);
-            let offset = shift.unwrap_or([0; 2]);
-            return [
-                offset[0] as f32,
-                offset[1] as f32,
-                t * t * (3. - 2. * t),
-                f32::from(shift.is_some()),
-            ];
-        }
-        [0., 0., 1., 0.]
+        transition(self.landscape_detail.transition)
     }
     pub(crate) fn settle_landscape_transition(&mut self) {
         self.landscape_detail.transition = None;
+        self.landscape_detail.local_transition = None;
     }
 
     pub(crate) fn landscape_detail_pending(&self) -> bool {
-        self.landscape_detail.source.is_some() && self.landscape_detail.pending.is_some()
+        self.landscape_detail.source.is_some()
+            && (self.landscape_detail.pending.is_some()
+                || self.landscape_detail.pending_local.is_some())
     }
 }
 
+fn transition(value: Option<(std::time::Instant, Option<[i64; 2]>)>) -> [f32; 4] {
+    if let Some((started, shift)) = value {
+        let t = (started.elapsed().as_secs_f32() / 0.45).min(1.);
+        let offset = shift.unwrap_or([0; 2]);
+        return [
+            offset[0] as f32,
+            offset[1] as f32,
+            t * t * (3. - 2. * t),
+            f32::from(shift.is_some()),
+        ];
+    }
+    [0., 0., 1., 0.]
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +1025,77 @@ mod tests {
     }
 
     #[test]
+    fn sun_survey_shadows_a_valley_but_clears_a_peak_rising_above_the_same_ray() {
+        let field = |r: Resolution, height: fn(f64, f64) -> f64| {
+            let stride = r.side + 2 * r.halo;
+            let min = [-(r.side as i64 / 2); 2];
+            let samples = (0..stride * stride)
+                .map(|i| {
+                    let x = (min[0] + (i % stride) as i64 - r.halo as i64) as f64 * r.step;
+                    let z = (min[1] + (i / stride) as i64 - r.halo as i64) as f64 * r.step;
+                    Sample {
+                        height: height(x, z) as f32,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            ShadingGrid {
+                min,
+                resolution: r,
+                samples,
+            }
+        };
+        let coarse = field(VALLEY, |x, _| if x == 320. { 200. } else { 0. });
+        let fine = field(NEAR, |x, z| if x == 0. && z == 0. { 300. } else { 0. });
+        let mut bytes = vec![0; SIDE * SIDE * 4];
+        let sun = [1., 0.25, 0.];
+        let parent = SolarHorizon::survey(&coarse, sun, None, &mut bytes, 1);
+        SolarHorizon::survey(&fine, sun, Some(&parent), &mut bytes, 0);
+        let at =
+            |x: i64, z: i64| 4 * ((z - fine.min[1]) as usize * SIDE + (x - fine.min[0]) as usize);
+        assert_eq!(bytes[at(0, 0)], 255);
+        assert_eq!(bytes[at(0, 2)], 0);
+        assert_eq!(bytes[at(52, 2)], 255);
+        SolarHorizon::survey(&fine, [0., 1., 0.], None, &mut bytes, 0);
+        assert_eq!(bytes[at(0, 2)], 255);
+    }
+
+    #[test]
+    fn local_relief_preserves_native_elevations_and_shared_normals_after_a_shift() {
+        let source = Source {
+            blocks: true,
+            seed: 997,
+            params: FbmParams {
+                recipe: FbmRecipe::Watershed,
+                ..Default::default()
+            },
+            edge: voxel_size(),
+            vegetation: false,
+        };
+        let terrain = FbmTerrain::new(source.seed, source.params).unwrap();
+        for spacing in [1., 4.] {
+            let a = LocalRelief::make(source, [-1816, 2016], spacing, None);
+            let b = LocalRelief::make(source, [-1784, 1984], spacing, Some(&a));
+            for z in (32..SIDE).step_by(7) {
+                for x in (0..SIDE - 32).step_by(11) {
+                    let old = 4 * ((z - 32) * SIDE + x + 32);
+                    let new = 4 * (z * SIDE + x);
+                    assert_eq!(a.pixels[old..old + 2], b.pixels[new..new + 2]);
+                    let encoded = u16::from_be_bytes([b.pixels[new + 2], b.pixels[new + 3]]);
+                    let h = terrain.height_m(
+                        (b.min[0] + x as i64) as f64 * spacing,
+                        (b.min[1] + z as i64) as f64 * spacing,
+                    );
+                    assert!(
+                        (f64::from(b.base + f32::from(encoded) * b.unit) - h).abs()
+                            <= f64::from(b.unit) * 0.55
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ridge_lighting_stays_world_aligned_across_a_negative_window_shift() {
         let source = Source {
             blocks: true,
@@ -663,8 +1107,8 @@ mod tests {
             edge: voxel_size(),
             vegetation: true,
         };
-        let (old, old_bytes) = Grid::make(source, [-160, -192], None);
-        let (moved, moved_bytes) = Grid::make(source, [-128, -224], Some(&old));
+        let (old, old_bytes) = Grid::make(source, [-160, -192], [0., 1., 0.], None);
+        let (moved, moved_bytes) = Grid::make(source, [-128, -224], [0., 1., 0.], Some(&old));
         let a = old.ridges.as_ref().unwrap();
         let b = moved.ridges.as_ref().unwrap();
         assert_eq!(a.min, [-66, -68]);
@@ -697,20 +1141,29 @@ mod tests {
             edge: voxel_size(),
             vegetation: true,
         };
-        let (old, before) = Grid::make(source, [-64, -128], None);
+        let (old, before) = Grid::make(source, [-64, -128], [0., 1., 0.], None);
         let (blocks, two_layers) = Grid::make(
             Source {
                 blocks: true,
                 ..source
             },
             old.fine.min,
+            [0., 1., 0.],
             None,
         );
         assert!(blocks.rivers.is_none());
         let near_bytes = SIDE * SIDE * 8;
-        assert_eq!(two_layers.len(), near_bytes + RIDGES.side * RIDGES.side * 8);
+        assert_eq!(
+            two_layers.len(),
+            2 * near_bytes + RIDGES.side * RIDGES.side * 16
+        );
         assert_eq!(before[..near_bytes], two_layers[..near_bytes]);
-        let (new, after) = Grid::make(source, [-64 + RECENTER, -128 - RECENTER], Some(&old));
+        let (new, after) = Grid::make(
+            source,
+            [-64 + RECENTER, -128 - RECENTER],
+            [0., 1., 0.],
+            Some(&old),
+        );
         let shift = RECENTER as usize;
         let area = SIDE * SIDE * 4;
         let river_shift = shift / 2;
