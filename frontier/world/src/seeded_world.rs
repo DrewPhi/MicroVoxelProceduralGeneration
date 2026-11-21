@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::Rc,
+    sync::{Arc, Mutex, OnceLock},
 };
 pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
@@ -381,8 +382,14 @@ struct Key {
     x: i64,
     z: i64,
 }
+// Local handles keep per-column lookups free of locks and atomic reference counts.
+// Only cache misses enter the shared directory. Each region builds under its own slot.
+type LocalRegion = Rc<Arc<Region>>;
+type RegionSlot = Arc<OnceLock<Arc<Region>>>;
+static SHARED_REGIONS: Mutex<VecDeque<(Key, RegionSlot)>> = Mutex::new(VecDeque::new());
+
 thread_local! {
-    static REGIONS: RefCell<VecDeque<(Key, Rc<Region>)>> = const {
+    static REGIONS: RefCell<VecDeque<(Key, LocalRegion)>> = const {
         RefCell::new(VecDeque::new())
     };
 }
@@ -469,7 +476,7 @@ fn fit_channel_sections(seed: u64, p: FbmParams, points: &mut [Node; 17], widths
     }
 }
 
-fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
+fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> LocalRegion {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
@@ -494,7 +501,34 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     }) {
         return hit;
     }
-    // Build outside the cache borrow. A one-node halo includes every incident
+    let slot = {
+        let mut directory = SHARED_REGIONS.lock().unwrap();
+        if let Some((_, slot)) = directory.iter().find(|(k, _)| *k == key) {
+            Arc::clone(slot)
+        } else {
+            if directory.len() == 32 {
+                directory.pop_front();
+            }
+            let slot = Arc::new(OnceLock::new());
+            directory.push_back((key, Arc::clone(&slot)));
+            slot
+        }
+    };
+    let shared = slot.get_or_init(|| Arc::new(build_region(seed, p, rx, rz, spacing)));
+    let value = Rc::new(Arc::clone(shared));
+    REGIONS.with(|cache| {
+        let mut c = cache.borrow_mut();
+        let capacity = if p.recipe.uses_watersheds() { 20 } else { REGION_CACHE_CAPACITY };
+        while c.len() >= capacity {
+            c.pop_front();
+        }
+        c.push_back((key, Rc::clone(&value)));
+    });
+    value
+}
+
+fn build_region(seed: u64, p: FbmParams, rx: i64, rz: i64, spacing: f64) -> Region {
+    // A one-node halo includes every incident
     // edge affecting this region, including diagonals and negative boundaries.
     let watershed = p.recipe.uses_watersheds();
     // The row just outside the accumulated halo is needed to choose the
@@ -754,21 +788,12 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
             }
         }
     }
-    let value = Rc::new(Region {
+    Region {
         reaches,
         bins,
         origin,
         bin_size,
-    });
-    REGIONS.with(|cache| {
-        let mut c = cache.borrow_mut();
-        let capacity = if watershed { 20 } else { REGION_CACHE_CAPACITY };
-        while c.len() >= capacity {
-            c.pop_front();
-        }
-        c.push_back((key, Rc::clone(&value)));
-    });
-    value
+    }
 }
 fn projected_fraction(r: Reach, x: f64, z: f64) -> f64 {
     let dx = r.b.x - r.a.x;
@@ -1738,6 +1763,20 @@ mod tests {
         assert!(common > 100);
         assert!(max_width > min_width * 2., "{min_width}..{max_width}");
     }
+    #[test]
+    fn simultaneous_workers_share_a_drainage_region() {
+        let gate = std::sync::Barrier::new(4);
+        let p = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
+        let regions = std::thread::scope(|scope| {
+            (0..4).map(|_| scope.spawn(|| {
+                gate.wait();
+                Arc::clone(&region(0x339b6, p, -310., 310.))
+            })).collect::<Vec<_>>().into_iter()
+                .map(|worker| worker.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(regions.iter().all(|r| Arc::ptr_eq(r, &regions[0])));
+    }
+
     #[test]
     fn a_headwater_grows_from_its_spring_and_keeps_the_next_segments_depth() {
         let p = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
