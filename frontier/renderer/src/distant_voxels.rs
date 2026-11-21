@@ -49,8 +49,8 @@ impl Mode {
         )
     }
 
-    pub(crate) fn initialize_application(flight: bool) {
-        MODE.get_or_init(|| Self::from_environment(if flight { Self::Blocks } else { Self::Seed }));
+    pub(crate) fn initialize_application() {
+        MODE.get_or_init(|| Self::from_environment(Self::Blocks));
     }
 
     pub(crate) fn current() -> Self {

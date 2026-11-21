@@ -107,8 +107,8 @@ impl Shadow {
         }
     }
 
-    pub fn bytes(&self) -> u64 {
-        u64::from(SIZE).pow(2) + self.positions.size() + self.light.size()
+    pub fn texture_bytes(&self) -> u64 {
+        u64::from(SIZE).pow(2)
     }
 
     pub fn prepare(

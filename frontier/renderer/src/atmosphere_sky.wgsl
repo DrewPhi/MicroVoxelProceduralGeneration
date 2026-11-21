@@ -6,6 +6,8 @@ struct AtmosphereUniform {
     lighting: vec4<f32>, // shafts, streaming haze, region count, reserved
     far_shadow: mat4x4<f32>,
     haze_regions: array<vec4<f32>,8>,
+    plane_shadow: array<vec4<f32>,4>,
+    cloud_map: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> atmosphere:AtmosphereUniform;
 struct VertexOutput {@builtin(position) position:vec4<f32>,@location(0) uv:vec2<f32>};
@@ -101,4 +103,21 @@ struct CloudOutput {
     }
     let horizon=1.-smoothstep(9000.,24000.,start);
     return CloudOutput(vec4(light*horizon,mix(1.,transmittance,horizon)),mix(vec4(1.),exp(-optical_depth),horizon));
+}
+
+// Integrate the same seeded density along the sunlight direction. Store
+// transmission from four receiver heights through the top of the deck.
+@fragment fn fs_cloud_sun(i:VertexOutput)->@location(0) vec4<f32> {
+    let base = atmosphere.cloud_map.xy + (i.uv-.5) / atmosphere.cloud_map.w;
+    let slope = atmosphere.sun.xz / atmosphere.sun.y;
+    let step = 680./16.;
+    var tau = vec4(0.);
+    for (var k=0u; k<16u; k+=1u) {
+        let y = (f32(k)+.5)*step;
+        let xz = base + slope*y;
+        let density = cloud_body(vec3(xz.x,1720.+y,xz.y),bank_coverage(xz));
+        tau[k/4u] += density*(step*.0045/atmosphere.sun.y);
+    }
+    tau.z+=tau.w; tau.y+=tau.z; tau.x+=tau.y;
+    return exp(-tau);
 }

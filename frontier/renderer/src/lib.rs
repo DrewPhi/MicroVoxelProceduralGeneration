@@ -1153,6 +1153,7 @@ impl Gpu {
         let capture_scene_depth =
             self.sample_count == 1 && post_settings.is_none_or(|s| s.render_scale == 1.);
         let mut post_attachment_bytes = 0u64;
+        let mut horizon_face_bytes = 0u64;
         if let Some(settings) = post_settings {
             let mut atmosphere = atmosphere::Atmosphere::new_with_scene_format(
                 &self.device,
@@ -1173,6 +1174,7 @@ impl Gpu {
                 };
             let (rw, rh) = atmosphere.dimensions();
             atmosphere.prepare_horizon(&self.device, &self.queue, world, *camera, settings, true);
+            horizon_face_bytes = atmosphere.horizon_face_bytes();
             atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.set_lighting_context(
                 camera,
@@ -1396,7 +1398,7 @@ impl Gpu {
         let native_voxel_m = voxel_size();
         let roll_degrees = camera.roll.to_degrees();
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"depth_source\":\"opaque_scene_before_atmosphere_and_horizon\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"roll_degrees\":{roll_degrees},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"depth_source\":\"opaque_scene_before_atmosphere_and_horizon\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"horizon_face_bytes\":{horizon_face_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -3339,7 +3341,7 @@ pub fn run() -> Result<()> {
     {
         appearance_method::initialize_meadow_application();
     }
-    adaptive_geometry::distant_voxels::Mode::initialize_application(visual_settings.flight_horizon);
+    adaptive_geometry::distant_voxels::Mode::initialize_application();
     naadf::configure_player(params.recipe.uses_watersheds());
     let world = if scene == "hybrid-topology"
         || scene == "adaptive-topology"
@@ -4397,11 +4399,12 @@ pub fn run() -> Result<()> {
             .map(|p| p.full_stats.summary());
         json.pop();
         json.push_str(&format!(
-            ",\"lighting\":{{\"ground_bounce\":{},\"sunbeams\":{},\"streaming_haze\":{},\"peak_haze_regions\":{}}}",
+            ",\"lighting\":{{\"ground_bounce\":{},\"sunbeams\":{},\"streaming_haze\":{},\"peak_haze_regions\":{},\"horizon_face_bytes\":{}}}",
             visual.ground_bounce,
             visual.sunbeams,
             visual.streaming_haze,
             viewer.atmosphere.as_ref().map_or(0, |a| a.peak_haze_regions()),
+            viewer.atmosphere.as_ref().map_or(0, |a| a.horizon_face_bytes()),
         ));
         json.push_str(&format!(",\"gpu_full_render\":{{\"supported\":{},\"samples\":{},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"scope\":\"GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps\"}}}}",
             full.is_some(),full.as_ref().map_or(0,|s|s.sample_count),number(full.as_ref().and_then(|s|s.p50_ms)),number(full.as_ref().and_then(|s|s.p95_ms)),number(full.as_ref().and_then(|s|s.p99_ms))));

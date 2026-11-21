@@ -3,6 +3,8 @@
 use crate::{settings::VisualSettings, Camera};
 use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
+#[path = "cloud_shadow.rs"]
+mod cloud_shadow;
 
 const SKY_SHADER: &str = concat!(
     include_str!("cloud_layer.wgsl"),
@@ -29,6 +31,7 @@ struct Uniform {
     far_shadow: [[f32; 4]; 4],
     haze_regions: [[f32; 4]; crate::streaming_haze::REGIONS],
     plane_shadow: [[f32; 4]; 4],
+    cloud_map: [f32; 4],
 }
 
 /// Opt-in shader diagnostics; default presentation and legacy profile are unchanged.
@@ -95,6 +98,7 @@ pub(crate) struct Atmosphere {
     scene_format: wgpu::TextureFormat,
     horizon: Option<crate::flight_horizon::Horizon>,
     aircraft_shadow: Option<crate::aircraft_shadow::Shadow>,
+    cloud_shadow: Option<cloud_shadow::CloudShadow>,
     sky: wgpu::TextureView,
     cloud_profile: wgpu::TextureView,
     sky_bind: wgpu::BindGroup,
@@ -367,6 +371,22 @@ impl Atmosphere {
             height.div_ceil(4),
             1,
         );
+        let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky inputs"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let cloud_shadow = (flight_horizon
+            && std::env::var("FRONTIER_CLOUD_SHADOWS").as_deref() != Ok("0"))
+        .then(|| cloud_shadow::CloudShadow::new(device, &sky_layout));
         let aircraft_shadow = flight_horizon.then(|| crate::aircraft_shadow::Shadow::new(device));
         let horizon = flight_horizon.then(|| {
             crate::flight_horizon::Horizon::new(device, width.div_ceil(2), height.div_ceil(2))
@@ -458,6 +478,16 @@ impl Atmosphere {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
@@ -514,25 +544,18 @@ impl Atmosphere {
                     ),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(
+                        cloud_shadow.as_ref().map_or(&sky, |s| &s.view),
+                    ),
+                },
+                wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(
                         horizon.as_ref().map_or(&sky, |h| &h.color),
                     ),
                 },
             ],
-        });
-        let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sky inputs"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
         });
         let sky_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky inputs"),
@@ -671,6 +694,7 @@ impl Atmosphere {
         Self {
             horizon,
             aircraft_shadow,
+            cloud_shadow,
             sky,
             cloud_profile,
             sky_bind,
@@ -768,10 +792,13 @@ impl Atmosphere {
                 + composite_bpp * u64::from(self.composite.is_some()))
             + u64::from(self.horizon.is_some())
                 * (u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2)) * 12)
-            + self.horizon.as_ref().map_or(0, |h| h.geometry_bytes())
-            + self.aircraft_shadow.as_ref().map_or(0, |s| s.bytes())
+            + self.aircraft_shadow.as_ref().map_or(0, |s| s.texture_bytes())
+            + u64::from(self.cloud_shadow.is_some()) * cloud_shadow::BYTES
             + lighting_pixels * 20
             + 4
+    }
+    pub(crate) fn horizon_face_bytes(&self) -> u64 {
+        self.horizon.as_ref().map_or(0, |h| h.geometry_bytes())
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -835,6 +862,7 @@ impl Atmosphere {
                 camera,
                 self.width as f32 / self.height as f32,
                 sun_direction(settings.sun_elevation, settings.sun_azimuth),
+                settings.overcast,
                 capture,
             );
         }
@@ -929,6 +957,25 @@ impl Atmosphere {
             ],
             far_shadow: context.shadow_projection,
             haze_regions: context.regions,
+            cloud_map: self.cloud_shadow.as_ref().map_or([0.; 4], |map| {
+                let wind = time_seconds * settings.cloud_speed * 1000.;
+                let weather = glam::Vec2::from(weather_origin) + glam::Vec2::new(1., 0.32) * wind;
+                let enabled = settings.terrain_shadows
+                    && settings.atmosphere
+                    && settings.beauty
+                    && !settings.visibility_benchmark
+                    && !context.submerged;
+                map.prepare(
+                    world_eye.as_vec3(),
+                    sun,
+                    weather,
+                    if enabled {
+                        settings.cloud_coverage.clamp(0., 1.)
+                    } else {
+                        0.
+                    },
+                )
+            }),
             plane_shadow: self
                 .aircraft_shadow
                 .as_ref()
@@ -967,6 +1014,9 @@ impl Atmosphere {
         shadows: Option<&crate::adaptive_gpu::AdaptiveGpu>,
     ) {
         if self.beauty_enabled.get() {
+            if let Some(clouds) = &self.cloud_shadow {
+                clouds.draw(encoder, &self.sky_bind);
+            }
             if let Some(shadow) = &self.aircraft_shadow {
                 shadow.draw(encoder);
             }
@@ -1080,7 +1130,7 @@ mod tests {
     }
     #[test]
     fn atmosphere_uniform_contract() {
-        assert_eq!(std::mem::size_of::<super::Uniform>(), 432);
+        assert_eq!(std::mem::size_of::<super::Uniform>(), 448);
         assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
         let module =
             naga::front::wgsl::parse_str(&crate::voxel_shader(super::shader_source(1))).unwrap();
@@ -1095,7 +1145,7 @@ mod tests {
         assert_eq!(*span as usize, std::mem::size_of::<super::Uniform>());
         assert_eq!(
             members.last().unwrap().offset as usize,
-            std::mem::offset_of!(super::Uniform, plane_shadow)
+            std::mem::offset_of!(super::Uniform, cloud_map)
         );
     }
 

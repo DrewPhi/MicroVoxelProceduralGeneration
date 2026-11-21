@@ -7,7 +7,10 @@ exact NAADF terrain near the player. The experiment brief lives in
 
 ## Fly the Highlands
 
-From `frontier/`, build once and launch a persistent world.
+From `frontier/`, build once and run `./run.sh` to start in the chase view
+over seed 19. Closing the window saves edits and inventory in
+`output/worlds/highlands-19-0.0625m.save`. Changing only `--voxel-size`
+selects a separate save for that grid. To choose a world file explicitly, run
 
 ```sh
 cargo build --release --locked --bin frontier
@@ -64,6 +67,9 @@ Nearby edits and collision use the native grid. At distance, larger columns
 preserve the stepped outline and grass, stone, sand and snow colors. Water
 keeps its source elevation. You can select the former surface renderer with
 `FRONTIER_DISTANT_TERRAIN=surface` for comparison.
+Walking presets also use the stepped terrain. On a 9-second seed 997
+Watershed walk and turn at 1080p, the stepped renderer measured
+**11.32 / 14.06 / 16.44 ms** at p50/p95/p99.
 
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,
@@ -152,6 +158,12 @@ runs. The general water shader took **7.56–8.02 ms**. The two paths gave
 identical linear color, depth and coverage in the oblique pool check. The
 mostly dry seed 997 walking route showed little difference between these
 water shaders. Set `FRONTIER_NAADF_STATIC_WATER_PIPELINE=0` for the control.
+
+Clouds also cast sunlight shadows over the landscape. A 64 KiB world-aligned
+texture records sunlight through four heights of the same cloud field used
+for the sky. Terrain, water, and the aircraft sample it at their true elevation.
+On a 12-second cloudy ridge view frame p95 was **15.78 ms** with cloud shadows
+and **15.68 ms** with `FRONTIER_CLOUD_SHADOWS=0`.
 
 Cloud transmittance is recorded at four distances along each view ray so a
 summit can occlude a cloud bank behind it. Across a sky view and an in-cloud

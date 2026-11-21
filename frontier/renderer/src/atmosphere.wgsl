@@ -12,6 +12,7 @@ struct AtmosphereUniform {
     far_shadow: mat4x4<f32>,
     haze_regions: array<vec4<f32>,8>,
     plane_shadow: array<vec4<f32>,4>,
+    cloud_map: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS
@@ -21,6 +22,7 @@ struct AtmosphereUniform {
 @group(0) @binding(6) var cloud_transmission:texture_2d<f32>;
 @group(0) @binding(7) var atmosphere_sampler:sampler;
 @group(0) @binding(8) var airframe_sun:texture_2d<f32>;
+@group(0) @binding(9) var cloud_sun:texture_2d<f32>;
 const cloud_depth_profile:bool=true;
 
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -195,12 +197,32 @@ fn horizon_sample(uv:vec2<f32>) -> vec4<f32> {
     let same_layer=abs(center.a-filtered.a)<max(.04,.02*center.a);
     return vec4(select(center.rgb,filtered.rgb,same_layer),center.a);
 }
+// Advect the lookup in the same coordinates as the visible cloud volumes.
+// The horizon and near terrain use the same sunlight at the same world point.
+fn cloud_ground_light(offset:vec3<f32>) -> vec3<f32> {
+    let map = atmosphere.cloud_map;
+    let y = atmosphere.world_eye.y+offset.y;
+    if map.w==0. || y>=2400. {return vec3(1.);}
+    let wind=vec2(1.,.32)*atmosphere.weather.w*atmosphere.weather.y*1000.;
+    let base=(atmosphere.world_eye.xz+offset.xz)+atmosphere.sun.xz*((1720.-y)/atmosphere.sun.y);
+    let p=(base+vec2(atmosphere.relative_eye.w,atmosphere.sun.w)+wind-map.xy)*map.w;
+    let edge=1.-smoothstep(.38,.5,max(abs(p.x),abs(p.y)));
+    if edge<=0. {return vec3(1.);}
+    let t=textureSampleLevel(cloud_sun,atmosphere_sampler,p+.5,0.);
+    let h=clamp((y-1720.)/680.,0.,1.)*4.;
+    let layer=min(u32(h),3u);
+    let upper=vec4(t.yzw,1.);
+    let transmission=mix(t[layer],upper[layer],h-f32(layer));
+    let shade=(1.-transmission)*edge*smoothstep(.08,.18,atmosphere.sun.y)*(1.-.72*atmosphere.weather.z);
+    // Preserve sky fill beneath the cloud and attenuate warm direct sunlight.
+    return mix(vec3(1.),vec3(.62,.69,.78),shade);
+}
 fn horizon_air(landscape:vec4<f32>, ray:vec3<f32>) -> vec3<f32> {
     let range = landscape.a*1000.;
     let integrated = bounded_height_integral(atmosphere.world_eye.y, atmosphere.world_eye.y+range*ray.y, range, atmosphere.fog.y);
     let air = exp(-atmosphere.fog.x*(.78*integrated+.22*range));
     let haze = alpine_clear_sky(vec3(ray.x,max(ray.y,.04),ray.z));
-    return mix(mix(haze,landscape.rgb,air),alpine_clear_sky(ray),smoothstep(24000.,35000.,range));
+    return mix(mix(haze,landscape.rgb*cloud_ground_light(range*ray),air),alpine_clear_sky(ray),smoothstep(24000.,35000.,range));
 }
 
 fn airframe_occlusion(uv:vec2<f32>,receiver:f32)->f32 {
@@ -272,7 +294,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         let optical_depth = atmosphere.fog.x * (integrated * 0.78 + distance * 0.22);
         let transmittance = exp(-optical_depth)*refinement_transmittance(offset,distance);
         let haze = alpine_clear_sky(vec3(ray.x, max(ray.y, 0.04), ray.z));
-        var surface = mix(haze, color*airframe_light(offset), transmittance);
+        var surface = mix(haze, color*airframe_light(offset)*cloud_ground_light(offset), transmittance);
         if atmosphere.lighting.w > .5 && distance > atmosphere.lighting.w*.63 {
             let near = .025;
             let fraction = near / (atmosphere.lighting.w*(1.-depth) + near*depth);

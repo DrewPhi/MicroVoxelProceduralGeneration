@@ -12,13 +12,17 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt;
 
+// RGB is ground/bed albedo. The last three channels hold visible elevation,
+// water coverage and coverage-weighted optical depth in metres.
+type Sample = [f32; 6];
+
 const SIDE: usize = 161;
 const SPACING: f64 = 512.;
 const LEVELS: usize = 3;
 const HALF: i64 = SIDE as i64 / 2;
 struct Lattice {
     center: [i64; 2],
-    samples: Vec<[f32; 4]>,
+    samples: Vec<Sample>,
 }
 struct Patch {
     lattice: Arc<Lattice>,
@@ -28,9 +32,9 @@ struct Patch {
 fn lattice(
     center: [i64; 2],
     previous: Option<&Lattice>,
-    mut sample: impl FnMut(f64, f64) -> [f32; 4],
+    mut sample: impl FnMut(f64, f64) -> Sample,
 ) -> Lattice {
-    let mut out = vec![[0.; 4]; SIDE * SIDE * LEVELS];
+    let mut out = vec![[0.; 6]; SIDE * SIDE * LEVELS];
     for level in 0..LEVELS {
         let step = SPACING / (1 << (LEVELS - level - 1)) as f64;
         let base = level * SIDE * SIDE;
@@ -96,8 +100,23 @@ fn samples(
 ) -> Patch {
     let lattice = Arc::new(lattice(center, old, |x, z| {
         let cell = Cell::from_meters([x, 0., z]);
-        let (col, [r, g, b]) = terrain.landscape_column(cell.x, cell.z, vegetation);
-        [r, g, b, (col.visible_top as f64 * voxel_size()) as f32]
+        let (col, surface) = terrain.landscape_column(cell.x, cell.z, vegetation);
+        let wet = col.visible_top > col.ground_top;
+        let [r, g, b] = if wet {
+            col.ground_surface.color()
+        } else {
+            surface
+        };
+        let depth =
+            ((col.visible_top - col.ground_top) as f64 * voxel_size()).clamp(0., 12.) as f32;
+        [
+            r,
+            g,
+            b,
+            (col.visible_top as f64 * voxel_size()) as f32,
+            u8::from(wet) as f32,
+            depth,
+        ]
     }));
     let mesh = blocks::build(&lattice.samples, voxel_size() as f32);
     Patch { lattice, mesh }
@@ -147,9 +166,12 @@ impl Horizon {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flight horizon"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("flight_horizon.wgsl")
-                    .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
-                    .into(),
+                concat!(
+                    include_str!("water.wgsl"),
+                    include_str!("flight_horizon.wgsl")
+                )
+                .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
+                .into(),
             ),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -239,6 +261,7 @@ impl Horizon {
         camera: Camera,
         aspect: f32,
         sun: Vec3,
+        overcast: f32,
         capture: bool,
     ) {
         let key = (source.seed(), source.params(), voxel_size(), vegetation);
@@ -296,7 +319,7 @@ impl Horizon {
             let mut data = [0f32; 24];
             data[..16].copy_from_slice(&matrix.to_cols_array());
             data[16..20].copy_from_slice(&eye.extend(camera.far * 0.52).to_array());
-            data[20..].copy_from_slice(&sun.extend(0.).to_array());
+            data[20..].copy_from_slice(&sun.extend(overcast).to_array());
             if self.view == Some(data) {
                 return;
             }
@@ -393,6 +416,8 @@ mod tests {
                 z as f32,
                 (x + z) as f32,
                 (x * 0.003 + z * 0.007).sin() as f32,
+                0.,
+                0.,
             ]
         };
         let old = lattice([-3, 7], None, sample);
