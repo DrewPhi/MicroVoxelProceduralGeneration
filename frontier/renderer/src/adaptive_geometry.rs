@@ -1288,6 +1288,16 @@ fn build_surface_with_geometry(
             let x = key.min[0] + (vertex.position[0] as f64 / voxel_size()).round() as i64;
             let z = key.min[1] + (vertex.position[2] as f64 / voxel_size()).round() as i64;
             let (normal, color) = *painted.entry([x, z]).or_insert_with(|| {
+                if let Some(cache) = &generator.samples.pages.landscape {
+                    return cache.get([x, z], || {
+                        landscape_paint_cache::sample(
+                            terrain,
+                            [x, z],
+                            radius,
+                            world.vegetation_enabled(),
+                        )
+                    });
+                }
                 let mut height = |x, z| generator.samples.column(world, [x, z]).height;
                 let dx = height(x - radius, z) - height(x + radius, z);
                 let dz = height(x, z - radius) - height(x, z + radius);
@@ -1784,6 +1794,9 @@ fn decode_native_column(b: &[u8]) -> Option<NativeColumn> {
         bands: [material(b[16])?, material(b[17])?, material(b[18])?],
     })
 }
+#[path = "landscape_paint_cache.rs"]
+mod landscape_paint_cache;
+
 const SOURCE_SHARDS: usize = 32;
 
 /// Spatial page sharding shares exact samples between concurrent builders. The
@@ -1794,6 +1807,7 @@ const SOURCE_SHARDS: usize = 32;
 #[derive(Clone)]
 struct SharedSourcePages {
     shards: [Arc<Mutex<SourceShard>>; SOURCE_SHARDS],
+    landscape: Option<Arc<landscape_paint_cache::Cache>>,
     terrain_bounds: Option<Arc<terrain_bound_pages::Cache>>,
     coarse_interiors: Option<Arc<distant_voxels::InteriorCache>>,
 }
@@ -1856,6 +1870,7 @@ impl SharedSourcePages {
                 .as_ref()
                 .map_or(0, |cache| cache.reserved_bytes);
         Self {
+            landscape: None,
             terrain_bounds,
             coarse_interiors,
             shards: std::array::from_fn(|i| {
@@ -1925,6 +1940,14 @@ impl SharedSourcePages {
     /// snapshot, not five independent passes through the same locks.
     fn snapshot(&self) -> CacheStats {
         let mut out = CacheStats::default();
+        if let Some(cache) = &self.landscape {
+            let (hits, misses) = cache.stats();
+            out.appearance_cache_hits += hits;
+            out.appearance_cache_misses += misses;
+            out.appearance_cache_bytes += cache.bytes;
+            out.source_cache_bytes += cache.bytes;
+            out.source_cache_peak_bytes += cache.bytes;
+        }
         if let Some(cache) = &self.terrain_bounds {
             let stats = cache.stats();
             out.affine_cache_hits += stats.hits;
@@ -2048,6 +2071,9 @@ impl SharedSourcePages {
             cache.clear();
         }
         if let Some(cache) = &self.coarse_interiors {
+            cache.clear();
+        }
+        if let Some(cache) = &self.landscape {
             cache.clear();
         }
         for shard in &self.shards {
@@ -3580,6 +3606,15 @@ impl GeometryCache {
                 .as_deref()
                 .or(if alpine { Some("128") } else { None }),
         );
+        let landscape = world
+            .fbm_terrain()
+            .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+            .filter(|_| std::env::var_os("FRONTIER_LANDSCAPE_PAINT_CACHE").is_none_or(|v| v != "0"))
+            .and_then(|_| landscape_paint_cache::Cache::new(source_budget / 4))
+            .map(Arc::new);
+        let mut samples =
+            SourceSamples::new(source_budget - landscape.as_ref().map_or(0, |c| c.bytes));
+        samples.pages.landscape = landscape;
         Self {
             naadf_owner: None,
             world,
@@ -3589,7 +3624,7 @@ impl GeometryCache {
             oldest: None,
             newest: None,
             entries: HashMap::new(),
-            samples: SourceSamples::new(source_budget),
+            samples,
             mesh_bytes: 0,
             stats: CacheStats::default(),
             disk: None,
@@ -6721,6 +6756,52 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn landscape_cache_reuses_the_same_stitched_vertex_normals_and_colors() {
+        let world = World::fbm(
+            19,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Highlands,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut samples = SourceSamples::new(0);
+        samples.pages.landscape = landscape_paint_cache::Cache::new(1024 * 1024).map(Arc::new);
+        let key = TileKey {
+            min: [-4096, 0],
+            width_cells: 4096,
+            step_cells: 256,
+            edge_steps: [128, 256, 128, 64],
+            source_revision: 0,
+        };
+        let expected = build_surface(&world, key, || false, &mut SourceSamples::new(0)).unwrap();
+        for _ in 0..2 {
+            let replay = build_surface(&world, key, || false, &mut samples).unwrap();
+            assert_eq!(
+                proxy_primitive_bits(&expected),
+                proxy_primitive_bits(&replay)
+            );
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&expected.mesh.vertices),
+                bytemuck::cast_slice::<_, u8>(&replay.mesh.vertices)
+            );
+        }
+        let cache = samples.pages.landscape.as_ref().unwrap();
+        let (hits, misses) = cache.stats();
+        assert!(hits > 0 && misses > 0 && cache.bytes <= 1024 * 1024);
+        let paint = ([1.; 3], [0.; 3]);
+        cache.get([777, -13], || paint);
+        assert_eq!(
+            cache.get([777, -13], || panic!("cached sample was lost")),
+            paint
+        );
+        samples.pages.clear();
+        assert_eq!(
+            cache.get([777, -13], || ([0.; 3], [1.; 3])),
+            ([0.; 3], [1.; 3])
+        );
     }
     #[test]
     fn grouped_fan_error_matches_every_emitted_triangle_on_a_stitched_coast() {
