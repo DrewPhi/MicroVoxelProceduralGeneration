@@ -18,9 +18,27 @@ type Sample = [f32; 12];
 
 const SIDE: usize = 161;
 const SPACING: f64 = 512.;
-const LEVELS: usize = 3;
+const LEVELS: usize = 4;
 const HALF: i64 = SIDE as i64 / 2;
+
+// The horizon is visible behind gaps before the active terrain reaches its clip.
+// Subdivide the 64 m columns when their width there exceeds twelve target pixels.
+fn first_level(focal_pixels: f32, far_m: f32) -> usize {
+    usize::from(64. * focal_pixels <= 12. * 0.65 * far_m)
+}
+
+// The optional 32 m ring covers 3.072 km on each side. The outer rings
+// retain their original sampling density all the way to the atmospheric fade.
+fn sample_radius(level: usize) -> i64 {
+    if level == 0 {
+        48
+    } else {
+        HALF
+    }
+}
+
 struct Lattice {
+    first: usize,
     center: [i64; 2],
     samples: Vec<Sample>,
     roof_heights: Vec<f32>,
@@ -32,25 +50,28 @@ struct Patch {
 
 fn lattice(
     center: [i64; 2],
+    first: usize,
     previous: Option<&Lattice>,
     mut sample: impl FnMut(f64, f64) -> Sample,
     height: impl FnMut(f64, f64) -> f32,
 ) -> Lattice {
-    let mut out = vec![[0.; 12]; SIDE * SIDE * LEVELS];
-    for level in 0..LEVELS {
+    let mut out = vec![[0.; 12]; SIDE * SIDE * (LEVELS - first)];
+    for level in first..LEVELS {
+        let extent = sample_radius(level);
+        let inner = sample_radius(level.saturating_sub(1)) / 2;
         let step = SPACING / (1 << (LEVELS - level - 1)) as f64;
-        let base = level * SIDE * SIDE;
-        let old = previous.and_then(|l| {
+        let base = (level - first) * SIDE * SIDE;
+        let old = previous.filter(|l| level >= l.first).and_then(|l| {
             let scale = 1_i128 << (LEVELS - level - 1);
             let dx = (i128::from(center[0]) - i128::from(l.center[0])) * scale;
             let dz = (i128::from(center[1]) - i128::from(l.center[1])) * scale;
             (dx.abs() < SIDE as i128 && dz.abs() < SIDE as i128)
                 .then_some((l, dx as i64, dz as i64))
         });
-        for z in -HALF..=HALF {
-            for x in -HALF..=HALF {
+        for z in -extent..=extent {
+            for x in -extent..=extent {
                 // Keep a one-vertex halo for the vertex normals beside the hole.
-                if level > 0 && x.abs().max(z.abs()) < HALF / 2 - 1 {
+                if level > first && x.abs().max(z.abs()) < inner - 1 {
                     continue;
                 }
                 let i = base + (z + HALF) as usize * SIDE + (x + HALF) as usize;
@@ -59,10 +80,11 @@ fn lattice(
                     let radius = ox.abs().max(oz.abs());
                     // Odd vertices on the old outer edge were averaged for
                     // the ring join. Resample them when they become interior.
-                    let averaged = level + 1 < LEVELS && radius == HALF && (ox | oz) & 1 != 0;
-                    if radius <= HALF && (level == 0 || radius >= HALF / 2 - 1) && !averaged {
-                        out[i] =
-                            l.samples[base + (oz + HALF) as usize * SIDE + (ox + HALF) as usize];
+                    let averaged = level + 1 < LEVELS && radius == extent && (ox | oz) & 1 != 0;
+                    if radius <= extent && (level == l.first || radius >= inner - 1) && !averaged {
+                        out[i] = l.samples[(level - l.first) * SIDE * SIDE
+                            + (oz + HALF) as usize * SIDE
+                            + (ox + HALF) as usize];
                         continue;
                     }
                 }
@@ -74,12 +96,14 @@ fn lattice(
         }
         // Anchor odd fine edge vertices to the enclosing coarse edge.
         if level + 1 < LEVELS {
-            for i in (1..SIDE - 1).step_by(2) {
+            let lo = (HALF - extent) as usize;
+            let hi = (HALF + extent) as usize;
+            for i in (lo + 1..hi).step_by(2) {
                 for (index, stride) in [
-                    (i, 1),
-                    ((SIDE - 1) * SIDE + i, 1),
-                    (i * SIDE, SIDE),
-                    (i * SIDE + SIDE - 1, SIDE),
+                    (lo * SIDE + i, 1),
+                    (hi * SIDE + i, 1),
+                    (i * SIDE + lo, SIDE),
+                    (i * SIDE + hi, SIDE),
                 ] {
                     out[base + index] = std::array::from_fn(|k| {
                         (out[base + index - stride][k] + out[base + index + stride][k]) * 0.5
@@ -89,9 +113,10 @@ fn lattice(
         }
     }
     Lattice {
+        first,
         center,
         samples: out,
-        roof_heights: blocks::sample_heights(center, previous, height),
+        roof_heights: blocks::sample_heights(center, first, previous, height),
     }
 }
 
@@ -99,10 +124,12 @@ fn samples(
     terrain: &FbmTerrain,
     vegetation: bool,
     center: [i64; 2],
+    first: usize,
     old: Option<&Lattice>,
 ) -> Patch {
     let lattice = Arc::new(lattice(
         center,
+        first,
         old,
         |x, z| {
             let cell = Cell::from_meters([x, 0., z]);
@@ -138,7 +165,7 @@ fn samples(
         },
         |x, z| terrain.height_m(x, z) as f32,
     ));
-    let mesh = blocks::build(&lattice.samples, &lattice.roof_heights, voxel_size() as f32);
+    let mesh = blocks::build(&lattice, voxel_size() as f32);
     Patch { lattice, mesh }
 }
 
@@ -375,6 +402,9 @@ impl Horizon {
             self.source_key = Some(key);
         }
         let center = [camera.position.x, camera.position.z].map(|v| (v / SPACING).round() as i64);
+        let focal_pixels =
+            0.5 * self.target_height as f32 / (0.5 * camera.fov_y.to_radians()).tan();
+        let first = first_level(focal_pixels, camera.far);
         let mut ready = None;
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
@@ -389,17 +419,17 @@ impl Horizon {
         if let Some(patch) = ready {
             self.publish(device, patch);
         }
+        let recenter = if first == 0 { 2 } else { 4 };
         if (capture || self.pending.is_none())
-            && self
-                .lattice
-                .as_ref()
-                .is_none_or(|old| (0..2).any(|a| old.center[a].abs_diff(center[a]) >= 4))
+            && self.lattice.as_ref().is_none_or(|old| {
+                old.first != first || (0..2).any(|a| old.center[a].abs_diff(center[a]) >= recenter)
+            })
         {
             if capture {
                 self.pending = None;
                 self.publish(
                     device,
-                    samples(source, vegetation, center, self.lattice.as_deref()),
+                    samples(source, vegetation, center, first, self.lattice.as_deref()),
                 );
             } else {
                 let (tx, rx) = mpsc::sync_channel(1);
@@ -407,7 +437,7 @@ impl Horizon {
                 let source = source.clone();
                 let old = self.lattice.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(samples(&source, vegetation, center, old.as_deref()));
+                    let _ = tx.send(samples(&source, vegetation, center, first, old.as_deref()));
                 });
             }
         }
@@ -421,7 +451,7 @@ impl Horizon {
             data[..16].copy_from_slice(&matrix.to_cols_array());
             data[16..20].copy_from_slice(&eye.extend(camera.far * 0.52).to_array());
             data[20..24].copy_from_slice(&sun.extend(overcast).to_array());
-            data[24] = 0.5 * self.target_height as f32 / (0.5 * camera.fov_y.to_radians()).tan();
+            data[24] = focal_pixels;
             if self.view == Some(data) {
                 return;
             }
@@ -549,45 +579,58 @@ mod tests {
             ]
         };
         let height = |x: f64, z: f64| (x * 0.19 + z * 0.47).sin() as f32;
-        let old = lattice([-3, 7], None, sample, height);
-        for center in [[1, 7], [-8, 3], [5000, -5000]] {
-            let mut misses = 0;
-            let mut roof_misses = 0;
-            let moved = lattice(
-                center,
-                Some(&old),
-                |x, z| {
-                    misses += 1;
-                    sample(x, z)
-                },
-                |x, z| {
-                    roof_misses += 1;
-                    height(x, z)
-                },
-            );
-            let mut cold_count = 0;
-            let mut cold_roofs = 0;
-            let cold = lattice(
-                center,
-                None,
-                |x, z| {
-                    cold_count += 1;
-                    sample(x, z)
-                },
-                |x, z| {
-                    cold_roofs += 1;
-                    height(x, z)
-                },
-            );
-            assert_eq!(moved.samples, cold.samples);
-            assert_eq!(moved.roof_heights, cold.roof_heights);
-            if center[0].abs() < 10 {
-                assert!(misses < cold_count / 4);
-                assert!(roof_misses < cold_roofs / 4);
-            } else {
-                assert_eq!(misses, cold_count);
-                assert_eq!(roof_misses, cold_roofs);
+        for (old_first, first) in [(1, 1), (0, 0), (0, 1), (1, 0)] {
+            let old = lattice([-3, 7], old_first, None, sample, height);
+            for center in [[-3, 7], [1, 7], [-8, 3], [5000, -5000]] {
+                let mut misses = 0;
+                let mut roof_misses = 0;
+                let moved = lattice(
+                    center,
+                    first,
+                    Some(&old),
+                    |x, z| {
+                        misses += 1;
+                        sample(x, z)
+                    },
+                    |x, z| {
+                        roof_misses += 1;
+                        height(x, z)
+                    },
+                );
+                let mut cold_count = 0;
+                let mut cold_roofs = 0;
+                let cold = lattice(
+                    center,
+                    first,
+                    None,
+                    |x, z| {
+                        cold_count += 1;
+                        sample(x, z)
+                    },
+                    |x, z| {
+                        cold_roofs += 1;
+                        height(x, z)
+                    },
+                );
+                assert_eq!(moved.samples, cold.samples);
+                assert_eq!(moved.roof_heights, cold.roof_heights);
+                if center[0].abs() < 10 {
+                    let numerator = if old_first > first { 2 } else { 1 };
+                    let denominator = if first == 1 && old_first == 1 { 4 } else { 3 };
+                    assert!(misses < cold_count * numerator / denominator);
+                    assert!(roof_misses < cold_roofs * numerator / denominator);
+                } else {
+                    assert_eq!(misses, cold_count);
+                    assert_eq!(roof_misses, cold_roofs);
+                }
             }
         }
+    }
+
+    #[test]
+    fn ring_selection_accounts_for_fov_resolution_and_clip() {
+        assert_eq!(first_level(468., 6000.), 1);
+        assert_eq!(first_level(312., 1500.), 0);
+        assert_eq!(first_level(936., 6000.), 0);
     }
 }

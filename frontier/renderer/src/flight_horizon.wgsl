@@ -18,10 +18,10 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     return albedo*(fill+light);
 }
 @vertex fn vs(@builtin(vertex_index) i:u32, @location(0) packed:vec2<u32>, @location(1) heights:vec2<f32>) -> Vertex {
-    let x = f32(bitcast<i32>(packed.x<<21u)>>21u)*unit;
-    let z = f32(bitcast<i32>(packed.x<<10u)>>21u)*unit;
     let axis = (packed.y>>24u)&7u;
     let size = unit*f32(1u<<((packed.y>>27u)&3u));
+    let x = f32(bitcast<i32>(packed.x<<21u)>>21u)*size;
+    let z = f32(bitcast<i32>(packed.x<<10u)>>21u)*size;
     let u = f32(i&1u);
     let v = f32(i>>1u);
     var p = vec3(x,heights.y,z);

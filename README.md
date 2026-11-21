@@ -115,6 +115,17 @@ world-aligned voxel horizon fading out to 35 km. Three rings draw exposed
 wall segments at their boundaries. A moving window reuses samples behind the aircraft. A sparse mesh carries saved terrain edits beyond the resident native
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
 
+Shorter view distances and narrower fields of view can expose large steps
+behind the active terrain. When a 64 m block would span more than 12 pixels
+in the half-resolution horizon at 65% of the active clip distance, a fourth
+ring supplies 32 m blocks within 3.072 km of its center along each axis.
+Across five Highlands seeds this added 0.18–1.27 MiB of GPU faces. Beyond
+1 km the measured 1080p skyline error at p95 fell from 62.02 to 24.63 px
+on seed 29123 and from 25.06 to 14.41 px on 673. On seed 19 the skyline
+stayed at 2.93 px, while projected terrain height error between 1 and 2 km
+fell from 33.61 to 16.93 px. Two 1080p seed 19 flights at a 1.5 km clip
+measured 9.71–10.17 ms frame p95, versus 9.83–10.36 ms with three rings.
+
 Horizon roof and wall lighting follows the visible face once its shorter
 projected dimension reaches 2.5 horizon pixels. Subpixel faces use the
 surrounding relief lighting. At 1080p, alternating straight flights measured
