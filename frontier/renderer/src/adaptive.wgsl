@@ -459,7 +459,11 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     position[(axis+1u)%3u]+=extent.x*select(0.,1.,corner==1u || corner==2u);
     position[(axis+2u)%3u]+=extent.y*select(0.,1.,corner>=2u);
     var normal=vec3<f32>(0.);normal[axis]=select(1.,-1.,negative);
-    return vertex_out(position,MATERIAL_COLORS[min(material,9u)],normal,profile_index);
+    var color=MATERIAL_COLORS[min(material&15u,9u)];
+    if (material&16u)!=0u {
+        color=vec3<f32>((vec3(material)>>vec3(8u,14u,20u))&vec3(63u))/63.;
+    }
+    return vertex_out(position,color,normal,profile_index);
 }
 @fragment fn fs_shadow_cut(in: VertexOut) {
     let cell = vec2<i32>(floor(in.local.xz*VOXELS_PER_METER-in.normal.xz*.01));
@@ -579,6 +583,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let near_weight=select(0.5+0.5*minified,minified,camera.sky.w>1.5);
         blend*=near_weight;
     }
+    if (camera.paint_origin.w&32u)!=0u {blend=0.;}
     let diagnostic=u32(camera.sky.z);
     if diagnostic==1u {
         let code=u32(camera.paint.w);

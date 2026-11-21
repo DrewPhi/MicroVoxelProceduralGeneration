@@ -17,7 +17,7 @@ cargo build --release --locked --bin frontier
 
 ![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
 
-*The bush plane banks 32° over the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
+*The bush plane banks 32° over stepped snowfields and exposed voxel cliffs in the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
 
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
@@ -54,6 +54,12 @@ On two 9-second passes flying over the saved strip at 45 m/s, querying the
 occupied edit buckets reduced measured frames over 16.67 ms from 13 and 15
 to zero. Frame p95 was 5.58 and 5.50 ms with the index.
 
+Flight renders exposed voxel tops and side faces throughout the active terrain.
+Nearby edits and collision use the native grid. At distance, larger columns
+preserve the stepped outline and grass, stone, sand and snow colors. Water
+keeps its source elevation. You can select the former surface renderer with
+`FRONTIER_DISTANT_TERRAIN=surface` for comparison.
+
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,
 and snow albedo varies between wind-scoured firn and softer drifts. The preset renders a 6 km active terrain view with a
@@ -78,17 +84,16 @@ forward spacing and vegetation off.
 
 | Highlands seed | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
 | --- | --- | ---: | ---: |
-| 19 | 6.56 / 8.61 / 9.66 | 10.18 | 45 / 240 |
-| 40961 | 4.99 / 6.47 / 8.13 | 2.35 | 0 / 240 |
-| 673 | 6.08 / 8.28 / 9.11 | 14.21 | 54 / 240 |
+| 19 | 7.59 / 9.87 / 10.71 | 7.61 | 26 / 240 |
+| 40961 | 3.94 / 5.27 / 5.57 | 3.98 | 9 / 240 |
+| 673 | 7.30 / 9.54 / 10.66 | 15.53 | 71 / 240 |
 
+The gallery view, with vegetation enabled, measured **9.60 / 12.13 / 12.59 ms**
+at a fixed banked camera during 12 seconds of cold refinement. Each coarse
+face carries its material and sampled color in the existing 32-byte instance.
+The renderer can cull complete rear-facing groups before vertex processing.
 The flight scheduler samples the approaching ridgeline and publishes up to two
-refinements per transaction. Coarse Highlands patches share a conservative source
-bound across groups of quads. With the previous 16-row bounds and ordinary
-two-tile selection, the same flights had 84, 1 and 110 columns outside five pixels
-respectively. Near terrain and mesh transitions still have visible errors.
-`FRONTIER_FLIGHT_FOCUS=0` and `FRONTIER_HIGHLANDS_BOUND_ROWS=16` reproduce
-that control.
+refinements per transaction. Block size changes remain visible during refinement.
 
 On the 3 m/s Watershed seed 997 walking turn, limiting an ascending shadow
 ray to the highest occupied native root gave p50/p95/p99 of

@@ -1773,26 +1773,29 @@ impl AdaptiveGpu {
                     },
                 );
             }
-            let (bin_mask, native_count) =
-                if c.native_quads && c.exact && self.native_bins_enabled && !c.bins.is_empty() {
-                    let eye = (camera.position - c.origin).to_array();
-                    let mut mask = 0u8;
-                    let mut count = 0u32;
-                    for (index, bin) in c.bins.iter().enumerate() {
-                        stats.native_bin_tests += 1;
-                        if !bin.backfacing(eye, frontier_world::voxel_size() / 1024.) {
-                            mask |= 1u8 << index;
-                            count += bin.quad_count;
-                        }
+            let (bin_mask, native_count) = if c.native_quads
+                && (c.exact || self.coarse_batch.is_none())
+                && self.native_bins_enabled
+                && !c.bins.is_empty()
+            {
+                let eye = (camera.position - c.origin).to_array();
+                let mut mask = 0u8;
+                let mut count = 0u32;
+                for (index, bin) in c.bins.iter().enumerate() {
+                    stats.native_bin_tests += 1;
+                    if !bin.backfacing(eye, frontier_world::voxel_size() / 1024.) {
+                        mask |= 1u8 << index;
+                        count += bin.quad_count;
                     }
-                    stats.native_bin_skipped_quads += (c.count - count) as u64;
-                    if count == 0 {
-                        continue;
-                    }
-                    (Some(mask), count)
-                } else {
-                    (None, c.count)
-                };
+                }
+                stats.native_bin_skipped_quads += (c.count - count) as u64;
+                if count == 0 {
+                    continue;
+                }
+                (Some(mask), count)
+            } else {
+                (None, c.count)
+            };
             let local_eye = (camera.position - c.origin).as_vec3();
             let matrix = projection
                 * if self.prepare_reuse_enabled {
@@ -1810,7 +1813,13 @@ impl AdaptiveGpu {
                 (self.voxel_filter as u32)
                     | ((c.exact as u32) << 1)
                     | (((self.lighting[11] > 0.5) as u32) << 2)
-                    | (((c.native_quads && !c.exact) as u32) << 3),
+                    | (((c.native_quads && !c.exact) as u32) << 3)
+                    | (u32::from(
+                        c.native_quads
+                            && !c.exact
+                            && crate::adaptive_geometry::distant_voxels::Mode::current()
+                                == crate::adaptive_geometry::distant_voxels::Mode::Blocks,
+                    ) << 5),
             ];
             bytes[80..96].copy_from_slice(bytemuck::cast_slice(&paint));
             let mut lighting = self.lighting;

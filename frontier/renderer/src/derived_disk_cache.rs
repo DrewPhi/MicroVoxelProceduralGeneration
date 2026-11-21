@@ -523,6 +523,7 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
     use crate::adaptive_geometry::distant_voxels::Mode;
     match Mode::current() {
         Mode::Surface => {}
+        Mode::Blocks => put(&mut b, 0x424c4f434b0001),
         Mode::Voxy => put(&mut b, 0x564f5859),
         Mode::Seed => put(&mut b, 0x534545440001),
     }
@@ -1003,8 +1004,12 @@ fn validate(t: &GeometryTile) -> bool {
         && t.native_quads.iter().all(|q| {
             q.axis_sign & !7 == 0
                 && q.axis_sign & 3 < 3
-                && (q.material as usize)
-                    < crate::adaptive_geometry::distant_voxels::TERRAIN_PALETTE.len()
+                && ((q.material < 10)
+                    || (!t.exact
+                        && crate::adaptive_geometry::distant_voxels::Mode::current()
+                            == crate::adaptive_geometry::distant_voxels::Mode::Blocks
+                        && q.material & 0xfc0000f0 == 0x10
+                        && q.material & 15 < 10))
                 && renderable_profile(q.profile_index)
                 && q.extent.iter().all(|v| *v >= 0.)
         })

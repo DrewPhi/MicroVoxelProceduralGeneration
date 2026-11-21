@@ -24,6 +24,7 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Surface,
+    Blocks,
     Voxy,
     Seed,
 }
@@ -33,6 +34,7 @@ static MODE: OnceLock<Mode> = OnceLock::new();
 impl Mode {
     fn resolve(value: Option<&str>, default: Self) -> Self {
         match value {
+            Some("blocks") => Self::Blocks,
             Some("surface") => Self::Surface,
             Some("voxy") => Self::Voxy,
             Some("voxy-seed") => Self::Seed,
@@ -48,9 +50,7 @@ impl Mode {
     }
 
     pub(crate) fn initialize_application(flight: bool) {
-        MODE.get_or_init(|| {
-            Self::from_environment(if flight { Self::Surface } else { Self::Seed })
-        });
+        MODE.get_or_init(|| Self::from_environment(if flight { Self::Blocks } else { Self::Seed }));
     }
 
     pub(crate) fn current() -> Self {
@@ -62,6 +62,7 @@ impl Mode {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Surface => "surface",
+            Self::Blocks => "blocks",
             Self::Voxy => "voxy",
             Self::Seed => "voxy-seed",
         }
@@ -78,6 +79,7 @@ struct Run {
     ground: i64,
     top_material: Material,
     deep_material: Material,
+    paint: u32,
     profile: u32,
 }
 
@@ -188,26 +190,25 @@ fn wall_quads(
         } else {
             ([span.start, lo, plane], [span.end - span.start, hi - lo])
         };
-        Some(packed_quad(
-            anchor,
-            axis,
-            positive,
-            extent,
-            material,
-            high.profile,
-        ))
+        let mut quad = packed_quad(anchor, axis, positive, extent, material, high.profile);
+        if material == high.top_material {
+            quad.material |= high.paint;
+        }
+        Some(quad)
     })
 }
 
 fn roof_quad(x: &Range<i64>, z: &Range<i64>, run: Run) -> NativeQuad {
-    packed_quad(
+    let mut quad = packed_quad(
         [x.start, run.top, z.start],
         1,
         true,
         [z.end - z.start, x.end - x.start],
         run.top_material,
         run.profile,
-    )
+    );
+    quad.material |= run.paint;
+    quad
 }
 
 fn rect_edges(
@@ -354,11 +355,26 @@ impl Generator<'_> {
             let vertical_pitch = (pitch / i64::from(vertical_pitch_divisor(self.world))).max(1);
             round_to_pitch(column.ground_height, vertical_pitch)
         };
+        let paint = if Mode::current() == Mode::Blocks && !wet && pitch as f64 * voxel_size() >= 1.
+        {
+            let x = self.key.min[0] + sample[0];
+            let z = self.key.min[1] + sample[1];
+            let terrain = self
+                .world
+                .fbm_terrain()
+                .expect("heightfield blocks require FBM");
+            let (_, color) = terrain.landscape_column(x, z, self.world.vegetation_enabled());
+            let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
+            0x10 | (r << 8) | (g << 14) | (b << 20)
+        } else {
+            0
+        };
         Ok((
             Run {
                 top: if wet { column.height } else { ground },
                 ground,
                 top_material: column.material(column.height - 1),
+                paint,
                 deep_material: column.bands[2],
                 profile,
             },
@@ -595,8 +611,11 @@ impl Generator<'_> {
         } else {
             None
         };
-        let seed_profile = if Mode::current() == Mode::Seed && key.width_cells >= 128 && pitch >= 4
-        {
+        let seed_profile = if Mode::current() == Mode::Blocks {
+            // Axis-aligned faces carry sampled source albedo in the instance.
+            self.appearance.exhaustive = false;
+            Some(0)
+        } else if Mode::current() == Mode::Seed && key.width_cells >= 128 && pitch >= 4 {
             Some(self.seed_appearance(cancelled)?)
         } else {
             None
