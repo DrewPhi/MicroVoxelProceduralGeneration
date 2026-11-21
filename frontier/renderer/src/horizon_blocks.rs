@@ -29,8 +29,16 @@ impl Column {
             && self.depth == other.depth
     }
 
-    fn wall_rgb(self, low: f32, voxel: f32) -> u32 {
-        let height = self.y - low;
+    fn wall_rgb(self, low: f32, voxel: f32, center_distance: f32) -> u32 {
+        let rise = self.y - low;
+        // A long hillside riser represents many native steps. Its exposed
+        // material bands follow the rise over one native cell. A wet riser
+        // still has a physical water column above its bed.
+        let height = if self.water == 0 {
+            rise.min(voxel * (rise / center_distance).max(1.))
+        } else {
+            rise
+        };
         let water = (self.depth as f32 * 0.25).min(height);
         let wet = self.water as f32 / 7.;
         // Integrate the native surface cell, eleven subsurface cells and the
@@ -357,7 +365,11 @@ pub(super) fn build(lattice: &Lattice, voxel: f32) -> Mesh {
                                         wall_level,
                                         low,
                                         Column {
-                                            rgb: high.wall_rgb(low, voxel),
+                                            rgb: high.wall_rgb(
+                                                low,
+                                                voxel,
+                                                0.5 * UNIT * (step + (1 << other)) as f32,
+                                            ),
                                             water: 0,
                                             ..high
                                         },
@@ -434,17 +446,20 @@ mod tests {
             ..Default::default()
         };
         for voxel in [0.0625, 0.1] {
-            assert_eq!(snow.wall_rgb(snow.y - voxel * 0.5, voxel), 0xffffff);
-            let rock = snow.wall_rgb(-100., voxel) & 255;
+            assert_eq!(snow.wall_rgb(snow.y - voxel * 0.5, voxel, voxel), 0xffffff);
+            let rock = snow.wall_rgb(-100., voxel, voxel) & 255;
             assert!((51..=52).contains(&rock));
+            assert_eq!(snow.wall_rgb(snow.y - 32., voxel, 64.), snow.rgb);
+            // A two-to-one slope exposes one surface and one soil cell.
+            assert_eq!(snow.wall_rgb(snow.y - 128., voxel, 64.), 0xbbbbbb);
         }
         let flooded = Column {
             water: 7,
             depth: 16,
             ..snow
         };
-        assert_eq!(flooded.wall_rgb(6., 0.0625), 0x4a3009);
-        assert_ne!(flooded.wall_rgb(-100., 0.0625), 0x4a3009);
+        assert_eq!(flooded.wall_rgb(6., 0.0625, 64.), 0x4a3009);
+        assert_ne!(flooded.wall_rgb(-100., 0.0625, 64.), 0x4a3009);
         assert!(snow.same_roof(Column {
             rock_rgb: 0,
             ..snow

@@ -298,13 +298,29 @@ stayed at 2.93 px, while projected terrain height error between 1 and 2 km
 fell from 33.61 to 16.93 px. Two 1080p seed 19 flights at a 1.5 km clip
 measured 9.71–10.17 ms frame p95, versus 9.83–10.36 ms with three rings.
 
-Horizon roof and wall lighting follows the visible face once its shorter
-projected dimension reaches 2.5 horizon pixels. Subpixel faces use the
-surrounding relief lighting. At 1080p, alternating straight flights measured
-7.81–7.98 ms frame p95 on seed 8123 and 11.64–11.97 ms on seed 19.
-Horizon walls take their color from the thickness of the exposed snow or grass
-cap, soil, bedrock and water. Deep cuts through a snowy summit expose the
-underlying rock. The additional CPU samples use 1.78 MiB per horizon lattice.
+![The same mountain gorge before and after integrating light over its native voxel steps.](frontier/reference/gallery/highlands-horizon-relief.jpg)
+
+*Highlands seed 673, looking west across the gorge from 2,700 m. On the
+left, each coarse riser exposed a wall of rock. On the right, each hillside
+takes its color from the grass, snow, soil and rock exposed over a native
+step at that grade. Sunlight follows the projected area of the visible voxel
+faces. Both frames use the same block geometry. The lower row enlarges the
+same patch of hillside.*
+
+In the gorge crop, fine-scale brightness variation fell from 26.4 to 7.1
+levels out of 255, while broad variation was 24.5 and 24.8. The camera flew
+at 100 m/s with a 1.5 km active view, a ten-pixel target and moving clouds.
+At 1080p MSAA 1 the two nine-second runs took 6.50–6.61 / 8.01–8.10 /
+9.63–12.47 ms at p50/p95/p99. The earlier runs took 6.68–6.71 / 8.11–8.60 /
+9.75–11.48 ms. Terrain covered every frame and distant tiles continued to refine.
+On a seed 40961 headland, a 7.5 km active render reached its six-pixel
+target and supplied 76,312 reference pixels in the hillside crop. Mean
+absolute RGB error in the 1.5 km view fell from 14.38 to 2.69 levels
+against that higher-detail terrain. In the gorge, the 7.5 km active capture
+was still refining and retained stripes beyond the near lighting field.
+Full-resolution RGB RMS error fell from 53.05 to 47.23, but mean absolute
+error rose from 35.26 to 39.78. The gorge comparison measures stripe
+suppression separately from agreement with the active renderer.
 
 The active terrain and horizon use the same sun color as its elevation changes.
 Flight and beauty views keep highlights in a floating-point scene target until
@@ -321,8 +337,9 @@ In five level-camera profiles, sampled every 2 m along 160 sightlines beyond
 6 km, skyline p95 fell from 7.06 to 2.93 px on seed 19, 24.12 to 8.58 on 673,
 17.08 to 7.34 on 29123, 13.45 to 5.64 on 40961 and 6.41 to 3.18 on 8123
 at 1080p. These are geometric errors against the unedited procedural terrain.
-The roof cache adds 1.17 MiB per window and the five GPU face buffers grew
-by 0.54–0.69 MiB. Two 8-second seed 19 flights measured 11.10–11.11 ms frame
+The three-ring roof cache uses 2.34 MiB for height and water depth. In the
+initial height-only comparison the five GPU face buffers grew by
+0.54–0.69 MiB. Two 8-second seed 19 flights measured 11.10–11.11 ms frame
 p95. On 20-second seed 673 flights the measured ranges overlapped at
 13.89–15.16 ms with center sampling and 12.72–14.70 ms with interpolation.
 Only ring-edge cells need a cross-resolution neighbor search. On six Highlands

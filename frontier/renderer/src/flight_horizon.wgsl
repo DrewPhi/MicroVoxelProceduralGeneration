@@ -39,9 +39,9 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
         normal = vec3(0.,0.,select(-1.,1.,axis==3u));
     }
     let albedo=vec3<f32>(vec3<u32>(packed.y,packed.y>>8u,packed.y>>16u)&vec3(255u))/255.;
-    // The roof and each riser keep their own lighting when their shorter
-    // dimension resolves in the horizon render target. Only thin silhouettes
-    // and grazing faces take light from the surrounding sampled relief.
+    // Each coarse roof and riser covers many native stairs. Weight their
+    // upward and outward faces by projected area, leaving some direct face
+    // contrast when the geometry spans multiple pixels.
     let slope=vec2<f32>(f32(bitcast<i32>(packed.x<<5u)>>27u),f32(bitcast<i32>(packed.x)>>27u))/15.;
     let relief=normalize(vec3(slope.x,max(0.,1.-abs(slope.x)-abs(slope.y)),slope.y));
     var center=vec3(x+.5*size,heights.y,z+.5*size);
@@ -53,9 +53,13 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     }
     let to_eye=camera.eye.xyz-center;
     let pixel_span=camera.screen.x*face_width*abs(dot(normal,to_eye))/max(1.,dot(to_eye,to_eye));
-    let unresolved=1.-smoothstep(.5,2.5,pixel_span);
-    let direct=mix(max(0.,dot(normal,camera.sun.xyz)),max(0.,dot(relief,camera.sun.xyz)),unresolved);
-    let sky=.5+.5*mix(normal.y,relief.y,unresolved);
+    let projected=max(vec3(0.),to_eye*relief);
+    let sum=dot(projected,vec3(1.));
+    let areas=projected/max(sum,.0001);
+    let native_sun=dot(areas,max(vec3(0.),sign(relief)*camera.sun.xyz));
+    let filtered=select(0.,1.-.19*smoothstep(.5,2.5,pixel_span),sum>.0001);
+    let direct=mix(max(0.,dot(normal,camera.sun.xyz)),native_sun,filtered);
+    let sky=.5+.5*mix(normal.y,areas.y,filtered);
     let color=face_color(albedo,direct,sky);
     let clip=camera.matrix*vec4(p,1.);
     var optics=vec2(0.);
