@@ -669,6 +669,19 @@ impl Generator<'_> {
         })
     }
 
+    fn block_run(
+        &mut self,
+        runs: &mut HashMap<[i64; 2], Run>,
+        sample: [i64; 2],
+    ) -> Result<Run, String> {
+        match runs.entry(sample) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(*entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                Ok(*entry.insert(self.sampled_block(sample)?))
+            }
+        }
+    }
+
     // Anchor coarse blocks at lattice nodes. A regular node owns half a cell
     // on either side, so its two halves also agree across a tile boundary.
     // A finer shared edge introduces smaller blocks for the adjacent half row.
@@ -677,22 +690,40 @@ impl Generator<'_> {
         x: i64,
         z: i64,
         pitch: i64,
+        center: NativeColumn,
         edges: &mut Edges,
         runs: &mut HashMap<[i64; 2], Run>,
     ) -> Result<[i64; 2], String> {
         let width = i64::from(self.key.width_cells);
+        let half = pitch / 2;
+        // Test the existing center probe against the regular node samples.
+        // Shorelines and narrow ridge crests gain a half-pitch lattice while
+        // the outer half row keeps the tile's negotiated boundary spacing.
+        let mut interior_pitch = pitch;
+        if pitch >= 4 && pitch as f64 * voxel_size() >= 4. {
+            let mut sum = 0;
+            let mut shoreline = false;
+            for sample in [
+                [x, z],
+                [x + pitch, z],
+                [x, z + pitch],
+                [x + pitch, z + pitch],
+            ] {
+                let node = self.block_run(runs, sample)?;
+                sum += node.top;
+                shoreline |= (node.top > node.ground) != (center.height > center.ground_height);
+            }
+            if shoreline || (4 * center.height - sum).abs() > half {
+                interior_pitch = half;
+            }
+        }
         let mut top_range = [i64::MAX, i64::MIN];
         let mut add =
             |this: &mut Self, xx: Range<i64>, zz: Range<i64>, sample| -> Result<(), String> {
                 if xx.is_empty() || zz.is_empty() {
                     return Ok(());
                 }
-                let run = match runs.entry(sample) {
-                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        *entry.insert(this.sampled_block(sample)?)
-                    }
-                };
+                let run = this.block_run(runs, sample)?;
                 top_range[0] = top_range[0].min(run.top);
                 top_range[1] = top_range[1].max(run.top);
                 this.append_quads([roof_quad(&xx, &zz, run)])?;
@@ -700,7 +731,6 @@ impl Generator<'_> {
                 Ok(())
             };
         let strides = self.key.edge_steps.map(i64::from);
-        let half = pitch / 2;
         for (zrange, zedge) in [
             (z..z + half, (z == 0).then_some(3)),
             (z + half..z + pitch, (z + pitch == width).then_some(1)),
@@ -709,8 +739,26 @@ impl Generator<'_> {
                 (x..x + half, (x == 0).then_some(0)),
                 (x + half..x + pitch, (x + pitch == width).then_some(2)),
             ] {
-                let sx = zedge.map_or(pitch, |e| strides[e]).max((pitch / 4).max(1));
-                let sz = xedge.map_or(pitch, |e| strides[e]).max((pitch / 4).max(1));
+                let sx = zedge
+                    .map_or(
+                        if xedge.is_some() {
+                            pitch
+                        } else {
+                            interior_pitch
+                        },
+                        |e| strides[e],
+                    )
+                    .max((pitch / 4).max(1));
+                let sz = xedge
+                    .map_or(
+                        if zedge.is_some() {
+                            pitch
+                        } else {
+                            interior_pitch
+                        },
+                        |e| strides[e],
+                    )
+                    .max((pitch / 4).max(1));
                 for (xx, cx) in node_spans(xrange.start.max(1)..xrange.end.min(width - 1), sx) {
                     for (zz, cz) in node_spans(zrange.start.max(1)..zrange.end.min(width - 1), sz) {
                         add(self, xx.clone(), zz, [cx, cz])?;
@@ -887,8 +935,10 @@ impl Generator<'_> {
                 }
                 let first_roof = self.coarse_quads.len();
                 if blocks {
-                    let range = self.block_patch(x, z, pitch, &mut edges, &mut block_runs)?;
-                    let center = self.height(x + pitch / 2, z + pitch / 2)?;
+                    let center = self.column([x + pitch / 2, z + pitch / 2])?;
+                    let range =
+                        self.block_patch(x, z, pitch, center, &mut edges, &mut block_runs)?;
+                    let center = center.height;
                     self.empirical_error_m = self.empirical_error_m.max(
                         (center - range[0]).abs().max((center - range[1]).abs()) as f64
                             * voxel_size(),

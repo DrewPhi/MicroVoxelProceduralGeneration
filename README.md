@@ -98,6 +98,13 @@ The renderer can cull complete rear-facing groups before vertex processing.
 The flight scheduler samples the approaching ridgeline and publishes up to two
 refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. Some block-size changes remain visible during refinement.
 
+The block renderer also probes each patch center against its four corner
+heights. A sharp bend or a shoreline gets smaller square columns inside the
+patch. On the same three routes, this gave ridgeline p95 of **4.96 px** on
+seed 19, **7.56 px** on seed 673 and **3.14 px** on seed 40961. Frame p95
+was **12.70, 14.94 and 7.85 ms**, respectively. The rocky routes benefit
+most. Roofs remain level and every exposed step has a vertical face.
+
 A separate 46-second run crossed 6.4 km at 140 m/s on seed 673. All 4,590
 measured frames retained terrain coverage. Frame p50/p95/p99 measured
 **10.19 / 12.66 / 13.69 ms**. The conservative 5 px quality target remained
