@@ -129,7 +129,7 @@ fn build_within(world: &World, origin: Cell, radius: i64) -> Option<Geometry> {
     let max = [origin.x, origin.z].map(|v| v.saturating_add(radius).saturating_add(1));
     // Bound total saved edits and the published mask independently of the
     // temporary column neighborhood used by each extraction batch.
-    let mut addresses = world.terrain_edit_cells_in_columns(
+    let mut addresses = world.terrain_edit_surface_candidates(
         min.map(|v| v.saturating_sub(3)),
         max.map(|v| v.saturating_add(3)),
         524288,
@@ -713,6 +713,44 @@ mod tests {
             let face = wood.iter().find(|q| q.axis_sign == dir).unwrap();
             assert_eq!(face.extent, [96., 1600.].map(|n| (n * voxel_size()) as f32));
         }
+    }
+
+    #[test]
+    fn a_dense_suspended_structure_keeps_its_full_requested_radius() {
+        let mut world = World::fbm(
+            7,
+            FbmParams {
+                recipe: FbmRecipe::Regional,
+                amplitude: 0.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // More than half a million native cells form one solid with two courses.
+        world.restore_terrain_edits((0..384).flat_map(|x| {
+            (0..224).flat_map(move |y| {
+                (0..8).map(move |z| {
+                    (
+                        Cell {
+                            x: x - 192,
+                            y: y + 120,
+                            z: z - 32000,
+                        },
+                        if y < 192 {
+                            Material::Wood
+                        } else {
+                            Material::Snow
+                        },
+                    )
+                })
+            })
+        }));
+        let mesh = build(&world, Cell::default(), 65536);
+        assert_eq!(mesh.radius, 65536);
+        assert!(mesh.columns.contains(&[-192, -32000]) && mesh.columns.contains(&[191, -31993]));
+        let count = |m: Material| mesh.quads.iter().filter(|q| q.material == m as u32).count();
+        // Four walls for each material, the wooden underside and the snow roof.
+        assert_eq!((count(Material::Wood), count(Material::Snow)), (5, 5));
     }
 
     #[test]

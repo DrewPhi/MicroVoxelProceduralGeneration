@@ -336,6 +336,18 @@ impl World {
     ) -> Option<Vec<Cell>> {
         self.edits.cells_in_columns(min, max, limit)
     }
+    /// Includes both ends of every contiguous authored material run in the
+    /// half-open footprint. Small selections can also contain interior cells.
+    pub fn terrain_edit_surface_candidates(
+        &self,
+        min: [i64; 2],
+        max: [i64; 2],
+        limit: usize,
+    ) -> Option<Vec<Cell>> {
+        self.edits
+            .cells_in_columns(min, max, limit)
+            .or_else(|| self.edits.run_ends_in_columns(min, max, limit))
+    }
     /// Conservative inclusive upper Y of terrain or fluid overrides whose X/Z
     /// may intersect this half-open box. Stale lineage buckets can enlarge a
     /// bound; a missing bound proves the region has no overrides.

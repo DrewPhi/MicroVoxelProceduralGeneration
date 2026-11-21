@@ -439,6 +439,13 @@ On the 153,600-cell runway, 30 reads measured **4.83 ms median, 6.67 ms p95**,
 compared with **51.35 ms median, 64.48 ms p95** for the combined edit index
 and per-cell terrain lookup. These times cover address collection only.
 
+When individual edits exceed the address budget, the renderer collects the
+ends of each uninterrupted vertical run of one authored material. This keeps
+openings, undersides and material changes visible. A saved hangar facade of
+950,272 native voxels rendered in 23 quads (9,952 bytes including the column
+mask). The opening showed sky through its center at 70 m and 950 m. The
+previous renderer exhausted its budget and omitted the facade at both distances.
+
 Directional shadow maps use the same column mask as the visible surface.
 The edit-distance check measures seven depth views and compares a sunlit
 excavation with shadows enabled and disabled. On the Radeon, both readings
