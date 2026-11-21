@@ -129,7 +129,8 @@ pub(crate) struct Horizon {
     faces: Option<wgpu::Buffer>,
     batches: Vec<blocks::Batch>,
     visible: Vec<Range<u32>>,
-    view: Option<[f32; 24]>,
+    view: Option<[f32; 28]>,
+    target_height: u32,
     dirty: std::cell::Cell<bool>,
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
@@ -160,7 +161,7 @@ impl Horizon {
         };
         let params = buffer(
             "horizon camera",
-            96,
+            112,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -225,6 +226,7 @@ impl Horizon {
             batches: Vec::new(),
             visible: Vec::new(),
             view: None,
+            target_height: height,
             dirty: std::cell::Cell::new(true),
             pipeline,
             group,
@@ -316,10 +318,11 @@ impl Horizon {
             let eye = (camera.position - origin).as_vec3();
             let matrix = Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 75000., 1.)
                 * Mat4::look_to_rh(eye, camera.direction(), camera.view_up());
-            let mut data = [0f32; 24];
+            let mut data = [0f32; 28];
             data[..16].copy_from_slice(&matrix.to_cols_array());
             data[16..20].copy_from_slice(&eye.extend(camera.far * 0.52).to_array());
-            data[20..].copy_from_slice(&sun.extend(overcast).to_array());
+            data[20..24].copy_from_slice(&sun.extend(overcast).to_array());
+            data[24] = 0.5 * self.target_height as f32 / (0.5 * camera.fov_y.to_radians()).tan();
             if self.view == Some(data) {
                 return;
             }
@@ -333,7 +336,7 @@ impl Horizon {
                 rows.w_axis + rows.y_axis,
                 rows.w_axis - rows.y_axis,
                 near,
-                rows.w_axis - rows.z_axis,
+                rows.z_axis,
             ];
             self.visible.clear();
             for batch in &self.batches {

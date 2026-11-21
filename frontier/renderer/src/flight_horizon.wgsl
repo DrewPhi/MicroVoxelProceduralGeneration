@@ -1,5 +1,5 @@
 const unit: f32 = GRID_UNIT;
-struct Camera { matrix: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32> };
+struct Camera { matrix: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, screen: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct Vertex {
     @builtin(position) clip: vec4<f32>,
@@ -31,15 +31,26 @@ struct Vertex {
     }
     var albedo=vec3<f32>(vec3<u32>(packed.y,packed.y>>8u,packed.y>>16u)&vec3(255u))/255.;
     if axis!=0u {albedo=mix(albedo,vec3(.035,.19,.29),f32(packed.y>>29u)/7.);}
-    // Distant steps occupy a fraction of a pixel in height. Integrate the
-    // surrounding slope into their illumination while keeping each face flat.
+    // The roof and each riser keep their own lighting when their shorter
+    // dimension resolves in the horizon render target. Only thin silhouettes
+    // and grazing faces take light from the surrounding sampled relief.
     let slope=vec2<f32>(f32(bitcast<i32>(packed.x<<5u)>>27u),f32(bitcast<i32>(packed.x)>>27u))/15.;
     let relief=normalize(vec3(slope.x,max(0.,1.-abs(slope.x)-abs(slope.y)),slope.y));
-    let center=vec3(x+.5*size,heights.y,z+.5*size);
-    let footprint=size/max(1.,distance(center,camera.eye.xyz));
-    let broad=mix(.72,.30,smoothstep(.008,.040,footprint));
-    let direct=mix(max(0.,dot(normal,camera.sun.xyz)),max(0.,dot(relief,camera.sun.xyz)),broad);
-    let color=albedo*(vec3(.24,.31,.40)+vec3(.93,.84,.65)*direct);
+    var center=vec3(x+.5*size,heights.y,z+.5*size);
+    var face_width=size;
+    if axis!=0u {
+        center.y=.5*(heights.x+heights.y);
+        if axis<=2u {center.x=x;} else {center.z=z;}
+        face_width=min(size,heights.y-heights.x);
+    }
+    let to_eye=camera.eye.xyz-center;
+    let pixel_span=camera.screen.x*face_width*abs(dot(normal,to_eye))/max(1.,dot(to_eye,to_eye));
+    let unresolved=1.-smoothstep(.5,2.5,pixel_span);
+    let direct=mix(max(0.,dot(normal,camera.sun.xyz)),max(0.,dot(relief,camera.sun.xyz)),unresolved);
+    let sky=.5+.5*mix(normal.y,relief.y,unresolved);
+    let fill=mix(vec3(.12,.145,.075),vec3(.25,.33,.43),sky)*(1.+.3*camera.sun.w);
+    let light=vec3(.93,.84,.65)*direct*(1.-.72*camera.sun.w);
+    let color=albedo*(fill+light);
     let clip=camera.matrix*vec4(p,1.);
     var optics=vec2(0.);
     if axis==0u {optics=vec2(f32(packed.y>>29u)/7.,f32(u32(heights.x)>>10u)*.25);}
