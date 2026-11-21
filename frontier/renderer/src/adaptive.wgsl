@@ -469,6 +469,7 @@ fn river_texel(cell:vec2<i32>,height:f32,tolerance:f32)->f32 {
     return coverage*(1.-smoothstep(tolerance,2.*tolerance,separation));
 }
 fn river_coverage(relative:vec2<f32>, spacing:f32,height:f32)->f32 {
+    if textureNumLayers(flight_detail)<4u {return 0.;}
     let side=vec2<f32>(textureDimensions(flight_detail));
     let center=(side-1.)*.5;
     let cell=(relative+near_shadow.parameters.zw-center*8.)/16.+2.*center;

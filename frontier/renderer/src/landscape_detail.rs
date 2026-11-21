@@ -50,10 +50,10 @@ impl Rivers {
                             0.,
                             z as f64 * RIVER_STEP + dz,
                         ]);
-                        let col = terrain.column_cells(cell.x, cell.z);
-                        if col.visible_top > 0 && col.visible_top > col.ground_top {
+                        let [bed, top] = terrain.column_tops(cell.x, cell.z);
+                        if top > 0 && top > bed {
                             wet += 1;
-                            stage_sum += col.visible_top as f64 * voxel_size();
+                            stage_sum += top as f64 * voxel_size();
                         }
                     }
                 }
@@ -114,6 +114,7 @@ struct Source {
     params: FbmParams,
     edge: f64,
     vegetation: bool,
+    river_overlay: bool,
 }
 #[derive(Clone, Copy, Default)]
 struct Sample {
@@ -168,7 +169,7 @@ impl Grid {
                 samples.push(sample);
             }
         }
-        let rivers = (source.params.recipe == FbmRecipe::Highlands).then(|| {
+        let rivers = source.river_overlay.then(|| {
             Rivers::make(
                 &terrain,
                 min.map(|i| i + SIDE as i64 / 2),
@@ -176,7 +177,8 @@ impl Grid {
             )
         });
         let area = SIDE * SIDE;
-        let mut pixels = vec![0; area * 16];
+        let layers = if rivers.is_some() { 4 } else { 2 };
+        let mut pixels = vec![0; area * 4 * layers];
         let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
         for v in 0..SIDE {
             for u in 0..SIDE {
@@ -268,15 +270,18 @@ pub(crate) struct Texture {
 }
 impl Texture {
     pub(super) fn bytes(&self) -> u64 {
-        self.texture.width() as u64 * self.texture.height() as u64 * 16
+        u64::from(self.texture.width())
+            * u64::from(self.texture.height())
+            * u64::from(self.texture.depth_or_array_layers())
+            * 4
     }
-    pub(crate) fn new(device: &wgpu::Device, side: u32) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, side: u32, layers: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("flight terrain normals and albedo"),
             size: wgpu::Extent3d {
                 width: side,
                 height: side,
-                depth_or_array_layers: 4,
+                depth_or_array_layers: layers,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -331,7 +336,12 @@ impl super::AdaptiveGpu {
             self.landscape_detail = Detail::default();
             return;
         };
+        // Block rings carry explicit wet faces and their native bed depths.
+        // Only the surface proxy needs the additional river coverage layers.
+        use crate::adaptive_geometry::distant_voxels::Mode;
         let source = Source {
+            river_overlay: terrain.params().recipe == FbmRecipe::Highlands
+                && Mode::current() != Mode::Blocks,
             seed: terrain.seed(),
             params: terrain.params(),
             edge: voxel_size(),
@@ -353,8 +363,10 @@ impl super::AdaptiveGpu {
                     if grid.source == source
                         && (0..2).all(|a| grid.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
                     {
-                        if self.shadows.near.detail.texture.width() != SIDE as u32 {
-                            self.shadows.near.detail = Texture::new(device, SIDE as u32);
+                        let layers = if grid.rivers.is_some() { 4 } else { 2 };
+                        let texture = &self.shadows.near.detail.texture;
+                        if texture.width() != SIDE as u32 || texture.depth_or_array_layers() != layers {
+                            self.shadows.near.detail = Texture::new(device, SIDE as u32, layers);
                             self.refresh_visibility_bind(device);
                         }
                         let texture = &self.shadows.near.detail.texture;
@@ -505,6 +517,7 @@ mod tests {
     #[test]
     fn moving_window_preserves_shared_height_normal_and_albedo() {
         let source = Source {
+            river_overlay: true,
             seed: 40961,
             params: FbmParams {
                 recipe: FbmRecipe::Highlands,
@@ -514,6 +527,11 @@ mod tests {
             vegetation: true,
         };
         let (old, before) = Grid::make(source, [-64, -128], None);
+        let (blocks, two_layers) =
+            Grid::make(Source { river_overlay: false, ..source }, old.min, None);
+        assert!(blocks.rivers.is_none());
+        assert_eq!(two_layers.len(), SIDE * SIDE * 8);
+        assert_eq!(&before[..two_layers.len()], &two_layers);
         let (new, after) = Grid::make(source, [-64 + RECENTER, -128 - RECENTER], Some(&old));
         let shift = RECENTER as usize;
         let area = SIDE * SIDE * 4;
