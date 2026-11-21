@@ -68,7 +68,7 @@ fn tube(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, radius: f32, color: [f32; 3]) {
     );
 }
 
-fn geometry() -> (Vec<Vertex>, u32) {
+fn skin() -> (Vec<Vertex>, u32) {
     let mut out = Vec::new();
     // Longitudinal stations give the cowling, glazed cabin and tapered tail.
     let body = [
@@ -192,6 +192,21 @@ fn geometry() -> (Vec<Vertex>, u32) {
     (out, prop_start)
 }
 
+#[path = "aircraft_voxels.rs"]
+mod voxels;
+
+pub(super) fn geometry() -> (&'static [Vertex], u32) {
+    static MESH: std::sync::OnceLock<(Vec<Vertex>, u32)> = std::sync::OnceLock::new();
+    let (mesh, prop) = MESH.get_or_init(|| {
+        let (skin, split) = skin();
+        let mut model = voxels::rasterize(&skin[..split as usize]);
+        let prop = model.len() as u32;
+        model.extend(voxels::rasterize(&skin[split as usize..]));
+        (model, prop)
+    });
+    (mesh, *prop)
+}
+
 pub(crate) struct Model {
     pub samples: u32,
     pipeline: wgpu::RenderPipeline,
@@ -245,7 +260,7 @@ impl Model {
         let (mesh, prop_start) = geometry();
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aircraft skin"),
-            contents: bytemuck::cast_slice(&mesh),
+            contents: bytemuck::cast_slice(mesh),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {

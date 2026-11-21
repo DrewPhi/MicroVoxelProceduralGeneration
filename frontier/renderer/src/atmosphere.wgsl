@@ -11,6 +11,7 @@ struct AtmosphereUniform {
     lighting: vec4<f32>, // shafts, streaming haze, region count, reserved
     far_shadow: mat4x4<f32>,
     haze_regions: array<vec4<f32>,8>,
+    plane_shadow: array<vec4<f32>,4>,
 };
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
 // SCENE_BINDINGS
@@ -19,6 +20,7 @@ struct AtmosphereUniform {
 @group(0) @binding(4) var cloud_lighting:texture_2d<f32>;
 @group(0) @binding(6) var cloud_transmission:texture_2d<f32>;
 @group(0) @binding(7) var atmosphere_sampler:sampler;
+@group(0) @binding(8) var airframe_sun:texture_2d<f32>;
 const cloud_depth_profile:bool=true;
 
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -201,6 +203,34 @@ fn horizon_air(landscape:vec4<f32>, ray:vec3<f32>) -> vec3<f32> {
     return mix(mix(haze,landscape.rgb,air),alpine_clear_sky(ray),smoothstep(24000.,35000.,range));
 }
 
+fn airframe_occlusion(uv:vec2<f32>,receiver:f32)->f32 {
+    let height=textureSampleLevel(airframe_sun,atmosphere_sampler,uv,0.).r;
+    // Zero is uncovered. The nearest aircraft surface lies within +/-8 m.
+    return smoothstep(max(.04,receiver+.006),max(.24,receiver+.012),height);
+}
+fn airframe_light(offset:vec3<f32>)->vec3<f32> {
+    let plane=atmosphere.plane_shadow;
+    if plane[3].w==0. {return vec3(1.);}
+    let delta=offset-plane[3].xyz;
+    let along=dot(delta,plane[2].xyz);
+    if along>7. || along < -900. {return vec3(1.);}
+    let p=vec2(dot(delta,plane[0].xyz),dot(delta,plane[1].xyz));
+    // The 0.53-degree solar disc grows the penumbra with caster separation.
+    let radius=clamp(-along*.00465,.05,4.2);
+    if max(abs(p.x),abs(p.y))>6.+radius {return vec3(1.);}
+    let uv=vec2(.5)+p*vec2(1.,-1.)/16.;
+    let r=radius/16.;
+    let reference=.5+along/16.;
+    var occ=airframe_occlusion(uv,reference)*.25;
+    for (var i=0u;i<6u;i++) {
+        let taps=array<vec2<f32>,6>(vec2(1.,0.),vec2(.5,.866),vec2(-.5,.866),
+            vec2(-1.,0.),vec2(-.5,-.866),vec2(.5,-.866));
+        occ+=airframe_occlusion(uv+taps[i]*r*.75,reference)*.125;
+    }
+    let direct=(1.-.8*atmosphere.weather.z)*(1.-smoothstep(470.,900.,-along));
+    return mix(vec3(1.),vec3(.48,.54,.62),occ*direct);
+}
+
 fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
     if atmosphere.fog.w < 0.5 {
         if atmosphere.beauty.x>.5 {return beauty_finish(color);}
@@ -242,7 +272,7 @@ fn composite(color: vec3<f32>, depth: f32, uv: vec2<f32>) -> vec3<f32> {
         let optical_depth = atmosphere.fog.x * (integrated * 0.78 + distance * 0.22);
         let transmittance = exp(-optical_depth)*refinement_transmittance(offset,distance);
         let haze = alpine_clear_sky(vec3(ray.x, max(ray.y, 0.04), ray.z));
-        var surface = mix(haze, color, transmittance);
+        var surface = mix(haze, color*airframe_light(offset), transmittance);
         if atmosphere.lighting.w > .5 && distance > atmosphere.lighting.w*.63 {
             let near = .025;
             let fraction = near / (atmosphere.lighting.w*(1.-depth) + near*depth);

@@ -17,7 +17,7 @@ cargo build --release --locked --bin frontier
 
 ![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
 
-*The bush plane banks 32° over stepped snowfields and exposed voxel cliffs in the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
+*The 6.25 cm voxel bush plane banks 32° over stepped snowfields and exposed cliffs in the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
 
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
@@ -25,6 +25,9 @@ Click the window to take the controls. **W/S** increase or decrease airspeed,
 between the aircraft and free camera. **F** switches to walking from the
 aircraft. The fuselage, wingtips and wheels check swept paths against the
 edited voxels. The chase camera also checks the space behind the aircraft.
+The wings, fuselage, landing gear and spinning propeller have exposed square
+faces. The wings and tail cast a moving sun shadow onto ground, water and
+placed blocks in both camera views.
 For a reproducible exterior view, add `--flight-view chase --bank 32` to
 a launch or capture. Positive bank angles lower the right wing.
 

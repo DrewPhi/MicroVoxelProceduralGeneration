@@ -5,6 +5,7 @@ mod adaptive_stream;
 mod adaptive_view;
 mod aircraft;
 mod aircraft_model;
+mod aircraft_shadow;
 mod appearance_hierarchy;
 mod appearance_map;
 mod appearance_method;
@@ -273,6 +274,7 @@ struct BrickCacheMetrics {
 struct Gpu {
     airframe: Option<aircraft_model::Model>,
     airframe_pose: Option<Camera>,
+    aircraft_pose: Option<Camera>,
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
     alpine_appearance: bool,
@@ -594,6 +596,7 @@ impl Gpu {
             terrain: None,
             airframe: None,
             airframe_pose: None,
+            aircraft_pose: None,
             adapter_info: format!("{:?}", adapter.get_info()),
         })
     }
@@ -761,7 +764,9 @@ impl Gpu {
             view_formats: &[],
         }))
     }
-    fn set_aircraft_pose(&mut self, pose: Option<Camera>) {
+    fn set_aircraft_pose(&mut self, plane: Option<&aircraft::Aircraft>, camera: Camera) {
+        let pose = plane.and_then(aircraft::Aircraft::exterior_pose);
+        self.aircraft_pose = plane.map(|_| pose.unwrap_or(camera));
         self.airframe_pose = pose;
         if pose.is_some()
             && self
@@ -1174,6 +1179,7 @@ impl Gpu {
                 self.adaptive.as_ref(),
                 None,
                 self.camera_submerged.get(),
+                self.aircraft_pose,
                 0.,
             );
             atmosphere.prepare(
@@ -2438,11 +2444,7 @@ impl Viewer {
             );
         }
         if let Some(gpu) = &mut self.gpu {
-            gpu.set_aircraft_pose(
-                self.aircraft
-                    .as_ref()
-                    .and_then(aircraft::Aircraft::exterior_pose),
-            );
+            gpu.set_aircraft_pose(self.aircraft.as_ref(), self.camera);
             // Restore raster ownership using this frame's vegetation readiness.
             let restore_id = gpu.naadf.as_ref().map_or(Some(0), |n| n.restore_owner_id());
             let plants = &gpu.vegetation_stats;
@@ -2732,6 +2734,7 @@ impl Viewer {
                 gpu.adaptive.as_ref(),
                 self.adaptive_view.as_ref(),
                 gpu.camera_submerged.get(),
+                gpu.aircraft_pose,
                 self.visual_started.elapsed().as_secs_f32(),
             );
             atmosphere.prepare(
@@ -3855,11 +3858,7 @@ pub fn run() -> Result<()> {
             gpu.init_pages(&cover);
         }
         gpu.configure_visuals(&world, &visual_settings);
-        gpu.set_aircraft_pose(
-            aircraft
-                .as_ref()
-                .and_then(aircraft::Aircraft::exterior_pose),
-        );
+        gpu.set_aircraft_pose(aircraft.as_ref(), camera);
         if let Some(view) = &mut adaptive_view {
             if visual_settings.naadf_enabled {
                 view.poll(&mut gpu, camera, width, height)?;
