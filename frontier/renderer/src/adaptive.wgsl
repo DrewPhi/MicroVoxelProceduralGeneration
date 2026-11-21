@@ -482,11 +482,12 @@ fn river_coverage(relative:vec2<f32>, spacing:f32,height:f32)->f32 {
                     mix(river_texel(q+vec2(0,1),height,tolerance),river_texel(q+vec2(1,1),height,tolerance),f.x),f.y);
 }
 // Source columns have one surface cell, eleven soil cells, then bedrock.
-fn cliff_albedo(word:u32, face:vec2<f32>, footprint:f32)->vec3<f32> {
-    let palette=(word&15u)==15u;
-    var skin=vec3<f32>((vec3(word)>>vec3(8u,14u,20u))&vec3(63u))/63.;
-    var bed=word&15u;
-    if palette { skin=MATERIAL_COLORS[(word>>8u)&15u]; bed=(word>>12u)&15u; }
+fn cliff_skin(word:u32)->vec3<f32> {
+    if (word&15u)==15u {return MATERIAL_COLORS[(word>>8u)&15u];}
+    return vec3<f32>((vec3(word)>>vec3(8u,14u,20u))&vec3(63u))/63.;
+}
+fn cliff_albedo(word:u32, skin:vec3<f32>,face:vec2<f32>, footprint:f32)->vec3<f32> {
+    let bed=select(word&15u,(word>>12u)&15u,(word&15u)==15u);
     let soil=(word>>4u)&15u;
     let middle=select(MATERIAL_COLORS[min(soil,9u)],skin,soil==14u);
     let deep=select(MATERIAL_COLORS[min(bed,9u)],skin,bed==14u);
@@ -521,8 +522,10 @@ fn shade(input: VertexOut) -> vec4<f32> {
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
     let wall_footprint=fwidth(in.local.y)*VOXELS_PER_METER;
+    var skin_color=in.color;
     if (in.surface_word&LAYERED_WALL)!=0u {
-        in.color=cliff_albedo(in.surface_word,in.color.xy,wall_footprint);
+        skin_color=cliff_skin(in.surface_word);
+        in.color=cliff_albedo(in.surface_word,skin_color,in.color.xy,wall_footprint);
         in.surface_word=0u;
     }
     let dx=dpdx(in.local); let dy=dpdy(in.local);
@@ -577,7 +580,11 @@ fn shade(input: VertexOut) -> vec4<f32> {
                 let exposed_skin=visible_faces.y+dot(visible_faces.xz,skin);
                 var paint=vec3(0.);
                 if fine_fraction<1. {
-                    paint=(1.-fine_fraction)*textureSampleLevel(flight_detail,flight_sampler,far_uv,1,1.).rgb;
+                    // A distant normal can span a whole hillside. Its color
+                    // supplies only the regional background so the native
+                    // roof's snow, grass and exposed stone keep their borders.
+                    let regional=textureSampleLevel(flight_detail,flight_sampler,far_uv,1,1.).rgb;
+                    paint=(1.-fine_fraction)*mix(skin_color,regional,.20);
                 }
                 if fine_fraction>0. {
                     paint+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,1,0.).rgb;
