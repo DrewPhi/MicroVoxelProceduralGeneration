@@ -25,6 +25,8 @@ pub fn source_version() -> u32 {
 pub const TILE_SIZE_CELLS: i64 = 256;
 pub const MAX_PLANT_RADIUS_CELLS: i64 = 96;
 pub const MAX_PLANT_HEIGHT_CELLS: i64 = 176;
+// Includes the tip of every grass blade and the tallest flower head.
+const MAX_GROUND_HEIGHT_CELLS: i64 = 16;
 pub const fn variant_count(species: Species) -> u8 {
     match species {
         Species::Grass | Species::Rowan => 8,
@@ -64,6 +66,57 @@ pub struct PlantModel {
 impl PlantModel {
     pub fn voxel(&self, cell: Cell) -> Option<PlantVoxel> {
         self.index.get(&cell).map(|&i| self.voxels[i])
+    }
+}
+
+#[derive(Default)]
+pub(super) struct RayPlants {
+    region: Option<[i64; 3]>,
+    candidates: Vec<(PlantRecord, Option<Arc<PlantModel>>)>,
+}
+
+impl RayPlants {
+    pub(super) fn voxel(&mut self, world: &World, cell: Cell) -> Option<PlantVoxel> {
+        const EDGE: i64 = 16;
+        let region = [cell.x, cell.y, cell.z].map(|v| v.div_euclid(EDGE));
+        if self.region != Some(region) {
+            self.region = Some(region);
+            self.candidates.clear();
+            let [x, y, z] = region.map(|v| v * EDGE);
+            for species in [Species::Rowan, Species::Grass, Species::Edelweiss] {
+                let (radius, height) = plant_extent(species);
+                let low = [x, z].map(|v| v.saturating_sub(radius));
+                let high = [x, z].map(|v| v.saturating_add(EDGE + radius));
+                world.visit_vegetation_roots(low, high, species, |record| {
+                    if record.root.y >= y.saturating_sub(height) && record.root.y <= y + (EDGE - 1)
+                    {
+                        self.candidates.push((record, None));
+                    }
+                });
+            }
+        }
+        for (record, model) in &mut self.candidates {
+            let (radius, height) = plant_extent(record.species);
+            let local = record.local_cell(cell);
+            if !(0..=height).contains(&local.y) || local.x.abs() > radius || local.z.abs() > radius
+            {
+                continue;
+            }
+            let model = model.get_or_insert_with(|| model_for(record));
+            if let Some(mut voxel) = model.voxel(local) {
+                voxel.cell = cell;
+                return Some(voxel);
+            }
+        }
+        None
+    }
+}
+
+fn plant_extent(species: Species) -> (i64, i64) {
+    if species == Species::Rowan {
+        (MAX_PLANT_RADIUS_CELLS, MAX_PLANT_HEIGHT_CELLS)
+    } else {
+        (8, MAX_GROUND_HEIGHT_CELLS)
     }
 }
 impl PlantRecord {
@@ -1107,33 +1160,37 @@ impl World {
         max: [i64; 2],
         species: Species,
     ) -> Vec<PlantRecord> {
-        let Some(cache) = &self.vegetation else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
+        self.visit_vegetation_roots(min, max, species, |r| out.push(r));
+        out
+    }
+    fn visit_vegetation_roots(
+        &self,
+        min: [i64; 2],
+        max: [i64; 2],
+        species: Species,
+        mut visit: impl FnMut(PlantRecord),
+    ) {
+        let Some(cache) = &self.vegetation else {
+            return;
+        };
         if (species != Species::Rowan && uses_decorative_ground_cover())
             || min[0] >= max[0]
             || min[1] >= max[1]
         {
-            return out;
+            return;
         }
         for tx in min[0].div_euclid(256)..=(max[0] - 1).div_euclid(256) {
             for tz in min[1].div_euclid(256)..=(max[1] - 1).div_euclid(256) {
-                out.extend(
-                    cache
-                        .tile(self, tx, tz, species)
-                        .iter()
-                        .copied()
-                        .filter(|r| {
-                            r.root.x >= min[0]
-                                && r.root.x < max[0]
-                                && r.root.z >= min[1]
-                                && r.root.z < max[1]
-                        }),
-                );
+                let page = cache.tile(self, tx, tz, species);
+                let first = page.partition_point(|r| r.root.x < min[0]);
+                for r in page[first..].iter().take_while(|r| r.root.x < max[0]) {
+                    if (min[1]..max[1]).contains(&r.root.z) {
+                        visit(*r);
+                    }
+                }
             }
         }
-        out
     }
     /// Canonical grass/flower roots in a small rectangle without populating
     /// entire 16 m placement pages. Same support, shade and seed rules as pages.
@@ -1174,11 +1231,7 @@ impl World {
         if species != Species::Rowan && uses_decorative_ground_cover() {
             return None;
         }
-        let radius = if species == Species::Rowan {
-            MAX_PLANT_RADIUS_CELLS
-        } else {
-            8
-        };
+        let (radius, height) = plant_extent(species);
         for tx in (c.x - radius).div_euclid(256)..=(c.x + radius).div_euclid(256) {
             for tz in (c.z - radius).div_euclid(256)..=(c.z + radius).div_euclid(256) {
                 let records = cache.tile(self, tx, tz, species);
@@ -1191,7 +1244,7 @@ impl World {
                 {
                     let local = r.local_cell(c);
                     if local.y < 0
-                        || local.y > MAX_PLANT_HEIGHT_CELLS
+                        || local.y > height
                         || local.x.abs() > radius
                         || local.z.abs() > radius
                     {
@@ -1649,7 +1702,7 @@ mod tests {
                 assert!(m.voxel(Cell::default()).is_some());
                 assert!(m.min.x >= -MAX_PLANT_RADIUS_CELLS && m.max.x <= MAX_PLANT_RADIUS_CELLS);
                 assert!(m.min.z >= -MAX_PLANT_RADIUS_CELLS && m.max.z <= MAX_PLANT_RADIUS_CELLS);
-                assert!(m.max.y <= MAX_PLANT_HEIGHT_CELLS);
+                assert!(m.max.y - 1 <= plant_extent(species).1);
                 let cells: Cells = m
                     .voxels
                     .iter()
@@ -1784,6 +1837,27 @@ mod tests {
                     let c = Cell { x, y, z };
                     assert_eq!(plain.material(c), off.material(c));
                     assert_eq!(plain.column(x, z).material(y), w.column(x, z).material(y));
+                }
+            }
+        }
+    }
+    #[test]
+    fn ray_region_matches_single_cell_queries_through_canopies_and_meadow() {
+        let world = World::new(37).with_vegetation();
+        let mut ray = RayPlants::default();
+        for species in [Species::Rowan, Species::Grass, Species::Edelweiss] {
+            let records = world.vegetation_records_species([-768, -768], [768, 768], species);
+            let record = records.first().unwrap();
+            let model = model_for(record);
+            for voxel in model
+                .voxels
+                .iter()
+                .step_by((model.voxels.len() / 64).max(1))
+            {
+                let c = record.world_cell(voxel.cell);
+                for y in c.y - 3..=c.y + 3 {
+                    let cell = Cell { y, ..c };
+                    assert_eq!(ray.voxel(&world, cell), world.vegetation_voxel(cell));
                 }
             }
         }

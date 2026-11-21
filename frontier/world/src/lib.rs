@@ -238,10 +238,14 @@ impl WorldColumn<'_> {
             y,
             z: self.z,
         };
-        self.world.material_over_source(c, || {
-            self.world
-                .source_with_column(c, self.height, self.terrain_column)
-        })
+        self.world.material_over_source(
+            c,
+            || {
+                self.world
+                    .source_with_column(c, self.height, self.terrain_column)
+            },
+            || self.world.vegetation_voxel(c),
+        )
     }
     fn canonical_material(&self, y: i64) -> Material {
         self.world.compose_fluid(
@@ -458,13 +462,18 @@ impl World {
     /// Physical terrain/vegetation before live water composition. Air edits open
     /// a cell to fluid; solid edits always take precedence over fluid occupancy.
     pub fn material_without_fluid(&self, c: Cell) -> Material {
-        self.material_over_source(c, || self.source(c))
+        self.material_over_source(c, || self.source(c), || self.vegetation_voxel(c))
     }
-    fn material_over_source(&self, c: Cell, source: impl FnOnce() -> Material) -> Material {
+    fn material_over_source(
+        &self,
+        c: Cell,
+        source: impl FnOnce() -> Material,
+        plant: impl FnOnce() -> Option<vegetation::PlantVoxel>,
+    ) -> Material {
         self.edits.get(&c).copied().unwrap_or_else(|| {
             let m = source();
             if m == Material::Air && self.vegetation_enabled() {
-                self.vegetation_voxel(c).map_or(m, |v| v.material)
+                plant().map_or(m, |v| v.material)
             } else {
                 m
             }
@@ -938,17 +947,22 @@ fn raycast_matching(
     let mut distance = 0.0;
     let mut normal = [0; 3];
     let mut column = None;
+    let mut plants = vegetation::RayPlants::default();
     loop {
         let cell = Cell {
             x: c[0],
             y: c[1],
             z: c[2],
         };
-        let base = world.material_over_source(cell, || {
-            let (height, source) =
-                *column.get_or_insert_with(|| world.source_column(cell.x, cell.z));
-            world.source_with_column(cell, height, source)
-        });
+        let base = world.material_over_source(
+            cell,
+            || {
+                let (height, source) =
+                    *column.get_or_insert_with(|| world.source_column(cell.x, cell.z));
+                world.source_with_column(cell, height, source)
+            },
+            || plants.voxel(world, cell),
+        );
         let material = world.compose_fluid(cell, base);
         if accepts(material) {
             return Some(RayHit {

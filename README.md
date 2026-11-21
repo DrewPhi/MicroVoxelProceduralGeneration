@@ -73,6 +73,10 @@ terrain at 6.25 cm, a batch of 1,400 downward 8 m rays took 2.44 ms,
 down from 26.29 ms. Shallow rays took 63.66 ms, down from 69.28 ms.
 These release CPU timings use vegetation off. Hit cells, face normals,
 materials and distances matched on Highlands and Regional at 6.25 and 10 cm.
+With vegetation enabled, rays reuse the nearby plant records across 16-cell
+regions. A 2,910-ray batch through rowan crowns, grass, flowers and edited
+cells took 26.74 ms at 6.25 cm and 18.81 ms at 10 cm. The single-cell plant
+lookup took 145.83 and 91.04 ms on the same rays and returned identical hits.
 
 A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
 6.25 cm voxels. From the approach, the distant renderer draws its deck, underside,
