@@ -15,6 +15,47 @@ struct Column {
     slope: u32,
     water: u32,
     depth: u32,
+    soil_rgb: u32,
+    rock_rgb: u32,
+}
+
+impl Column {
+    fn same_roof(self, other: Self) -> bool {
+        self.y == other.y
+            && self.rgb == other.rgb
+            && self.slope == other.slope
+            && self.water == other.water
+            && self.depth == other.depth
+    }
+
+    fn wall_rgb(self, low: f32, voxel: f32) -> u32 {
+        let height = self.y - low;
+        let water = (self.depth as f32 * 0.25).min(height);
+        let wet = self.water as f32 / 7.;
+        // Integrate the native surface cell, eleven subsurface cells and the
+        // remaining rock over the exposed wall. Wet columns start at the bed.
+        let bands = |h: f32| {
+            let skin = h.min(voxel);
+            let soil = (h - skin).min(11. * voxel);
+            [skin, soil, h - skin - soil]
+        };
+        let dry_bands = bands(height);
+        let wet_bands = bands(height - water);
+        let weight: [f32; 3] =
+            std::array::from_fn(|k| (dry_bands[k] + wet * (wet_bands[k] - dry_bands[k])) / height);
+        let water_rgb = frontier_world::Material::Water.color();
+        let mut packed = 0;
+        for (k, channel) in water_rgb.into_iter().enumerate() {
+            let shift = k * 8;
+            let byte = |rgb| ((rgb >> shift) & 255u32) as f32;
+            let color = weight[0] * byte(self.rgb)
+                + weight[1] * byte(self.soil_rgb)
+                + weight[2] * byte(self.rock_rgb)
+                + 255. * channel * (wet * water / height);
+            packed |= (color.round().clamp(0., 255.) as u32) << shift;
+        }
+        packed
+    }
 }
 
 pub(super) struct Batch {
@@ -74,7 +115,10 @@ fn columns(samples: &[Sample], voxel: f32) -> Vec<Column> {
                 let dz = (a - c) * (1. - u) + (b - d) * u;
                 let length = dx.abs() + dz.abs() + 2. * UNIT * (1 << level) as f32;
                 let encode = |n: f32| ((15. * n / length).round() as i32 as u32) & 31;
-                let rgb = |k| (at(k).clamp(0., 1.) * 255.).round() as u32;
+                let rgb = |k| {
+                    let byte = |i| (at(i).clamp(0., 1.) * 255.).round() as u32;
+                    byte(k) | byte(k + 1) << 8 | byte(k + 2) << 16
+                };
                 let wet = at(4).clamp(0., 1.);
                 let water = (7. * wet).round() as u32;
                 let depth = if water > 0 {
@@ -91,7 +135,9 @@ fn columns(samples: &[Sample], voxel: f32) -> Vec<Column> {
                         (at(3) / vertical_step).round() * vertical_step
                     },
                     slope: encode(dx) | (encode(dz) << 5),
-                    rgb: rgb(0) | rgb(1) << 8 | rgb(2) << 16,
+                    rgb: rgb(0),
+                    soil_rgb: rgb(6),
+                    rock_rgb: rgb(9),
                 };
             }
         }
@@ -138,14 +184,17 @@ fn roofs(columns: &[Column], level: usize, cx: i32, cz: i32, output: &mut Vec<[u
             if high.slope == 0 {
                 while x + width < (cx + CHUNK).min(HALF)
                     && !hole(level, x + width, z)
-                    && column(x + width, z) == high
+                    && column(x + width, z).same_roof(high)
                 {
                     width += 1;
                 }
             }
             let slot = &mut previous[(x - cx) as usize];
             let index = if let Some(run) = slot.filter(|run| {
-                high.slope == 0 && run.row == z - 1 && run.width == width && run.column == high
+                high.slope == 0
+                    && run.row == z - 1
+                    && run.width == width
+                    && run.column.same_roof(high)
             }) {
                 let face = &mut output[run.index];
                 // The next five bits of the roof word encode its z span.
@@ -208,7 +257,11 @@ pub(super) fn build(samples: &[Sample], voxel: f32) -> Mesh {
                                         axis,
                                         wall_level,
                                         low,
-                                        high,
+                                        Column {
+                                            rgb: high.wall_rgb(low, voxel),
+                                            water: 0,
+                                            ..high
+                                        },
                                     ));
                                     min_y = min_y.min(low);
                                 }
@@ -267,6 +320,33 @@ mod tests {
         assert!(address(-641, 0).is_none());
     }
     #[test]
+    fn snow_caps_and_flooded_cliffs_expose_their_native_material_bands() {
+        let snow = Column {
+            y: 8.,
+            rgb: 0xffffff,
+            soil_rgb: 0x777777,
+            rock_rgb: 0x333333,
+            ..Default::default()
+        };
+        for voxel in [0.0625, 0.1] {
+            assert_eq!(snow.wall_rgb(snow.y - voxel * 0.5, voxel), 0xffffff);
+            let rock = snow.wall_rgb(-100., voxel) & 255;
+            assert!((51..=52).contains(&rock));
+        }
+        let flooded = Column {
+            water: 7,
+            depth: 16,
+            ..snow
+        };
+        assert_eq!(flooded.wall_rgb(6., 0.0625), 0x4a3009);
+        assert_ne!(flooded.wall_rgb(-100., 0.0625), 0x4a3009);
+        assert!(snow.same_roof(Column {
+            rock_rgb: 0,
+            ..snow
+        }));
+    }
+
+    #[test]
     fn wet_horizon_roofs_keep_their_depth_and_merge_only_matching_beds() {
         let mut c = vec![
             Column {
@@ -274,7 +354,8 @@ mod tests {
                 rgb: 123,
                 slope: 0,
                 water: 7,
-                depth: 16
+                depth: 16,
+                ..Default::default()
             };
             (CELLS * CELLS) as usize
         ];
@@ -297,7 +378,8 @@ mod tests {
 
     #[test]
     fn flat_horizon_roofs_cover_each_column_once_without_buried_faces() {
-        let lattice = vec![[0.5, 0.25, 0.1, 7.5, 0., 0.]; LEVELS * SIDE * SIDE];
+        let lattice =
+            vec![[0.5, 0.25, 0.1, 7.5, 0., 0., 0.3, 0.2, 0.1, 0.3, 0.3, 0.3]; LEVELS * SIDE * SIDE];
         let mesh = build(&lattice, 0.0625);
         let ring = (CELLS * CELLS) as usize;
         assert!(mesh.faces.len() < 400);

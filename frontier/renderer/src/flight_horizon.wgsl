@@ -29,8 +29,7 @@ struct Vertex {
         p = vec3(x+select(u,1.-u,axis==4u)*size,mix(heights.x,heights.y,v),z);
         normal = vec3(0.,0.,select(-1.,1.,axis==3u));
     }
-    var albedo=vec3<f32>(vec3<u32>(packed.y,packed.y>>8u,packed.y>>16u)&vec3(255u))/255.;
-    if axis!=0u {albedo=mix(albedo,vec3(.035,.19,.29),f32(packed.y>>29u)/7.);}
+    let albedo=vec3<f32>(vec3<u32>(packed.y,packed.y>>8u,packed.y>>16u)&vec3(255u))/255.;
     // The roof and each riser keep their own lighting when their shorter
     // dimension resolves in the horizon render target. Only thin silhouettes
     // and grazing faces take light from the surrounding sampled relief.

@@ -109,6 +109,9 @@ Horizon roof and wall lighting follows the visible face once its shorter
 projected dimension reaches 2.5 horizon pixels. Subpixel faces use the
 surrounding relief lighting. At 1080p, alternating straight flights measured
 7.81–7.98 ms frame p95 on seed 8123 and 11.64–11.97 ms on seed 19.
+Horizon walls take their color from the thickness of the exposed snow or grass
+cap, soil, bedrock and water. Deep cuts through a snowy summit expose the
+underlying rock. The additional CPU samples use 1.78 MiB per horizon lattice.
 
 A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
 finished image. To measure the skyline over unedited Highlands, use

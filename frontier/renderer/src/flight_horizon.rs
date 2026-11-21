@@ -1,7 +1,7 @@
 //! Kilometre-scale relief beyond the active terrain clip. The lattice is
 //! anchored in world metres so moving the window preserves shared vertices.
 use crate::{atmosphere::texture, Camera};
-use frontier_world::{voxel_size, Cell, FbmParams, FbmTerrain};
+use frontier_world::{voxel_size, Cell, FbmParams, FbmTerrain, Material};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use std::ops::Range;
 #[path = "horizon_blocks.rs"]
@@ -12,9 +12,9 @@ use std::sync::{
 };
 use wgpu::util::DeviceExt;
 
-// RGB is ground/bed albedo. The last three channels hold visible elevation,
-// water coverage and coverage-weighted optical depth in metres.
-type Sample = [f32; 6];
+// Ground/bed RGB, visible elevation, wet coverage, weighted optical depth,
+// then subsurface and bedrock RGB from the native material column.
+type Sample = [f32; 12];
 
 const SIDE: usize = 161;
 const SPACING: f64 = 512.;
@@ -34,7 +34,7 @@ fn lattice(
     previous: Option<&Lattice>,
     mut sample: impl FnMut(f64, f64) -> Sample,
 ) -> Lattice {
-    let mut out = vec![[0.; 6]; SIDE * SIDE * LEVELS];
+    let mut out = vec![[0.; 12]; SIDE * SIDE * LEVELS];
     for level in 0..LEVELS {
         let step = SPACING / (1 << (LEVELS - level - 1)) as f64;
         let base = level * SIDE * SIDE;
@@ -109,6 +109,12 @@ fn samples(
         };
         let depth =
             ((col.visible_top - col.ground_top) as f64 * voxel_size()).clamp(0., 12.) as f32;
+        let soil = col.ground_subsurface.color();
+        let rock = if col.ground_surface == Material::Stone && !wet {
+            surface
+        } else {
+            Material::Stone.color()
+        };
         [
             r,
             g,
@@ -116,6 +122,12 @@ fn samples(
             (col.visible_top as f64 * voxel_size()) as f32,
             u8::from(wet) as f32,
             depth,
+            soil[0],
+            soil[1],
+            soil[2],
+            rock[0],
+            rock[1],
+            rock[2],
         ]
     }));
     let mesh = blocks::build(&lattice.samples, voxel_size() as f32);
@@ -421,6 +433,12 @@ mod tests {
                 (x * 0.003 + z * 0.007).sin() as f32,
                 0.,
                 0.,
+                x as f32,
+                z as f32,
+                0.,
+                z as f32,
+                0.,
+                x as f32,
             ]
         };
         let old = lattice([-3, 7], None, sample);
