@@ -86,12 +86,16 @@ struct Run {
 
 #[derive(Clone)]
 struct Edge {
-    span: Range<i64>,
-    run: Run,
+    span: Range<u32>,
+    run: u32,
 }
 
 type Plane = (usize, i64);
-type Edges = BTreeMap<Plane, [Vec<Edge>; 2]>;
+#[derive(Default)]
+struct Edges {
+    planes: BTreeMap<Plane, [Vec<Edge>; 2]>,
+    runs: Vec<Run>,
+}
 
 /// Unmerged faces have patch-local profile slots. These can be reused when a
 /// neighboring tile changes pitch, before the new tile's profiles are assigned.
@@ -171,6 +175,14 @@ fn packed_quad(
 fn pack_color(color: [f32; 3]) -> u32 {
     let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
     0x10 | r << 8 | g << 14 | b << 20
+}
+
+// Water uses a disjoint payload in the same face word as dry RGB. Sixteenths
+// of a metre encode native depths exactly at the default grid. Light reaching
+// the bottom is negligible beyond the 12 m optical depth limit.
+fn pack_water_bed(cells: i64, material: Material) -> u32 {
+    let depth = ((cells as f64 * voxel_size()).clamp(0., 12.) * 16.).round() as u32;
+    0x20 | (material as u32) << 8 | depth << 12
 }
 
 impl Run {
@@ -267,14 +279,25 @@ fn rect_edges(
     run: Run,
     interior_width: Option<i64>,
 ) {
+    if interior_width.is_some_and(|width| {
+        [x.start, x.end, z.start, z.end]
+            .into_iter()
+            .all(|p| p != 1 && p != width - 1)
+    }) {
+        return;
+    }
+    // A rectangle contributes to four edge lists. Keep its full material
+    // column once and sort compact tile-local spans during wall extraction.
+    let index = edges.runs.len() as u32;
+    edges.runs.push(run);
     for (axis, line, span) in [(0, x.clone(), z.clone()), (2, z, x)] {
         for (side, plane) in [line.start, line.end].into_iter().enumerate() {
             if interior_width.is_some_and(|width| plane != 1 && plane != width - 1) {
                 continue;
             }
-            edges.entry((axis, plane)).or_default()[side].push(Edge {
-                span: span.clone(),
-                run,
+            edges.planes.entry((axis, plane)).or_default()[side].push(Edge {
+                span: span.start as u32..span.end as u32,
+                run: index,
             });
         }
     }
@@ -620,7 +643,11 @@ impl Generator<'_> {
                 deep_material: column.bands[2],
                 soil_bands: Some([column.bands[0], column.bands[1]]),
                 profile: 0,
-                paint: 0,
+                paint: if column.height > column.ground_height {
+                    pack_water_bed(column.height - column.ground_height, column.bands[0])
+                } else {
+                    0
+                },
             });
         }
         // This path owns procedural heightfields. Saved volume edits are drawn
@@ -634,7 +661,7 @@ impl Generator<'_> {
             let (col, color) =
                 terrain.landscape_column(at[0], at[1], self.world.vegetation_enabled());
             let paint = if col.top_material() == Material::Water {
-                0
+                pack_water_bed(col.visible_top - col.ground_top, col.ground_surface)
             } else {
                 pack_color(color)
             };
@@ -926,7 +953,7 @@ impl Generator<'_> {
             .then(|| self.interior(width, pitch, grid as usize, cancelled))
             .transpose()?;
         let mut profiles = Vec::with_capacity(interior.as_ref().map_or(0, |i| i.patches.len()));
-        let mut edges = Edges::new();
+        let mut edges = Edges::default();
         let mut block_runs = HashMap::new();
         for z in (0..width).step_by(pitch as usize) {
             for x in (0..width).step_by(pitch as usize) {
@@ -1069,7 +1096,7 @@ impl Generator<'_> {
                 ..q
             }))?;
         }
-        for ((axis, plane), mut sides) in edges {
+        for ((axis, plane), mut sides) in edges.planes {
             if cancelled() {
                 return Err("adaptive geometry cancelled".into());
             }
@@ -1088,25 +1115,25 @@ impl Generator<'_> {
                 // Middle spans have identical tops in the two tiles. Only
                 // native edge cells need an exposed face across the seam.
                 for edge in &sides[usize::from(positive)] {
-                    if edge.span.end - edge.span.start != 1 || !seam_native(edge.span.start, stride)
-                    {
+                    let t = i64::from(edge.span.start);
+                    if edge.span.end - edge.span.start != 1 || !seam_native(t, stride) {
                         continue;
                     }
-                    let t = edge.span.start;
                     let outside = if positive { width } else { -1 };
                     let neighbor = if axis == 0 {
                         self.height(outside, t)?
                     } else {
                         self.height(t, outside)?
                     };
-                    if edge.run.top > neighbor {
+                    let run = edges.runs[edge.run as usize];
+                    if run.top > neighbor {
                         self.append_quads(wall_quads(
                             axis,
                             plane,
                             positive,
-                            edge.span.clone(),
+                            t..t + 1,
                             neighbor,
-                            edge.run,
+                            run,
                         ))?;
                     }
                 }
@@ -1117,20 +1144,22 @@ impl Generator<'_> {
             let mut j = 0;
             while let (Some(right), Some(left)) = (negative.get(i), positive.get(j)) {
                 let span = right.span.start.max(left.span.start)..right.span.end.min(left.span.end);
-                if !span.is_empty() && left.run.top != right.run.top {
-                    let outward = left.run.top > right.run.top;
+                let left_run = edges.runs[left.run as usize];
+                let right_run = edges.runs[right.run as usize];
+                if !span.is_empty() && left_run.top != right_run.top {
+                    let outward = left_run.top > right_run.top;
                     let (high, low) = if outward {
-                        (left, right)
+                        (left_run, right_run)
                     } else {
-                        (right, left)
+                        (right_run, left_run)
                     };
                     self.append_quads(wall_quads(
                         axis,
                         plane,
                         outward,
-                        span,
-                        low.run.top,
-                        high.run,
+                        i64::from(span.start)..i64::from(span.end),
+                        low.top,
+                        high,
                     ))?;
                 }
                 if right.span.end <= left.span.end {
@@ -1273,6 +1302,19 @@ mod tests {
     use super::*;
     use crate::adaptive_geometry::{build_surface_with_geometry, SourceSamples, TileKey};
     use frontier_world::{FbmParams, World};
+
+    #[test]
+    fn water_faces_keep_bed_material_and_depth_in_the_instance_word() {
+        for ground in [Material::Sand, Material::Stone, Material::Soil] {
+            for cells in [1, 7, 64, 512, 50_000] {
+                let word = pack_water_bed(cells, ground) | Material::Water as u32;
+                assert_eq!(word & 255, 0x27);
+                assert_eq!((word >> 8) & 15, ground as u32);
+                let depth = f64::from(word >> 12) / 16.;
+                assert!((depth - (cells as f64 * voxel_size()).min(12.)).abs() <= 1. / 32.);
+            }
+        }
+    }
 
     #[test]
     fn shallow_voxel_steps_expose_the_surface_and_soil_layers() {

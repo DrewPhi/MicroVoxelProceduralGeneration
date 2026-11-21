@@ -463,7 +463,9 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     if (material&16u)!=0u {
         color=vec3<f32>((vec3(material)>>vec3(8u,14u,20u))&vec3(63u))/63.;
     }
-    return vertex_out(position,color,normal,profile_index);
+    var out=vertex_out(position,color,normal,profile_index);
+    if (material&255u)==0x27u {out.water=material;}
+    return out;
 }
 @fragment fn fs_shadow_cut(in: VertexOut) {
     let cell = vec2<i32>(floor(in.local.xz*VOXELS_PER_METER-in.normal.xz*.01));
@@ -477,6 +479,21 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
     camera=batch_cameras[in.camera_slot].value;
     return shade(in);
 }
+// Dry grid samples carry alpha 255. Bilinear interpolation of encoded
+// depth across those samples would turn a shallow bank into deep water.
+fn block_water_bed(cell:vec2<f32>,fallback:vec4<f32>)->vec4<f32> {
+    let base=vec2<i32>(floor(cell));
+    let f=fract(cell);
+    let a=textureLoad(flight_detail,base,1,0);
+    let b=textureLoad(flight_detail,base+vec2(1,0),1,0);
+    let c=textureLoad(flight_detail,base+vec2(0,1),1,0);
+    let d=textureLoad(flight_detail,base+vec2(1,1),1,0);
+    let weights=vec4((1.-f.x)*(1.-f.y),f.x*(1.-f.y),(1.-f.x)*f.y,f.x*f.y);
+    let wet=select(vec4(0.),weights,vec4(a.w,b.w,c.w,d.w)<vec4(254.5/255.));
+    let sum=(a*wet.x+b*wet.y+c*wet.z+d*wet.w)*vec4(1.,1.,1.,12.*255./254.);
+    return sum+fallback*(1.-dot(wet,vec4(1.)));
+}
+
 fn river_texel(cell:vec2<i32>,height:f32,tolerance:f32)->f32 {
     let channel=u32((cell.x&1)+2*(cell.y&1));
     let lo=u32(round(255.*textureLoad(flight_detail,cell/2,2,0)[channel]));
@@ -608,7 +625,15 @@ fn shade(input: VertexOut) -> vec4<f32> {
         var bed=vec3(.30,.35,.25);
         var depth=4.;
         let phase=near_shadow.water_phase;
-        if (camera.paint_origin.w & 26u)==0u && normal.y>.5 {
+        // The water surface has a horizontal voxel roof in both flight
+        // representations. Keep its hydraulic stage and animate only light.
+        let block_water=(camera.paint_origin.w&32u)!=0u && in.water!=0u;
+        let measured_column=(in.water&255u)==0x27u;
+        if measured_column {
+            bed=MATERIAL_COLORS[min((in.water>>8u)&15u,9u)];
+            depth=f32(in.water>>12u)/16.;
+        }
+        if ((camera.paint_origin.w & 26u)==0u || block_water) && normal.y>.5 {
             let p=in.local.xz-camera.eye.xz+phase.xy;
             let pixel=max(length(dx.xz),length(dy.xz));
             normal=water_swell(p,normal,phase.z,pixel);
@@ -616,17 +641,30 @@ fn shade(input: VertexOut) -> vec4<f32> {
                 let cell=(in.local.xz-camera.eye.xz+near_shadow.parameters.zw)/8.;
                 let side=vec2<f32>(textureDimensions(flight_detail));
                 let edge=min(cell,side-1.-cell);
-                let w=smoothstep(1.,15.,min(edge.x,edge.y));
+                var w=smoothstep(1.,15.,min(edge.x,edge.y));
+                if measured_column {
+                    let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
+                    w*=smoothstep(6.,20.,spacing);
+                }
                 if w>0. {
-                    let paint=textureSampleLevel(flight_detail,flight_sampler,(cell+.5)/side,1,0.);
-                    bed=mix(bed,paint.rgb,w);
-                    depth=mix(depth,paint.a*(12.*255./254.),w);
+                    var measured=vec4(bed,depth);
+                    if block_water {
+                        measured=block_water_bed(cell,measured);
+                    } else {
+                        measured=textureSampleLevel(flight_detail,flight_sampler,(cell+.5)/side,1,0.)*vec4(1.,1.,1.,12.*255./254.);
+                    }
+                    bed=mix(bed,measured.rgb,w);
+                    depth=mix(depth,measured.a,w);
                 }
             }
         }
         let reflected=reflect(direction,normal);
         let above=water_sky(reflected,camera.sun.xyz,camera.sky.x);
-        let below=water_medium(bed*light,depth);
+        // A ray refracted into water travels farther than the vertical depth
+        // at grazing incidence (Snell's law with n=1.333).
+        let cos_air=clamp(-dot(direction,normal),0.,1.);
+        let path=select(depth,depth*inverseSqrt(1.-.5628*(1.-cos_air*cos_air)),block_water && in.normal.y>.5);
+        let below=water_medium(bed*light,path);
         let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
             visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
         if in.water!=0u {return vec4(color,1.);}
