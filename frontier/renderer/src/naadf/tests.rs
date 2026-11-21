@@ -493,7 +493,7 @@ fn gpu_matches_canonical_rays_for_source(
                         ],
                         viewport: [64., 64., 1., if shadows { 2. } else { 1. }],
                         sun: [-0.5, 0.8, -0.3, 0.],
-                        sky: [0.; 4],
+                        sky: [0., volume.static_shadow_ceiling(), 0., 0.],
                         far_matrix: [[0.; 4]; 4],
                         shadow: [0.; 4],
                         forward: basis[0],

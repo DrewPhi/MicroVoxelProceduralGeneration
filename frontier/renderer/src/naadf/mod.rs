@@ -299,6 +299,20 @@ struct Volume {
     cpu_profile: Option<prepare_profile::Metrics>,
 }
 impl Volume {
+    fn static_shadow_ceiling(&self) -> f32 {
+        // Relative to the published volume origin in native voxels. Keep a
+        // cell of margin for floating-point ray origins near the ceiling.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ENABLED
+            .get_or_init(|| std::env::var_os("FRONTIER_NAADF_SUN_TOP").is_none_or(|v| v != "0"))
+        {
+            self.occupied
+                .map_or(0., |r| ((r.hi[1] - self.region.lo[1]) * 16) as f32 + 1.)
+        } else {
+            0.
+        }
+    }
+
     fn edit_bounds(&self) -> [[i32; 4]; 2] {
         self.dirty_roots
             .map_or([[i32::MIN; 4], [i32::MAX; 4]], |b| {
@@ -1779,7 +1793,7 @@ impl Experiment {
                 sun: [sun.x, sun.y, sun.z, if s.beauty { 1. } else { 0. }],
                 sky: [
                     s.overcast,
-                    0.,
+                    a.static_shadow_ceiling(),
                     0.,
                     if s.visibility_benchmark { 1. } else { 0. },
                 ],

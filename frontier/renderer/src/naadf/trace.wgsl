@@ -646,7 +646,13 @@ fn trace_water_optics(o:vec3<f32>,d:vec3<f32>,maximum:f32)->VoxelHit {
 fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusion:bool,measure:bool)->VoxelHit {
     let lane=u32(occlusion);
     trace_metric(lane,0u,1u);
-    var h=trace_impl(o,d,max(minimum,prefix),occlusion,measure,true);
+    var maximum=1e30;
+    // Above the published root ceiling, an ascending sun ray can encounter
+    // no static cells. Very remote receivers retain the unbounded traversal.
+    if occlusion && d.y>0. && naadf.sky.y>0. && abs(o.y)<1048576. {
+        maximum=(naadf.sky.y-o.y)/d.y;
+    }
+    var h=trace_impl_mode(o,d,max(minimum,prefix),occlusion,measure,true,false,maximum);
     // A different preceding empty cuboid can change face priority at a
     // simultaneous plane crossing, or round into the previous cell and stall
     // before a hit is returned. Replay those cases with the original start.
@@ -667,7 +673,7 @@ fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusio
         }
         if replay {
             trace_metric(lane,select(22u,21u,stalled),1u);
-            let exact=trace_impl(o,d,minimum,occlusion,measure,false);
+            let exact=trace_impl_mode(o,d,minimum,occlusion,measure,false,false,maximum);
             h=VoxelHit(exact.found,exact.t,exact.normal,exact.pigment,h.visits+exact.visits,exact.flags);
         }
     }
@@ -687,7 +693,7 @@ fn trace_static_prefixed(o:vec3<f32>,d:vec3<f32>,minimum:f32,prefix:f32,occlusio
         }
         if native_replay {
             trace_metric(lane,30u,1u);
-            let exact=trace_native(o,d,minimum,occlusion,measure);
+            let exact=trace_native_mode(o,d,minimum,occlusion,measure,false,maximum);
             h=VoxelHit(exact.found,exact.t,exact.normal,exact.pigment,h.visits+exact.visits,exact.flags);
         }
     }

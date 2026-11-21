@@ -67,6 +67,14 @@ respectively. Near terrain and mesh transitions still have visible errors.
 `FRONTIER_FLIGHT_FOCUS=0` and `FRONTIER_HIGHLANDS_BOUND_ROWS=16` reproduce
 that control.
 
+On the 3 m/s Watershed seed 997 walking turn, limiting an ascending shadow
+ray to the highest occupied native root gave p50/p95/p99 of
+**16.49 / 20.68 / 23.06 ms** and **16.72 / 20.30 / 23.53 ms** on repeat.
+The unbounded controls gave **18.27 / 21.49 / 22.91 ms** and
+**18.39 / 22.03 / 25.37 ms**. This 1080p test uses a 1.5 km view, 32 m
+native radius and GPU stage timing. Walking still misses the 16.67 ms budget.
+Set `FRONTIER_NAADF_SUN_TOP=0` for the control.
+
 ### Earlier measurements
 
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover
