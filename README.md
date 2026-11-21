@@ -118,6 +118,14 @@ views of grass and snow ledges kept identical depth and coverage across all
 pixels. On the Radeon 760M, the layered snow view at 1080p MSAA 1 took
 7.11–7.24 ms median GPU time, up from 6.60–6.86 ms for the single-color wall.
 
+On the cold Highlands seed 673 route, the engine reuses compiled voxel shaders
+when the nearby volume moves. Over high terrain it checks smaller patches
+when a single height bound cannot prove the flight path clear. The bounds
+include trees and saved edits. In four alternating 100 m/s passes on the
+Radeon 760M at 1920×1080, MSAA 1 and a 6 km active view, p99 frame time was
+43.97–50.96 ms before these changes and 15.82–16.02 ms afterward. The two
+updated runs covered every measured frame and continued refining throughout.
+
 In flight, an 8 m lattice of source heights and colors estimates the visible
 areas of the native tops and risers as they shrink below a pixel. The renderer
 combines their individual sunlight responses while keeping the stepped outline.
