@@ -674,6 +674,36 @@ fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
         r.a.stage + t * (r.b.stage - r.a.stage),
     )
 }
+
+/// Downstream unit tangent and fall per horizontal metre at a channel column.
+/// The caller already knows the column is wet. A lake owns its surface at an inlet.
+pub(crate) fn river_course(seed: u64, p: FbmParams, x: f64, z: f64) -> Option<([f64; 2], f64)> {
+    let region = region(seed, p, x, z);
+    let mut nearest = 1.;
+    let mut result = None;
+    for r in region.candidates(x, z) {
+        let t = projection_t(r, x, z);
+        let dx = r.b.x - r.a.x;
+        let dz = r.b.z - r.a.z;
+        let width = r.width + t * (r.width_b - r.width);
+        let fraction = (x - r.a.x - t * dx).hypot(z - r.a.z - t * dz) / width;
+        if fraction >= 1. || r.a.stage + t * (r.b.stage - r.a.stage) <= 0. {
+            continue;
+        }
+        if r.lake {
+            return None;
+        }
+        if fraction < nearest {
+            let length = dx.hypot(dz);
+            if length > 0. {
+                nearest = fraction;
+                result = Some(([dx / length, dz / length], r.grade));
+            }
+        }
+    }
+    result
+}
+
 #[derive(Clone, Copy)]
 struct ChannelMargin {
     bank_distance: f64,
@@ -1343,6 +1373,34 @@ mod tests {
             }
             assert!(wet > 100 && deposits > wet / 2 && exposed_bank > 0);
         }
+    }
+
+    #[test]
+    fn sampled_river_course_follows_the_downstream_reach_and_ends_at_lakes() {
+        let p = FbmParams { recipe: FbmRecipe::Watershed, ..params() };
+        let terrain = super::super::FbmTerrain::new(997, p).unwrap();
+        let mut rivers = 0;
+        let mut lakes = 0;
+        for reach in &region(997, p, 0., 0.).reaches {
+            let x = (reach.a.x + reach.b.x) * 0.5;
+            let z = (reach.a.z + reach.b.z) * 0.5;
+            if !(0. ..9600.).contains(&x) || !(0. ..9600.).contains(&z) {
+                continue;
+            }
+            let course = terrain.river_course(x, z);
+            if reach.lake {
+                assert!(course.is_none());
+                lakes += 1;
+            } else if let Some(([cx, cz], grade)) = course {
+                let dx = reach.b.x - reach.a.x;
+                let dz = reach.b.z - reach.a.z;
+                let length = dx.hypot(dz);
+                assert!((cx * dx + cz * dz) / length > 0.99999);
+                assert!((grade - (reach.a.stage - reach.b.stage) / length).abs() < 1e-9);
+                rivers += 1;
+            }
+        }
+        assert!(rivers > 24 && lakes > 0, "{rivers} rivers, {lakes} lakes");
     }
 
     #[test]

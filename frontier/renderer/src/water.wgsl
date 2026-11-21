@@ -54,13 +54,31 @@ fn water_swell(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32)->vec3<f32> {
 
 // One world-anchored slope field for the exact water volume and its raster
 // continuation. Only the optical normal moves; the voxel roof stays level.
-fn water_surface_normal(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32,distance:f32)->vec3<f32> {
+fn water_surface_normal(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32,distance:f32,course:vec4<f32>)->vec3<f32> {
     if normal.y<.5 {return normal;}
     let swell=water_swell(p,normal,time,pixel);
     let detail=.020*(1.-smoothstep(.08,.38,pixel))*(1.-smoothstep(22.,78.,distance));
-    if detail<=0. {return swell;}
     let phase=p-128.*floor(p/128.);
-    return water_ripple(vec3(phase.x,0.,phase.y),swell,time,detail);
+    var wind=swell;
+    if detail>0. {wind=water_ripple(vec3(phase.x,0.,phase.y),swell,time,detail);}
+    if course.w<=0. {return wind;}
+    // Counter-propagating wavelets have fixed world phase. Changes in course
+    // steer their amplitudes, so neighbouring reaches agree even late in a run.
+    let q=phase*.049087385;
+    let eddy=sin(dot(q,vec2(6.,-8.))+.34*time)+.64*sin(dot(q,vec2(11.,3.))-.25*time);
+    let waves=vec4(dot(q,vec2(43.,9.)),dot(q,vec2(-11.,49.)),
+        dot(q,vec2(57.,52.)),dot(q,vec2(64.,-51.)))+eddy*vec4(1.8,-1.1,.9,-1.6);
+    let ax=vec4(.979,-.219,.739,.782);
+    let az=vec4(.205,.976,.674,-.623);
+    let alignment=ax*course.x+az*course.y;
+    let speed=time*vec4(1.96,2.15,3.8,4.2);
+    let running=mix(sin(waves+speed),sin(waves-speed),smoothstep(vec4(-.32),vec4(.32),alignment));
+    let packet=.77+.23*sin(dot(q,vec2(13.,-8.))+.27*time+.8*eddy);
+    let resolved=1.-smoothstep(vec4(.25,.23,.14,.13),vec4(1.10,1.,.64,.60),vec4(pixel));
+    let bands=running*(.12+.88*alignment*alignment)*resolved;
+    let slope=vec2(dot(ax,bands),dot(az,bands))*packet*mix(.014,.047,course.z);
+    let river=normalize(normal+vec3(slope.x,0.,slope.y));
+    return normalize(mix(wind,river,course.w));
 }
 
 // Below one pixel, a single wet-to-wet riser and its adjacent water roof

@@ -1,7 +1,8 @@
 struct GroundLight {
     origin_strength: vec4<f32>,
     nodes: array<vec4<f32>,169>,
-    cloud_light:vec4<f32>,
+    water_options:vec4<f32>, // cloud map enabled, deck relative to eye, river course present
+    currents:array<vec4<u32>,43>,
     reflection_origin:vec4<f32>,
     skyline:array<vec4<f32>,16>,
     terrain_panorama:array<vec4<u32>,256>,
@@ -11,6 +12,27 @@ struct GroundLight {
 
 fn ground_available() -> bool {
     return ground_light.origin_strength.w>0.;
+}
+
+fn current_node(i:u32)->vec4<f32> {
+    return unpack4x8snorm(ground_light.currents[i/4u][i%4u]);
+}
+
+fn stream_current(relative:vec2<f32>)->vec4<f32> {
+    let radius=max(abs(relative.x),abs(relative.y));
+    if ground_light.water_options.z<=0. || radius>=62. {return vec4(0.);}
+    let grid=clamp((relative-ground_light.origin_strength.xy)/ground_light.origin_strength.w,
+        vec2(0.),vec2(12.));
+    let corner=vec2<u32>(min(floor(grid),vec2(11.)));
+    let w=grid-vec2<f32>(corner);
+    let i=corner.x+13u*corner.y;
+    let a=mix(current_node(i),current_node(i+1u),w.x);
+    let b=mix(current_node(i+13u),current_node(i+14u),w.x);
+    let course=mix(a,b,w.y);
+    let magnitude=length(course.xy);
+    if magnitude<.015 {return vec4(0.);}
+    return vec4(course.xy/magnitude,course.z/max(course.w,.001),
+        smoothstep(.015,.56,magnitude)*(1.-smoothstep(42.,62.,radius)));
 }
 
 fn ground_sample(position:vec3<f32>) -> vec4<f32> {
@@ -48,9 +70,9 @@ fn cloud_texel(x:u32,y:u32)->vec4<f32> {
 // Sample the cloud deck from the water surface. The low angular resolution
 // filters the cloud light while native water normals retain their fine ripples.
 fn water_cloud_light(relative:vec3<f32>,ray:vec3<f32>,clear:vec3<f32>)->vec3<f32> {
-    if ground_light.cloud_light.x<=0. || ray.y<=0. {return clear;}
+    if ground_light.water_options.x<=0. || ray.y<=0. {return clear;}
     var direction=ray;
-    let range=(ground_light.cloud_light.y-relative.y)/max(.001,ray.y);
+    let range=(ground_light.water_options.y-relative.y)/max(.001,ray.y);
     if range>20. {
         let toward=relative+ray*range;
         direction=toward*inverseSqrt(max(dot(toward,toward),.001));

@@ -492,6 +492,14 @@ impl FbmTerrain {
     pub(crate) fn seeded_reaches(&self, min: [f64; 2], max: [f64; 2]) -> Vec<seeded_world::Reach> {
         seeded_world::reaches_intersecting(self.seed, self.params, min, max)
     }
+    /// Downstream direction in X/Z and hydraulic grade for a wet river column.
+    /// Lake and ocean surfaces have no channel direction.
+    pub fn river_course(&self, x_m: f64, z_m: f64) -> Option<([f64; 2], f64)> {
+        if !self.params.recipe.has_static_water() || self.params.amplitude == 0. {
+            return None;
+        }
+        seeded_world::river_course(self.seed, self.params, x_m, z_m)
+    }
     /// Candidate horizontal bounds for inland static water. The native column
     /// still determines whether a candidate is wet. None means the requested
     /// box exceeds a single drainage query's supported extent.

@@ -196,6 +196,10 @@ Near water, a 64×32 directional map samples the same moving cloud volume
 that lights the sky. The water surface samples it along the reflected ray,
 with a correction for the distance between the camera and the reflecting
 voxel. Nearby banks and trees can cross in front of a reflected cloud.
+The river's nearby ripples travel along the drainage graph. Faster, steeper
+reaches have stronger surface slopes, and the calm sandbar has short patches
+of moving water between clear reflections. Both render paths sample the
+same downstream directions. Lakes and the open sea retain their wind swell.
 In a level camera view over the sea on Highlands seed 40961, reflected
 brightness tracked the sky across three bands below the horizon
 (correlation 0.65–0.76). All three captures had identical terrain depth.
@@ -205,6 +209,11 @@ With moving clouds, p95 was 13.12 ms and 12.95 ms respectively. A 100 m/s
 approach with reflections took 8.65 / 14.82 / 17.98 ms at p50/p95/p99.
 These eight-second runs used 47% cloud coverage, fixed coarse detail, a
 1.5 km active view and a 16 m native radius.
+
+With downstream ripples enabled, the same sandbar measured 11.14–11.24 ms
+median, compared with 11.03–11.06 ms for the wind-swell version. Upstream
+rapids measured 15.87 / 17.31 / 17.98 ms at p50/p95/p99. Open-sea color and
+depth matched the wind-swell renderer pixel for pixel in the 800×450 check.
 
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 

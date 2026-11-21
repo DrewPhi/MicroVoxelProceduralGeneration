@@ -15,7 +15,8 @@ const COUNT: usize = SIDE * SIDE;
 pub(crate) struct GroundUniform {
     origin_strength: [f32; 4],
     nodes: [[[f32; 4]; SIDE]; SIDE],
-    cloud_light: [f32; 4],
+    water_options: [f32; 4],
+    currents: [[u32; 4]; COUNT.div_ceil(4)],
     water: Panorama,
 }
 
@@ -24,12 +25,8 @@ pub(crate) const CLOUD_OFFSET: u64 = std::mem::size_of::<GroundUniform>() as u64
 impl GroundUniform {
     pub(crate) fn enable_clouds(&mut self, enabled: bool, eye_height: f64) -> bool {
         let active = enabled && self.water.enabled();
-        self.cloud_light = [
-            if active { 1. } else { 0. },
-            (2060. - eye_height) as f32,
-            0.,
-            0.,
-        ];
+        self.water_options[0] = if active { 1. } else { 0. };
+        self.water_options[1] = (2060. - eye_height) as f32;
         active
     }
 
@@ -57,7 +54,7 @@ pub(crate) fn buffer(device: &wgpu::Device) -> wgpu::Buffer {
 pub(crate) struct GroundField {
     start: [i64; 2],
     source: Option<World>,
-    nodes: Vec<([f32; 3], f64, Option<f64>)>,
+    nodes: Vec<GroundSample>,
     reflections: Reflections,
 }
 
@@ -101,8 +98,8 @@ impl GroundField {
             let mut nearest = f64::INFINITY;
             let mut anchor = None;
             let center = [eye.x, eye.z].map(|v| (v / 48.).round() * 48.);
-            for (i, &(_, _, surface)) in self.nodes.iter().enumerate() {
-                if let Some(y) = surface {
+            for (i, node) in self.nodes.iter().enumerate() {
+                if let Some(y) = node.water {
                     let x = (start[0] + (i % SIDE) as i64) as f64 * SPACING;
                     let z = (start[1] + (i / SIDE) as i64) as f64 * SPACING;
                     let distance = (x - center[0]).powi(2) + (z - center[1]).powi(2);
@@ -123,8 +120,15 @@ impl GroundField {
                 );
             }
         }
+        let mut currents = [[0; 4]; COUNT.div_ceil(4)];
+        let mut has_current = false;
+        for (i, node) in self.nodes.iter().enumerate() {
+            currents[i / 4][i % 4] = node.current;
+            has_current |= node.current != 0;
+        }
         GroundUniform {
-            cloud_light: [0.; 4],
+            water_options: [0., 0., f32::from(has_current), 0.],
+            currents,
             water,
             origin_strength: [
                 (start[0] as f64 * SPACING - eye.x) as f32,
@@ -134,16 +138,26 @@ impl GroundField {
             ],
             nodes: std::array::from_fn(|z| {
                 std::array::from_fn(|x| {
-                    let ([r, g, b], y, _) = self.nodes[x + SIDE * z];
-                    [r, g, b, (y - eye.y) as f32]
+                    let node = self.nodes[x + SIDE * z];
+                    let [r, g, b] = node.color;
+                    [r, g, b, (node.bed - eye.y) as f32]
                 })
             }),
         }
     }
 }
 
-fn sample_ground(world: &World, x: i64, z: i64) -> ([f32; 3], f64, Option<f64>) {
-    let cell = Cell::from_meters([x as f64 * SPACING, 0., z as f64 * SPACING]);
+#[derive(Clone, Copy)]
+struct GroundSample {
+    color: [f32; 3],
+    bed: f64,
+    water: Option<f64>,
+    current: u32,
+}
+
+fn sample_ground(world: &World, x: i64, z: i64) -> GroundSample {
+    let [x, z] = [x, z].map(|v| v as f64 * SPACING);
+    let cell = Cell::from_meters([x, 0., z]);
     let column = world.column(cell.x, cell.z);
     let height = column.ground_height_m();
     let material = column.canonical_material_without_fluid(column.ground_height_cells() - 1);
@@ -153,5 +167,17 @@ fn sample_ground(world: &World, x: i64, z: i64) -> ([f32; 3], f64, Option<f64>) 
         material.color()
     };
     let water = (column.height_cells() > column.ground_height_cells()).then(|| column.height_m());
-    (color, height, water)
+    let current = water
+        .filter(|&y| y > 0.)
+        .and_then(|_| world.fbm_terrain()?.river_course(x, z))
+        .map_or(0, |([dx, dz], grade)| {
+            let encode = |v: f64| (v.clamp(-1., 1.) * 127.).round() as i8 as u8;
+            u32::from_le_bytes([encode(dx), encode(dz), encode((grade / 0.14).sqrt()), 127])
+        });
+    GroundSample {
+        color,
+        bed: height,
+        water,
+        current,
+    }
 }

@@ -131,7 +131,8 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
     }
     let phase_position=water_phase_position(surface);
     let pixel=2.*distance*naadf.up.w/(naadf.viewport.y*max(.06,abs(dot(d,normal))));
-    let ripple=water_surface_normal(phase_position.xz,optical_face,naadf.water.z,pixel,distance);
+    let course=stream_current(surface.xz-naadf.eye.xz);
+    let ripple=water_surface_normal(phase_position.xz,optical_face,naadf.water.z,pixel,distance,course);
     let n=select(normal,ripple,dot(d,ripple)<-0.002);
     let transmitted=refract(d,n,1./1.333);
     let origin=surface*VOXELS_PER_METER-normal*.012;

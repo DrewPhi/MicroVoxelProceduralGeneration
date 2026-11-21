@@ -613,7 +613,8 @@ fn shade(input: VertexOut) -> vec4<f32> {
         }
         if normal.y>.5 {
             let relative=in.local-camera.eye.xyz;
-            let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,max(length(dx.xz),length(dy.xz)),length(relative));
+            let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,
+                max(length(dx.xz),length(dy.xz)),length(relative),stream_current(relative.xz));
             normal=select(normal,slope,dot(direction,slope)<-.002);
             if ((camera.paint_origin.w & 26u)==0u || block_water) && near_shadow.parameters.z > -1e10 {
                 let cell=(in.local.xz-camera.eye.xz+near_shadow.parameters.zw)/8.;
