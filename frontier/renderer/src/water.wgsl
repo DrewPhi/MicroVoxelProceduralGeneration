@@ -51,3 +51,22 @@ fn water_swell(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32)->vec3<f32> {
     let slope=packet*vec2(.024*a-.016*b+.009*c,.011*a+.027*b-.007*c);
     return normalize(normal+vec3(slope.x,0.,slope.y)*normal.y);
 }
+
+// One world-anchored slope field for the exact water volume and its raster
+// continuation. Only the optical normal moves; the voxel roof stays level.
+fn water_surface_normal(p:vec2<f32>,normal:vec3<f32>,time:f32,pixel:f32,distance:f32)->vec3<f32> {
+    if normal.y<.5 {return normal;}
+    let swell=water_swell(p,normal,time,pixel);
+    let detail=.020*(1.-smoothstep(.08,.38,pixel))*(1.-smoothstep(22.,78.,distance));
+    if detail<=0. {return swell;}
+    let phase=p-128.*floor(p/128.);
+    return water_ripple(vec3(phase.x,0.,phase.y),swell,time,detail);
+}
+
+// Below one pixel, a single wet-to-wet riser and its adjacent water roof
+// share a sample. Filter their optical response while retaining the face.
+fn stream_step_normal(side:vec3<f32>, height:f32, pixel_height:f32)->vec3<f32> {
+    let span=height/max(pixel_height,.000001);
+    let roof=.92*(1.-smoothstep(.6,3.3,span));
+    return normalize(mix(side,vec3(0.,1.,0.),roof));
+}

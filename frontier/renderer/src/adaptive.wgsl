@@ -420,7 +420,7 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         let height=select(extent.y,extent.x,axis==0u)*VOXELS_PER_METER;
         out.color=vec3(select(0.,height,position.y==anchor.y),height,0.);
         out.surface_word=material;
-    } else if (material&255u)==0x27u {out.surface_word=material;}
+    } else if (material&0xbfu)==0x27u {out.surface_word=material;}
     return out;
 }
 @fragment fn fs_shadow_cut(in: VertexOut) {
@@ -602,16 +602,20 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // The water surface has a horizontal voxel roof in both flight
         // representations. Keep its hydraulic stage and animate only light.
         let block_water=(camera.paint_origin.w&32u)!=0u && in.surface_word!=0u;
-        let measured_column=(in.surface_word&255u)==0x27u;
+        let measured_column=(in.surface_word&0xbfu)==0x27u;
+        let connected_step=(in.surface_word&255u)==0x67u;
+        if connected_step {
+            normal=stream_step_normal(normal,NATIVE_VOXEL_METERS,length(vec2(dx.y,dy.y)));
+        }
         if measured_column {
             bed=MATERIAL_COLORS[min((in.surface_word>>8u)&15u,9u)];
             depth=f32(in.surface_word>>12u)/16.;
         }
-        if ((camera.paint_origin.w & 26u)==0u || block_water) && normal.y>.5 {
-            let p=in.local.xz-camera.eye.xz+phase.xy;
-            let pixel=max(length(dx.xz),length(dy.xz));
-            normal=water_swell(p,normal,phase.z,pixel);
-            if near_shadow.parameters.z > -1e10 {
+        if normal.y>.5 {
+            let relative=in.local-camera.eye.xyz;
+            let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,max(length(dx.xz),length(dy.xz)),length(relative));
+            normal=select(normal,slope,dot(direction,slope)<-.002);
+            if ((camera.paint_origin.w & 26u)==0u || block_water) && near_shadow.parameters.z > -1e10 {
                 let cell=(in.local.xz-camera.eye.xz+near_shadow.parameters.zw)/8.;
                 let side=vec2<f32>(textureDimensions(flight_detail));
                 let edge=min(cell,side-1.-cell);
@@ -640,8 +644,12 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // A ray refracted into water travels farther than the vertical depth
         // at grazing incidence (Snell's law with n=1.333).
         let cos_air=clamp(-dot(direction,normal),0.,1.);
-        let path=select(depth,depth*inverseSqrt(1.-.5628*(1.-cos_air*cos_air)),block_water && in.normal.y>.5);
-        let below=water_medium(bed*light,path);
+        let path=select(depth,depth*inverseSqrt(1.-.5628*(1.-cos_air*cos_air)),in.normal.y>.5);
+        var bed_light=light;
+        if connected_step {
+            bed_light=mix(light,terrain_skylight(vec3(0.,1.,0.),visibility,sky_exposure),normal.y);
+        }
+        let below=water_medium(bed*bed_light,path);
         let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
             visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
         if in.surface_word!=0u {return vec4(color,1.);}

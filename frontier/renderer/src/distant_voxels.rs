@@ -243,6 +243,7 @@ fn wall_quads(
     positive: bool,
     span: Range<i64>,
     low: i64,
+    lower_is_water: bool,
     high: Run,
 ) -> impl Iterator<Item = NativeQuad> {
     let ground = high.ground.clamp(low, high.top);
@@ -258,7 +259,17 @@ fn wall_quads(
                 ([span.start, lo, plane], [span.end - span.start, hi - lo])
             };
             let material = if above_ground {
-                high.material_word(high.top_material)
+                let mut word = high.material_word(high.top_material);
+                // A single native riser between wet columns is part of the
+                // same stream. Isolated water blocks keep all six face normals.
+                if lower_is_water
+                    && high.top - low == 1
+                    && high.top_material == Material::Water
+                    && word & 255 == 0x27
+                {
+                    word |= 0x40;
+                }
+                word
             } else {
                 high.ground_wall(lo)
             };
@@ -492,9 +503,15 @@ impl Generator<'_> {
                         }
                         let neighbor = interior.patches[index - delta].run;
                         if neighbor.top > run.top {
-                            interior
-                                .walls
-                                .extend(wall_quads(axis, plane, true, span, run.top, neighbor));
+                            interior.walls.extend(wall_quads(
+                                axis,
+                                plane,
+                                true,
+                                span,
+                                run.top,
+                                run.top > run.ground,
+                                neighbor,
+                            ));
                         } else if run.top > neighbor.top {
                             interior.walls.extend(wall_quads(
                                 axis,
@@ -502,6 +519,7 @@ impl Generator<'_> {
                                 false,
                                 span,
                                 neighbor.top,
+                                neighbor.top > neighbor.ground,
                                 run,
                             ));
                         }
@@ -1132,19 +1150,20 @@ impl Generator<'_> {
                         continue;
                     }
                     let outside = if positive { width } else { -1 };
-                    let neighbor = if axis == 0 {
-                        self.height(outside, t)?
+                    let neighbor = self.column(if axis == 0 {
+                        [outside, t]
                     } else {
-                        self.height(t, outside)?
-                    };
+                        [t, outside]
+                    })?;
                     let run = edges.runs[edge.run as usize];
-                    if run.top > neighbor {
+                    if run.top > neighbor.height {
                         self.append_quads(wall_quads(
                             axis,
                             plane,
                             positive,
                             t..t + 1,
-                            neighbor,
+                            neighbor.height,
+                            neighbor.height > neighbor.ground_height,
                             run,
                         ))?;
                     }
@@ -1171,6 +1190,7 @@ impl Generator<'_> {
                         outward,
                         i64::from(span.start)..i64::from(span.end),
                         low.top,
+                        low.top > low.ground,
                         high,
                     ))?;
                 }
@@ -1441,12 +1461,22 @@ mod tests {
             paint: pack_water_bed(8, Material::Sand),
             profile: 2,
         };
-        let faces = wall_quads(2, 4, false, 2..9, 0, run).collect::<Vec<_>>();
+        let faces = wall_quads(2, 4, false, 2..9, 0, false, run).collect::<Vec<_>>();
         assert_eq!(faces.len(), 2);
         assert!(valid_layered_wall(faces[0].material));
         assert_eq!((faces[0].material >> 8) & 15, Material::Sand as u32);
         assert_eq!(faces[1].material, Material::Water as u32 | run.paint);
         assert_eq!(faces[0].anchor[1] + faces[0].extent[1], faces[1].anchor[1]);
+
+        let side = |low, wet| wall_quads(2, 4, false, 2..9, low, wet, run).next().unwrap();
+        let wet = side(27, true);
+        let dry = side(27, false);
+        assert_eq!(wet.material, dry.material | 0x40);
+        assert_eq!(dry.material & 255, 0x27);
+        assert_eq!(wet.anchor, dry.anchor);
+        assert_eq!(wet.extent, dry.extent);
+        assert_eq!(side(26, true).material, dry.material);
+        assert_eq!(roof_quad(&(0..4), &(0..4), run).material, dry.material);
     }
 
     #[test]

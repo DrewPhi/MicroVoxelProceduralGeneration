@@ -151,6 +151,14 @@ refining at capture. In a separate fixed-refinement timing comparison at
 at water level measured 12.90–12.97 ms with valley reflections and
 12.94–13.23 ms with sky alone on the Radeon 760M.
 
+The native and distant water use the same world-space ripples. Refraction
+reaches 8 m down and native bank reflections reach 24 m on every grid.
+Adjacent wet columns share their optical response across a single-voxel
+drop as it becomes smaller than a pixel. An isolated block of water and
+a taller drop keep their distinct side faces. In a 960×540 Watershed
+riverbank view, the median brightness dip along a measured 6.25 cm step
+fell from 67 to 47 levels out of 255. The depth at the step stayed identical.
+
 ![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
 
 *At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. This in-engine 1920×1080 view uses 4× MSAA, a 16° left bank and a 6 km active view.*

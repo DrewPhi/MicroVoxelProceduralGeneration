@@ -109,35 +109,70 @@ fn water_phase_position(p:vec3<f32>)->vec3<f32> {
     return p+vec3(naadf.water.x,0.,naadf.water.y);
 }
 
+fn connected_stream_step(surface:vec3<f32>,face:vec3<f32>)->bool {
+    let inside=vec3<i32>(floor(surface*VOXELS_PER_METER-face*.014));
+    let lower=inside+vec3<i32>(face)-vec3(0,1,0);
+    let upper=inside+vec3(0,1,0);
+    let extent=vec3<i32>(naadf.extent.xyz);
+    if any(lower<vec3(0)) || any(lower>=extent) || any(upper<vec3(0)) || any(upper>=extent) {return false;}
+    let wet=water_state(lower);
+    if wet!=2u && (wet==1u || !water_node(footprint_word(vec3<u32>(lower)))) {return false;}
+    let above=water_state(upper);
+    let word=footprint_word(vec3<u32>(upper));
+    return above!=2u && ((word&0x40000000u)==0u || (above==1u && water_node(word)));
+}
+
 // One bounded bed ray and one bounded shore ray, only on visible water.
 fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec3<f32> {
-    let ripple=water_ripple(water_phase_position(surface),normal,naadf.water.z,0.023*(1.-smoothstep(22.,78.,distance)));
+    let pixel_height=2.*distance*naadf.up.w/naadf.viewport.y;
+    var optical_face=normal;
+    if normal.y==0. && pixel_height*3.3>NATIVE_VOXEL_METERS && connected_stream_step(surface,normal) {
+        optical_face=stream_step_normal(normal,NATIVE_VOXEL_METERS,pixel_height);
+    }
+    let phase_position=water_phase_position(surface);
+    let pixel=2.*distance*naadf.up.w/(naadf.viewport.y*max(.06,abs(dot(d,normal))));
+    let ripple=water_surface_normal(phase_position.xz,optical_face,naadf.water.z,pixel,distance);
     let n=select(normal,ripple,dot(d,ripple)<-0.002);
     let transmitted=refract(d,n,1./1.333);
-    let bed=trace_water_optics(surface*VOXELS_PER_METER-normal*0.012,transmitted,128.);
+    let origin=surface*VOXELS_PER_METER-normal*.012;
+    let limit=8.*VOXELS_PER_METER;
+    var bed=trace_water_optics(origin,transmitted,limit);
+    var bed_direction=transmitted;
+    var path=bed.t*NATIVE_VOXEL_METERS;
+    if !bed.found && normal.y>.5 {
+        let leave=voxel_interval(origin,transmitted).y;
+        if leave>0. && leave<limit && origin.y+leave*transmitted.y>1. {
+            // A shallow refracted ray can leave the exact box sideways before it
+            // reaches the bed. Measure the water column underneath this roof.
+            bed_direction=vec3(0.,-1.,0.);
+            bed=trace_water_optics(origin,bed_direction,limit);
+            path=bed.t*NATIVE_VOXEL_METERS/max(.05,-transmitted.y);
+        }
+    }
     var below=water_medium(vec3(0.03,0.10,0.08),8.);
     if bed.found {
-        let p=water_phase_position(surface+transmitted*bed.t*NATIVE_VOXEL_METERS);
-        // Filter the lighting of subpixel bed risers, without moving the hit.
+        let bed_grid=origin+bed_direction*bed.t;
+        let bed_position=bed_grid*NATIVE_VOXEL_METERS;
+        let p=water_phase_position(bed_position);
         let resolve=1.-0.70*smoothstep(3.,18.,distance);
         let bed_light=mix(light(vec3(0.,1.,0.),0.48),light(bed.normal,0.48),resolve);
-        let color=voxel_albedo(surface*VOXELS_PER_METER-normal*.012+transmitted*bed.t,bed)*(bed_light+bounce_at(surface+transmitted*bed.t*NATIVE_VOXEL_METERS,bed.normal,0.48));
+        let color=voxel_albedo(bed_grid,bed)*(bed_light+bounce_at(bed_position,bed.normal,0.48));
         let phase=sin(dot(p.xz,vec2(43.,-35.)*0.049087385)-naadf.water.z)*1.9;
         let caustic=sin(dot(p.xz,vec2(183.,82.)*0.049087385)+naadf.water.z*1.5+phase);
-        below=water_medium(color*(1.+0.065*caustic),bed.t*NATIVE_VOXEL_METERS);
+        below=water_medium(color*(1.+0.065*caustic),path);
     }
 
     let mirror=reflect(d,n);
     var above=water_sky(mirror,naadf.sun.xyz,naadf.sky.x);
-    if normal.y>.5 && naadf.sun.w>.5 {
+    if optical_face.y>.5 && naadf.sun.w>.5 {
         above=reflected_terrain(surface-naadf.eye.xyz,mirror,above);
     }
     let reflection_weight=1.-smoothstep(28.,56.,distance);
     if reflection_weight>0. && dot(mirror,normal)>0. {
-        let bank=trace_water_optics(surface*VOXELS_PER_METER+normal*0.012,mirror,384.);
+        let bank=trace_water_optics(surface*VOXELS_PER_METER+normal*0.012,mirror,24.*VOXELS_PER_METER);
         if bank.found {
             let color=voxel_albedo(surface*VOXELS_PER_METER+normal*.012+mirror*bank.t,bank)*(light(bank.normal,0.82)+bounce_at(surface+mirror*bank.t*NATIVE_VOXEL_METERS,bank.normal,0.82));
-            above=mix(above,color,reflection_weight*(1.-smoothstep(256.,384.,bank.t)));
+            above=mix(above,color,reflection_weight*(1.-smoothstep(16.,24.,bank.t*NATIVE_VOXEL_METERS)));
         }
     }
     let fresnel=water_fresnel(-dot(d,n));

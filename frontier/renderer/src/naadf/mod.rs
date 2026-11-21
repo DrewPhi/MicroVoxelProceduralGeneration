@@ -1861,8 +1861,8 @@ impl Experiment {
                         .to_bits(),
                 ],
                 water: [
-                    origin.x.rem_euclid(128.) as f32,
-                    origin.z.rem_euclid(128.) as f32,
+                    origin.x.rem_euclid(2048.) as f32,
+                    origin.z.rem_euclid(2048.) as f32,
                     gpu.water_time.get(),
                     0.,
                 ],

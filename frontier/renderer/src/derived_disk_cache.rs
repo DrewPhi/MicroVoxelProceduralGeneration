@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 20;
+const REPRESENTATION_VERSION: u64 = 21;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
@@ -1014,7 +1014,8 @@ fn validate(t: &GeometryTile) -> bool {
                                 q.material,
                             ))
                             || (q.material & 0xfc0000f0 == 0x10 && q.material & 15 < 10)
-                            || (q.material & 0xfff000ff == 0x27
+                            || ((q.material & 0xfff000ff == 0x27
+                                || (q.material & 0xfff000ff == 0x67 && q.axis_sign & 3 != 1))
                                 && (q.material >> 8) & 15 < 10
                                 && q.material >> 12 <= 192))))
                 && renderable_profile(q.profile_index)
