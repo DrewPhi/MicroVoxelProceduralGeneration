@@ -62,6 +62,12 @@ any procedural terrain it removed. Brush dimensions follow the world X, Y
 and Z axes. Edits and material selection persist on close. Undo is available
 during the current session.
 
+The brush evaluates one procedural column per X/Z address and publishes each
+stamp in one revision. Across 21 CPU trials on Highlands seed 19, a 32 × 16 × 32
+stamp took **1.67 ms median / 1.88 ms p95** to query and commit. A 64 × 1 × 64
+slab took **2.02 / 2.17 ms**. The maximum 256 × 1 × 256 slab took **32.13 /
+33.95 ms**. Native renderer publication follows asynchronously.
+
 A saved **100 m × 6 m** wooden strip contains 153,600 individually editable
 6.25 cm voxels. From the approach, the distant renderer draws its deck, underside,
 edges and surrounding ground in nine quads using 130 KiB including the column

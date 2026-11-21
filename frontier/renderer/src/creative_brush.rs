@@ -1,6 +1,6 @@
 //! Face-anchored, native-cell stamps for the creative terrain editor.
 use crate::{live_water::LiveWater, naadf::Experiment, player_edit, Camera};
-use frontier_world::{Cell, Material, RayHit, TerrainUndo, World};
+use frontier_world::{Material, RayHit, TerrainUndo, World};
 use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +125,11 @@ impl Brush {
         grabbed: bool,
     ) -> player_edit::Overlay {
         let [x, y, z] = self.size.0;
-        let mut out = player_edit::Overlay {text:format!("Creative brush  {x} × {y} × {z} cells  ·  {material:?}\nL dig  ·  R place in outline  ·  1–6 material  ·  Z undo\n{}",self.message),..Default::default()};
+        let text = format!("Creative brush  {x} × {y} × {z} cells  ·  {material:?}\nL dig  ·  R place in outline  ·  1–6 material  ·  Z undo\n{}", self.message);
+        let mut out = player_edit::Overlay {
+            text,
+            ..Default::default()
+        };
         if grabbed {
             if let Ok(bounds) = self.target_bounds(world, camera, native, true) {
                 out.outline(
@@ -150,9 +154,24 @@ impl Brush {
         let result = self
             .target_bounds(world, camera, native, place)
             .and_then(|bounds| {
-                let values = Self::collect(world, live, bounds, place, eye)?;
+                let material = if place {
+                    live.inventory.selected
+                } else {
+                    Material::Air
+                };
                 let undo = world
-                    .set_batch_reversible(values)
+                    .edit_terrain_box(bounds.min, bounds.end, |cell, old| {
+                        if old == Material::Water || live.fluid.mass(cell).is_some_and(|m| m > 0) {
+                            return Err("The brush intersects water");
+                        }
+                        if place != (old == Material::Air) {
+                            return Ok(None);
+                        }
+                        if place && player_edit::intersects_player(cell, eye) {
+                            return Err("The brush intersects the player");
+                        }
+                        Ok(Some(material))
+                    })?
                     .ok_or("No cells changed")?;
                 live.terrain_changed(world, undo.cells());
                 let count = undo.cells().len();
@@ -170,40 +189,6 @@ impl Brush {
             ),
             Err(reason) => reason.into(),
         };
-    }
-    fn collect(
-        world: &World,
-        live: &LiveWater,
-        bounds: Bounds,
-        place: bool,
-        eye: [f64; 3],
-    ) -> Result<Vec<(Cell, Material)>, &'static str> {
-        let material = if place {
-            live.inventory.selected
-        } else {
-            Material::Air
-        };
-        let mut values = Vec::new();
-        for x in bounds.min[0]..bounds.end[0] {
-            for z in bounds.min[2]..bounds.end[2] {
-                let column = world.column(x, z);
-                for y in bounds.min[1]..bounds.end[1] {
-                    let c = Cell { x, y, z };
-                    let old = column.canonical_material(y);
-                    if old == Material::Water || live.fluid.mass(c).is_some_and(|m| m > 0) {
-                        return Err("The brush intersects water");
-                    }
-                    if place != (old == Material::Air) {
-                        continue;
-                    }
-                    if place && player_edit::intersects_player(c, eye) {
-                        return Err("The brush intersects the player");
-                    }
-                    values.push((c, material));
-                }
-            }
-        }
-        Ok(values)
     }
     pub fn undo(
         &mut self,
@@ -242,6 +227,7 @@ impl Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frontier_world::Cell;
     #[test]
     fn dimensions_and_signed_face_anchors() {
         let brush: Size = "4,2,3".parse().unwrap();

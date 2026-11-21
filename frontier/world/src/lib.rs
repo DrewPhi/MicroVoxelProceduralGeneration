@@ -245,7 +245,7 @@ impl WorldColumn<'_> {
             base
         }
     }
-    pub fn canonical_material(&self, y: i64) -> Material {
+    fn canonical_material(&self, y: i64) -> Material {
         self.world.compose_fluid(
             Cell {
                 x: self.x,
@@ -626,28 +626,54 @@ impl World {
     /// Apply last-write-wins terrain edits atomically in one world revision.
     /// Entries whose final material already matches the snapshot are omitted.
     pub fn set_batch(&mut self, values: impl IntoIterator<Item = (Cell, Material)>) {
-        let updates = self.effective_terrain_batch(values);
+        let updates = values
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .filter(|&(c, m)| self.material(c) != m)
+            .collect();
         self.apply_terrain_batch(updates);
     }
 
-    /// A creative stamp can restore the exact authored map, including addresses
-    /// which originally came solely from the procedural source.
-    pub fn set_batch_reversible(
+    /// Visit the canonical cells of a half-open box, reusing each procedural
+    /// column. Rejecting any cell aborts the entire stamp before publication.
+    pub fn edit_terrain_box<E>(
         &mut self,
-        values: impl IntoIterator<Item = (Cell, Material)>,
-    ) -> Option<TerrainUndo> {
-        let updates = self.effective_terrain_batch(values);
+        min: [i64; 3],
+        end: [i64; 3],
+        mut select: impl FnMut(Cell, Material) -> Result<Option<Material>, E>,
+    ) -> Result<Option<TerrainUndo>, E> {
+        let mut updates = Vec::new();
+        for x in min[0]..end[0] {
+            for z in min[2]..end[2] {
+                let column = self.column(x, z);
+                for y in min[1]..end[1] {
+                    let cell = Cell { x, y, z };
+                    let old = column.canonical_material(y);
+                    if let Some(next) = select(cell, old)? {
+                        if old != next {
+                            updates.push((cell, next));
+                        }
+                    }
+                }
+            }
+        }
         if updates.is_empty() {
-            return None;
+            return Ok(None);
+        }
+        // Edit pages are ordered by (x,y,z). Sampling in (x,z,y) order
+        // amortizes terrain evaluation over every layer of a tall stamp.
+        if end[1].saturating_sub(min[1]) > 1 {
+            updates.sort_unstable_by_key(|&(c, _)| c);
         }
         let cells = updates.iter().map(|(cell, _)| *cell).collect();
         let before = self.edits.clone();
         self.apply_terrain_batch(updates);
-        Some(TerrainUndo {
+        Ok(Some(TerrainUndo {
             before,
             after: self.edits.clone(),
             cells,
-        })
+        }))
     }
 
     /// A later terrain write invalidates the stamp. Fluid and other world state
@@ -660,18 +686,6 @@ impl World {
         self.edits = undo.before.clone();
         self.bump_revision();
         true
-    }
-
-    fn effective_terrain_batch(
-        &self,
-        values: impl IntoIterator<Item = (Cell, Material)>,
-    ) -> Vec<(Cell, Material)> {
-        values
-            .into_iter()
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .filter(|&(c, m)| self.material(c) != m)
-            .collect()
     }
 
     fn apply_terrain_batch(&mut self, updates: Vec<(Cell, Material)>) {
@@ -1295,12 +1309,27 @@ mod tests {
         let b = Cell { x: -2, ..a };
         world.set(a, Material::Wood);
         let before = world.clone();
+        let end = [b.x + 1, a.y + 1, a.z + 1];
+        let min = [a.x, a.y, a.z];
+        let aborted = world.edit_terrain_box(min, end, |c, _| {
+            if c == b {
+                Err("blocked")
+            } else {
+                Ok(Some(Material::Snow))
+            }
+        });
+        assert!(aborted.is_err());
+        assert_eq!(before.revision(), world.revision());
+        assert!(world.shares_terrain_edits(&before));
         let undo = world
-            .set_batch_reversible([
-                (a, Material::Air),
-                (b, Material::Stone),
-                (b, Material::Snow),
-            ])
+            .edit_terrain_box(min, end, |c, _| {
+                Ok::<_, ()>(Some(if c == a {
+                    Material::Air
+                } else {
+                    Material::Snow
+                }))
+            })
+            .unwrap()
             .unwrap();
         let stamped = world.clone();
         assert_eq!(undo.cells(), &[a, b]);
