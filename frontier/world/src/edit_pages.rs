@@ -81,6 +81,52 @@ impl EditPages {
         self.iter().map(|(c, _)| c)
     }
 
+    pub(super) fn cells_in_columns(
+        &self,
+        min: [i64; 2],
+        max: [i64; 2],
+        limit: usize,
+    ) -> Option<Vec<Cell>> {
+        let mut cells = Vec::new();
+        let Some([lo, hi]) = self.bounds else {
+            return Some(cells);
+        };
+        if [0, 2]
+            .into_iter()
+            .enumerate()
+            .any(|(i, axis)| min[i] >= max[i] || max[i] <= lo[axis] || min[i] > hi[axis])
+        {
+            return Some(cells);
+        }
+        // The directory and each leaf are in (x, y, z) order. Include the
+        // predecessor leaf because it can straddle the first requested X.
+        let first_at = Cell { x: min[0], ..FIRST };
+        let last_at = Cell { x: max[0], ..FIRST };
+        let (&first, _) = self.pages.range(..=first_at).next_back()?;
+        let all_z = min[1] <= lo[2] && max[1] > hi[2];
+        for (_, leaf) in self.pages.range(first..last_at) {
+            let start = leaf.partition_point(|&(cell, _)| cell.x < min[0]);
+            let end = leaf.partition_point(|&(cell, _)| cell.x < max[0]);
+            let span = &leaf[start..end];
+            if all_z {
+                if span.len() > limit - cells.len() {
+                    return None;
+                }
+                cells.extend(span.iter().map(|&(cell, _)| cell));
+            } else {
+                for &(cell, _) in span {
+                    if (min[1]..max[1]).contains(&cell.z) {
+                        if cells.len() == limit {
+                            return None;
+                        }
+                        cells.push(cell);
+                    }
+                }
+            }
+        }
+        Some(cells)
+    }
+
     // World::set_batch has already ordered and deduplicated the writes.
     pub(super) fn extend(&mut self, values: Vec<(Cell, Material)>) {
         if self.pages.is_empty() {
@@ -142,5 +188,36 @@ mod tests {
         }
         assert!(edited.pages.values().all(|p| p.len() <= LEAF));
         assert_eq!(baseline.get(&FIRST), None);
+    }
+
+    #[test]
+    fn bounded_column_reads_span_pages_and_include_extreme_heights() {
+        let pages = EditPages::from_sorted((-30..30).flat_map(|x| {
+            [i64::MIN, 0, i64::MAX]
+                .into_iter()
+                .flat_map(move |y| (-3..4).map(move |z| (Cell { x, y, z }, Material::Air)))
+        }));
+        for (lo, hi) in [
+            ([-40, -10], [40, 10]),
+            ([-29, -2], [19, 3]),
+            ([-1, 0], [0, 1]),
+            ([29, 3], [30, 4]),
+            ([0, 0], [-3, 10]),
+            ([i64::MIN; 2], [-30, 10]),
+            ([30, 0], [i64::MAX; 2]),
+        ] {
+            let exact: Vec<_> = pages
+                .keys()
+                .copied()
+                .filter(|c| (lo[0]..hi[0]).contains(&c.x) && (lo[1]..hi[1]).contains(&c.z))
+                .collect();
+            assert_eq!(
+                pages.cells_in_columns(lo, hi, exact.len()),
+                Some(exact.clone())
+            );
+            if !exact.is_empty() {
+                assert_eq!(pages.cells_in_columns(lo, hi, exact.len() - 1), None);
+            }
+        }
     }
 }

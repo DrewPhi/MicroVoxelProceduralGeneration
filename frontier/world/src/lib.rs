@@ -312,6 +312,16 @@ impl World {
         )
         .0
     }
+    /// Authored addresses at all elevations inside a half-open X/Z rectangle.
+    /// Returns None once the matching terrain exceeds the caller's cell limit.
+    pub fn terrain_edit_cells_in_columns(
+        &self,
+        min: [i64; 2],
+        max: [i64; 2],
+        limit: usize,
+    ) -> Option<Vec<Cell>> {
+        self.edits.cells_in_columns(min, max, limit)
+    }
     /// Conservative inclusive upper Y of terrain or fluid overrides whose X/Z
     /// may intersect this half-open box. Stale lineage buckets can enlarge a
     /// bound; a missing bound proves the region has no overrides.

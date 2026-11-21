@@ -129,14 +129,11 @@ fn build_within(world: &World, origin: Cell, radius: i64) -> Option<Geometry> {
     let max = [origin.x, origin.z].map(|v| v.saturating_add(radius).saturating_add(1));
     // Bound total saved edits and the published mask independently of the
     // temporary column neighborhood used by each extraction batch.
-    let mut addresses = world.edit_cells_in_columns(
+    let mut addresses = world.terrain_edit_cells_in_columns(
         min.map(|v| v.saturating_sub(3)),
         max.map(|v| v.saturating_add(3)),
-    );
-    addresses.retain(|&c| world.terrain_override(c).is_some());
-    if addresses.len() > 524288 {
-        return None;
-    }
+        524288,
+    )?;
     addresses.sort_unstable_by_key(|c| (c.x, c.z, c.y));
     for c in &addresses {
         let p = [c.x, c.z];

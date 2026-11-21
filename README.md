@@ -283,6 +283,12 @@ openings in the active terrain view. Large edit sets can exceed the distant
 mesh budget, which reduces the area reconstructed around the camera. The
 35 km horizon still samples the unedited procedural source.
 
+The distant edit mesh reads authored columns directly from the saved terrain
+pages and limits the result before allocation can grow with the entire save.
+On the 153,600-cell runway, 30 reads measured **4.83 ms median, 6.67 ms p95**,
+compared with **51.35 ms median, 64.48 ms p95** for the combined edit index
+and per-cell terrain lookup. These times cover address collection only.
+
 Directional shadow maps use the same column mask as the visible surface.
 The edit-distance check measures seven depth views and compares a sunlit
 excavation with shadows enabled and disabled. On the Radeon, both readings
