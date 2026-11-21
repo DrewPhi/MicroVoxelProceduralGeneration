@@ -13,7 +13,7 @@ use crate::{
 };
 use frontier_runtime::occlusion::Aabb;
 use frontier_world::{
-    affine_bounds::{bound_native_height, BoundBudget, ColumnBox, HeightBound},
+    affine_bounds::{BoundBudget, ColumnBox, HeightBound},
     voxel_size, Cell, Material, World,
 };
 use std::{
@@ -2077,7 +2077,7 @@ impl SharedSourcePages {
         shard.bound_misses += 1;
         // Keep the miss under only its spatial lock: overlapping builders share
         // the exact analysis, while independent shards progress concurrently.
-        let value = bound_native_height(world.fbm_terrain().unwrap(), region, budget);
+        let value = terrain_bound_pages::raster_bound(world.fbm_terrain().unwrap(), region, budget);
         if let Some(i) = index {
             shard.bounds[i] = Some(BoundEntry { key, value });
         }
@@ -6871,7 +6871,7 @@ mod tests {
                     (center / (voxel_size() * width as f64)).floor() as i64 * width as i64
                 });
                 let bound = bounds.entry(min).or_insert_with(|| {
-                    bound_native_height(
+                    frontier_world::affine_bounds::bound_native_height(
                         terrain,
                         ColumnBox {
                             min,

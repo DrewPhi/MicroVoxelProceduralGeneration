@@ -17,6 +17,32 @@ const CELLS: usize = (SIDE * SIDE) as usize;
 const SHARDS: usize = 32;
 const WAYS: usize = 4;
 
+// Adaptive roofs use f32 coordinates relative to tiles up to 2^20 cells
+// across. A decimal pitch can round a corner across the nominal patch edge.
+// Enclose the adjacent native columns before evaluating the affine source.
+pub(super) fn raster_bound(
+    terrain: &FbmTerrain,
+    region: ColumnBox,
+    budget: BoundBudget,
+) -> Option<HeightBound> {
+    let pitch = frontier_world::voxel_size();
+    let region = raster_domain(region, pitch)?;
+    bound_native_height(terrain, region, budget)
+}
+
+fn raster_domain(region: ColumnBox, pitch: f64) -> Option<ColumnBox> {
+    if pitch.to_bits() & 0x000f_ffff_ffff_ffff == 0 || region.size_cells.contains(&0) {
+        return Some(region);
+    }
+    Some(ColumnBox {
+        min: [region.min[0].checked_sub(1)?, region.min[1].checked_sub(1)?],
+        size_cells: [
+            region.size_cells[0].checked_add(2)?,
+            region.size_cells[1].checked_add(2)?,
+        ],
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Address {
     page: [i64; 2],
@@ -200,7 +226,7 @@ impl Cache {
             if page.ready & bit == 0 {
                 let [dx, dz] = [index as i64 % SIDE, index as i64 / SIDE];
                 let step = i64::from(address.pitch);
-                page.bounds[index] = bound_native_height(
+                page.bounds[index] = raster_bound(
                     terrain,
                     ColumnBox {
                         min: [
@@ -230,6 +256,36 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounded_decimal_roofs_fit_their_source_domain_across_large_tiles() {
+        let tile = -1048576i64;
+        for pitch in [0.03, 0.1] {
+            let mut escaped = 0;
+            for offset in [0, 7, 127, 16383, 1048560] {
+                let patch = ColumnBox {
+                    min: [tile + offset; 2],
+                    size_cells: [8; 2],
+                };
+                let domain = raster_domain(patch, pitch).unwrap();
+                let low = (offset as f64 * pitch) as f32;
+                let high = ((offset + 8) as f64 * pitch) as f32;
+                for edge in [low, low + (high - low)] {
+                    let x = tile as f64 * pitch + f64::from(edge);
+                    let lo = patch.min[0] as f64 * pitch;
+                    let hi = (patch.min[0] + 8) as f64 * pitch;
+                    escaped += usize::from(x < lo || x > hi);
+                    let expanded = domain.min[0] as f64 * pitch
+                        ..=(domain.min[0] + i64::from(domain.size_cells[0])) as f64 * pitch;
+                    assert!(expanded.contains(&x));
+                }
+                let binary = raster_domain(patch, 0.0625).unwrap();
+                assert_eq!(binary.min, patch.min);
+                assert_eq!(binary.size_cells, patch.size_cells);
+            }
+            assert!(escaped > 0);
+        }
+    }
 
     fn bits(bound: HeightBound) -> ([u64; 10], u32, u32) {
         let [x, z] = bound.center_xz;

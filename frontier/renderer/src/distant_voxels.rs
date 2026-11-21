@@ -579,19 +579,21 @@ impl Generator<'_> {
             // actual roof of each one, including the thin boundary band.
             for roof in first_roof..self.coarse_quads.len() {
                 let quad = self.coarse_quads[roof];
-                let cell = |p: f32| (f64::from(p) / voxel_size()).round() as i64;
-                let [x0, top, z0] = quad.anchor.map(cell);
-                let x1 = x0 + cell(quad.extent[1]);
-                let z1 = z0 + cell(quad.extent[0]);
-                for z in z0..z1 {
+                let cells = |start: f32, extent: f32| {
+                    (f64::from(start) / voxel_size()).floor() as i64
+                        ..(f64::from(start + extent) / voxel_size()).ceil() as i64
+                };
+                let xs = cells(quad.anchor[0], quad.extent[1]);
+                let top = f64::from(quad.anchor[1]);
+                for z in cells(quad.anchor[2], quad.extent[0]) {
                     if z % 32 == 0 && cancelled() {
                         return Err("adaptive geometry cancelled".into());
                     }
-                    for x in x0..x1 {
+                    for x in xs.clone() {
                         let h = self.height(x, z)? as f64 * voxel_size();
                         range[0] = range[0].min(h);
                         range[1] = range[1].max(h);
-                        error = error.max((h - top as f64 * voxel_size()).abs());
+                        error = error.max((h - top).abs());
                     }
                 }
             }
@@ -618,8 +620,9 @@ impl Generator<'_> {
                 self.affine_stats.full_range_fallbacks += bound.full_range_fallbacks as u64;
                 // A patch whose entire range fits below the accumulated
                 // error cannot change the tile's conservative certificate.
-                let dominated = bound.roof_range_error(roof_range.map(|y| y as f64 * voxel_size()))
-                    <= self.affine_error;
+                let dominated = bound.roof_range_error(
+                    roof_range.map(|y| f64::from((y as f64 * voxel_size()) as f32)),
+                ) <= self.affine_error;
                 #[cfg(test)]
                 let dominated = dominated && !self.samples.coarse_reference;
                 let complete = if dominated {
@@ -631,8 +634,10 @@ impl Generator<'_> {
                         let [x, y, z] = quad.anchor.map(f64::from);
                         let x = x + key.min[0] as f64 * voxel_size();
                         let z = z + key.min[1] as f64 * voxel_size();
-                        let x1 = x + f64::from(quad.extent[1]);
-                        let z1 = z + f64::from(quad.extent[0]);
+                        let x1 = key.min[0] as f64 * voxel_size()
+                            + f64::from(quad.anchor[0] + quad.extent[1]);
+                        let z1 = key.min[1] as f64 * voxel_size()
+                            + f64::from(quad.anchor[2] + quad.extent[0]);
                         if let Some(value) =
                             bound.quad_error([[x, y, z], [x, y, z1], [x1, y, z1], [x1, y, z]])
                         {
@@ -907,9 +912,9 @@ impl Generator<'_> {
                     self.affine_stats.full_range_fallbacks += u64::from(bound.full_range_fallbacks);
                     self.affine_range[0] = self.affine_range[0].min(bound.height_range[0]);
                     self.affine_range[1] = self.affine_range[1].max(bound.height_range[1]);
-                    self.affine_error = self
-                        .affine_error
-                        .max(bound.roof_range_error(roofs[i].map(|y| y as f64 * voxel_size())));
+                    self.affine_error = self.affine_error.max(bound.roof_range_error(
+                        roofs[i].map(|y| f64::from((y as f64 * voxel_size()) as f32)),
+                    ));
                 } else {
                     self.affine_complete = false;
                     self.affine_stats.unavailable_quads += 1;

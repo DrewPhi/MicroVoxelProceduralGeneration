@@ -18,6 +18,15 @@ cargo build --release --locked --bin frontier
   --world-save output/worlds/highlands-19.save
 ```
 
+At decimal voxel sizes, distant terrain bounds include the adjacent native
+columns that a rounded GPU vertex can touch. In a 720×405, 1.5 km Watershed
+river view at 10 cm, a coarse-detail capture settled in **3.62 s** with all
+visible tiles certified. The earlier renderer timed out at 121 s with 210
+uncertified tiles. Both runs used one terrain worker, a 4 m native radius and
+a deliberately loose pixel-error setting to isolate certification cost.
+With a 10-pixel limit, a 512 m view and an 8 m native radius, the same
+camera met its requested accuracy in 5.41 s.
+
 ![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
 
 *The 6.25 cm voxel bush plane banks 32° over stepped snowfields and exposed cliffs in the seed 19 Highlands. Captured in-engine at 1920×1080 on the Radeon 760M.*
