@@ -9,15 +9,19 @@ use frontier_world::{voxel_size, Cell, FbmTerrain, Material, World};
 const SIDE: usize = 13;
 const SPACING: f64 = 12.;
 const COUNT: usize = SIDE * SIDE;
+const WATER_SIDE: usize = 27;
+const WATER_COUNT: usize = WATER_SIDE * WATER_SIDE;
+const WATER_SPACING: f64 = 4.;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GroundUniform {
     origin_strength: [f32; 4],
-    nodes: [[[f32; 4]; SIDE]; SIDE],
+    heights: [[f32; 4]; COUNT.div_ceil(4)],
+    materials: [[u32; 4]; COUNT.div_ceil(32)],
     water_options: [f32; 4],
-    currents: [[u32; 4]; COUNT.div_ceil(4)],
-    wet_depths: [[u32; 4]; COUNT.div_ceil(16)],
+    water_origin: [f32; 4],
+    water_nodes: [[u32; 4]; WATER_COUNT.div_ceil(4)],
     water: Panorama,
 }
 
@@ -70,6 +74,7 @@ pub(crate) struct GroundField {
     source: Option<World>,
     nodes: Vec<GroundSample>,
     reflections: Reflections,
+    water_grid: WaterGrid,
 }
 
 impl GroundField {
@@ -95,7 +100,7 @@ impl GroundField {
                     let sample = if same_source && overlap {
                         self.nodes[index[0] as usize + SIDE * index[1] as usize]
                     } else {
-                        sample_ground(world, x, z)
+                        sample_ground(world, x as f64 * SPACING, z as f64 * SPACING)
                     };
                     nodes.push(sample);
                 }
@@ -140,26 +145,39 @@ impl GroundField {
                 );
             }
         }
-        let mut currents = [[0; 4]; COUNT.div_ceil(4)];
-        let mut wet_depths = [[0; 4]; COUNT.div_ceil(16)];
-        let mut has_current = false;
+        let close_to_terrain = world
+            .fbm_terrain()
+            .is_some_and(|t| t.params().recipe.has_static_water())
+            && self
+                .nodes
+                .iter()
+                .any(|s| (s.water.unwrap_or(s.bed) - eye.y).abs() < 140.);
+        self.water_grid
+            .prepare(world, [eye.x, eye.z], same_source, close_to_terrain);
+        let mut heights = [[0.; 4]; COUNT.div_ceil(4)];
+        let mut materials = [[0; 4]; COUNT.div_ceil(32)];
         for (i, node) in self.nodes.iter().enumerate() {
-            currents[i / 4][i % 4] = node.current;
-            has_current |= node.current != 0;
-            if let Some(stage) = node.water {
-                let depth = 1 + (16. * (stage - node.bed).clamp(0., 12.)).round() as u32;
-                wet_depths[i / 16][(i / 4) % 4] |= depth << (8 * (i % 4));
-            }
+            heights[i / 4][i % 4] = (node.bed - eye.y) as f32;
+            materials[i / 32][(i / 8) % 4] |= (node.material as u32) << (4 * (i % 8));
         }
         GroundUniform {
             water_options: [
                 f32::from(cloud_stage.is_some()),
                 0.,
-                f32::from(has_current),
+                f32::from(self.water_grid.has_current),
                 cloud_stage.map_or(0., |y| (y - eye.y) as f32),
             ],
-            currents,
-            wet_depths,
+            heights,
+            materials,
+            water_nodes: self.water_grid.words,
+            water_origin: self.water_grid.start.map_or([0.; 4], |[x, z]| {
+                [
+                    (x as f64 * WATER_SPACING - eye.x) as f32,
+                    (z as f64 * WATER_SPACING - eye.z) as f32,
+                    WATER_SPACING as f32,
+                    0.,
+                ]
+            }),
             water,
             origin_strength: [
                 (start[0] as f64 * SPACING - eye.x) as f32,
@@ -167,23 +185,15 @@ impl GroundField {
                 settings.ground_bounce,
                 SPACING as f32,
             ],
-            nodes: std::array::from_fn(|z| {
-                std::array::from_fn(|x| {
-                    let node = self.nodes[x + SIDE * z];
-                    let [r, g, b] = node.color;
-                    [r, g, b, (node.bed - eye.y) as f32]
-                })
-            }),
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct GroundSample {
-    color: [f32; 3],
+    material: Material,
     bed: f64,
     water: Option<f64>,
-    current: u32,
 }
 
 /// Two bits of mean aeration for a native inland water column. Near water
@@ -199,30 +209,89 @@ pub(crate) fn rapids(terrain: &FbmTerrain, x: i64, z: i64, top: i64) -> u8 {
     })
 }
 
-fn sample_ground(world: &World, x: i64, z: i64) -> GroundSample {
-    let [x, z] = [x, z].map(|v| v as f64 * SPACING);
+fn sample_ground(world: &World, x: f64, z: f64) -> GroundSample {
     let cell = Cell::from_meters([x, 0., z]);
     let column = world.column(cell.x, cell.z);
-    let height = column.ground_height_m();
-    let material = column.canonical_material_without_fluid(column.ground_height_cells() - 1);
-    let color = if material == Material::Air || material == Material::Water {
-        [0.27, 0.26, 0.24]
-    } else {
-        material.color()
-    };
-    let water = (column.height_cells() > column.ground_height_cells()).then(|| column.height_m());
-    let current = water
-        .filter(|&y| y > 0.)
-        .and_then(|_| world.fbm_terrain()?.river_course(x, z))
-        .map_or(0, |([dx, dz], grade)| {
-            let encode = |v: f64| (v.clamp(-1., 1.) * 127.).round() as i8 as u8;
-            u32::from_le_bytes([encode(dx), encode(dz), encode((grade / 0.14).sqrt()), 127])
-        });
+    let bed = column.ground_height_cells();
     GroundSample {
-        color,
-        bed: height,
-        water,
-        current,
+        material: column.canonical_material_without_fluid(bed - 1),
+        bed: column.ground_height_m(),
+        water: (column.height_cells() > bed).then(|| column.height_m()),
+    }
+}
+
+// Pack native depth, bed material, grade and two signed course components in
+// four bytes. Zero is dry. A wet lake or ocean has zero course components.
+fn wet_node(world: &World, x: f64, z: f64) -> u32 {
+    let c = Cell::from_meters([x, 0., z]);
+    let column = world.column(c.x, c.z);
+    let bed = column.ground_height_cells();
+    let top = column.height_cells();
+    if top <= bed {
+        return 0;
+    }
+    let depth = ((top - bed) as f64 * voxel_size()).min(12.);
+    let material = column.canonical_material_without_fluid(bed - 1);
+    let mut word = 1 + (depth * 16.).round() as u32 | ((material as u32) << 8);
+    if top > 0 {
+        if let Some(([dx, dz], grade)) = world.fbm_terrain().and_then(|t| t.river_course(x, z)) {
+            let direction = |d: f64| ((d.clamp(-1., 1.) * 63.).round() as i32 as u32) & 127;
+            let grade = ((grade / 0.14).sqrt().min(1.) * 63.).round() as u32;
+            word |= (grade << 12) | (direction(dx) << 18) | (direction(dz) << 25);
+        }
+    }
+    word
+}
+
+struct WaterGrid {
+    start: Option<[i64; 2]>,
+    words: [[u32; 4]; WATER_COUNT.div_ceil(4)],
+    has_current: bool,
+}
+
+impl Default for WaterGrid {
+    fn default() -> Self {
+        Self {
+            start: None,
+            words: [[0; 4]; WATER_COUNT.div_ceil(4)],
+            has_current: false,
+        }
+    }
+}
+
+impl WaterGrid {
+    fn prepare(&mut self, world: &World, eye: [f64; 2], same_source: bool, active: bool) {
+        if !active {
+            self.start = None;
+            self.has_current = false;
+            return;
+        }
+        let start = eye.map(|v| (v / WATER_SPACING).floor() as i64 - WATER_SIDE as i64 / 2);
+        if same_source && self.start == Some(start) {
+            return;
+        }
+        let previous = self.start.filter(|_| same_source);
+        let mut words = [[0; 4]; WATER_COUNT.div_ceil(4)];
+        let mut has_current = false;
+        for i in 0..WATER_COUNT {
+            let x = start[0] + (i % WATER_SIDE) as i64;
+            let z = start[1] + (i / WATER_SIDE) as i64;
+            let overlap = previous.and_then(|[ox, oz]| {
+                let (u, v) = (x - ox, z - oz);
+                let range = 0..WATER_SIDE as i64;
+                (range.contains(&u) && range.contains(&v))
+                    .then(|| u as usize + v as usize * WATER_SIDE)
+            });
+            let word = overlap.map_or_else(
+                || wet_node(world, x as f64 * WATER_SPACING, z as f64 * WATER_SPACING),
+                |j| self.words[j / 4][j % 4],
+            );
+            has_current |= word >> 18 != 0;
+            words[i / 4][i % 4] = word;
+        }
+        self.words = words;
+        self.start = Some(start);
+        self.has_current = has_current;
     }
 }
 
@@ -239,12 +308,61 @@ mod tests {
             (997, FbmRecipe::Watershed, -814.1769, 993., 0),
             (40961, FbmRecipe::Highlands, 360., -3000., 0),
         ] {
-            let terrain = FbmTerrain::new(seed, FbmParams { recipe, ..FbmParams::default() }).unwrap();
+            let terrain = FbmTerrain::new(
+                seed,
+                FbmParams {
+                    recipe,
+                    ..FbmParams::default()
+                },
+            )
+            .unwrap();
             let c = Cell::from_meters([x, 0., z]);
             let [bed, top] = terrain.column_tops(c.x, c.z);
             assert!(top > bed);
             assert_eq!(rapids(&terrain, c.x, c.z, top), expected);
         }
+    }
+
+    #[test]
+    fn four_metre_water_survey_tracks_negative_origins_and_edited_bed_materials() {
+        use frontier_world::{FbmParams, FbmRecipe};
+        let mut world = World::fbm(
+            673,
+            FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..FbmParams::default()
+            },
+        )
+        .unwrap();
+        let eye = [-2246., -1835.];
+        let mut grid = WaterGrid::default();
+        grid.prepare(&world, eye, false, true);
+        let moved = [eye[0] + 4., eye[1] - 8.];
+        grid.prepare(&world, moved, true, true);
+        let mut fresh = WaterGrid::default();
+        fresh.prepare(&world, moved, false, true);
+        assert_eq!(grid.words, fresh.words);
+        let i = (0..WATER_COUNT)
+            .find(|&i| grid.words[i / 4][i % 4] >> 18 != 0)
+            .unwrap();
+        let start = grid.start.unwrap();
+        let x = (start[0] + (i % WATER_SIDE) as i64) as f64 * WATER_SPACING;
+        let z = (start[1] + (i / WATER_SIDE) as i64) as f64 * WATER_SPACING;
+        let mut c = Cell::from_meters([x, 0., z]);
+        let column = world.column(c.x, c.z);
+        c.y = column.ground_height_cells() - 1;
+        let word = grid.words[i / 4][i % 4];
+        let depth = (column.height_m() - column.ground_height_m()).min(12.);
+        assert_eq!(word & 255, 1 + (16. * depth).round() as u32);
+        let (direction, _) = world.fbm_terrain().unwrap().river_course(x, z).unwrap();
+        let decode = |v: u32| ((v << 25) as i32 >> 25) as f64 / 63.;
+        assert!((decode(word >> 18) - direction[0]).abs() <= 0.5 / 63.);
+        assert!((decode(word >> 25) - direction[1]).abs() <= 0.5 / 63.);
+        world.set_batch([(c, Material::Wood)]);
+        grid.prepare(&world, moved, false, true);
+        assert_eq!((grid.words[i / 4][i % 4] >> 8) & 15, Material::Wood as u32);
+        grid.prepare(&world, moved, true, false);
+        assert!(grid.start.is_none() && !grid.has_current);
     }
 
     #[test]

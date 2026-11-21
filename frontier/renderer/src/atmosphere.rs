@@ -288,6 +288,7 @@ fn air_shader_source(samples: u32) -> String {
         "const NAADF_GROUP:u32=1u;const NAADF_BASE:u32=3u;\n",
         include_str!("naadf/trace.wgsl"),
         include_str!("sunlight.wgsl"),
+        include_str!("material_palette.wgsl"),
         include_str!("ground_light.wgsl"),
         include_str!("reflected_clouds.wgsl"),
         include_str!("atmosphere_air.wgsl"),

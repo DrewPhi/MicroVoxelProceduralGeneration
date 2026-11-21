@@ -46,6 +46,7 @@ const SHADER: &str = concat!(
     include_str!("trace.wgsl"),
     include_str!("../water.wgsl"),
     include_str!("../sunlight.wgsl"),
+    include_str!("../material_palette.wgsl"),
     include_str!("../ground_light.wgsl"),
     include_str!("../reflected_clouds.wgsl"),
     include_str!("../terrain_paint.wgsl"),

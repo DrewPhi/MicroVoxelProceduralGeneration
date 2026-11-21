@@ -1,9 +1,10 @@
 struct GroundLight {
     origin_strength: vec4<f32>,
-    nodes: array<vec4<f32>,169>,
+    heights: array<vec4<f32>,43>,
+    materials: array<vec4<u32>,6>,
     water_options:vec4<f32>, // cloud map enabled, deck relative to eye, river course present, probe height relative to eye
-    currents:array<vec4<u32>,43>,
-    wet_depths:array<vec4<u32>,11>,
+    water_origin:vec4<f32>,
+    water_nodes:array<vec4<u32>,183>,
     reflection_origin:vec4<f32>,
     skyline:array<vec4<f32>,16>,
     terrain_panorama:array<vec4<u32>,256>,
@@ -15,60 +16,75 @@ fn ground_available() -> bool {
     return ground_light.origin_strength.w>0.;
 }
 
-fn current_node(i:u32)->vec4<f32> {
-    return unpack4x8snorm(ground_light.currents[i/4u][i%4u]);
+fn bed_pigment(material:u32)->vec3<f32> {
+    if material==0u || material==7u {return vec3(.27,.26,.24);}
+    return MATERIAL_COLORS[min(material,9u)];
 }
-
-fn stream_current(relative:vec2<f32>)->vec4<f32> {
-    let radius=max(abs(relative.x),abs(relative.y));
-    if ground_light.water_options.z<=0. || radius>=62. {return vec4(0.);}
-    let grid=clamp((relative-ground_light.origin_strength.xy)/ground_light.origin_strength.w,
-        vec2(0.),vec2(12.));
-    let corner=vec2<u32>(min(floor(grid),vec2(11.)));
-    let w=grid-vec2<f32>(corner);
-    let i=corner.x+13u*corner.y;
-    let a=mix(current_node(i),current_node(i+1u),w.x);
-    let b=mix(current_node(i+13u),current_node(i+14u),w.x);
-    let course=mix(a,b,w.y);
-    let magnitude=length(course.xy);
-    if magnitude<.015 {return vec4(0.);}
-    return vec4(course.xy/magnitude,course.z/max(course.w,.001),
-        smoothstep(.015,.56,magnitude)*(1.-smoothstep(42.,62.,radius)));
+fn ground_node(i:u32)->vec4<f32> {
+    let material=(ground_light.materials[i/32u][(i/8u)%4u]>>(4u*(i%8u)))&15u;
+    return vec4(bed_pigment(material),ground_light.heights[i/4u][i%4u]);
 }
-
 fn ground_sample(position:vec3<f32>) -> vec4<f32> {
     let grid=clamp((position.xz-ground_light.origin_strength.xy)
         /ground_light.origin_strength.w,vec2(0.),vec2(12.));
     let corner=vec2<u32>(min(floor(grid),vec2(11.)));
     let weight=grid-vec2<f32>(corner);
     let i=corner.x+corner.y*13u;
-    let low=mix(ground_light.nodes[i],ground_light.nodes[i+1u],weight.x);
-    let high=mix(ground_light.nodes[i+13u],ground_light.nodes[i+14u],weight.x);
+    let low=mix(ground_node(i),ground_node(i+1u),weight.x);
+    let high=mix(ground_node(i+13u),ground_node(i+14u),weight.x);
     return mix(low,high,weight.y);
 }
 
-// Beyond the native volume a cut optical ray can still see shallow water.
-// Dry samples contribute no bed pigment or depth to the reconstruction.
-fn surveyed_water_bed(relative:vec3<f32>)->vec4<f32> {
-    let grid=(relative.xz-ground_light.origin_strength.xy)/max(.001,ground_light.origin_strength.w);
-    if !ground_available() || any(grid<vec2(0.)) || any(grid>vec2(12.)) {return vec4(0.);}
-    let corner=vec2<u32>(min(floor(grid),vec2(11.)));
+struct WetFootprint {
+    words:vec4<u32>,
+    weights:vec4<f32>,
+};
+fn wet_footprint(relative:vec2<f32>)->WetFootprint {
+    let spacing=ground_light.water_origin.z;
+    if spacing<=0. {return WetFootprint(vec4(0u),vec4(0.));}
+    let grid=(relative-ground_light.water_origin.xy)/spacing;
+    if any(grid<vec2(0.)) || any(grid>vec2(26.)) {return WetFootprint(vec4(0u),vec4(0.));}
+    let corner=vec2<u32>(min(floor(grid),vec2(25.)));
     let f=grid-vec2<f32>(corner);
-    let weights=vec4((1.-f.x)*(1.-f.y),f.x*(1.-f.y),(1.-f.x)*f.y,f.x*f.y);
-    let indices=vec4(corner.x+13u*corner.y)+vec4(0u,1u,13u,14u);
-    var bed=vec4(0.);
-    var total=0.;
+    let indices=vec4(corner.x+27u*corner.y)+vec4(0u,1u,27u,28u);
+    var words=vec4(0u);
     for (var k=0u;k<4u;k++) {
         let i=indices[k];
-        let code=(ground_light.wet_depths[i/16u][(i/4u)%4u]>>(8u*(i%4u)))&255u;
-        if code>0u {
-            let w=max(.005,weights[k]);
-            bed+=vec4(ground_light.nodes[i].rgb,max(.03125,f32(code-1u)/16.))*w;
-            total+=w;
-        }
+        words[k]=ground_light.water_nodes[i/4u][i%4u];
     }
-    if total>0. {return bed/total;}
-    return vec4(0.);
+    let weights=vec4((1.-f.x)*(1.-f.y),f.x*(1.-f.y),(1.-f.x)*f.y,f.x*f.y);
+    return WetFootprint(words,select(vec4(0.),weights,(words&vec4(255u))!=vec4(0u)));
+}
+fn stream_current(relative:vec2<f32>)->vec4<f32> {
+    let radius=max(abs(relative.x),abs(relative.y));
+    if ground_light.water_options.z<=0. || radius>=48. {return vec4(0.);}
+    let nodes=wet_footprint(relative);
+    let words=nodes.words;
+    let dx=vec4<f32>(bitcast<vec4<i32>>(words<<vec4(7u))>>vec4(25u))/63.;
+    let dz=vec4<f32>(bitcast<vec4<i32>>(words)>>vec4(25u))/63.;
+    let current=select(vec4(0.),nodes.weights,(words>>vec4(18u))!=vec4(0u));
+    let total=dot(current,vec4(1.));
+    let flow=vec2(dot(current,dx),dot(current,dz));
+    let magnitude=length(flow);
+    if magnitude<.001 {return vec4(0.);}
+    let grade=vec4<f32>((words>>vec4(12u))&vec4(63u))/63.;
+    let wet=dot(nodes.weights,vec4(1.));
+    let confidence=smoothstep(.002,.22,wet)*clamp(magnitude/max(.001,wet),0.,1.);
+    return vec4(flow/magnitude,dot(current,grade)/total,confidence*(1.-smoothstep(36.,48.,radius)));
+}
+// A clipped optical ray and an exact material-only triangle use the same
+// nearby bed. Only wet columns supply pigment or depth.
+fn surveyed_water_bed(relative:vec3<f32>)->vec4<f32> {
+    let nodes=wet_footprint(relative.xz);
+    let total=dot(nodes.weights,vec4(1.));
+    if total<=.0001 {return vec4(0.);}
+    var bed=vec4(0.);
+    for (var k=0u;k<4u;k++) {
+        let word=nodes.words[k];
+        let depth=max(.03125,(f32(word&255u)-1.)/16.);
+        bed+=vec4(bed_pigment((word>>8u)&15u),depth)*nodes.weights[k];
+    }
+    return bed/total;
 }
 
 // First-bounce approximation for an illuminated ground hemisphere. The same

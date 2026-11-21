@@ -122,6 +122,7 @@ const SHADER: &str = concat!(
     "const NAADF_GROUP:u32=2u;const NAADF_BASE:u32=3u;\n",
     include_str!("naadf/trace.wgsl"),
     include_str!("sunlight.wgsl"),
+    include_str!("material_palette.wgsl"),
     include_str!("ground_light.wgsl"),
     include_str!("reflected_clouds.wgsl"),
     include_str!("vegetation.wgsl")
