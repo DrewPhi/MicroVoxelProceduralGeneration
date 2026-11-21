@@ -185,6 +185,13 @@ and onto low banks. A cobble occupies several native cells at 6.25 cm, so
 digging into it exposes its actual material. Existing saves select their
 original bed and bank generation before terrain, vegetation or edits load.
 
+From the air, shallow inland water samples the sediment at the four corners
+of each coarse roof. In a seed 997 chase view, 97 of 1,857 shallow-water
+probes had a one-pixel green-channel jump above 26/255. Sampling the four
+corners reduced that count to 49. The same 100 m/s route with the new
+bed optics measured 10.38–10.43 ms median and 14.56–15.33 ms p95 at
+1080p MSAA 1, a 1.5 km active view and a 16 m native radius.
+
 The current generator also cuts shallow coves and builds sandbars along
 each channel. Two seeded fields vary the cross-section over 58 m and 19 m
 at the default world scale. Bars rise from the bed and coves meet the

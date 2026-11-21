@@ -420,6 +420,11 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         let height=select(extent.y,extent.x,axis==0u)*VOXELS_PER_METER;
         out.color=vec3(select(0.,height,position.y==anchor.y),height,0.);
         out.surface_word=material;
+    } else if (material&255u)==0xa7u {
+        // The native face corners run around the roof in z, then x.
+        let code=(material>>(8u+2u*corner))&3u;
+        out.color=MATERIAL_COLORS[array<u32,4>(2u,8u,3u,2u)[code]];
+        out.surface_word=material;
     } else if (material&0xbfu)==0x27u {out.surface_word=material;}
     return out;
 }
@@ -602,12 +607,16 @@ fn shade(input: VertexOut) -> vec4<f32> {
         // The water surface has a horizontal voxel roof in both flight
         // representations. Keep its hydraulic stage and animate only light.
         let block_water=(camera.paint_origin.w&32u)!=0u && in.surface_word!=0u;
-        let measured_column=(in.surface_word&0xbfu)==0x27u;
+        let sediment_roof=(in.surface_word&255u)==0xa7u;
+        let measured_column=(in.surface_word&0xbfu)==0x27u || sediment_roof;
         let connected_step=(in.surface_word&255u)==0x67u;
         if connected_step {
             normal=stream_step_normal(normal,NATIVE_VOXEL_METERS,length(vec2(dx.y,dy.y)));
         }
-        if measured_column {
+        if sediment_roof {
+            bed=in.color;
+            depth=f32(in.surface_word>>16u)/16.;
+        } else if measured_column {
             bed=MATERIAL_COLORS[min((in.surface_word>>8u)&15u,9u)];
             depth=f32(in.surface_word>>12u)/16.;
         }

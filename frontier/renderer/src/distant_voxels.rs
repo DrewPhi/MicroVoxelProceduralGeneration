@@ -181,6 +181,38 @@ fn pack_water_bed(cells: i64, material: Material) -> u32 {
     0x20 | (material as u32) << 8 | depth << 12
 }
 
+// Positive-Y river roofs can carry four bed samples in vertex order (z, then x).
+// Homogeneous beds retain the regular water encoding and merge across flat runs.
+const SEDIMENT_ROOF: u32 = 0xa7;
+fn sediment_code(material: Material) -> Option<u32> {
+    match material {
+        Material::Soil => Some(0),
+        Material::Sand => Some(1),
+        Material::Stone => Some(2),
+        _ => None,
+    }
+}
+
+fn sediment_roof_word(water: u32, corners: [Material; 4]) -> u32 {
+    if corners.iter().all(|&c| c == corners[0]) {
+        return (water & !0xf00) | ((corners[0] as u32) << 8);
+    }
+    let mut word = SEDIMENT_ROOF | ((water >> 12) << 16);
+    for (i, corner) in corners.into_iter().enumerate() {
+        let Some(code) = sediment_code(corner) else {
+            return water;
+        };
+        word |= code << (8 + 2 * i);
+    }
+    word
+}
+
+pub(crate) fn valid_sediment_roof(word: u32) -> bool {
+    word & 255 == SEDIMENT_ROOF
+        && word >> 16 <= 192
+        && (0..4).all(|i| (word >> (8 + i * 2)) & 3 < 3)
+}
+
 // Bit 26 is the highest material bit available in a compact instance.
 // Mixed cliff walls carry the source materials without adding geometry.
 pub(crate) const LAYERED_WALL: u32 = 1 << 26;
@@ -744,6 +776,41 @@ impl Generator<'_> {
         }
     }
 
+    fn block_roof(
+        &mut self,
+        x: &Range<i64>,
+        z: &Range<i64>,
+        run: Run,
+    ) -> Result<NativeQuad, String> {
+        let mut roof = roof_quad(x, z, run);
+        if run.top_material == Material::Water
+            && run.top > 0
+            && roof.material & 255 == 0x27
+            && f64::from(self.key.step_cells) * voxel_size() >= 1.
+            && (roof.material >> 12) < 128
+        {
+            let bed = run.soil_bands.expect("procedural block has ground bands")[0];
+            if sediment_code(bed).is_some() {
+                let mut corners = [bed; 4];
+                for (sample, at) in corners.iter_mut().zip([
+                    [x.start, z.start],
+                    [x.start, z.end],
+                    [x.end, z.end],
+                    [x.end, z.start],
+                ]) {
+                    let column = self.column(at)?;
+                    if column.height > column.ground_height
+                        && sediment_code(column.bands[0]).is_some()
+                    {
+                        *sample = column.bands[0];
+                    }
+                }
+                roof.material = sediment_roof_word(roof.material, corners);
+            }
+        }
+        Ok(roof)
+    }
+
     // Anchor coarse blocks at lattice nodes. A regular node owns half a cell
     // on either side, so its two halves also agree across a tile boundary.
     // A finer shared edge introduces smaller blocks for the adjacent half row.
@@ -788,7 +855,8 @@ impl Generator<'_> {
                 let run = this.block_run(runs, sample)?;
                 top_range[0] = top_range[0].min(run.top);
                 top_range[1] = top_range[1].max(run.top);
-                this.append_quads([roof_quad(&xx, &zz, run)])?;
+                let roof = this.block_roof(&xx, &zz, run)?;
+                this.append_quads([roof])?;
                 rect_edges(edges, xx, zz, run, None);
                 Ok(())
             };
@@ -1300,7 +1368,9 @@ pub(super) fn merge_quads(tile: &mut GeometryTile) {
             let axis = (quad.axis_sign & 3) as usize;
             let u = (axis + 1 + merge) % 3;
             // Each layered facade measures depth from its own surface cell.
-            if u == 1 && quad.material & LAYERED_WALL != 0 {
+            // A mixed bed measures its color across the original roof footprint.
+            if (u == 1 && quad.material & LAYERED_WALL != 0) || quad.material & 255 == SEDIMENT_ROOF
+            {
                 return false;
             }
             if strip(prev) == strip(quad) && prev.anchor[u] + prev.extent[merge] == quad.anchor[u] {
@@ -1368,6 +1438,22 @@ mod tests {
                 assert!((depth - (cells as f64 * voxel_size()).min(12.)).abs() <= 1. / 32.);
             }
         }
+    }
+
+    #[test]
+    fn sediment_roof_keeps_corner_order_optical_depth_and_uniform_runs() {
+        let water = pack_water_bed(11, Material::Soil) | Material::Water as u32;
+        let [sand, soil, stone] = [Material::Sand, Material::Soil, Material::Stone];
+        let mixed = sediment_roof_word(water, [stone, soil, sand, stone]);
+        assert!(valid_sediment_roof(mixed));
+        assert_eq!((mixed >> 8) & 255, 2 | (1 << 4) | (2 << 6));
+        assert_eq!(mixed >> 16, water >> 12);
+        assert!(!valid_sediment_roof(mixed | (3 << 8)));
+        assert!(!valid_sediment_roof(mixed | (1 << 25)));
+        assert_eq!(
+            sediment_roof_word(water, [sand; 4]),
+            pack_water_bed(11, sand) | Material::Water as u32
+        );
     }
 
     #[test]
