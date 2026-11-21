@@ -1808,6 +1808,8 @@ const SOURCE_SHARDS: usize = 32;
 struct SharedSourcePages {
     shards: [Arc<Mutex<SourceShard>>; SOURCE_SHARDS],
     landscape: Option<Arc<landscape_paint_cache::Cache>>,
+    block_columns:
+        Option<Arc<landscape_paint_cache::Cache<(frontier_world::terrain::TerrainColumn, u32)>>>,
     terrain_bounds: Option<Arc<terrain_bound_pages::Cache>>,
     coarse_interiors: Option<Arc<distant_voxels::InteriorCache>>,
 }
@@ -1861,6 +1863,7 @@ impl SharedSourcePages {
             bytes
         };
         let coarse_interiors = (distant_voxels::enabled()
+            && distant_voxels::Mode::current() != distant_voxels::Mode::Blocks
             && std::env::var_os("FRONTIER_COARSE_INTERIOR_CACHE").is_none_or(|v| v != "0"))
         .then(|| distant_voxels::InteriorCache::new((bytes / 32).min(4 * 1024 * 1024)))
         .flatten()
@@ -1871,6 +1874,7 @@ impl SharedSourcePages {
                 .map_or(0, |cache| cache.reserved_bytes);
         Self {
             landscape: None,
+            block_columns: None,
             terrain_bounds,
             coarse_interiors,
             shards: std::array::from_fn(|i| {
@@ -1940,13 +1944,18 @@ impl SharedSourcePages {
     /// snapshot, not five independent passes through the same locks.
     fn snapshot(&self) -> CacheStats {
         let mut out = CacheStats::default();
-        if let Some(cache) = &self.landscape {
-            let (hits, misses) = cache.stats();
+        for (bytes, (hits, misses)) in [
+            self.landscape.as_ref().map(|c| (c.bytes, c.stats())),
+            self.block_columns.as_ref().map(|c| (c.bytes, c.stats())),
+        ]
+        .into_iter()
+        .flatten()
+        {
             out.appearance_cache_hits += hits;
             out.appearance_cache_misses += misses;
-            out.appearance_cache_bytes += cache.bytes;
-            out.source_cache_bytes += cache.bytes;
-            out.source_cache_peak_bytes += cache.bytes;
+            out.appearance_cache_bytes += bytes;
+            out.source_cache_bytes += bytes;
+            out.source_cache_peak_bytes += bytes;
         }
         if let Some(cache) = &self.terrain_bounds {
             let stats = cache.stats();
@@ -2071,6 +2080,9 @@ impl SharedSourcePages {
             cache.clear();
         }
         if let Some(cache) = &self.coarse_interiors {
+            cache.clear();
+        }
+        if let Some(cache) = &self.block_columns {
             cache.clear();
         }
         if let Some(cache) = &self.landscape {
@@ -3606,15 +3618,26 @@ impl GeometryCache {
                 .as_deref()
                 .or(if alpine { Some("128") } else { None }),
         );
-        let landscape = world
+        let cache_paint = world
             .fbm_terrain()
-            .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
-            .filter(|_| std::env::var_os("FRONTIER_LANDSCAPE_PAINT_CACHE").is_none_or(|v| v != "0"))
-            .and_then(|_| landscape_paint_cache::Cache::new(source_budget / 4))
+            .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
+            && std::env::var_os("FRONTIER_LANDSCAPE_PAINT_CACHE").is_none_or(|v| v != "0");
+        let blocks = distant_voxels::Mode::current() == distant_voxels::Mode::Blocks;
+        let landscape = (cache_paint && !blocks)
+            .then(|| landscape_paint_cache::Cache::new(source_budget / 4))
+            .flatten()
             .map(Arc::new);
-        let mut samples =
-            SourceSamples::new(source_budget - landscape.as_ref().map_or(0, |c| c.bytes));
+        let block_columns = (cache_paint && blocks)
+            .then(|| landscape_paint_cache::Cache::new(source_budget / 4))
+            .flatten()
+            .map(Arc::new);
+        let mut samples = SourceSamples::new(
+            source_budget
+                - landscape.as_ref().map_or(0, |c| c.bytes)
+                - block_columns.as_ref().map_or(0, |c| c.bytes),
+        );
         samples.pages.landscape = landscape;
+        samples.pages.block_columns = block_columns;
         Self {
             naadf_owner: None,
             world,

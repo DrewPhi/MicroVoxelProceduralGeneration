@@ -12,7 +12,7 @@ use frontier_world::{
     voxel_size, FbmRecipe, Material, World,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     sync::{
@@ -355,26 +355,12 @@ impl Generator<'_> {
             let vertical_pitch = (pitch / i64::from(vertical_pitch_divisor(self.world))).max(1);
             round_to_pitch(column.ground_height, vertical_pitch)
         };
-        let paint = if Mode::current() == Mode::Blocks && !wet && pitch as f64 * voxel_size() >= 1.
-        {
-            let x = self.key.min[0] + sample[0];
-            let z = self.key.min[1] + sample[1];
-            let terrain = self
-                .world
-                .fbm_terrain()
-                .expect("heightfield blocks require FBM");
-            let (_, color) = terrain.landscape_column(x, z, self.world.vegetation_enabled());
-            let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
-            0x10 | (r << 8) | (g << 14) | (b << 20)
-        } else {
-            0
-        };
         Ok((
             Run {
                 top: if wet { column.height } else { ground },
                 ground,
                 top_material: column.material(column.height - 1),
-                paint,
+                paint: 0,
                 deep_material: column.bands[2],
                 profile,
             },
@@ -574,6 +560,143 @@ impl Generator<'_> {
         Ok(())
     }
 
+    fn sampled_block(&mut self, sample: [i64; 2]) -> Result<Run, String> {
+        if f64::from(self.key.step_cells) * voxel_size() < 1. {
+            return Ok(self.coarse_run(sample, 1, 0)?.0);
+        }
+        // This path owns procedural heightfields. Saved volume edits are drawn
+        // by their own indexed surface. Fetch climate and bedrock together so
+        // every shared roof and facade uses the same canonical column.
+        let terrain = self.world.fbm_terrain().expect("procedural surface");
+        let at = [self.key.min[0] + sample[0], self.key.min[1] + sample[1]];
+        let mut generated = false;
+        let mut compute = || {
+            generated = true;
+            let (col, color) =
+                terrain.landscape_column(at[0], at[1], self.world.vegetation_enabled());
+            let [r, g, b] = color.map(|v| (v.clamp(0., 1.) * 63.).round() as u32);
+            let paint = if col.top_material() == Material::Water {
+                0
+            } else {
+                0x10 | r << 8 | g << 14 | b << 20
+            };
+            (col, paint)
+        };
+        let (col, paint) = match &self.samples.pages.block_columns {
+            Some(cache) => cache.get(at, compute),
+            None => compute(),
+        };
+        if col.visible_top.unsigned_abs() > 16_777_216 || self.heights.len() >= super::MAX_SAMPLES {
+            return Err("adaptive block source exceeds sample or precision budget".into());
+        }
+        let material = col.top_material();
+        self.heights.insert(
+            sample,
+            NativeColumn {
+                height: col.visible_top,
+                ground_height: col.ground_top,
+                bands: [col.ground_surface, col.ground_subsurface, Material::Stone],
+            },
+        );
+        self.samples.generated += u64::from(generated);
+        self.samples.hits += u64::from(!generated);
+        Ok(Run {
+            top: col.visible_top,
+            ground: col.ground_top,
+            top_material: material,
+            deep_material: Material::Stone,
+            profile: 0,
+            paint,
+        })
+    }
+
+    // Anchor coarse blocks at lattice nodes. A regular node owns half a cell
+    // on either side, so its two halves also agree across a tile boundary.
+    // A finer shared edge introduces smaller blocks for the adjacent half row.
+    fn block_patch(
+        &mut self,
+        x: i64,
+        z: i64,
+        pitch: i64,
+        edges: &mut Edges,
+        runs: &mut HashMap<[i64; 2], Run>,
+    ) -> Result<[i64; 2], String> {
+        let width = i64::from(self.key.width_cells);
+        let mut top_range = [i64::MAX, i64::MIN];
+        let mut add =
+            |this: &mut Self, xx: Range<i64>, zz: Range<i64>, sample| -> Result<(), String> {
+                if xx.is_empty() || zz.is_empty() {
+                    return Ok(());
+                }
+                let run = match runs.entry(sample) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        *entry.insert(this.sampled_block(sample)?)
+                    }
+                };
+                top_range[0] = top_range[0].min(run.top);
+                top_range[1] = top_range[1].max(run.top);
+                this.append_quads([roof_quad(&xx, &zz, run)])?;
+                rect_edges(edges, xx, zz, run, None);
+                Ok(())
+            };
+        let strides = self.key.edge_steps.map(i64::from);
+        let half = pitch / 2;
+        for (zrange, zedge) in [
+            (z..z + half, (z == 0).then_some(3)),
+            (z + half..z + pitch, (z + pitch == width).then_some(1)),
+        ] {
+            for (xrange, xedge) in [
+                (x..x + half, (x == 0).then_some(0)),
+                (x + half..x + pitch, (x + pitch == width).then_some(2)),
+            ] {
+                let sx = zedge.map_or(pitch, |e| strides[e]).max((pitch / 4).max(1));
+                let sz = xedge.map_or(pitch, |e| strides[e]).max((pitch / 4).max(1));
+                for (xx, cx) in node_spans(xrange.start.max(1)..xrange.end.min(width - 1), sx) {
+                    for (zz, cz) in node_spans(zrange.start.max(1)..zrange.end.min(width - 1), sz) {
+                        add(self, xx.clone(), zz, [cx, cz])?;
+                    }
+                }
+            }
+        }
+        for (edge, touches) in [x == 0, z + pitch == width, x + pitch == width, z == 0]
+            .into_iter()
+            .enumerate()
+        {
+            if !touches {
+                continue;
+            }
+            let [axis, along] = edge_axes(edge);
+            let plane = if edge == 0 || edge == 3 { 0 } else { width };
+            let inside = if plane == 0 { 0 } else { width - 1 };
+            let start = [x, z][along];
+            let stride = strides[edge];
+            for t in (start..start + pitch).step_by(stride as usize) {
+                // The cells closest to each node meet native and T-junction
+                // corners exactly. Both intervening spans share the same
+                // lattice samples as the interior on an equal-pitch edge.
+                let end = t + stride;
+                for (span, horizontal, normal) in [
+                    (t..t + 1, t, inside),
+                    (t + 1..t + stride / 2, t, plane),
+                    (t + stride / 2..end - 1, end, plane),
+                    (end - 1..end, end - 1, inside),
+                ]
+                .into_iter()
+                .take(if stride == 1 { 1 } else { 4 })
+                {
+                    if axis == 0 {
+                        add(self, inside..inside + 1, span, [normal, horizontal])?;
+                    } else {
+                        let span = span.start.max(1)..span.end.min(width - 1);
+                        add(self, span, inside..inside + 1, [horizontal, normal])?;
+                    }
+                }
+            }
+        }
+        Ok(top_range)
+    }
+
     pub(super) fn coarse_surface(
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
@@ -620,7 +743,8 @@ impl Generator<'_> {
         } else {
             None
         };
-        let use_interior = needs_affine && can_certify;
+        let blocks = Mode::current() == Mode::Blocks;
+        let use_interior = !blocks && needs_affine && can_certify;
         #[cfg(test)]
         let use_interior = use_interior && !self.samples.coarse_reference;
         let interior = use_interior
@@ -628,12 +752,34 @@ impl Generator<'_> {
             .transpose()?;
         let mut profiles = Vec::with_capacity(interior.as_ref().map_or(0, |i| i.patches.len()));
         let mut edges = Edges::new();
+        let mut block_runs = HashMap::new();
         for z in (0..width).step_by(pitch as usize) {
             for x in (0..width).step_by(pitch as usize) {
                 if cancelled() {
                     return Err("adaptive geometry cancelled".into());
                 }
                 let first_roof = self.coarse_quads.len();
+                if blocks {
+                    let range = self.block_patch(x, z, pitch, &mut edges, &mut block_runs)?;
+                    let center = self.height(x + pitch / 2, z + pitch / 2)?;
+                    self.empirical_error_m = self.empirical_error_m.max(
+                        (center - range[0]).abs().max((center - range[1]).abs()) as f64
+                            * voxel_size(),
+                    );
+                    if can_certify {
+                        let index = ((z / pitch) * i64::from(grid) + x / pitch) as usize;
+                        let bound = bounds.as_ref().map(|bounds| bounds[index]);
+                        self.record_coarse_error(
+                            [x, z],
+                            pitch,
+                            first_roof,
+                            range,
+                            bound,
+                            cancelled,
+                        )?;
+                    }
+                    continue;
+                }
                 let profile = match seed_profile {
                     Some(profile) => profile,
                     None => self.patch_appearance(x, z, pitch)?,
@@ -819,6 +965,21 @@ fn edge_axes(edge: usize) -> [usize; 2] {
     } else {
         [1, 0]
     }
+}
+
+// Partition a half-open native interval by the nearest regular lattice node.
+fn node_spans(range: Range<i64>, step: i64) -> impl Iterator<Item = (Range<i64>, i64)> {
+    let mut pos = range.start;
+    std::iter::from_fn(move || {
+        if pos >= range.end {
+            return None;
+        }
+        let node = (pos + step / 2).div_euclid(step) * step;
+        let end = (node + (step + 1) / 2).min(range.end);
+        let span = pos..end;
+        pos = end;
+        Some((span, node))
+    })
 }
 
 fn seam_native(t: i64, stride: i64) -> bool {
@@ -1100,6 +1261,7 @@ mod tests {
     fn application_default_and_comparison_overrides_are_distinct() {
         assert!(Mode::resolve(None, Mode::Seed) == Mode::Seed);
         for (value, mode) in [
+            ("blocks", Mode::Blocks),
             ("surface", Mode::Surface),
             ("voxy", Mode::Voxy),
             ("voxy-seed", Mode::Seed),

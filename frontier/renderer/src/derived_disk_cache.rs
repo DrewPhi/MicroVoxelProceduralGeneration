@@ -17,7 +17,7 @@ use std::{
 
 const MAGIC: &[u8; 8] = b"FVDC0003";
 // Bump when geometry, certificate, appearance or ownership construction changes.
-const REPRESENTATION_VERSION: u64 = 17;
+const REPRESENTATION_VERSION: u64 = 18;
 const MAX_FILES: usize = 16384;
 const MAX_EDITS: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]

@@ -24,32 +24,32 @@ pub(super) fn sample(
 }
 
 #[derive(Clone, Copy)]
-struct Entry {
+struct Entry<T> {
     at: [i64; 2],
-    paint: Paint,
+    paint: T,
 }
 
-struct Shard {
-    entries: Box<[Option<Entry>]>,
+struct Shard<T> {
+    entries: Box<[Option<Entry<T>>]>,
     hits: u64,
     misses: u64,
 }
 
-pub(super) struct Cache {
-    shards: [Mutex<Shard>; 32],
+pub(super) struct Cache<T = Paint> {
+    shards: [Mutex<Shard<T>>; 32],
     pub(super) bytes: usize,
 }
 
-impl Cache {
+impl<T: Copy> Cache<T> {
     pub(super) fn new(budget: usize) -> Option<Self> {
         // Charge allocation overhead on every shard plus the owning Arc.
         let fixed = size_of::<Self>() + 64 * 33;
-        let slots = budget.saturating_sub(fixed) / (32 * size_of::<Option<Entry>>());
+        let slots = budget.saturating_sub(fixed) / (32 * size_of::<Option<Entry<T>>>());
         if slots == 0 {
             return None;
         }
         Some(Self {
-            bytes: fixed + 32 * slots * size_of::<Option<Entry>>(),
+            bytes: fixed + 32 * slots * size_of::<Option<Entry<T>>>(),
             shards: std::array::from_fn(|_| {
                 Mutex::new(Shard {
                     entries: vec![None; slots].into_boxed_slice(),
@@ -60,7 +60,7 @@ impl Cache {
         })
     }
 
-    pub(super) fn get(&self, at: [i64; 2], compute: impl FnOnce() -> Paint) -> Paint {
+    pub(super) fn get(&self, at: [i64; 2], compute: impl FnOnce() -> T) -> T {
         // Mix high bits down: adjacent flight anchors are often thousands of
         // native cells apart along both axes.
         let h = (at[0] as u64).wrapping_mul(0x9e3779b97f4a7c15)
