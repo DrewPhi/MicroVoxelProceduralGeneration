@@ -320,10 +320,10 @@ fn cover_shell_alpha(p:CoverSample,local:vec3<f32>,normal:vec3<f32>,footprint:f3
     return min(coverage,0.6*p.extra.pz[band]*cover_handoff(local)*smoothstep(0.75,1.5,projected));
 }
 fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:vec3<f32>,base:vec3<f32>,visibility:f32)->vec3<f32> {
-    if face_profiles[id].top.w != -6. {return base;}
+    if normal.y<0.45 || face_profiles[id].top.w != -6. {return base;}
     let p=cover_sample(id,local,normal);let view=normalize(camera.eye.xyz-local);
     let wrapper=face_profiles[id];let map=u32(i32(id)+i32(wrapper.top.y));let spacing=1./face_profiles[map].top.z;
-    if normal.y<0.45 || abs(local.y-p.extra.nz.w)>max(1.,spacing) {return base;}
+    if abs(local.y-p.extra.nz.w)>max(1.,spacing) {return base;}
     var coverage=view_coverage(p,view,normal)*cover_handoff(local);
     if coverage<=0.0001 {return base;}
     let w=vec4(max(view.x,0.),max(-view.x,0.),max(view.z,0.),max(-view.z,0.));
@@ -586,21 +586,19 @@ fn shade(input: VertexOut) -> vec4<f32> {
         if paint_hash(vec3(cell.x,991u,cell.z))>=alpha {discard;}
         return vec4(ground_cover_color(in.profile_index,in.local,in.normal,dx,dy,in.color*tint*light,visibility),1.);
     }
-    let xx=dot(dx,dx); let yy=dot(dy,dy); let xy=dot(dx,dy);
-    let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
-    let cross_area=cross(dx,dy);
-    let smallest=dot(cross_area,cross_area)/max(largest,0.00000001);
-    let footprint=sqrt(smallest)/NATIVE_VOXEL_METERS;
-    var blend=select(0.,1.,(camera.paint_origin.w&1u)!=0u);
-    let minified=smoothstep(1.,2.,footprint);
-    if (camera.paint_origin.w&2u)!=0u {blend*=minified;}
-    else if (u32(camera.paint.w)&31u)<=4u && (u32(camera.paint.w)>>5u)<=7u && camera.sky.w>0.5 {
-        // Preserve a native-face component while near proxy geometry still
-        // resolves, converging to full area shading when native cells minify.
-        let near_weight=select(0.5+0.5*minified,minified,camera.sky.w>1.5);
-        blend*=near_weight;
+    // A block already carries the albedo of its sampled face. Only draws
+    // using the area profile need the projected native footprint.
+    var blend=select(0.,1.,(camera.paint_origin.w&33u)==1u);
+    let native=(camera.paint_origin.w&2u)!=0u;
+    let near_proxy=(u32(camera.paint.w)&31u)<=4u && (u32(camera.paint.w)>>5u)<=7u && camera.sky.w>0.5;
+    if blend>0. && (native || near_proxy) {
+        let xx=dot(dx,dx); let yy=dot(dy,dy); let xy=dot(dx,dy);
+        let largest=0.5*(xx+yy+sqrt(max((xx-yy)*(xx-yy)+4.*xy*xy,0.)));
+        let cross_area=cross(dx,dy);
+        let smallest=dot(cross_area,cross_area)/max(largest,0.00000001);
+        let minified=smoothstep(1.,2.,sqrt(smallest)/NATIVE_VOXEL_METERS);
+        blend=select(0.5+0.5*minified,minified,native || camera.sky.w>1.5);
     }
-    if (camera.paint_origin.w&32u)!=0u {blend=0.;}
     let diagnostic=u32(camera.sky.z);
     if diagnostic==1u {
         let code=u32(camera.paint.w);

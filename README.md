@@ -131,6 +131,13 @@ In two ten-second moving runs per seed with reversed depth, frame p95 was
 29123 (Radeon 760M, 1080p, MSAA 1, vegetation off). A banked flight view
 with vegetation enabled measured 12.94 / 15.61 / 16.89 ms at p50/p95/p99.
 
+Dry block faces skip the area-filter footprint calculation. The revised
+shader produced byte-identical color, depth and coverage on a Highlands ridge,
+a vegetated Watershed scene and an edited pool at 801×501. In alternating
+1080p runs the banked view measured 12.89–12.96 ms at p95, down from
+14.14–14.45 ms. The runs finished at different refinement levels.
+The moving seed 29123 ranges overlapped at 13.37–13.55 ms and 12.96–13.78 ms.
+
 ### Flight benchmark
 
 Radeon 760M, 1920×1080, MSAA 1, 6 km active view, 32 m native radius.
