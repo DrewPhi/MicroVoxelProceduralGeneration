@@ -65,8 +65,9 @@ keeps its source elevation. You can select the former surface renderer with
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,
 and snow albedo varies between wind-scoured firn and softer drifts. The preset renders a 6 km active terrain view with a
-world-aligned landscape horizon fading out to 35 km. The horizon samples the
-procedural source. A sparse mesh carries saved terrain edits beyond the resident native
+world-aligned voxel horizon fading out to 35 km. Three rings draw exposed
+64 m, 128 m and 256 m columns from the same procedural source. They share
+wall segments at their boundaries. A moving window reuses samples behind the aircraft. A sparse mesh carries saved terrain edits beyond the resident native
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
 
 A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
@@ -86,16 +87,26 @@ forward spacing and vegetation off.
 
 | Highlands seed | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
 | --- | --- | ---: | ---: |
-| 19 | 8.01 / 9.86 / 10.62 | 7.41 | 27 / 240 |
-| 40961 | 3.74 / 5.03 / 5.28 | 2.68 | 1 / 240 |
-| 673 | 6.95 / 8.82 / 10.08 | 10.49 | 57 / 240 |
+| 19 | 8.50 / 10.34 / 11.72 | 8.71 | 32 / 240 |
+| 40961 | 4.15 / 5.43 / 5.75 | 2.39 | 0 / 240 |
+| 673 | 7.67 / 9.83 / 11.08 | 7.79 | 37 / 240 |
 
-The gallery view, with vegetation enabled, measured **9.79 / 12.43 / 13.06 ms**
+The gallery view, with vegetation enabled, measured **10.69 / 12.96 / 14.26 ms**
 at a fixed banked camera during 12 seconds of cold refinement. Each coarse
 face carries its material and sampled color in the existing 32-byte instance.
 The renderer can cull complete rear-facing groups before vertex processing.
 The flight scheduler samples the approaching ridgeline and publishes up to two
-refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. On seed 673 this reduced ridgeline p95 from 15.53 to 10.49 pixels. Some tile boundaries remain visible during refinement.
+refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. Some block-size changes remain visible during refinement.
+
+A separate 46-second run crossed 6.4 km at 140 m/s on seed 673. All 4,590
+measured frames retained terrain coverage. Frame p50/p95/p99 measured
+**10.19 / 12.66 / 13.69 ms**. The conservative 5 px quality target remained
+unresolved during that moving run.
+
+At reduced render scales, a bounded cubic filter reconstructs the voxel faces.
+At 85% scale on the fixed native fixture, mean absolute RGB error against
+full resolution fell from 1.28 to 1.20 levels out of 255. Full resolution is
+the flight default.
 
 On the 3 m/s Watershed seed 997 walking turn, limiting an ascending shadow
 ray to the highest occupied native root gave p50/p95/p99 of

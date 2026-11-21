@@ -2,35 +2,68 @@
 //! anchored in world metres so moving the window preserves shared vertices.
 use crate::{atmosphere::texture, Camera};
 use frontier_world::{voxel_size, Cell, FbmParams, FbmTerrain};
-use glam::{DVec3, Mat4, Vec3};
-use std::sync::mpsc::{self, Receiver};
+use glam::{DVec3, Mat4, Vec3, Vec4};
+use std::ops::Range;
+#[path = "horizon_blocks.rs"]
+mod blocks;
+use std::sync::{
+    mpsc::{self, Receiver},
+    Arc,
+};
 use wgpu::util::DeviceExt;
 
 const SIDE: usize = 161;
 const SPACING: f64 = 512.;
 const LEVELS: usize = 3;
 const HALF: i64 = SIDE as i64 / 2;
-type Patch = ([i64; 2], Vec<[f32; 4]>);
+struct Lattice {
+    center: [i64; 2],
+    samples: Vec<[f32; 4]>,
+}
+struct Patch {
+    lattice: Arc<Lattice>,
+    mesh: blocks::Mesh,
+}
 
-fn samples(terrain: &FbmTerrain, vegetation: bool, center: [i64; 2]) -> Patch {
+fn lattice(
+    center: [i64; 2],
+    previous: Option<&Lattice>,
+    mut sample: impl FnMut(f64, f64) -> [f32; 4],
+) -> Lattice {
     let mut out = vec![[0.; 4]; SIDE * SIDE * LEVELS];
     for level in 0..LEVELS {
         let step = SPACING / (1 << (LEVELS - level - 1)) as f64;
         let base = level * SIDE * SIDE;
+        let old = previous.and_then(|l| {
+            let scale = 1_i128 << (LEVELS - level - 1);
+            let dx = (i128::from(center[0]) - i128::from(l.center[0])) * scale;
+            let dz = (i128::from(center[1]) - i128::from(l.center[1])) * scale;
+            (dx.abs() < SIDE as i128 && dz.abs() < SIDE as i128)
+                .then_some((l, dx as i64, dz as i64))
+        });
         for z in -HALF..=HALF {
             for x in -HALF..=HALF {
                 // Keep a one-vertex halo for the vertex normals beside the hole.
                 if level > 0 && x.abs().max(z.abs()) < HALF / 2 - 1 {
                     continue;
                 }
-                let cell = Cell::from_meters([
+                let i = base + (z + HALF) as usize * SIDE + (x + HALF) as usize;
+                if let Some((l, dx, dz)) = old {
+                    let (ox, oz) = (x + dx, z + dz);
+                    let radius = ox.abs().max(oz.abs());
+                    // Odd vertices on the old outer edge were averaged for
+                    // the ring join. Resample them when they become interior.
+                    let averaged = level + 1 < LEVELS && radius == HALF && (ox | oz) & 1 != 0;
+                    if radius <= HALF && (level == 0 || radius >= HALF / 2 - 1) && !averaged {
+                        out[i] =
+                            l.samples[base + (oz + HALF) as usize * SIDE + (ox + HALF) as usize];
+                        continue;
+                    }
+                }
+                out[i] = sample(
                     center[0] as f64 * SPACING + x as f64 * step,
-                    0.,
                     center[1] as f64 * SPACING + z as f64 * step,
-                ]);
-                let (col, [r, g, b]) = terrain.landscape_column(cell.x, cell.z, vegetation);
-                out[base + (z + HALF) as usize * SIDE + (x + HALF) as usize] =
-                    [r, g, b, (col.visible_top as f64 * voxel_size()) as f32];
+                );
             }
         }
         // Anchor odd fine edge vertices to the enclosing coarse edge.
@@ -49,19 +82,39 @@ fn samples(terrain: &FbmTerrain, vegetation: bool, center: [i64; 2]) -> Patch {
             }
         }
     }
-    (center, out)
+    Lattice {
+        center,
+        samples: out,
+    }
+}
+
+fn samples(
+    terrain: &FbmTerrain,
+    vegetation: bool,
+    center: [i64; 2],
+    old: Option<&Lattice>,
+) -> Patch {
+    let lattice = Arc::new(lattice(center, old, |x, z| {
+        let cell = Cell::from_meters([x, 0., z]);
+        let (col, [r, g, b]) = terrain.landscape_column(cell.x, cell.z, vegetation);
+        [r, g, b, (col.visible_top as f64 * voxel_size()) as f32]
+    }));
+    let mesh = blocks::build(&lattice.samples, voxel_size() as f32);
+    Patch { lattice, mesh }
 }
 
 pub(crate) struct Horizon {
     pub(crate) color: wgpu::TextureView,
     depth: wgpu::TextureView,
     params: wgpu::Buffer,
-    heights: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    faces: Option<wgpu::Buffer>,
+    batches: Vec<blocks::Batch>,
+    visible: Vec<Range<u32>>,
+    view: Option<[f32; 24]>,
+    dirty: std::cell::Cell<bool>,
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
-    center: Option<[i64; 2]>,
+    lattice: Option<Arc<Lattice>>,
     pending: Option<Receiver<Patch>>,
     source_key: Option<(u64, FbmParams, f64, bool)>,
 }
@@ -91,37 +144,11 @@ impl Horizon {
             96,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let heights = buffer(
-            "horizon lattice",
-            (LEVELS * SIDE * SIDE * 16) as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        let mut tris = Vec::with_capacity((SIDE - 1) * (SIDE - 1) * 6);
-        for level in 0..LEVELS {
-            let hole = SIDE / 4..SIDE - 1 - SIDE / 4;
-            for z in 0..SIDE - 1 {
-                for x in 0..SIDE - 1 {
-                    if level > 0 && hole.contains(&z) && hole.contains(&x) {
-                        continue;
-                    }
-                    let i = (level * SIDE * SIDE + z * SIDE + x) as u32;
-                    let j = i + SIDE as u32;
-                    tris.extend([i, j, i + 1, j, j + 1, i + 1]);
-                }
-            }
-        }
-        let index_count = tris.len() as u32;
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("horizon indices"),
-            contents: bytemuck::cast_slice(&tris),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flight horizon"),
             source: wgpu::ShaderSource::Wgsl(
                 include_str!("flight_horizon.wgsl")
-                    .replace("GRID_SIDE", &SIDE.to_string())
-                    .replace("GRID_STEP", &format!("{SPACING:.1}"))
+                    .replace("GRID_UNIT", &format!("{:.1}", blocks::UNIT))
                     .into(),
             ),
         });
@@ -132,7 +159,11 @@ impl Horizon {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[],
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 16,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Uint32x2, 1 => Float32x2],
+                }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -140,7 +171,11 @@ impl Horizon {
                 compilation_options: Default::default(),
                 targets: &[Some(format.into())],
             }),
-            primitive: Default::default(),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
@@ -155,34 +190,49 @@ impl Horizon {
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("flight horizon"),
             layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: heights.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params.as_entire_binding(),
+            }],
         });
         Self {
             color,
             depth,
             params,
-            heights,
-            indices,
-            index_count,
+            faces: None,
+            batches: Vec::new(),
+            visible: Vec::new(),
+            view: None,
+            dirty: std::cell::Cell::new(true),
             pipeline,
             group,
-            center: None,
+            lattice: None,
             pending: None,
             source_key: None,
         }
     }
 
+    pub(crate) fn geometry_bytes(&self) -> u64 {
+        self.faces.as_ref().map_or(0, wgpu::Buffer::size)
+    }
+
+    fn publish(&mut self, device: &wgpu::Device, Patch { lattice, mesh }: Patch) {
+        self.faces = Some(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("stepped horizon faces"),
+                contents: bytemuck::cast_slice(&mesh.faces),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        );
+        self.batches = mesh.batches;
+        self.lattice = Some(lattice);
+        self.view = None;
+        self.dirty.set(true);
+    }
+
     pub(crate) fn prepare(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         source: &FbmTerrain,
         vegetation: bool,
@@ -193,7 +243,10 @@ impl Horizon {
     ) {
         let key = (source.seed(), source.params(), voxel_size(), vegetation);
         if self.source_key != Some(key) {
-            self.center = None;
+            self.lattice = None;
+            self.view = None;
+            self.visible.clear();
+            self.dirty.set(true);
             self.pending = None;
             self.source_key = Some(key);
         }
@@ -209,30 +262,33 @@ impl Horizon {
                 Err(mpsc::TryRecvError::Empty) => (),
             }
         }
-        if let Some((center, data)) = ready {
-            self.center = Some(center);
-            queue.write_buffer(&self.heights, 0, bytemuck::cast_slice(&data));
+        if let Some(patch) = ready {
+            self.publish(device, patch);
         }
         if (capture || self.pending.is_none())
             && self
-                .center
-                .is_none_or(|old| (0..2).any(|a| old[a].abs_diff(center[a]) >= 4))
+                .lattice
+                .as_ref()
+                .is_none_or(|old| (0..2).any(|a| old.center[a].abs_diff(center[a]) >= 4))
         {
             if capture {
                 self.pending = None;
-                let (_, data) = samples(source, vegetation, center);
-                self.center = Some(center);
-                queue.write_buffer(&self.heights, 0, bytemuck::cast_slice(&data));
+                self.publish(
+                    device,
+                    samples(source, vegetation, center, self.lattice.as_deref()),
+                );
             } else {
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.pending = Some(rx);
                 let source = source.clone();
+                let old = self.lattice.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(samples(&source, vegetation, center));
+                    let _ = tx.send(samples(&source, vegetation, center, old.as_deref()));
                 });
             }
         }
-        if let Some(center) = self.center {
+        if let Some(lattice) = &self.lattice {
+            let center = lattice.center;
             let origin = DVec3::new(center[0] as f64 * SPACING, 0., center[1] as f64 * SPACING);
             let eye = (camera.position - origin).as_vec3();
             let matrix = Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 1., 75000.)
@@ -241,10 +297,59 @@ impl Horizon {
             data[..16].copy_from_slice(&matrix.to_cols_array());
             data[16..20].copy_from_slice(&eye.extend(camera.far * 0.52).to_array());
             data[20..].copy_from_slice(&sun.extend(0.).to_array());
+            if self.view == Some(data) {
+                return;
+            }
+            self.view = Some(data);
+            self.dirty.set(true);
+            let rows = matrix.transpose();
+            let near = rows.w_axis - Vec4::W * data[19];
+            let planes = [
+                rows.w_axis + rows.x_axis,
+                rows.w_axis - rows.x_axis,
+                rows.w_axis + rows.y_axis,
+                rows.w_axis - rows.y_axis,
+                near,
+                rows.w_axis - rows.z_axis,
+            ];
+            self.visible.clear();
+            for batch in &self.batches {
+                let lo = Vec3::from(batch.min);
+                let hi = Vec3::from(batch.max);
+                if planes.iter().any(|p| {
+                    let n = p.truncate();
+                    Vec3::select(n.cmpge(Vec3::ZERO), hi, lo).dot(n) + p.w < 0.
+                }) {
+                    continue;
+                }
+                // A camera outside a chunk cannot see a wall facing away
+                // from the whole chunk. Submit adjacent visible bins together.
+                let facing = [
+                    eye.y >= lo.y,
+                    eye.x >= lo.x,
+                    eye.x <= hi.x,
+                    eye.z >= lo.z,
+                    eye.z <= hi.z,
+                ];
+                for (range, visible) in batch.faces.iter().zip(facing) {
+                    if !visible || range.is_empty() {
+                        continue;
+                    }
+                    if let Some(previous) = self.visible.last_mut().filter(|r| r.end == range.start)
+                    {
+                        previous.end = range.end;
+                    } else {
+                        self.visible.push(range.clone());
+                    }
+                }
+            }
             queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&data));
         }
     }
     pub(crate) fn draw(&self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.dirty.replace(false) {
+            return;
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("flight horizon"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -266,11 +371,48 @@ impl Horizon {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
-        if self.center.is_some() {
+        if let Some(faces) = &self.faces {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.group, &[]);
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            pass.set_vertex_buffer(0, faces.slice(..));
+            for range in &self.visible {
+                pass.draw(0..4, range.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recentered_horizon_matches_a_cold_lattice_in_both_directions() {
+        let sample = |x: f64, z: f64| {
+            [
+                x as f32,
+                z as f32,
+                (x + z) as f32,
+                (x * 0.003 + z * 0.007).sin() as f32,
+            ]
+        };
+        let old = lattice([-3, 7], None, sample);
+        for center in [[1, 7], [-8, 3], [5000, -5000]] {
+            let mut misses = 0;
+            let moved = lattice(center, Some(&old), |x, z| {
+                misses += 1;
+                sample(x, z)
+            });
+            let mut cold_count = 0;
+            let cold = lattice(center, None, |x, z| {
+                cold_count += 1;
+                sample(x, z)
+            });
+            assert_eq!(moved.samples, cold.samples);
+            if center[0].abs() < 10 {
+                assert!(misses < cold_count / 4);
+            } else {
+                assert_eq!(misses, cold_count);
+            }
         }
     }
 }

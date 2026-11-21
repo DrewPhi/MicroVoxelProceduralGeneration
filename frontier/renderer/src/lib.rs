@@ -1167,7 +1167,7 @@ impl Gpu {
                     0
                 };
             let (rw, rh) = atmosphere.dimensions();
-            atmosphere.prepare_horizon(&self.queue, world, *camera, settings, true);
+            atmosphere.prepare_horizon(&self.device, &self.queue, world, *camera, settings, true);
             atmosphere.set_medium_ground_height(self.medium_ground_height);
             atmosphere.set_lighting_context(
                 camera,
@@ -2718,6 +2718,7 @@ impl Viewer {
             .map(|t| t.create_view(&Default::default()));
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.prepare_horizon(
+                &gpu.device,
                 &gpu.queue,
                 &self.world,
                 self.camera,

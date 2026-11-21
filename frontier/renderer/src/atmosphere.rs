@@ -12,16 +12,7 @@ const SHADER: &str = concat!(
     include_str!("cloud_layer.wgsl"),
     include_str!("atmosphere.wgsl")
 );
-const BLIT: &str = r#"
-@group(0) @binding(0) var image: texture_2d<f32>;
-@group(0) @binding(1) var image_sampler: sampler;
-struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
-@vertex fn vs_main(@builtin(vertex_index) i:u32)->Output {
- var p=array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
- var o:Output; o.position=vec4(p[i],0.0,1.0); o.uv=vec2(p[i].x*0.5+0.5,0.5-p[i].y*0.5); return o;
-}
-@fragment fn fs_main(i:Output)->@location(0) vec4<f32> { return textureSample(image,image_sampler,i.uv); }
-"#;
+const BLIT: &str = include_str!("scene_upscale.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -456,7 +447,7 @@ impl Atmosphere {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -650,7 +641,13 @@ impl Atmosphere {
             &shader_source(sample_count),
             format,
         );
-        let blit_pipeline = make_pipeline(device, "scene upscale", &blit_layout, BLIT, format);
+        let cubic =
+            scale < 1. && std::env::var_os("FRONTIER_CUBIC_UPSCALE").is_none_or(|v| v != "0");
+        let blit = BLIT.replace(
+            "const cubic_enabled:bool=false;",
+            &format!("const cubic_enabled:bool={cubic};"),
+        );
+        let blit_pipeline = make_pipeline(device, "scene upscale", &blit_layout, &blit, format);
         Self {
             horizon,
             sky,
@@ -750,6 +747,7 @@ impl Atmosphere {
                 + composite_bpp * u64::from(self.composite.is_some()))
             + u64::from(self.horizon.is_some())
                 * (u64::from(self.width.div_ceil(2)) * u64::from(self.height.div_ceil(2)) * 12)
+            + self.horizon.as_ref().map_or(0, |h| h.geometry_bytes())
             + lighting_pixels * 20
             + 4
     }
@@ -794,6 +792,7 @@ impl Atmosphere {
 
     pub(crate) fn prepare_horizon(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         world: &frontier_world::World,
         camera: Camera,
@@ -805,6 +804,7 @@ impl Atmosphere {
         }
         if let (Some(horizon), Some(source)) = (&mut self.horizon, world.fbm_terrain()) {
             horizon.prepare(
+                device,
                 queue,
                 source,
                 world.vegetation_enabled(),

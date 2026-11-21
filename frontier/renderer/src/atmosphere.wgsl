@@ -81,7 +81,10 @@ fn alpine_clear_sky(ray: vec3<f32>) -> vec3<f32> {
     let sun_color = mix(vec3(1.0, 0.91, 0.74), vec3(1.0, 0.55, 0.29), dusk);
     let horizon = mix(vec3(0.48, 0.63, 0.76), vec3(0.72, 0.52, 0.40), dusk * 0.65);
     let zenith = mix(vec3(0.065, 0.22, 0.46), vec3(0.08, 0.13, 0.27), dusk);
-    var color = mix(horizon, zenith, pow(elevation, 0.42));
+    // A finite tangent at the geometric horizon avoids a horizontal stripe
+    // in the clear air seen from above the cloud deck.
+    let altitude_gradient = elevation * pow(max(elevation,0.035),-0.58);
+    var color = mix(horizon, zenith, altitude_gradient);
     // Broad low-energy Mie lobe plus a correctly small angular solar disc.
     color += sun_color * (pow(forward, 12.0) * 0.055 + pow(forward, 96.0) * 0.17);
     color += sun_color * smoothstep(0.999975, 0.999989, forward) * 3.0;
@@ -184,7 +187,11 @@ fn refinement_transmittance(position:vec3<f32>,distance:f32)->f32 {
 
 fn horizon_sample(uv:vec2<f32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(flight_landscape));
-    return textureLoad(flight_landscape, clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),size-1),0);
+    let center=textureLoad(flight_landscape, clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),size-1),0);
+    let filtered=textureSampleLevel(flight_landscape,atmosphere_sampler,uv,0.);
+    // Keep the measured ray distance at a silhouette or a disocclusion.
+    let same_layer=abs(center.a-filtered.a)<max(.04,.02*center.a);
+    return vec4(select(center.rgb,filtered.rgb,same_layer),center.a);
 }
 fn horizon_air(landscape:vec4<f32>, ray:vec3<f32>) -> vec3<f32> {
     let range = landscape.a*1000.;
