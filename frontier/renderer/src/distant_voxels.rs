@@ -728,19 +728,19 @@ impl Generator<'_> {
         // the outer half row keeps the tile's negotiated boundary spacing.
         let mut interior_pitch = pitch;
         if pitch >= 4 && pitch as f64 * voxel_size() >= 4. {
-            let mut sum = 0;
+            let mut heights = [0; 4];
             let mut shoreline = false;
-            for sample in [
+            for (height, sample) in heights.iter_mut().zip([
                 [x, z],
                 [x + pitch, z],
                 [x, z + pitch],
                 [x + pitch, z + pitch],
-            ] {
+            ]) {
                 let node = self.block_run(runs, sample)?;
-                sum += node.top;
+                *height = node.top;
                 shoreline |= (node.top > node.ground) != (center.height > center.ground_height);
             }
-            if shoreline || (4 * center.height - sum).abs() > half {
+            if shoreline || needs_finer_blocks(heights, center.height, pitch) {
                 interior_pitch = half;
             }
         }
@@ -1174,6 +1174,23 @@ impl Generator<'_> {
     }
 }
 
+// Center deviation catches narrow peaks. A planar cliff or a diagonal saddle
+// can pass exactly through that center while spanning several block heights.
+fn needs_finer_blocks(corners: [i64; 4], center: i64, pitch: i64) -> bool {
+    let [a, b, c, d] = corners.map(i128::from);
+    let midpoint_error = (4 * i128::from(center) - a - b - c - d).abs();
+    if midpoint_error > i128::from(pitch / 2) {
+        return true;
+    }
+    if pitch as f64 * voxel_size() < 12. {
+        return false;
+    }
+    let dx = (b + d - a - c) as f64;
+    let dz = (c + d - a - b) as f64;
+    let threshold = 3.5 * pitch as f64;
+    dx * dx + dz * dz > threshold * threshold || (a + d - b - c).abs() > 2 * i128::from(pitch)
+}
+
 fn edge_axes(edge: usize) -> [usize; 2] {
     if edge % 2 == 0 {
         [0, 1]
@@ -1302,6 +1319,15 @@ mod tests {
     use super::*;
     use crate::adaptive_geometry::{build_surface_with_geometry, SourceSamples, TileKey};
     use frontier_world::{FbmParams, World};
+
+    #[test]
+    fn planar_cliffs_and_saddles_receive_square_subcolumns() {
+        let p = (32. / voxel_size()).ceil() as i64;
+        assert!(needs_finer_blocks([0, 2 * p, 0, 2 * p], p, p));
+        assert!(needs_finer_blocks([2 * p, 0, 0, 2 * p], p, p));
+        assert!(!needs_finer_blocks([0, p / 2, 0, p / 2], p / 4, p));
+        assert!(needs_finer_blocks([p, p, p, p], p + p / 4, p));
+    }
 
     #[test]
     fn water_faces_keep_bed_material_and_depth_in_the_instance_word() {

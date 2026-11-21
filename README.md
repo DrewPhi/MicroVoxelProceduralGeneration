@@ -71,6 +71,12 @@ Walking presets also use the stepped terrain. On a 9-second seed 997
 Watershed walk and turn at 1080p, the stepped renderer measured
 **11.32 / 14.06 / 16.44 ms** at p50/p95/p99.
 
+![Eye-level view of square grass blades, a stepped tree trunk and distant voxel terraces.](frontier/reference/gallery/watershed-ground.jpg)
+
+*Watershed seed 997 at walking height. Grass blades, branches and the steps
+underfoot use the native 6.25 cm grid. The hillside across the clearing
+uses larger, axis-aligned faces.*
+
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,
 and snow albedo varies between wind-scoured firn and softer drifts. The preset renders a 6 km active terrain view with a
@@ -124,6 +130,17 @@ patch. On the same three routes, this gave ridgeline p95 of **4.96 px** on
 seed 19, **7.56 px** on seed 673 and **3.14 px** on seed 40961. Frame p95
 was **12.70, 14.94 and 7.85 ms**, respectively. The rocky routes benefit
 most. Roofs remain level and every exposed step has a vertical face.
+
+Coarse planar cliffs steeper than 1.75 m per horizontal metre and diagonal
+saddles can pass the center test while concealing a full ledge. On patches
+at least 12 m wide, these features also receive square half-width columns.
+Across five additional cold runs, ridgeline p95 measured 4.34, 2.93, 2.39,
+6.60 and 6.03 px on seeds 19, 673, 40961, 8123 and 29123. Frame p95 ranged
+from 5.65 to 12.10 ms. Seeds 19 and 8123 had larger endpoint error than the
+previous run. Realtime routes finish at slightly different positions and
+streaming states. At fixed poses, the corresponding p95 comparisons were
+4.32 → 4.03 px on seed 673, 6.97 → 6.97 on 8123 and 6.49 → 6.03 on 29123
+after 12 seconds of refinement.
 
 Sorting coplanar faces directly by their positions reduced accumulated tile
 finalization time on seed 19 from **3.48 s to 1.76 s** during a 10-second
