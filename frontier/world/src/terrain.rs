@@ -86,6 +86,8 @@ pub struct FbmParams {
     pub alluvial_deposits: bool,
     /// Shape low banks into bars and shallow coves in new Watershed and Highlands worlds.
     pub shaped_banks: bool,
+    /// Fit the longitudinal river stage beneath both shoulders of each reach.
+    pub fitted_channels: bool,
     /// Base horizontal wavelength in meters, in [16, 10_000_000].
     pub horizontal_scale: f64,
     /// Vertical relief scale in meters, in [0, 100_000].
@@ -104,6 +106,7 @@ impl Default for FbmParams {
             legacy_riverbanks: false,
             alluvial_deposits: true,
             shaped_banks: true,
+            fitted_channels: true,
             horizontal_scale: 1800.0,
             amplitude: 1000.0,
             octaves: 8,
@@ -125,6 +128,10 @@ impl FbmParams {
             && !self.legacy_riverbanks
             && self.alluvial_deposits
             && self.shaped_banks
+    }
+
+    pub(crate) fn has_fitted_channels(self) -> bool {
+        self.has_shaped_banks() && self.fitted_channels
     }
 
     pub fn validate(&self) -> Result<(), FbmError> {
@@ -178,6 +185,8 @@ impl FbmTerrain {
             FbmRecipe::Watershed | FbmRecipe::Highlands => {
                 if self.params.legacy_riverbanks {
                     1
+                } else if self.params.has_fitted_channels() {
+                    5
                 } else if self.params.has_shaped_banks() {
                     4
                 } else if self.params.alluvial_deposits {

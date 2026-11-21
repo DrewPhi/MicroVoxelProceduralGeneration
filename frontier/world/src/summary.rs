@@ -406,6 +406,7 @@ mod tests {
                 legacy_riverbanks: false,
                 alluvial_deposits: true,
                 shaped_banks: true,
+                fitted_channels: true,
                 recipe: FbmRecipe::Regional,
                 horizontal_scale: 16.0,
                 amplitude: 100000.0,

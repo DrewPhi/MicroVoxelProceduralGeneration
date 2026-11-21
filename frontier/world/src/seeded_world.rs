@@ -22,7 +22,9 @@ pub(crate) const WATERSHED_MAX_WATER_DEPTH: f64 = 9.;
 pub(crate) const WATERSHED_WATER_ABOVE_LAND: f64 = 0.7;
 
 pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
-    if p.recipe.uses_watersheds() {
+    if p.has_fitted_channels() {
+        0.45
+    } else if p.recipe.uses_watersheds() {
         3.
     } else {
         8.
@@ -286,6 +288,7 @@ pub(crate) struct Reach {
     pub(crate) width: f64,
     pub(crate) width_b: f64,
     pub(crate) depth: f64,
+    pub(crate) depth_b: f64,
     grade: f64,
     valley_radius: f64,
     pub(crate) lake: bool,
@@ -293,6 +296,10 @@ pub(crate) struct Reach {
     pub(crate) segment: u8,
 }
 impl Reach {
+    fn depth_at(self, t: f64) -> f64 {
+        self.depth + t * (self.depth_b - self.depth)
+    }
+
     /// Radius range at projections of this box onto the finite channel.
     /// A wet sample must intersect the segment's capsule, including its caps.
     pub(crate) fn core_radii(self, min: [f64; 2], max: [f64; 2]) -> Option<[f64; 2]> {
@@ -364,6 +371,7 @@ impl Region {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
     legacy_riverbanks: bool,
+    fitted_channels: bool,
     recipe: FbmRecipe,
     seed: u64,
     scale: u64,
@@ -426,12 +434,48 @@ fn downstream(nodes: &[Node], side: usize, i: usize) -> usize {
     best
 }
 
+// A straight segment can pass over a notch between two fitted nodes. Sample
+// the channel and both shoulders along the segment before fixing its grade.
+fn fit_channel_sections(seed: u64, p: FbmParams, points: &mut [Node; 17], widths: &[f64; 17]) {
+    let mut cut = [0.0_f64; 17];
+    let relief = p.amplitude / 1000.;
+    for (i, pair) in points.windows(2).enumerate() {
+        let [a, b] = [pair[0], pair[1]];
+        let dx = b.x - a.x;
+        let dz = b.z - a.z;
+        let length = dx.hypot(dz);
+        if length <= 0. {
+            continue;
+        }
+        let mut deficit = 0.0_f64;
+        for t in [0.25, 0.5, 0.75] {
+            let x = a.x + t * dx;
+            let z = a.z + t * dz;
+            let stage = a.stage + t * (b.stage - a.stage);
+            let radius = 2. * (widths[i] + t * (widths[i + 1] - widths[i])) / length;
+            for side in [-1., 0., 1.] {
+                let bank = land(seed, p, x - side * dz * radius, z + side * dx * radius);
+                deficit = deficit.max(stage + 0.7 * relief - bank.h);
+            }
+        }
+        cut[i] = cut[i].max(deficit);
+        cut[i + 1] = cut[i + 1].max(deficit);
+    }
+    let outlet = points[16].stage;
+    let mut upstream = points[0].stage;
+    for (i, point) in points[1..16].iter_mut().enumerate() {
+        point.stage = (point.stage - cut[i + 1]).clamp(outlet, upstream);
+        upstream = point.stage;
+    }
+}
+
 fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
     let key = Key {
         legacy_riverbanks: p.legacy_riverbanks,
+        fitted_channels: p.has_fitted_channels(),
         recipe: p.recipe,
         seed,
         scale: p.horizontal_scale.to_bits(),
@@ -535,6 +579,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                     width,
                     width_b: width,
                     depth,
+                    depth_b: depth,
                     valley_radius: 3. * width,
                     lake,
                     owner,
@@ -594,7 +639,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                     (190. + 2.2 * authored_incision).clamp(190., 820.) * scale
                 });
                 let max_width: f64 = if watershed { 44. } else { 24. };
-                let widths: [f64; 17] = std::array::from_fn(|i| {
+                let mut widths: [f64; 17] = std::array::from_fn(|i| {
                     if i == 0 {
                         return width;
                     }
@@ -610,7 +655,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                             * (std::f64::consts::PI * t).sin().powi(2)
                             * (std::f64::consts::TAU * t + phase2).sin();
                     (baseline * pulse).clamp(
-                        minimum_radius(p) * p.horizontal_scale / 1800.,
+                        (if watershed { 3. } else { 8. }) * p.horizontal_scale / 1800.,
                         max_width * p.horizontal_scale / 1800.,
                     )
                 });
@@ -638,6 +683,31 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                         upstream = point.stage;
                     }
                 }
+                if p.has_fitted_channels() {
+                    fit_channel_sections(seed, p, &mut points, &widths);
+                }
+                // A source without an upstream tributary begins as a spring.
+                // Its channel and valley open gradually along the first part
+                // of the reach, retaining the shared downstream node.
+                let spring = p.has_fitted_channels()
+                    && !(j - 1..=j + 1).any(|row| (i - 1..=i + 1).any(|col| {
+                        let neighbor = row * side + col;
+                        neighbor != index && downstream(&nodes, side, neighbor) == index
+                    }));
+                let mut growth = [1.; 17];
+                if spring {
+                    let head_width = minimum_radius(p) * p.horizontal_scale / 1800.;
+                    let spring_length = (0.28 * length).min(680. * p.horizontal_scale / 1800.);
+                    let mut distance = 0.;
+                    for n in 0..=16 {
+                        if n > 0 {
+                            distance += (points[n].x - points[n - 1].x)
+                                .hypot(points[n].z - points[n - 1].z);
+                        }
+                        growth[n] = smooth(distance / spring_length.max(1e-12));
+                        widths[n] = head_width + growth[n] * (widths[n] - head_width);
+                    }
+                }
                 for segment in 0..16 {
                     let segment_width = widths[segment as usize];
                     let segment_width_b = widths[segment as usize + 1];
@@ -655,9 +725,12 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
                         },
                         width: segment_width,
                         width_b: segment_width_b,
-                        depth,
-                        valley_radius: valley_radius
-                            .map_or(18. * widest, |radius| radius.max(14. * widest)),
+                        depth: depth * growth[segment as usize],
+                        depth_b: depth * growth[segment as usize + 1],
+                        valley_radius: valley_radius.map_or(18. * widest, |radius| {
+                            let growth = growth[segment as usize + 1];
+                            (radius * (0.12 + 0.88 * growth)).max(14. * widest)
+                        }),
                         lake,
                         owner,
                         segment,
@@ -697,15 +770,18 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     });
     value
 }
-fn projection_t(r: Reach, x: f64, z: f64) -> f64 {
+fn projected_fraction(r: Reach, x: f64, z: f64) -> f64 {
     let dx = r.b.x - r.a.x;
     let dz = r.b.z - r.a.z;
     let denom = dx * dx + dz * dz;
     if denom > 0. {
-        (((x - r.a.x) * dx + (z - r.a.z) * dz) / denom).clamp(0., 1.)
+        ((x - r.a.x) * dx + (z - r.a.z) * dz) / denom
     } else {
         0.
     }
+}
+fn projection_t(r: Reach, x: f64, z: f64) -> f64 {
+    projected_fraction(r, x, z).clamp(0., 1.)
 }
 fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
     let dx = r.b.x - r.a.x;
@@ -819,16 +895,20 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
             d + d.min(width).min(32. * p.horizontal_scale / 1800.) * (bar + cove)
         };
         for r in region.candidates(x, z) {
-            let (d, stage) = project(r, x, z);
+            let fraction = projected_fraction(r, x, z);
+            let t = fraction.clamp(0., 1.);
+            let dx = r.b.x - r.a.x;
+            let dz = r.b.z - r.a.z;
+            let d = (x - r.a.x - t * dx).hypot(z - r.a.z - t * dz);
+            let stage = r.a.stage + t * (r.b.stage - r.a.stage);
             let outer = r.outer_radius();
-            let t = projection_t(r, x, z);
             let width = r.width + t * (r.width_b - r.width);
             if d >= outer || stage < 0. {
                 continue;
             }
             near_lake |= r.lake;
             let amplitude = p.amplitude / 1000.;
-            let depth = r.depth * amplitude;
+            let depth = r.depth_at(t) * amplitude;
             let bank_height = 0.7 * amplitude;
             let bank_d = profile_distance(d, width);
             let bed_profile = |radius: f64| {
@@ -847,7 +927,20 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
             };
             let profile = bed_profile(bank_d);
             let taper = 1. - smooth(d / outer);
-            let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
+            let mut weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
+            if p.has_fitted_channels() && d < 3. * width {
+                // The local bed controls the waterline. A downstream
+                // segment's rounded end extends behind its own endpoint,
+                // where its constant stage would tilt an upstream cross-section.
+                let shoulder = 1. - smooth((d / width - 1.) * 0.5);
+                let overlap = if r.lake || t == fraction {
+                    1.
+                } else {
+                    let axial = (fraction - t).abs() * (dx * dx + dz * dz).sqrt();
+                    1. - smooth(axial / (width * 0.65))
+                };
+                weight *= 1. + 127. * shoulder * overlap;
+            }
             weighted_ground += weight * profile;
             if p.has_shaped_banks() {
                 let original = if bank_d == d { profile } else { bed_profile(d) };
@@ -899,7 +992,7 @@ fn hydrography<const BANKS: bool>(seed: u64, p: FbmParams, x: f64, z: f64) -> Hy
                 let width = r.width + t * (r.width_b - r.width);
                 let (d, stage) = project(r, x, z);
                 if d < width && stage > supported_stage {
-                    let depth = r.depth * relief;
+                    let depth = r.depth_at(t) * relief;
                     let bank_d = profile_distance(d, width);
                     let head = (depth - (depth + 0.7 * relief) * smooth(bank_d / width)).max(0.);
                     let mut waterline = stage.min(ground + head);
@@ -1401,6 +1494,7 @@ mod tests {
             width: 8.,
             width_b: 28.,
             depth: 2.,
+            depth_b: 2.,
             grade: 0.,
             valley_radius: 60.,
             lake: false,
@@ -1528,6 +1622,7 @@ mod tests {
     #[test]
     fn bars_and_coves_move_both_banks_within_the_existing_hydraulic_ceiling() {
         let params = FbmParams {
+            fitted_channels: false,
             recipe: FbmRecipe::Watershed,
             ..params()
         };
@@ -1626,7 +1721,7 @@ mod tests {
                         let fingerprint = |r: &Reach| {
                             [
                                 r.a.x, r.a.z, r.a.stage, r.b.x, r.b.z, r.b.stage, r.width,
-                                r.width_b, r.depth,
+                                r.width_b, r.depth, r.depth_b,
                             ]
                             .map(f64::to_bits)
                         };
@@ -1643,6 +1738,62 @@ mod tests {
         assert!(common > 100);
         assert!(max_width > min_width * 2., "{min_width}..{max_width}");
     }
+    #[test]
+    fn a_headwater_grows_from_its_spring_and_keeps_the_next_segments_depth() {
+        let p = FbmParams { recipe: FbmRecipe::Highlands, ..Default::default() };
+        let drainage = region(673, p, -2230., -1830.);
+        let mut springs = 0;
+        for r in drainage.reaches.iter().filter(|r| !r.lake && r.segment == 0 && r.depth == 0.) {
+            assert_eq!(r.width, minimum_radius(p) * p.horizontal_scale / 1800.);
+            assert!(r.width_b > r.width && r.depth_b > r.depth);
+            let next = drainage.reaches.iter()
+                .find(|next| next.owner == r.owner && next.segment == 1).unwrap();
+            assert_eq!((r.width_b, r.depth_b, r.b.stage), (next.width, next.depth, next.a.stage));
+            springs += 1;
+        }
+        assert!(springs > 0);
+    }
+
+    #[test]
+    fn fitted_highland_channel_holds_one_stage_across_its_wet_core() {
+        let (x, z) = (-2230.70, -1829.19);
+        for fitted_channels in [false, true, false] {
+            let params = FbmParams {
+                recipe: FbmRecipe::Highlands,
+                fitted_channels,
+                ..FbmParams::default()
+            };
+            let terrain = super::super::FbmTerrain::new(673, params).unwrap();
+            assert_eq!(terrain.source_version(), if fitted_channels { 5 } else { 4 });
+            let (direction, _) = terrain.river_course(x, z).unwrap();
+            let mut section = Vec::new();
+            for i in -128..=128 {
+                let offset = f64::from(i) * 0.125;
+                let c = crate::Cell::from_meters([
+                    x - direction[1] * offset,
+                    0.,
+                    z + direction[0] * offset,
+                ]);
+                let [bed, top] = terrain.column_tops(c.x, c.z);
+                if top > bed {
+                    section.push((top, top - bed));
+                }
+            }
+            let depth = section.iter().map(|&(_, depth)| depth).max().unwrap();
+            section.retain(|&(_, d)| d * 2 >= depth);
+            assert!(section.len() > 50);
+            let (low, high) = section.iter().fold((i64::MAX, i64::MIN), |(lo, hi), &(h, _)| {
+                (lo.min(h), hi.max(h))
+            });
+            let span = (high - low) as f64 * voxel_size();
+            if fitted_channels {
+                assert!(span <= 0.25, "channel tilts {span} m");
+            } else {
+                assert!(span > 10., "version-four channel changed");
+            }
+        }
+    }
+
     #[test]
     fn perched_river_regressions_and_saved_source_replay() {
         for (seed, recipe, x, z, dx, dz, old_lip) in [

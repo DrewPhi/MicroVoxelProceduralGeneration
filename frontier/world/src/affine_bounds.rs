@@ -1086,15 +1086,15 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         let dx = r.b.x - r.a.x;
         let dz = r.b.z - r.a.z;
         let denom = dx * dx + dz * dz;
-        let fraction = if denom > 0. {
+        let projected = if denom > 0. {
             x.sub(Aa::point(r.a.x))
                 .scale(dx)
                 .add(z.sub(Aa::point(r.a.z)).scale(dz))
                 .div_scalar(denom)
-                .clamp(0., 1.)
         } else {
             Aa::point(0.)
         };
+        let fraction = projected.clamp(0., 1.);
         let u = x.sub(Aa::point(r.a.x)).sub(fraction.scale(dx));
         let v = z.sub(Aa::point(r.a.z)).sub(fraction.scale(dz));
         let ordinary = u.mul(u).add(v.mul(v)).sqrt().range();
@@ -1124,7 +1124,11 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             hi: stage.hi.max(0.),
         };
         let amplitude = p.amplitude / 1000.;
-        let depth = r.depth * amplitude;
+        let depth = if r.depth == r.depth_b {
+            I::point(r.depth * amplitude)
+        } else {
+            I::point(r.depth).add(fraction.range().scale(r.depth_b - r.depth)).scale(amplitude)
+        };
         let bank = I::point(0.7 * amplitude);
         let shaped = p.has_shaped_banks() && d.lo < width.scale(1.8).hi;
         let bank_d = if shaped {
@@ -1158,8 +1162,8 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         };
         let inner = |d: I| {
             stage
-                .sub(I::point(depth))
-                .add(I::point(depth).add(bank).mul(smooth(d.div(width))))
+                .sub(depth)
+                .add(depth.add(bank).mul(smooth(d.div(width))))
         };
         let outer_profile = |d: I| {
             let q = smooth(d.sub(width).div(I::point(outer).sub(width)));
@@ -1218,6 +1222,22 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             .div(denominator)
             .mul(taper)
             .mul(taper);
+        let raw = if p.has_fitted_channels() && d.lo < width.scale(3.).hi {
+            let shoulder = I::point(1.).sub(smooth(d.div(width).sub(I::point(1.)).scale(0.5)));
+            let overlap = if r.lake {
+                I::point(1.)
+            } else {
+                let f = projected.range();
+                let excess = I {
+                    lo: (-f.hi).max((f.lo - 1.).next_down()).max(0.),
+                    hi: (-f.lo).max((f.hi - 1.).next_up()).max(0.),
+                };
+                I::point(1.).sub(smooth(excess.scale(denom.sqrt()).div(width.scale(0.65))))
+            };
+            raw.mul(I::point(1.).add(shoulder.scale(127.).mul(overlap)))
+        } else {
+            raw
+        };
         let weight = I {
             lo: if fully_active { raw.lo.max(0.) } else { 0. },
             hi: raw.hi.max(0.),
@@ -1234,12 +1254,12 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             if fully_active && distance.hi < width.lo {
                 if guaranteed_stage.is_none_or(|old| stage.lo > old) {
                     guaranteed_stage = Some(stage.lo);
-                    original_head = I::point(depth)
-                        .sub(I::point(depth).add(bank).mul(smooth(d.div(width))))
+                    original_head = depth
+                        .sub(depth.add(bank).mul(smooth(d.div(width))))
                         .lo
                         .max(0.);
-                    guaranteed_head = I::point(depth)
-                        .sub(I::point(depth).add(bank).mul(smooth(bank_d.div(width))))
+                    guaranteed_head = depth
+                        .sub(depth.add(bank).mul(smooth(bank_d.div(width))))
                         .lo
                         .max(0.);
                 }
@@ -1649,6 +1669,7 @@ mod tests {
                         legacy_riverbanks: false,
                         alluvial_deposits: true,
                         shaped_banks: true,
+                        fitted_channels: true,
                         recipe,
                         horizontal_scale: 1800.0,
                         amplitude: 1000.0,
