@@ -18,6 +18,7 @@ struct Column {
     slope: u32,
     water: u32,
     depth: u32,
+    rapids: u32,
     soil_rgb: u32,
     rock_rgb: u32,
 }
@@ -29,6 +30,7 @@ impl Column {
             && self.slope == other.slope
             && self.water == other.water
             && self.depth == other.depth
+            && self.rapids == other.rapids
     }
 
     fn wall_rgb(self, low: f32, voxel: f32, center_distance: f32) -> u32 {
@@ -212,14 +214,15 @@ fn columns(lattice: &Lattice) -> Vec<Column> {
                 let roof = lattice.roofs[index];
                 // The center supplies both physical planes. Neighbors only
                 // estimate how much of an already wet roof is covered.
-                let water = if roof.depth > 0. {
+                let water = if roof.wet_depth > 0 {
                     (7. * at(4)).round().clamp(1., 7.) as u32
                 } else {
                     0
                 };
                 result[index] = Column {
                     water,
-                    depth: (4. * roof.depth).round() as u32,
+                    depth: u32::from(roof.wet_depth.saturating_sub(1)),
+                    rapids: u32::from(roof.rapids),
                     y: roof.height,
                     slope: encode(dx) | (encode(dz) << 7),
                     rgb: rgb(0),
@@ -238,7 +241,7 @@ fn face(x: i32, z: i32, axis: u32, level: usize, low: f32, high: Column) -> [u32
         (x as u32 & 511) | ((z as u32 & 511) << 9) | (high.slope << 18),
         high.rgb | (axis << 24) | ((level as u32) << 27) | (high.water << 29),
         if axis == 0 {
-            (low + (high.depth << 10) as f32).to_bits()
+            (low + ((high.depth << 10) | (high.rapids << 16)) as f32).to_bits()
         } else {
             low.to_bits()
         },
@@ -532,7 +535,7 @@ mod tests {
                 first,
                 None,
                 |_, _| [0.5, 0.25, 0.1, 7.5, 0., 0.3, 0.2, 0.1, 0.3, 0.3, 0.3],
-                |_, _| NativeRoof { height: 7.5, depth: 0. },
+                |_, _| NativeRoof::new(7.5, 0., 0),
             );
             let mesh = build(&lattice, 0.0625);
             assert!(mesh.faces.len() <= 100 * (LEVELS - first));
@@ -582,10 +585,15 @@ mod tests {
             1,
             None,
             |_, _| [0.5, 0.3, 0.2, 80., 1., 0.2, 0.3, 0.1, 0.3, 0.3, 0.3],
-            |_, _| NativeRoof { height: 80., depth: 4. },
+            |_, _| NativeRoof::new(80., 4., 3),
         );
         let mesh = build(&lattice, 0.0625);
         assert!(!mesh.batches.is_empty());
+        for face in &mesh.faces {
+            let word = f32::from_bits(face[2]) as u32;
+            assert_eq!((word >> 10) & 63, 16);
+            assert_eq!(word >> 16, 3);
+        }
         for b in &mesh.batches {
             let p = b.wet_center.unwrap();
             assert!((p.y - 80.).abs() < 1e-4);
@@ -606,9 +614,9 @@ mod tests {
             },
             |x, _| {
                 if x < 0. {
-                    NativeRoof { height: 17., depth: 0. }
+                    NativeRoof::new(17., 0., 0)
                 } else {
-                    NativeRoof { height: 2., depth: 0.5 }
+                    NativeRoof::new(2., 0.5, 0)
                 }
             },
         );
@@ -642,7 +650,7 @@ mod tests {
                     } else {
                         0.
                     };
-                    NativeRoof { height, depth: 0. }
+                    NativeRoof::new(height, 0., 0)
                 },
             );
             let mut walls = Vec::new();
@@ -673,7 +681,7 @@ mod tests {
                 } else {
                     0.
                 };
-                NativeRoof { height, depth: 0. }
+                NativeRoof::new(height, 0., 0)
             },
         );
         let mesh = build(&lattice, 0.0625);

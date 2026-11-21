@@ -197,7 +197,7 @@ fn sediment_roof_word(water: u32, corners: [Material; 4]) -> u32 {
     if corners.iter().all(|&c| c == corners[0]) {
         return (water & !0xf00) | ((corners[0] as u32) << 8);
     }
-    let mut word = SEDIMENT_ROOF | ((water >> 12) << 16);
+    let mut word = SEDIMENT_ROOF | (((water >> 12) & 255) << 16) | (water & (3 << 24));
     for (i, corner) in corners.into_iter().enumerate() {
         let Some(code) = sediment_code(corner) else {
             return water;
@@ -209,7 +209,8 @@ fn sediment_roof_word(water: u32, corners: [Material; 4]) -> u32 {
 
 pub(crate) fn valid_sediment_roof(word: u32) -> bool {
     word & 255 == SEDIMENT_ROOF
-        && word >> 16 <= 192
+        && word >> 26 == 0
+        && (word >> 16) & 255 <= 192
         && (0..4).all(|i| (word >> (8 + i * 2)) & 3 < 3)
 }
 
@@ -701,6 +702,7 @@ impl Generator<'_> {
     }
 
     fn sampled_block(&mut self, sample: [i64; 2]) -> Result<Run, String> {
+        let at = [self.key.min[0] + sample[0], self.key.min[1] + sample[1]];
         if f64::from(self.key.step_cells) * voxel_size() < 1. {
             let column = self.column(sample)?;
             return Ok(Run {
@@ -711,7 +713,11 @@ impl Generator<'_> {
                 soil_bands: Some([column.bands[0], column.bands[1]]),
                 profile: 0,
                 paint: if column.height > column.ground_height {
+                    let rapid = self.world.fbm_terrain().map_or(0, |t| {
+                        crate::terrain_light::rapids(t, at[0], at[1], column.height)
+                    });
                     pack_water_bed(column.height - column.ground_height, column.bands[0])
+                        | (u32::from(rapid) << 24)
                 } else {
                     0
                 },
@@ -721,14 +727,15 @@ impl Generator<'_> {
         // by their own indexed surface. Fetch climate and bedrock together so
         // every shared roof and facade uses the same canonical column.
         let terrain = self.world.fbm_terrain().expect("procedural surface");
-        let at = [self.key.min[0] + sample[0], self.key.min[1] + sample[1]];
         let mut generated = false;
         let mut compute = || {
             generated = true;
             let (col, color) =
                 terrain.landscape_column(at[0], at[1], self.world.vegetation_enabled());
             let paint = if col.top_material() == Material::Water {
+                let rapid = crate::terrain_light::rapids(terrain, at[0], at[1], col.visible_top);
                 pack_water_bed(col.visible_top - col.ground_top, col.ground_surface)
+                    | (u32::from(rapid) << 24)
             } else {
                 pack_color(color)
             };
@@ -787,7 +794,7 @@ impl Generator<'_> {
             && run.top > 0
             && roof.material & 255 == 0x27
             && f64::from(self.key.step_cells) * voxel_size() >= 1.
-            && (roof.material >> 12) < 128
+            && ((roof.material >> 12) & 255) < 128
         {
             let bed = run.soil_bands.expect("procedural block has ground bands")[0];
             if sediment_code(bed).is_some() {
@@ -1449,7 +1456,11 @@ mod tests {
         assert_eq!((mixed >> 8) & 255, 2 | (1 << 4) | (2 << 6));
         assert_eq!(mixed >> 16, water >> 12);
         assert!(!valid_sediment_roof(mixed | (3 << 8)));
-        assert!(!valid_sediment_roof(mixed | (1 << 25)));
+        assert!(valid_sediment_roof(mixed | (3 << 24)));
+        assert!(!valid_sediment_roof(mixed | (1 << 26)));
+        let rapid = sediment_roof_word(water | (2 << 24), [Material::Sand, Material::Soil, Material::Stone, Material::Sand]);
+        assert_eq!(rapid >> 24, 2);
+        assert_eq!((rapid >> 16) & 255, (water >> 12) & 255);
         assert_eq!(
             sediment_roof_word(water, [sand; 4]),
             pack_water_bed(11, sand) | Material::Water as u32

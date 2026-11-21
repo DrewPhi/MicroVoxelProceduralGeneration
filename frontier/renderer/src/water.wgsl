@@ -88,3 +88,47 @@ fn stream_step_normal(side:vec3<f32>, height:f32, pixel_height:f32)->vec3<f32> {
     let roof=.92*(1.-smoothstep(.6,3.3,span));
     return normalize(mix(side,vec3(0.,1.,0.),roof));
 }
+
+// Seamless value noise with a power-of-two cell count along each side of
+// the shared 512 m water origin. Evaluate all four corners together.
+fn foam_noise(p:vec2<f32>,period:u32)->f32 {
+    let i=bitcast<vec2<u32>>(vec2<i32>(floor(p)));
+    let x=(vec4(i.x)+vec4(0u,1u,0u,1u))&vec4(period-1u);
+    let z=(vec4(i.y)+vec4(0u,0u,1u,1u))&vec4(period-1u);
+    var h=x*0x8da6b343u ^ z*0xd8163841u;
+    h=(h^(h>>vec4(16u)))*0x7feb352du;
+    let v=vec4<f32>((h^(h>>vec4(15u)))&vec4(65535u))/65535.;
+    let f=fract(p);
+    let w=f*f*(3.-2.*f);
+    return mix(mix(v.x,v.y,w.x),mix(v.z,v.w,w.x),w.y);
+}
+// A steep reach contains patches of entrained air. Current-aligned patches
+// stretch downstream and break into smaller flecks as the footprint shrinks.
+fn rapid_foam(p:vec2<f32>,time:f32,pixel:f32,strength:f32,course:vec2<f32>)->f32 {
+    if strength<.001 {return 0.;}
+    let world=p-512.*floor(p/512.);
+    let pool=foam_noise(world*.125,64u);
+    let turbulence=smoothstep(.24,.77,pool);
+    let mean=strength*mix(.02,.28,turbulence);
+    let resolve=1.-smoothstep(.15,1.25,pixel);
+    if resolve<=0. {return mean;}
+    let angle=world*.0122718463;
+    let bend=vec2(sin(dot(angle,vec2(43.,-39.))+time*.46),
+                  cos(dot(angle,vec2(31.,56.))-time*.37));
+    let q=(world+.34*bend-.54*course*sin(time*1.4+pool*1.8))*.5;
+    let a=abs(course);
+    let diagonal=smoothstep(.12,.84,min(a.x,a.y)/max(.001,max(a.x,a.y)));
+    let cardinal=select(q.yx,q,a.x>=a.y)*vec2(1.,4.);
+    let across=select(-q.y,q.y,course.x*course.y>=0.);
+    let slant=vec2(q.x+across,3.*(q.x-across));
+    let streak=mix(foam_noise(cardinal,256u),foam_noise(slant,256u),diagonal);
+    let churn=foam_noise(q*5.+vec2(7.3,-2.9),256u);
+    let bubbles=foam_noise(q*15.+vec2(3.7,5.1),256u);
+    let density=.51*streak+.31*churn+.18*mix(bubbles,.5,smoothstep(.035,.16,pixel));
+    let threshold=mix(.76,.43,turbulence);
+    let spray=smoothstep(threshold-.055,threshold+.15,density);
+    return mix(mean,.74*strength*spray,resolve);
+}
+fn foam_color(lit:vec3<f32>,light:vec3<f32>,amount:f32)->vec3<f32> {
+    return mix(lit,vec3(.72,.83,.80)*light,amount);
+}

@@ -126,12 +126,14 @@ fn connected_stream_step(surface:vec3<f32>,face:vec3<f32>)->bool {
 fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec3<f32> {
     let pixel_height=2.*distance*naadf.up.w/naadf.viewport.y;
     var optical_face=normal;
-    if normal.y==0. && pixel_height*3.3>NATIVE_VOXEL_METERS && connected_stream_step(surface,normal) {
+    let course=stream_current(surface.xz-naadf.eye.xz);
+    let step=normal.y==0. && (pixel_height*3.3>NATIVE_VOXEL_METERS || course.z>.50)
+        && connected_stream_step(surface,normal);
+    if step && pixel_height*3.3>NATIVE_VOXEL_METERS {
         optical_face=stream_step_normal(normal,NATIVE_VOXEL_METERS,pixel_height);
     }
     let phase_position=water_phase_position(surface);
     let pixel=2.*distance*naadf.up.w/(naadf.viewport.y*max(.06,abs(dot(d,normal))));
-    let course=stream_current(surface.xz-naadf.eye.xz);
     let ripple=water_surface_normal(phase_position.xz,optical_face,naadf.water.z,pixel,distance,course);
     let n=select(normal,ripple,dot(d,ripple)<-0.002);
     let transmitted=refract(d,n,1./1.333);
@@ -161,6 +163,17 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
         let phase=sin(dot(p.xz,vec2(43.,-35.)*0.049087385)-naadf.water.z)*1.9;
         let caustic=sin(dot(p.xz,vec2(183.,82.)*0.049087385)+naadf.water.z*1.5+phase);
         below=water_medium(color*(1.+0.065*caustic),path);
+    } else {
+        let leave=voxel_interval(origin,transmitted).y;
+        if leave>0. && leave<limit {
+            let survey=surveyed_water_bed(surface-naadf.eye.xyz);
+            if survey.a>0. {
+                let up=vec3(0.,1.,0.);
+                let bed_light=light(up,.48)+bounce_at(surface,up,.48);
+                let path=max(leave*NATIVE_VOXEL_METERS,survey.a/max(.05,-transmitted.y));
+                below=water_medium(survey.rgb*bed_light,path);
+            }
+        }
     }
 
     let mirror=reflect(d,n);
@@ -177,7 +190,21 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
         }
     }
     let fresnel=water_fresnel(-dot(d,n));
-    return mix(below,above,fresnel)+water_glint(d,n,naadf.sun.xyz,naadf.sky.x)*min(1.,3.*fresnel);
+    let color=mix(below,above,fresnel)+water_glint(d,n,naadf.sun.xyz,naadf.sky.x)*min(1.,3.*fresnel);
+    let world_height=surface.y+f32(bitcast<i32>(naadf.paint_origin.y))*NATIVE_VOXEL_METERS;
+    if (normal.y>.5 || step) && world_height>0. && naadf.sun.w>.5 && course.z>.50 {
+        let amount=rapid_foam(phase_position.xz,naadf.water.z,pixel_height/max(.18,abs(d.y)),
+            course.w*smoothstep(.50,.98,course.z),course.xy);
+        if amount>.001 {
+            let up=vec3(0.,1.,0.);
+            var visibility=distant_sun_visibility(surface,naadf.sun.xyz);
+            if visibility>.01 && naadf.shadow.x>.5 && naadf.shadow.y<.5 {
+                visibility*=naadf_sun_visibility(surface-naadf.eye.xyz,up,naadf.sun.xyz);
+            }
+            return foam_color(color,light(up,visibility),amount);
+        }
+    }
+    return color;
 }
 
 // Follow the connected water immediately above the eye. The search is limited

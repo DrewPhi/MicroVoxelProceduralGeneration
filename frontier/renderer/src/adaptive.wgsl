@@ -318,6 +318,7 @@ struct VertexOut {
     @location(3) @interpolate(flat) profile_index:u32,
     @location(4) @interpolate(flat) camera_slot:u32,
     @location(5) @interpolate(flat) surface_word:u32,
+    @location(6) @interpolate(flat) face_width:f32,
 };
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) color: vec3<f32>, @location(2) normal: vec3<f32>,
     @location(3) profile_index:u32) -> VertexOut {
@@ -414,6 +415,7 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         color=vec3<f32>((vec3(material)>>vec3(8u,14u,20u))&vec3(63u))/63.;
     }
     var out=vertex_out(position,color,normal,profile_index);
+    out.face_width=min(extent.x,extent.y);
     if (material & LAYERED_WALL)!=0u {
         // Reuse vertex color for the two face coordinates on layered walls.
         // Perspective interpolation gives fragment depth below the native cap.
@@ -553,8 +555,13 @@ fn shade(input: VertexOut) -> vec4<f32> {
             broad=detail_window(broad_cell,broad_side,transition.xy/16.,transition.zw,8.);
         }
         let weight=max(fine,broad);
+        // Keep the distinct light of a roof or riser once its narrower
+        // dimension projects to several pixels. Subpixel stairs converge
+        // to the same integrated light on either side of a tile boundary.
+        let facing_eye=abs(dot(in.normal,normalize(relative)));
+        let span=min(pitch,in.face_width)*facing_eye/max(.00001,footprint);
         let strength=smoothstep(1.,3.2,footprint/NATIVE_VOXEL_METERS)
-            *weight*(.82+.14*smoothstep(.15,1.2,footprint/pitch));
+            *weight*voxel_face_filter(span);
         if strength>.001 {
             let uv=(cell+.5)/side;
             let far_uv=(broad_cell+.5)/broad_side;
@@ -699,15 +706,31 @@ fn shade(input: VertexOut) -> vec4<f32> {
         }
         if sediment_roof {
             bed=in.color;
-            depth=f32(in.surface_word>>16u)/16.;
+            depth=f32((in.surface_word>>16u)&255u)/16.;
         } else if measured_column {
             bed=MATERIAL_COLORS[min((in.surface_word>>8u)&15u,9u)];
-            depth=f32(in.surface_word>>12u)/16.;
+            depth=f32((in.surface_word>>12u)&255u)/16.;
+        }
+        let relative=in.local-camera.eye.xyz;
+        // Exact terrain triangles carry a canonical water material. A nearby
+        // wet-bed sample supplies the optical depth missing from that material.
+        if in.surface_word==1u && (camera.paint_origin.w&6u)==6u {
+            let survey=surveyed_water_bed(relative);
+            if survey.a>0. {bed=survey.rgb;depth=survey.a;}
+        }
+        let pixel=max(length(dx.xz),length(dy.xz));
+        var foam=0.;
+        let course=stream_current(relative.xz);
+        if (in.normal.y>.5 || connected_step) && world_height>0.
+                && (camera.paint_origin.w&4u)!=0u && in.surface_word!=0u {
+            let baked=f32((in.surface_word>>24u)&3u)/3.;
+            let strength=mix(baked,smoothstep(.50,.98,course.z),course.w);
+            let footprint=near_shadow.water_phase.w/(in.position.w*max(.18,abs(direction.y)));
+            foam=rapid_foam(relative.xz+phase.xy,phase.z,footprint,strength,course.xy);
         }
         if normal.y>.5 {
-            let relative=in.local-camera.eye.xyz;
             let slope=water_surface_normal(relative.xz+phase.xy,normal,phase.z,
-                max(length(dx.xz),length(dy.xz)),length(relative),stream_current(relative.xz));
+                pixel,length(relative),course);
             normal=select(normal,slope,dot(direction,slope)<-.002);
             if ((camera.paint_origin.w & 26u)==0u || block_water) && near_shadow.parameters.z > -1e10 {
                 let cell=(in.local.xz-camera.eye.xz+near_shadow.parameters.zw)/8.;
@@ -741,7 +764,11 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let below=water_medium(bed*bed_light,path);
         let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
             visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
-        if in.surface_word!=0u {return vec4(color,1.);}
+        if in.surface_word!=0u {
+            var foam_light=bed_light;
+            if connected_step && foam>.001 {foam_light=terrain_skylight(vec3(0.,1.,0.),visibility,sky_exposure);}
+            return vec4(foam_color(color,foam_light,foam),1.);
+        }
         return vec4(mix(in.color*tint*light,color,river),1.);
     }
     let resolved=in.color*tint*light;

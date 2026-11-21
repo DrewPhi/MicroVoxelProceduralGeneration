@@ -4,7 +4,7 @@ use crate::{
     water_reflection::{Panorama, Reflections},
     Camera,
 };
-use frontier_world::{Cell, Material, World};
+use frontier_world::{voxel_size, Cell, FbmTerrain, Material, World};
 
 const SIDE: usize = 13;
 const SPACING: f64 = 12.;
@@ -17,6 +17,7 @@ pub(crate) struct GroundUniform {
     nodes: [[[f32; 4]; SIDE]; SIDE],
     water_options: [f32; 4],
     currents: [[u32; 4]; COUNT.div_ceil(4)],
+    wet_depths: [[u32; 4]; COUNT.div_ceil(16)],
     water: Panorama,
 }
 
@@ -84,7 +85,7 @@ impl GroundField {
         let same_source = self
             .source
             .as_ref()
-            .is_some_and(|old| old.shares_source_lineage(world));
+            .is_some_and(|old| old.shares_terrain_edits(world));
         if !same_source || start != self.start {
             let mut nodes = Vec::with_capacity(COUNT);
             for z in start[1]..start[1] + SIDE as i64 {
@@ -140,10 +141,15 @@ impl GroundField {
             }
         }
         let mut currents = [[0; 4]; COUNT.div_ceil(4)];
+        let mut wet_depths = [[0; 4]; COUNT.div_ceil(16)];
         let mut has_current = false;
         for (i, node) in self.nodes.iter().enumerate() {
             currents[i / 4][i % 4] = node.current;
             has_current |= node.current != 0;
+            if let Some(stage) = node.water {
+                let depth = 1 + (16. * (stage - node.bed).clamp(0., 12.)).round() as u32;
+                wet_depths[i / 16][(i / 4) % 4] |= depth << (8 * (i % 4));
+            }
         }
         GroundUniform {
             water_options: [
@@ -153,6 +159,7 @@ impl GroundField {
                 cloud_stage.map_or(0., |y| (y - eye.y) as f32),
             ],
             currents,
+            wet_depths,
             water,
             origin_strength: [
                 (start[0] as f64 * SPACING - eye.x) as f32,
@@ -177,6 +184,19 @@ struct GroundSample {
     bed: f64,
     water: Option<f64>,
     current: u32,
+}
+
+/// Two bits of mean aeration for a native inland water column. Near water
+/// resolves the continuous response and its wave crests in the shader.
+pub(crate) fn rapids(terrain: &FbmTerrain, x: i64, z: i64, top: i64) -> u8 {
+    if top <= 0 {
+        return 0;
+    }
+    let [x, z] = [x, z].map(|v| (v as f64 + 0.5) * voxel_size());
+    terrain.river_course(x, z).map_or(0, |(_, grade)| {
+        let t = (((grade / 0.14).sqrt() - 0.5) / 0.48).clamp(0., 1.);
+        (3. * t * t * (3. - 2. * t)).round() as u8
+    })
 }
 
 fn sample_ground(world: &World, x: i64, z: i64) -> GroundSample {
@@ -210,6 +230,22 @@ fn sample_ground(world: &World, x: i64, z: i64) -> GroundSample {
 mod tests {
     use super::*;
     use bytemuck::Zeroable;
+
+    #[test]
+    fn aeration_follows_the_native_water_column_and_reach_grade() {
+        use frontier_world::{FbmParams, FbmRecipe};
+        for (seed, recipe, x, z, expected) in [
+            (673, FbmRecipe::Highlands, -2230., -1835., 3),
+            (997, FbmRecipe::Watershed, -814.1769, 993., 0),
+            (40961, FbmRecipe::Highlands, 360., -3000., 0),
+        ] {
+            let terrain = FbmTerrain::new(seed, FbmParams { recipe, ..FbmParams::default() }).unwrap();
+            let c = Cell::from_meters([x, 0., z]);
+            let [bed, top] = terrain.column_tops(c.x, c.z);
+            assert!(top > bed);
+            assert_eq!(rapids(&terrain, c.x, c.z, top), expected);
+        }
+    }
 
     #[test]
     fn reflection_probe_follows_the_water_through_flight_altitudes() {

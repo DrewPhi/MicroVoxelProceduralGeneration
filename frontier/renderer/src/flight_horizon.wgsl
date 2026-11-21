@@ -9,7 +9,7 @@ struct Vertex {
     @location(0) relative: vec3<f32>,
     @location(1) @interpolate(flat) color: vec3<f32>,
     @location(2) view_depth: f32,
-    @location(3) @interpolate(flat) optics:vec2<f32>,
+    @location(3) @interpolate(flat) optics:vec3<f32>,
     @location(4) @interpolate(flat) normal_xz:vec2<f32>,
 };
 fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
@@ -57,13 +57,16 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     let sum=dot(projected,vec3(1.));
     let areas=projected/max(sum,.0001);
     let native_sun=dot(areas,max(vec3(0.),sign(relief)*camera.sun.xyz));
-    let filtered=select(0.,1.-.19*smoothstep(.5,2.5,pixel_span),sum>.0001);
+    let filtered=select(0.,voxel_face_filter(pixel_span),sum>.0001);
     let direct=mix(max(0.,dot(normal,camera.sun.xyz)),native_sun,filtered);
     let sky=.5+.5*mix(normal.y,areas.y,filtered);
     let color=face_color(albedo,direct,sky);
     let clip=camera.matrix*vec4(p,1.);
-    var optics=vec2(0.);
-    if axis==0u {optics=vec2(f32(packed.y>>29u)/7.,f32(u32(heights.x)>>10u)*.25);}
+    var optics=vec3(0.);
+    if axis==0u {
+        let word=u32(heights.x);
+        optics=vec3(f32(packed.y>>29u)/7.,f32((word>>10u)&63u)*.25,f32(word>>16u)/3.);
+    }
     return Vertex(clip,p-camera.eye.xyz,color,clip.w,optics,normal.xz);
 }
 @vertex fn vs_edit(@builtin(vertex_index) i:u32, @location(0) anchor:vec3<f32>,
@@ -79,7 +82,7 @@ fn face_color(albedo:vec3<f32>, direct:f32, sky:f32)->vec3<f32> {
     let relative=p-edit.eye.xyz;
     let clip=camera.matrix*vec4(relative+camera.eye.xyz,1.);
     let color=face_color(MATERIAL_COLORS[material],max(0.,dot(normal,camera.sun.xyz)),.5+.5*normal.y);
-    return Vertex(clip,relative,color,clip.w,vec2(0.),normal.xz);
+    return Vertex(clip,relative,color,clip.w,vec3(0.),normal.xz);
 }
 fn cloud_texel(x:u32,y:u32)->vec4<f32> {
     return unpack4x8unorm(camera.cloud_panorama[16u*y+x/4u][x%4u]);
@@ -96,7 +99,9 @@ fn surface(v:Vertex) -> vec4<f32> {
         let path=v.optics.y*inverseSqrt(1.-.5628*(1.-cosine*cosine));
         let surface=mix(water_medium(color,path),above,water_fresnel(cosine))
             +water_glint(ray,normal,camera.sun.xyz,camera.sun.w);
-        color=mix(color,surface,v.optics.x);
+        let foam=rapid_foam(v.relative.xz+camera.eye.xz,0.,8.,v.optics.z,vec2(0.));
+        let lit=face_color(vec3(1.),max(camera.sun.y,0.),1.);
+        color=mix(color,foam_color(surface,lit,foam),v.optics.x);
     }
     return vec4(color,length(v.relative)*.001);
 }

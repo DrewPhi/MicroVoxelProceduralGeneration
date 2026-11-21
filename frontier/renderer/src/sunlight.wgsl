@@ -20,3 +20,7 @@ fn regional_skylight(normal:vec3<f32>,sun:vec3<f32>,overcast:f32,visibility:f32,
     let n=normalize(normal);
     return regional_face_light(n.y,max(dot(n,sun),0.),sun,overcast,visibility,exposure,beauty);
 }
+
+fn voxel_face_filter(projected_width:f32)->f32 {
+    return .96-.30*smoothstep(1.,5.,projected_width);
+}

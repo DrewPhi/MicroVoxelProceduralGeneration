@@ -3,6 +3,7 @@ struct GroundLight {
     nodes: array<vec4<f32>,169>,
     water_options:vec4<f32>, // cloud map enabled, deck relative to eye, river course present, probe height relative to eye
     currents:array<vec4<u32>,43>,
+    wet_depths:array<vec4<u32>,11>,
     reflection_origin:vec4<f32>,
     skyline:array<vec4<f32>,16>,
     terrain_panorama:array<vec4<u32>,256>,
@@ -44,6 +45,30 @@ fn ground_sample(position:vec3<f32>) -> vec4<f32> {
     let low=mix(ground_light.nodes[i],ground_light.nodes[i+1u],weight.x);
     let high=mix(ground_light.nodes[i+13u],ground_light.nodes[i+14u],weight.x);
     return mix(low,high,weight.y);
+}
+
+// Beyond the native volume a cut optical ray can still see shallow water.
+// Dry samples contribute no bed pigment or depth to the reconstruction.
+fn surveyed_water_bed(relative:vec3<f32>)->vec4<f32> {
+    let grid=(relative.xz-ground_light.origin_strength.xy)/max(.001,ground_light.origin_strength.w);
+    if !ground_available() || any(grid<vec2(0.)) || any(grid>vec2(12.)) {return vec4(0.);}
+    let corner=vec2<u32>(min(floor(grid),vec2(11.)));
+    let f=grid-vec2<f32>(corner);
+    let weights=vec4((1.-f.x)*(1.-f.y),f.x*(1.-f.y),(1.-f.x)*f.y,f.x*f.y);
+    let indices=vec4(corner.x+13u*corner.y)+vec4(0u,1u,13u,14u);
+    var bed=vec4(0.);
+    var total=0.;
+    for (var k=0u;k<4u;k++) {
+        let i=indices[k];
+        let code=(ground_light.wet_depths[i/16u][(i/4u)%4u]>>(8u*(i%4u)))&255u;
+        if code>0u {
+            let w=max(.005,weights[k]);
+            bed+=vec4(ground_light.nodes[i].rgb,max(.03125,f32(code-1u)/16.))*w;
+            total+=w;
+        }
+    }
+    if total>0. {return bed/total;}
+    return vec4(0.);
 }
 
 // First-bounce approximation for an illuminated ground hemisphere. The same

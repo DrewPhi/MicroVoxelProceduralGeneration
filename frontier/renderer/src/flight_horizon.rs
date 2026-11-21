@@ -19,7 +19,18 @@ type Sample = [f32; 11];
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 struct NativeRoof {
     height: f32,
-    depth: f32,
+    // Zero is dry. A wet code stores one plus the depth in quarter metres.
+    wet_depth: u8,
+    rapids: u8,
+}
+impl NativeRoof {
+    fn new(height: f32, depth: f32, rapids: u8) -> Self {
+        Self {
+            height,
+            wet_depth: if depth > 0. { 1 + (4. * depth.min(12.)).round() as u8 } else { 0 },
+            rapids,
+        }
+    }
 }
 
 const SIDE: usize = 161;
@@ -169,10 +180,14 @@ fn samples(
         |x, z| {
             let cell = Cell::from_meters([x, 0., z]);
             let [bed, top] = terrain.column_tops(cell.x, cell.z);
-            NativeRoof {
-                height: (top as f64 * voxel_size()) as f32,
-                depth: ((top - bed) as f64 * voxel_size()).min(12.) as f32,
-            }
+            let rapids = if top > bed {
+                crate::terrain_light::rapids(terrain, cell.x, cell.z, top)
+            } else { 0 };
+            NativeRoof::new(
+                (top as f64 * voxel_size()) as f32,
+                ((top - bed) as f64 * voxel_size()) as f32,
+                rapids,
+            )
         },
     ));
     let mesh = blocks::build(&lattice, voxel_size() as f32);
@@ -627,10 +642,11 @@ mod tests {
                 x as f32,
             ]
         };
-        let height = |x: f64, z: f64| NativeRoof {
-            height: (x * 0.19 + z * 0.47).sin() as f32,
-            depth: (x * 0.37 + z * 0.61).cos().max(0.) as f32,
-        };
+        let height = |x: f64, z: f64| NativeRoof::new(
+            (x * 0.19 + z * 0.47).sin() as f32,
+            (x * 0.37 + z * 0.61).cos().max(0.) as f32,
+            0,
+        );
         for (old_first, first) in [(1, 1), (0, 0), (0, 1), (1, 0)] {
             let old = lattice([-3, 7], old_first, None, sample, height);
             for center in [[-3, 7], [1, 7], [-8, 3], [5000, -5000]] {
