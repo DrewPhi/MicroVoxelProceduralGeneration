@@ -152,22 +152,18 @@ fn packed_quad(
     axis: usize,
     positive: bool,
     extent: [i64; 2],
-    material: Material,
+    material: u32,
     profile: u32,
 ) -> NativeQuad {
     let meters = |c: i64| (c as f64 * voxel_size()) as f32;
     let axes = [(axis + 1) % 3, (axis + 2) % 3];
-    let material = TERRAIN_PALETTE
-        .iter()
-        .position(|&entry| entry == material)
-        .expect("all terrain materials have a palette entry");
     NativeQuad {
         anchor: anchor.map(meters),
         extent: std::array::from_fn(|i| {
             meters(anchor[axes[i]] + extent[i]) - meters(anchor[axes[i]])
         }),
         axis_sign: axis as u32 | if positive { 0 } else { 4 },
-        material: material as u32,
+        material,
         profile_index: profile,
     }
 }
@@ -185,47 +181,59 @@ fn pack_water_bed(cells: i64, material: Material) -> u32 {
     0x20 | (material as u32) << 8 | depth << 12
 }
 
+// Bit 26 is the highest material bit available in a compact instance.
+// Mixed cliff walls carry the source materials without adding geometry.
+pub(crate) const LAYERED_WALL: u32 = 1 << 26;
+const SURFACE_PAINT: u32 = 14;
+const PALETTE_LAYERS: u32 = 15;
+
+pub(crate) fn valid_layered_wall(word: u32) -> bool {
+    if word >> 26 != 1 {
+        return false;
+    }
+    let bed = word & 15;
+    let soil = (word >> 4) & 15;
+    if bed == PALETTE_LAYERS {
+        soil < 10 && ((word >> 8) & 15) < 10 && ((word >> 12) & 15) < 10 && word & 0x03ff0000 == 0
+    } else {
+        (soil < 10 || soil == SURFACE_PAINT) && (bed < 10 || bed == SURFACE_PAINT)
+    }
+}
+
 impl Run {
-    fn wall_material(self, low: i64, high: i64, default: Material) -> (Material, u32) {
-        let paint = |m| {
-            if m == self.top_material {
+    fn material_word(self, material: Material) -> u32 {
+        material as u32
+            | if material == self.top_material {
                 self.paint
             } else {
                 0
             }
-        };
+    }
+
+    fn ground_wall(self, low: i64) -> u32 {
         let Some([surface, soil]) = self.soil_bands else {
-            return (default, paint(default));
+            return self.material_word(self.deep_material);
         };
-        if low >= self.ground {
-            return (default, paint(default));
+        let height = self.ground - low;
+        let skin = self.material_word(surface);
+        if height <= 1 || (surface == soil && (height <= 12 || soil == self.deep_material)) {
+            return skin;
         }
-        // The ground voxel and its eleven subsurface cells also have side
-        // faces. Integrate their canonical albedo over an unresolved cliff.
-        let skin = (self.ground - 1).clamp(low, high);
-        let bed = (self.ground - 12).clamp(low, high);
-        let bands = [
-            (high - skin, surface),
-            (skin - bed, soil),
-            (bed - low, self.deep_material),
-        ];
-        let &(_, material) = bands.iter().max_by_key(|b| b.0).unwrap();
-        if bands.iter().all(|&(n, m)| n == 0 || m == material) {
-            return (material, paint(material));
+        if skin & 16 == 0 {
+            return LAYERED_WALL
+                | PALETTE_LAYERS
+                | ((soil as u32) << 4)
+                | ((surface as u32) << 8)
+                | ((self.deep_material as u32) << 12);
         }
-        let mut color = [0.; 3];
-        for (n, m) in bands {
-            let packed = paint(m);
-            let albedo = if packed & 16 == 0 {
-                m.color()
+        let code = |m| {
+            if m == surface {
+                SURFACE_PAINT
             } else {
-                [8, 14, 20].map(|shift| ((packed >> shift) & 63) as f32 / 63.)
-            };
-            for i in 0..3 {
-                color[i] += albedo[i] * (n as f32 / (high - low) as f32);
+                m as u32
             }
-        }
-        (material, pack_color(color))
+        };
+        LAYERED_WALL | (skin & 0x03ffff00) | (code(soil) << 4) | code(self.deep_material)
     }
 }
 
@@ -238,38 +246,42 @@ fn wall_quads(
     high: Run,
 ) -> impl Iterator<Item = NativeQuad> {
     let ground = high.ground.clamp(low, high.top);
-    [
-        (low, ground, high.deep_material),
-        (ground, high.top, high.top_material),
-    ]
-    .into_iter()
-    .filter_map(move |(lo, hi, material)| {
-        if lo == hi {
-            return None;
-        }
-        let (anchor, extent) = if axis == 0 {
-            ([plane, lo, span.start], [hi - lo, span.end - span.start])
-        } else {
-            ([span.start, lo, plane], [span.end - span.start, hi - lo])
-        };
-        let (material, paint) = high.wall_material(lo, hi, material);
-        let mut quad = packed_quad(anchor, axis, positive, extent, material, high.profile);
-        quad.material |= paint;
-        Some(quad)
-    })
+    [(low, ground, false), (ground, high.top, true)]
+        .into_iter()
+        .filter_map(move |(lo, hi, above_ground)| {
+            if lo == hi {
+                return None;
+            }
+            let (anchor, extent) = if axis == 0 {
+                ([plane, lo, span.start], [hi - lo, span.end - span.start])
+            } else {
+                ([span.start, lo, plane], [span.end - span.start, hi - lo])
+            };
+            let material = if above_ground {
+                high.material_word(high.top_material)
+            } else {
+                high.ground_wall(lo)
+            };
+            Some(packed_quad(
+                anchor,
+                axis,
+                positive,
+                extent,
+                material,
+                high.profile,
+            ))
+        })
 }
 
 fn roof_quad(x: &Range<i64>, z: &Range<i64>, run: Run) -> NativeQuad {
-    let mut quad = packed_quad(
+    packed_quad(
         [x.start, run.top, z.start],
         1,
         true,
         [z.end - z.start, x.end - x.start],
-        run.top_material,
+        run.material_word(run.top_material),
         run.profile,
-    );
-    quad.material |= run.paint;
-    quad
+    )
 }
 
 fn rect_edges(
@@ -1236,19 +1248,6 @@ fn seam_spans(
     .filter(|(span, _, _)| !span.is_empty())
 }
 
-pub(crate) const TERRAIN_PALETTE: [Material; 10] = [
-    Material::Air,
-    Material::Grass,
-    Material::Soil,
-    Material::Stone,
-    Material::Wood,
-    Material::Leaf,
-    Material::Flower,
-    Material::Water,
-    Material::Sand,
-    Material::Snow,
-];
-
 /// Use the existing instanced axis-face layout, without re-tessellating coarse
 /// faces into native cells. Profiles have already been decorated at this point.
 pub(super) fn merge_quads(tile: &mut GeometryTile) {
@@ -1275,6 +1274,10 @@ pub(super) fn merge_quads(tile: &mut GeometryTile) {
         quads.dedup_by(|quad, prev| {
             let axis = (quad.axis_sign & 3) as usize;
             let u = (axis + 1 + merge) % 3;
+            // Each layered facade measures depth from its own surface cell.
+            if u == 1 && quad.material & LAYERED_WALL != 0 {
+                return false;
+            }
             if strip(prev) == strip(quad) && prev.anchor[u] + prev.extent[merge] == quad.anchor[u] {
                 let far = quad.anchor[u] + quad.extent[merge];
                 let combined = far - prev.anchor[u];
@@ -1353,21 +1356,29 @@ mod tests {
             paint: pack_color([0.1, 0.4, 0.2]),
             profile: 0,
         };
+        assert_eq!(run.ground_wall(19), Material::Grass as u32 | run.paint);
+        let word = run.ground_wall(0);
+        assert!(valid_layered_wall(word));
+        assert_eq!(word & 15, Material::Stone as u32);
+        assert_eq!((word >> 4) & 15, Material::Soil as u32);
+        assert_eq!(word & 0x03ffff00, run.paint & 0x03ffff00);
+        let unpainted = Run { paint: 0, ..run }.ground_wall(0);
+        assert!(valid_layered_wall(unpainted));
+        assert_eq!(unpainted & 15, PALETTE_LAYERS);
         assert_eq!(
-            run.wall_material(19, 20, Material::Stone),
-            (Material::Grass, run.paint)
+            (unpainted >> 8) & 255,
+            Material::Grass as u32 | ((Material::Stone as u32) << 4)
         );
+        let painted_sand = Run {
+            top_material: Material::Sand,
+            soil_bands: Some([Material::Sand; 2]),
+            ..run
+        };
         assert_eq!(
-            run.wall_material(8, 19, Material::Stone),
-            (Material::Soil, 0)
+            painted_sand.ground_wall(9),
+            Material::Sand as u32 | run.paint
         );
-        assert_eq!(
-            run.wall_material(0, 8, Material::Stone),
-            (Material::Stone, 0)
-        );
-        let (mat, paint) = run.wall_material(8, 20, Material::Stone);
-        assert_eq!(mat, Material::Soil);
-        assert!(paint & 16 != 0);
+        assert_eq!((painted_sand.ground_wall(0) >> 4) & 15, SURFACE_PAINT);
     }
 
     fn mixed_tile(
@@ -1390,6 +1401,52 @@ mod tests {
                 .unwrap();
         merge_quads(&mut tile);
         tile
+    }
+
+    #[test]
+    fn layered_cliffs_merge_across_a_row_but_keep_each_rows_surface() {
+        let world = World::fbm(19, FbmParams::default()).unwrap();
+        let mut tile = mixed_tile(Mode::Blocks, &world, [0, 0], 32, 4, [4; 4]);
+        let word = LAYERED_WALL | PALETTE_LAYERS | (2 << 4) | (9 << 8) | (3 << 12);
+        tile.native_bins.clear();
+        tile.native_quads = (0..2)
+            .flat_map(|row| {
+                (0..2).map(move |column| {
+                    packed_quad([0, row * 4, column * 4], 0, true, [4, 4], word, 0)
+                })
+            })
+            .collect();
+        merge_quads(&mut tile);
+        assert_eq!(tile.native_quads.len(), 2);
+        for (row, q) in tile.native_quads.iter().enumerate() {
+            assert_eq!(q.anchor[1], (4. * voxel_size() * row as f64) as f32);
+            assert_eq!(
+                q.extent,
+                [(4. * voxel_size()) as f32, (8. * voxel_size()) as f32]
+            );
+            assert_eq!(q.material, word);
+        }
+        assert!(!valid_layered_wall(word | 1 << 19));
+        assert!(!valid_layered_wall(word | 1 << 28));
+    }
+
+    #[test]
+    fn flooded_steps_separate_the_native_bed_from_the_water_face() {
+        let run = Run {
+            top: 28,
+            ground: 20,
+            top_material: Material::Water,
+            deep_material: Material::Stone,
+            soil_bands: Some([Material::Sand, Material::Soil]),
+            paint: pack_water_bed(8, Material::Sand),
+            profile: 2,
+        };
+        let faces = wall_quads(2, 4, false, 2..9, 0, run).collect::<Vec<_>>();
+        assert_eq!(faces.len(), 2);
+        assert!(valid_layered_wall(faces[0].material));
+        assert_eq!((faces[0].material >> 8) & 15, Material::Sand as u32);
+        assert_eq!(faces[1].material, Material::Water as u32 | run.paint);
+        assert_eq!(faces[0].anchor[1] + faces[0].extent[1], faces[1].anchor[1]);
     }
 
     #[test]

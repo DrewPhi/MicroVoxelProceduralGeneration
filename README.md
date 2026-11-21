@@ -101,6 +101,13 @@ Walking presets also use the stepped terrain. On a 9-second seed 997
 Watershed walk and turn at 1080p, the stepped renderer measured
 **11.32 / 14.06 / 16.44 ms** at p50/p95/p99.
 
+On an exposed cliff, the active terrain draws the column's single surface
+voxel, eleven subsurface voxels and underlying bedrock on the same flat face.
+A distant pixel receives the average of the layers it covers. Three 960×600
+views of grass and snow ledges kept identical depth and coverage across all
+pixels. On the Radeon 760M, the layered snow view at 1080p MSAA 1 took
+7.11–7.24 ms median GPU time, up from 6.60–6.86 ms for the single-color wall.
+
 ![Eye-level view of square grass blades, a stepped tree trunk and distant voxel terraces.](frontier/reference/gallery/watershed-ground.jpg)
 
 *Watershed seed 997 at walking height. Grass blades, branches and the steps

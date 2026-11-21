@@ -353,6 +353,7 @@ fn ground_cover_color(id:u32,local:vec3<f32>,normal:vec3<f32>,dx:vec3<f32>,dy:ve
     }
     return mix(base,max(plant,vec3(0.)),coverage);
 }
+const LAYERED_WALL:u32=0x04000000u;
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -360,7 +361,7 @@ struct VertexOut {
     @location(2) local:vec3<f32>,
     @location(3) @interpolate(flat) profile_index:u32,
     @location(4) @interpolate(flat) camera_slot:u32,
-    @location(5) @interpolate(flat) water:u32,
+    @location(5) @interpolate(flat) surface_word:u32,
 };
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) color: vec3<f32>, @location(2) normal: vec3<f32>,
     @location(3) profile_index:u32) -> VertexOut {
@@ -377,7 +378,7 @@ fn vertex_out(position:vec3<f32>,color:vec3<f32>,normal:vec3<f32>,profile_index:
     out.position=camera.view_projection*vec4<f32>(p,1.);
     out.color=color;out.normal=normal;out.local=p;
     out.profile_index=profile_index;out.camera_slot=0u;
-    out.water=u32(all(color==MATERIAL_COLORS[7]));
+    out.surface_word=u32(all(color==MATERIAL_COLORS[7]));
     return out;
 }
 // Lossless triangle records retain the original indexed vertex sequence.
@@ -457,7 +458,13 @@ fn native_face(vertex:u32,anchor:vec3<f32>,extent:vec2<f32>,
         color=vec3<f32>((vec3(material)>>vec3(8u,14u,20u))&vec3(63u))/63.;
     }
     var out=vertex_out(position,color,normal,profile_index);
-    if (material&255u)==0x27u {out.water=material;}
+    if (material & LAYERED_WALL)!=0u {
+        // Reuse vertex color for the two face coordinates on layered walls.
+        // Perspective interpolation gives fragment depth below the native cap.
+        let height=select(extent.y,extent.x,axis==0u)*VOXELS_PER_METER;
+        out.color=vec3(select(0.,height,position.y==anchor.y),height,0.);
+        out.surface_word=material;
+    } else if (material&255u)==0x27u {out.surface_word=material;}
     return out;
 }
 @fragment fn fs_shadow_cut(in: VertexOut) {
@@ -512,6 +519,21 @@ fn river_coverage(relative:vec2<f32>, spacing:f32,height:f32)->f32 {
     return fade*mix(mix(river_texel(q,height,tolerance),river_texel(q+vec2(1,0),height,tolerance),f.x),
                     mix(river_texel(q+vec2(0,1),height,tolerance),river_texel(q+vec2(1,1),height,tolerance),f.x),f.y);
 }
+// Source columns have one surface cell, eleven soil cells, then bedrock.
+fn cliff_albedo(word:u32, face:vec2<f32>, footprint:f32)->vec3<f32> {
+    let palette=(word&15u)==15u;
+    var skin=vec3<f32>((vec3(word)>>vec3(8u,14u,20u))&vec3(63u))/63.;
+    var bed=word&15u;
+    if palette { skin=MATERIAL_COLORS[(word>>8u)&15u]; bed=(word>>12u)&15u; }
+    let soil=(word>>4u)&15u;
+    let middle=select(MATERIAL_COLORS[min(soil,9u)],skin,soil==14u);
+    let deep=select(MATERIAL_COLORS[min(bed,9u)],skin,bed==14u);
+    let half_width=max(0.0001,0.5*footprint);
+    let lo=max(0.,face.x-half_width);
+    let hi=min(face.y,face.x+half_width);
+    let weights=clamp((vec2(1.,12.)-lo)/max(hi-lo,0.00001),vec2(0.),vec2(1.));
+    return skin*weights.x+middle*(weights.y-weights.x)+deep*(1.-weights.y);
+}
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
@@ -527,11 +549,16 @@ fn shade(input: VertexOut) -> vec4<f32> {
     }
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
+    let wall_footprint=fwidth(in.local.y)*VOXELS_PER_METER;
+    if (in.surface_word&LAYERED_WALL)!=0u {
+        in.color=cliff_albedo(in.surface_word,in.color.xy,wall_footprint);
+        in.surface_word=0u;
+    }
     var sky_exposure=1.;
     // The flight field is aligned to canonical 8 m samples. Fine meshes and
     // native stairs retain their own material and face response.
     if near_shadow.parameters.z > -1e10 && (camera.paint_origin.w & 26u) == 0u
-        && in.normal.y > 0. && in.water == 0u {
+        && in.normal.y > 0. && in.surface_word == 0u {
         let spacing = f32(1u << (u32(camera.paint.w) & 31u)) * NATIVE_VOXEL_METERS;
         let cell = (in.local.xz - camera.eye.xz + near_shadow.parameters.zw) / 8.;
         let side = vec2<f32>(textureDimensions(flight_detail));
@@ -605,24 +632,24 @@ fn shade(input: VertexOut) -> vec4<f32> {
     if diagnostic==7u {return vec4<f32>(in.color,1.);}
     var river=0.;
     let world_height=in.local.y+f32(bitcast<i32>(camera.paint_origin.y))*NATIVE_VOXEL_METERS;
-    if diagnostic==0u && in.water==0u && near_shadow.parameters.z > -1e10
+    if diagnostic==0u && in.surface_word==0u && near_shadow.parameters.z > -1e10
         && (camera.paint_origin.w & 26u)==0u && in.normal.y>.35 && world_height>0. {
         let spacing=f32(1u << (u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
         river=river_coverage(in.local.xz-camera.eye.xz,spacing,world_height);
     }
-    if diagnostic==0u && (in.water!=0u || river>.003) {
+    if diagnostic==0u && (in.surface_word!=0u || river>.003) {
         let direction=normalize(in.local-camera.eye.xyz);
-        var normal=select(vec3(0.,1.,0.),normalize(in.normal),in.water!=0u);
+        var normal=select(vec3(0.,1.,0.),normalize(in.normal),in.surface_word!=0u);
         var bed=vec3(.30,.35,.25);
         var depth=4.;
         let phase=near_shadow.water_phase;
         // The water surface has a horizontal voxel roof in both flight
         // representations. Keep its hydraulic stage and animate only light.
-        let block_water=(camera.paint_origin.w&32u)!=0u && in.water!=0u;
-        let measured_column=(in.water&255u)==0x27u;
+        let block_water=(camera.paint_origin.w&32u)!=0u && in.surface_word!=0u;
+        let measured_column=(in.surface_word&255u)==0x27u;
         if measured_column {
-            bed=MATERIAL_COLORS[min((in.water>>8u)&15u,9u)];
-            depth=f32(in.water>>12u)/16.;
+            bed=MATERIAL_COLORS[min((in.surface_word>>8u)&15u,9u)];
+            depth=f32(in.surface_word>>12u)/16.;
         }
         if ((camera.paint_origin.w & 26u)==0u || block_water) && normal.y>.5 {
             let p=in.local.xz-camera.eye.xz+phase.xy;
@@ -658,7 +685,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let below=water_medium(bed*light,path);
         let color=mix(below,above,water_fresnel(-dot(direction,normal)))+
             visibility*water_glint(direction,normal,camera.sun.xyz,camera.sky.x);
-        if in.water!=0u {return vec4(color,1.);}
+        if in.surface_word!=0u {return vec4(color,1.);}
         return vec4(mix(in.color*tint*light,color,river),1.);
     }
     let resolved=in.color*tint*light;
