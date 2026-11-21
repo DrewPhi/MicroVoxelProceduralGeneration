@@ -974,7 +974,7 @@ impl AdaptiveView {
         json.pop();
         json.push_str(&format!(",\"deferred_selection_arc_bytes\":{},\"gpu_pending_clusters\":{},\"selection_arc_bytes_may_overlap_each_other\":true}}",self.deferred_arc_bytes,self.gpu_pending_clusters));
         json.pop();
-        json.push_str(&format!(",\"gpu_occluded_clusters\":{},\"gpu_occluded_triangles\":{},\"gpu_occluder_boxes\":{},\"raster_clipped_clusters\":{},\"gpu_occlusion_uses_current_camera\":true}}",self.stats.occluded_clusters,self.stats.occluded_triangles,self.stats.occluder_boxes,self.stats.clipped_draw_clusters));
+        json.push_str(&format!(",\"gpu_occluded_clusters\":{},\"gpu_occluded_triangles\":{},\"gpu_occluder_boxes\":{},\"raster_clipped_clusters\":{},\"raster_clipped_region_quads\":{},\"gpu_occlusion_uses_current_camera\":true}}",self.stats.occluded_clusters,self.stats.occluded_triangles,self.stats.occluder_boxes,self.stats.clipped_draw_clusters,self.stats.clipped_region_quads));
         json.pop();
         json.push_str(
             ",\"quality_assessment\":\"current_gpu_draw_candidates_after_current_occlusion\"",

@@ -94,10 +94,13 @@ forward spacing and vegetation off.
 | 40961 | 4.15 / 5.43 / 5.75 | 2.39 | 0 / 240 |
 | 673 | 7.67 / 9.83 / 11.08 | 7.79 | 37 / 240 |
 
-The gallery view, with vegetation enabled, measured **10.69 / 12.96 / 14.26 ms**
-at a fixed banked camera during 12 seconds of cold refinement. Each coarse
-face carries its material and sampled color in the existing 32-byte instance.
-The renderer can cull complete rear-facing groups before vertex processing.
+The gallery view, with vegetation enabled, measured **12.29 / 14.93 / 16.18 ms**
+and **12.97 / 16.25 / 17.29 ms** over two 12-second cold refinement runs.
+Each coarse face carries its material and sampled color in a 32-byte instance.
+The renderer checks dense tiles in four horizontal quadrants per face direction.
+At the banked gallery pose this reduced the final visible triangles from
+1,177,114 to 1,093,046. Draw calls rose from 217 to 279. With the same face
+order, culling on and off gave identical color and depth at 1280×720.
 The flight scheduler samples the approaching ridgeline and publishes up to two
 refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. Some block-size changes remain visible during refinement.
 

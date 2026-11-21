@@ -27,6 +27,8 @@ pub(crate) mod adaptive_shadow;
 pub(crate) mod coarse_batch;
 #[path = "edit_landscape.rs"]
 pub(crate) mod edit_landscape;
+#[path = "face_regions.rs"]
+mod face_regions;
 #[path = "landscape_detail.rs"]
 pub(crate) mod landscape_detail;
 #[path = "proxy_indexed.rs"]
@@ -181,6 +183,7 @@ struct Cluster {
     position_bytes: u64,
     position_reserved_bytes: u64,
     bins: Vec<NativeBin>,
+    face_bounds: Vec<[Vec3; 2]>,
     exact: bool,
     profile: Option<ProfileAllocation>,
     vertices: Allocation,
@@ -298,6 +301,7 @@ pub struct DrawStats {
     pub current_quality_ready: bool,
     pub native_bin_tests: u64,
     pub native_bin_skipped_quads: u64,
+    pub clipped_region_quads: u64,
     pub draw_calls: u64,
     pub no_voxel_shadow_clusters: usize,
     pub coarse_batch_groups: usize,
@@ -325,7 +329,7 @@ fn record_offender(top: &mut [Option<VisibleOffender>; 8], offender: VisibleOffe
 struct DrawItem {
     no_voxel_shadow: bool,
     key: TileKey,
-    bin_mask: Option<u8>,
+    bin_mask: Option<u32>,
 }
 // Keep direct and cached command encoding identical. Bundles cache commands,
 // never visibility or camera values; each prepare still evaluates current demand.
@@ -419,15 +423,12 @@ macro_rules! encode_cluster_draws {
             if c.native_quads {
                 pass.set_index_buffer(renderer.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
                 if let Some(mask) = item.bin_mask {
-                    for (index, bin) in c.bins.iter().enumerate() {
-                        if mask & (1u8 << index) != 0 {
-                            pass.draw_indexed(
-                                0..6,
-                                0,
-                                first_instance + bin.first_quad
-                                    ..first_instance + bin.first_quad + bin.quad_count,
-                            );
-                        }
+                    for span in face_regions::visible_runs(&c.bins, mask) {
+                        pass.draw_indexed(
+                            0..6,
+                            0,
+                            first_instance + span.start..first_instance + span.end,
+                        );
                     }
                 } else {
                     pass.draw_indexed(0..6, 0, first_instance..first_instance + c.count);
@@ -567,6 +568,7 @@ pub struct AdaptiveGpu {
     bundle_reuses: u64,
     bundle_build_ms: f64,
     native_bins_enabled: bool,
+    face_regions_enabled: bool,
     voxel_filter: bool,
     far_pipelines: Option<[wgpu::RenderPipeline; 6]>,
     cover_pipelines: Option<[wgpu::RenderPipeline; 6]>,
@@ -971,6 +973,9 @@ impl AdaptiveGpu {
             bundle_reuses: 0,
             bundle_build_ms: 0.,
             native_bins_enabled: true,
+            face_regions_enabled: std::env::var("FRONTIER_FACE_REGIONS").as_deref() != Ok("0")
+                && crate::adaptive_geometry::distant_voxels::Mode::current()
+                    == crate::adaptive_geometry::distant_voxels::Mode::Blocks,
             voxel_filter: true,
             far_pipelines,
             cover_pipelines,
@@ -1361,6 +1366,7 @@ impl AdaptiveGpu {
                 position_bytes: 0,
                 position_reserved_bytes: 0,
                 bins: vec![],
+                face_bounds: vec![],
                 exact: tile.exact,
                 profile,
                 vertices,
@@ -1774,29 +1780,6 @@ impl AdaptiveGpu {
                     },
                 );
             }
-            let (bin_mask, native_count) = if c.native_quads
-                && (c.exact || self.coarse_batch.is_none())
-                && self.native_bins_enabled
-                && !c.bins.is_empty()
-            {
-                let eye = (camera.position - c.origin).to_array();
-                let mut mask = 0u8;
-                let mut count = 0u32;
-                for (index, bin) in c.bins.iter().enumerate() {
-                    stats.native_bin_tests += 1;
-                    if !bin.backfacing(eye, frontier_world::voxel_size() / 1024.) {
-                        mask |= 1u8 << index;
-                        count += bin.quad_count;
-                    }
-                }
-                stats.native_bin_skipped_quads += (c.count - count) as u64;
-                if count == 0 {
-                    continue;
-                }
-                (Some(mask), count)
-            } else {
-                (None, c.count)
-            };
             let local_eye = (camera.position - c.origin).as_vec3();
             let matrix = projection
                 * if self.prepare_reuse_enabled {
@@ -1808,10 +1791,42 @@ impl AdaptiveGpu {
             // the tighter bounds of the published faces after recording that
             // demand, including when the enclosing source interval crosses a
             // ridge outside the actual camera frustum.
-            if !intersects_raster_clip(matrix, c.bounds) {
+            let raster_clip = RasterClip::new(matrix, c.bounds);
+            if !raster_clip.intersects(c.bounds) {
                 stats.clipped_draw_clusters += 1;
                 continue;
             }
+            let (bin_mask, native_count) = if c.native_quads
+                && (c.exact || self.coarse_batch.is_none())
+                && self.native_bins_enabled
+                && !c.bins.is_empty()
+            {
+                let eye = (camera.position - c.origin).to_array();
+                let mut mask = 0u32;
+                let mut count = 0u32;
+                for (index, bin) in c.bins.iter().enumerate() {
+                    stats.native_bin_tests += 1;
+                    if bin.backfacing(eye, frontier_world::voxel_size() / 1024.) {
+                        stats.native_bin_skipped_quads += u64::from(bin.quad_count);
+                        continue;
+                    }
+                    if c.face_bounds
+                        .get(index)
+                        .is_some_and(|bounds| !raster_clip.intersects(*bounds))
+                    {
+                        stats.clipped_region_quads += u64::from(bin.quad_count);
+                        continue;
+                    }
+                    mask |= 1u32 << index;
+                    count += bin.quad_count;
+                }
+                if count == 0 {
+                    continue;
+                }
+                (Some(mask), count)
+            } else {
+                (None, c.count)
+            };
             let mut bytes = [0u8; 208];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&matrix.to_cols_array()));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(&local_eye.extend(1.).to_array()));
@@ -1886,7 +1901,7 @@ impl AdaptiveGpu {
                 bound_vertex_page = None;
             }
             stats.visible_clusters += 1;
-            stats.draw_calls += bin_mask.map_or(1, |m| m.count_ones() as u64);
+            stats.draw_calls += bin_mask.map_or(1, |m| u64::from((m & !(m << 1)).count_ones()));
             if c.native_quads {
                 stats.visible_native_quads += native_count as u64;
             }
@@ -2053,7 +2068,40 @@ impl AdaptiveGpu {
                 batch.add_profile_page(device, &self.profile_tables[page].buffer);
             }
         }
+        let origin = DVec3::new(
+            tile.mesh.origin.x as f64,
+            tile.mesh.origin.y as f64,
+            tile.mesh.origin.z as f64,
+        ) * frontier_world::voxel_size();
+        let mut bounds = tile
+            .bounds
+            .map(|b| (DVec3::from_array(b) - origin).as_vec3());
+        let cover = tile.face_profiles.iter().any(|p| p[0][3] == -6.);
+        let raised_cover = crate::ground_cover::shell_enabled() && cover;
+        if raised_cover {
+            bounds[1].y += 1.;
+        }
         let mut quads = tile.native_quads.clone();
+        let mut bins = validated_bins(&tile.native_bins, quads.len() as u32);
+        let mut face_bounds = Vec::new();
+        if !tile.exact
+            && quads.len() >= 512
+            && !bins.is_empty()
+            && self.coarse_batch.is_none()
+            && self.face_regions_enabled
+        {
+            (bins, face_bounds) = face_regions::partition(
+                &tile.native_quads,
+                &mut quads,
+                &bins,
+                (bounds[0] + bounds[1]) * 0.5,
+            );
+            if raised_cover {
+                for region in &mut face_bounds {
+                    region[1].y += 1.;
+                }
+            }
+        }
         for quad in &mut quads {
             quad.profile_index += (table.range.start / 80) as u32;
             quad.axis_sign |= slot << 3;
@@ -2068,31 +2116,20 @@ impl AdaptiveGpu {
             table.range.start,
             table_bytes,
         );
-        let origin = DVec3::new(
-            tile.mesh.origin.x as f64,
-            tile.mesh.origin.y as f64,
-            tile.mesh.origin.z as f64,
-        ) * frontier_world::voxel_size();
-        let mut bounds = tile
-            .bounds
-            .map(|b| (DVec3::from_array(b) - origin).as_vec3());
-        if crate::ground_cover::shell_enabled() && tile.face_profiles.iter().any(|p| p[0][3] == -6.)
-        {
-            bounds[1].y += 1.;
-        }
         self.residency_revision = self.residency_revision.wrapping_add(1);
         self.clusters.insert(
             tile.key,
             Cluster {
                 appearance_pending: tile.cover_input.is_some(),
-                cover: tile.face_profiles.iter().any(|p| p[0][3] == -6.),
+                cover,
                 native_quads: true,
                 proxy_triangles: false,
                 indexed_proxy: false,
                 derived_proxy: false,
                 position_bytes: 0,
                 position_reserved_bytes: 0,
-                bins: validated_bins(&tile.native_bins, tile.native_quads.len() as u32),
+                bins,
+                face_bounds,
                 exact: tile.exact,
                 profile: Some(ProfileAllocation {
                     indices: None,
@@ -2332,6 +2369,7 @@ impl AdaptiveGpu {
                     .map_or(0, |p| p.positions.len() as u64 * 12),
                 position_reserved_bytes: table_extra,
                 bins: vec![],
+                face_bounds: vec![],
                 exact: tile.exact,
                 profile: Some(ProfileAllocation {
                     indices: None,
@@ -2399,32 +2437,44 @@ fn certificate_kind(tile: &GeometryTile) -> u8 {
     }
 }
 
-fn intersects_raster_clip(matrix: Mat4, [lo, hi]: [Vec3; 2]) -> bool {
-    let r = matrix.transpose();
-    let abs = lo.abs().max(hi.abs()).extend(1.);
-    // Clip coordinates are computed separately before the hardware comparison.
-    // Include their rounding error even when subtracting nearly parallel rows
-    // (the perspective far plane).
-    let clip_scale = [r.x_axis, r.y_axis, r.z_axis, r.w_axis]
-        .into_iter()
-        .map(|row| row.abs().dot(abs))
-        .fold(1_f32, f32::max);
-    let tolerance = 16. * f32::EPSILON * clip_scale;
-    let w = r.w_axis;
-    [
-        w + r.x_axis,
-        w - r.x_axis,
-        w + r.y_axis,
-        w - r.y_axis,
-        r.z_axis,
-        w - r.z_axis,
-    ]
-    .into_iter()
-    .all(|plane| {
-        let n = plane.truncate();
-        let support = Vec3::select(n.cmpge(Vec3::ZERO), hi, lo);
-        n.dot(support) + plane.w >= -tolerance
-    })
+struct RasterClip {
+    planes: [glam::Vec4; 6],
+    tolerance: f32,
+}
+impl RasterClip {
+    fn new(matrix: Mat4, [lo, hi]: [Vec3; 2]) -> Self {
+        let r = matrix.transpose();
+        let abs = lo.abs().max(hi.abs()).extend(1.);
+        // Clip coordinates are computed separately before the hardware comparison.
+        // Include their rounding error even when subtracting nearly parallel rows
+        // (the perspective far plane).
+        let clip_scale = [r.x_axis, r.y_axis, r.z_axis, r.w_axis]
+            .into_iter()
+            .map(|row| row.abs().dot(abs))
+            .fold(1_f32, f32::max);
+        let tolerance = 16. * f32::EPSILON * clip_scale;
+        let w = r.w_axis;
+        let planes = [
+            w + r.x_axis,
+            w - r.x_axis,
+            w + r.y_axis,
+            w - r.y_axis,
+            r.z_axis,
+            w - r.z_axis,
+        ];
+        Self { planes, tolerance }
+    }
+    fn intersects(&self, [lo, hi]: [Vec3; 2]) -> bool {
+        self.planes.into_iter().all(|plane| {
+            let n = plane.truncate();
+            let support = Vec3::select(n.cmpge(Vec3::ZERO), hi, lo);
+            n.dot(support) + plane.w >= -self.tolerance
+        })
+    }
+}
+#[cfg(test)]
+fn intersects_raster_clip(matrix: Mat4, bounds: [Vec3; 2]) -> bool {
+    RasterClip::new(matrix, bounds).intersects(bounds)
 }
 fn nearest_depth(origin: DVec3, bounds: [Vec3; 2], eye: DVec3, forward: DVec3) -> f64 {
     let local = Vec3::new(
