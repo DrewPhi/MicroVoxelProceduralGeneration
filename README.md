@@ -84,16 +84,16 @@ forward spacing and vegetation off.
 
 | Highlands seed | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
 | --- | --- | ---: | ---: |
-| 19 | 7.59 / 9.87 / 10.71 | 7.61 | 26 / 240 |
-| 40961 | 3.94 / 5.27 / 5.57 | 3.98 | 9 / 240 |
-| 673 | 7.30 / 9.54 / 10.66 | 15.53 | 71 / 240 |
+| 19 | 8.01 / 9.86 / 10.62 | 7.41 | 27 / 240 |
+| 40961 | 3.74 / 5.03 / 5.28 | 2.68 | 1 / 240 |
+| 673 | 6.95 / 8.82 / 10.08 | 10.49 | 57 / 240 |
 
-The gallery view, with vegetation enabled, measured **9.60 / 12.13 / 12.59 ms**
+The gallery view, with vegetation enabled, measured **9.79 / 12.43 / 13.06 ms**
 at a fixed banked camera during 12 seconds of cold refinement. Each coarse
 face carries its material and sampled color in the existing 32-byte instance.
 The renderer can cull complete rear-facing groups before vertex processing.
 The flight scheduler samples the approaching ridgeline and publishes up to two
-refinements per transaction. Block size changes remain visible during refinement.
+refinements per transaction. Neighboring tiles fill in intermediate block sizes up to a 32-column tile budget. On seed 673 this reduced ridgeline p95 from 15.53 to 10.49 pixels. Some tile boundaries remain visible during refinement.
 
 On the 3 m/s Watershed seed 997 walking turn, limiting an ascending shadow
 ray to the highest occupied native root gave p50/p95/p99 of

@@ -1287,6 +1287,11 @@ impl AdaptiveStream {
         // Second pass: each physical shared edge has one canonical sample stride,
         // including the coarse edge split across two balanced fine neighbors.
         let pairs = adjacency(&nodes);
+        if crate::adaptive_geometry::distant_voxels::Mode::current()
+            == crate::adaptive_geometry::distant_voxels::Mode::Blocks
+        {
+            balance_block_spacing(&mut nodes, &pairs);
+        }
         let mut edges: Vec<[u32; 4]> = nodes.iter().map(|n| [n.step; 4]).collect();
         if self.world.topology_base_cells().is_some() {
             for (i, n) in nodes.iter().enumerate() {
@@ -2549,6 +2554,33 @@ fn frustum_horizontal_extents(camera: &Camera, width: u32, height: u32) -> Optio
 fn same_pose(a: &Camera, b: &Camera) -> bool {
     a == b
 }
+// Neighbors can have similar tile widths but very different voxel pitches.
+// Fill the intermediate level before publishing that boundary. Retain the
+// 32-column build limit of the flight macro tiles, including near native LOD.
+fn balance_block_spacing(nodes: &mut [Node], pairs: &[(usize, usize, usize, usize)]) {
+    loop {
+        let mut changed = false;
+        for &(a, _, b, _) in pairs {
+            let (coarse, fine) = if nodes[a].step > nodes[b].step {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let target = nodes[fine]
+                .step
+                .saturating_mul(2)
+                .max(nodes[coarse].width / 32);
+            if target < nodes[coarse].step {
+                nodes[coarse].step = target;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 fn split(n: Node, out: &mut Vec<Node>) {
     let half = n.width / 2;
     for dz in [0, half] {
@@ -2688,6 +2720,21 @@ fn diagnostic_boxes_disjoint(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn block_spacing_fills_intermediate_levels_with_bounded_per_tile_work() {
+        let mut nodes = [32, 16, 2, 1].map(|step| Node {
+            min: [0, 0],
+            width: 128,
+            step,
+        });
+        let neighbors = [(0, 2, 1, 0), (1, 2, 2, 0), (2, 2, 3, 0)];
+        balance_block_spacing(&mut nodes, &neighbors);
+        assert_eq!(nodes.map(|n| n.step), [8, 4, 2, 1]);
+        nodes[0].width = 1024;
+        nodes[0].step = 128;
+        balance_block_spacing(&mut nodes, &neighbors);
+        assert_eq!(nodes[0].step, 32);
+    }
     #[test]
     fn cached_partition_guard_matches_original_scans_during_camera_changes() {
         let keys: Vec<_> = (-2..2)
