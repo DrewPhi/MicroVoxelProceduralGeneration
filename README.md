@@ -80,10 +80,14 @@ wall segments at their boundaries. A moving window reuses samples behind the air
 volume. Set `--terrain-recipe watershed` after the preset for the earlier terrain.
 
 A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
-finished image. To measure a level, unbanked flight over the unedited default
-Highlands, use `cargo run --release -p frontier-reference --bin flight_skyline -- --help`
-from `frontier/`. Turn vegetation off for this measurement. The tool reports
-ridgeline displacement in screen pixels against a sampled procedural reference.
+finished image. To measure the skyline over unedited Highlands, use
+`cargo run --release -p frontier-reference --bin flight_skyline -- --help`
+from `frontier/`. Use the pilot camera with vegetation off. For a banked view,
+pass the capture's `roll_degrees` as `--roll-degrees`. The tool measures
+displacement along the screen projection of vertical world planes. At 32°
+bank on seed 19, it measured 5.09 px at p95. At −38° on seed 673 it measured
+4.57 px. Halving the radial spacing from 0.5 m to 0.25 m changed p95 by less
+than 0.01 px in both views.
 On seed 19, halving the reference spacing from 0.5 m to 0.25 m changed the
 median by 0.09 px and left p95 unchanged across 240 screen columns.
 
