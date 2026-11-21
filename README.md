@@ -32,7 +32,9 @@ Level cruise trims to 65 m/s. Pulling into a climb trades airspeed for height,
 and a dive recovers speed. Banking increases drag and raises the stall speed
 above the 24 m/s wings-level value. The instruments show vertical speed and
 warn as you approach a stall. Lower the nose, level the wings and add power
-to recover.
+to recover. The lower-left attitude indicator shows bank and pitch alongside
+heading, airspeed, altitude and climb rate. **F3** shows frame times and terrain
+loading. **Esc** opens settings.
 
 To land, bring the wings level, slow below 48 m/s and descend at less than
 3.5 m/s onto a firm, nearly level strip. On the ground, **A/D** steer and

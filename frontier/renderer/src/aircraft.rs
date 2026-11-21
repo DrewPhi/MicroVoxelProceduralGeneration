@@ -31,6 +31,8 @@ pub(crate) struct Instruments {
     pub altitude_m: f64,
     pub climb_mps: f32,
     pub bank_degrees: f32,
+    pub pitch_degrees: f32,
+    pub heading_degrees: f32,
     pub stall_warning: bool,
     pub grounded: bool,
 }
@@ -156,6 +158,8 @@ impl Aircraft {
                 self.speed * pose.pitch.sin() - self.sink
             },
             bank_degrees: pose.roll.to_degrees(),
+            pitch_degrees: pose.pitch.to_degrees(),
+            heading_degrees: (180. - pose.yaw.to_degrees()).rem_euclid(360.),
             stall_warning: !self.grounded
                 && self.speed < 1.08 * LEVEL_STALL_SPEED * load_factor(pose.roll).sqrt(),
             grounded: self.grounded,

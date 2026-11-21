@@ -7,6 +7,9 @@ use winit::{
     window::Window,
 };
 
+#[path = "flight_instruments.rs"]
+mod flight_instruments;
+
 pub struct SettingsUi {
     context: egui::Context,
     input: egui_winit::State,
@@ -14,6 +17,8 @@ pub struct SettingsUi {
     settings: VisualSettings,
     loading_draft: VisualSettings,
     open: bool,
+    telemetry_visible: bool,
+    gpu_readout: Option<(std::time::Instant, [Option<f64>; 2])>,
     paint_jobs: Vec<egui::ClippedPrimitive>,
     free_textures: Vec<egui::TextureId>,
     screen: ScreenDescriptor,
@@ -55,6 +60,8 @@ impl SettingsUi {
             loading_draft: settings.clone(),
             settings,
             open: false,
+            telemetry_visible: false,
+            gpu_readout: None,
             paint_jobs: Vec::new(),
             free_textures: Vec::new(),
             screen: ScreenDescriptor {
@@ -77,6 +84,24 @@ impl SettingsUi {
         self.open
     }
 
+    pub(super) fn shows_metrics(&self) -> bool {
+        self.telemetry_visible || self.open
+    }
+
+    pub(super) fn gpu_times(
+        &mut self,
+        read: impl FnOnce() -> [Option<f64>; 2],
+    ) -> [Option<f64>; 2] {
+        if let Some((time, values)) = self.gpu_readout {
+            if time.elapsed() < std::time::Duration::from_millis(250) {
+                return values;
+            }
+        }
+        let values = read();
+        self.gpu_readout = Some((std::time::Instant::now(), values));
+        values
+    }
+
     pub fn set_walking(&mut self, walking: bool) {
         self.settings.walking = walking;
         self.loading_draft.walking = walking;
@@ -90,6 +115,12 @@ impl SettingsUi {
     /// close, focus and redraw events, and releases cursor grab while open.
     pub fn handle_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
         if let WindowEvent::KeyboardInput { event, .. } = event {
+            if event.physical_key == PhysicalKey::Code(KeyCode::F3) {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.telemetry_visible = !self.telemetry_visible;
+                }
+                return true;
+            }
             if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                 if event.state == ElementState::Pressed && !event.repeat {
                     self.open = !self.open;
@@ -154,6 +185,24 @@ impl SettingsUi {
                 }
                 painter.circle_stroke(rect.center(),3.,egui::Stroke::new(1.,egui::Color32::WHITE));
             }
+            if !self.open && self.started.elapsed().as_secs_f32() < 8. {
+                egui::Area::new(egui::Id::new("control hint"))
+                    .anchor(egui::Align2::CENTER_TOP,[0.,14.]).interactable(false).show(ctx,|ui| {
+                        egui::Frame::popup(ui.style()).show(ui,|ui| { ui.small("Click to take control   ·   Esc settings   ·   F3 performance"); });
+                    });
+            }
+            if let Some(flight) = stats.flight {
+                if !self.open { flight_instruments::show(ctx,flight); }
+            }
+            if stats.background_paused && !self.telemetry_visible && !self.open {
+                egui::Area::new(egui::Id::new("memory pressure"))
+                    .anchor(egui::Align2::LEFT_TOP,[14.,14.]).interactable(false).show(ctx,|ui| {
+                        egui::Frame::popup(ui.style()).show(ui,|ui| {
+                            ui.colored_label(egui::Color32::YELLOW,"Low memory · terrain loading paused");
+                        });
+                    });
+            }
+            if self.telemetry_visible || self.open {
             egui::Area::new(egui::Id::new("frontier telemetry"))
                 .anchor(egui::Align2::LEFT_TOP, [14., 14.])
                 .interactable(false)
@@ -171,12 +220,6 @@ impl SettingsUi {
                             ))
                             .strong(),
                         );
-                        if let Some(flight) = stats.flight {
-                            ui.label(format!("{:.0} km/h   ·   {:.0} m ASL   ·   {:+.1} m/s vertical   ·   bank {:+.0}°",
-                                flight.speed_mps * 3.6, flight.altitude_m, flight.climb_mps, flight.bank_degrees));
-                            if flight.stall_warning {ui.colored_label(egui::Color32::YELLOW, "Low airspeed · level wings, lower nose, add power");}
-                            if flight.grounded {ui.small("W accelerate  ·  S brake  ·  A/D steer  ·  ↓ lift off above 105 km/h");} else {ui.small("W/S throttle  ·  A/D bank  ·  ↓/↑ pitch  ·  C chase view  ·  V free camera");}
-                        }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {
                                 ui.label(format!("Render GPU {ms:.1} ms  ·"));
@@ -211,6 +254,7 @@ impl SettingsUi {
                         }
                     });
                 });
+            }
             if !self.open {
                 return;
             }
@@ -239,6 +283,11 @@ impl SettingsUi {
                     egui::ScrollArea::vertical()
                         .max_height((available - 80.).max(80.))
                         .show(ui, |ui| {
+                            ui.collapsing("Controls", |ui| {
+                                ui.label("Click to take control. Esc opens settings. F3 shows performance.");
+                                ui.label("Aircraft: W/S change power, A/D bank, ↓/↑ pitch, C changes view. On the ground W accelerates, S brakes, and ↓ rotates above 105 km/h.");
+                                ui.label("V switches aircraft and free camera. F switches walking. On foot, hold left mouse to pick up terrain and right mouse to place it.");
+                            });
                             ui.heading("Image quality");
                             ui.add(
                                 egui::Slider::new(&mut self.loading_draft.pixel_error, 0.5..=12.)

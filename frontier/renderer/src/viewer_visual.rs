@@ -39,34 +39,40 @@ impl Viewer {
             background_paused: self.resource_pressure,
             ..Default::default()
         };
-        if let Some(probe) = &self.gpu_probe {
-            stats.gpu_ms = probe.stats.summary().p50_ms;
-            stats.gpu_full_ms = probe
-                .full_supported
-                .then(|| probe.full_stats.summary().p50_ms)
-                .flatten();
+        if ui.shows_metrics() {
+            if let Some(probe) = &self.gpu_probe {
+                [stats.gpu_ms, stats.gpu_full_ms] = ui.gpu_times(|| {
+                    [
+                        probe.stats.summary().p50_ms,
+                        probe
+                            .full_supported
+                            .then(|| probe.full_stats.summary().p50_ms)
+                            .flatten(),
+                    ]
+                });
+            }
+            if let Some(view) = &self.adaptive_view {
+                stats.pending = view.pending_count;
+                stats.gpu_mib = view.stats.allocated_bytes as f64 / 1048576.;
+                stats.cache_mib = view.cache_bytes as f64 / 1048576.;
+                stats.quality_ready = view.quality_ready;
+            }
+            if let Some(experiment) = &gpu.naadf {
+                stats.naadf_status =
+                    if experiment.ready() && experiment.bounds_for(self.camera).is_none() {
+                        "Outside fixed NAADF region · rebuild here".into()
+                    } else {
+                        format!("{} (stage {})", experiment.status, experiment.stage)
+                    };
+                stats.naadf_gpu_mib = experiment.gpu_bytes() as f64 / 1048576.;
+            }
+            stats.plant_instances = gpu.vegetation_stats.selected_instances;
+            stats.plant_pending = gpu.vegetation_stats.pending_jobs;
+            stats.plant_gpu_mib = gpu
+                .vegetation
+                .as_ref()
+                .map_or(0., |p| p.stats().resident_bytes as f64 / 1048576.);
         }
-        if let Some(view) = &self.adaptive_view {
-            stats.pending = view.pending_count;
-            stats.gpu_mib = view.stats.allocated_bytes as f64 / 1048576.;
-            stats.cache_mib = view.cache_bytes as f64 / 1048576.;
-            stats.quality_ready = view.quality_ready;
-        }
-        if let Some(experiment) = &gpu.naadf {
-            stats.naadf_status =
-                if experiment.ready() && experiment.bounds_for(self.camera).is_none() {
-                    "Outside fixed NAADF region · rebuild here".into()
-                } else {
-                    format!("{} (stage {})", experiment.status, experiment.stage)
-                };
-            stats.naadf_gpu_mib = experiment.gpu_bytes() as f64 / 1048576.;
-        }
-        stats.plant_instances = gpu.vegetation_stats.selected_instances;
-        stats.plant_pending = gpu.vegetation_stats.pending_jobs;
-        stats.plant_gpu_mib = gpu
-            .vegetation
-            .as_ref()
-            .map_or(0., |p| p.stats().resident_bytes as f64 / 1048576.);
         let was_open = ui.menu_open();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let changes = ui.prepare(
