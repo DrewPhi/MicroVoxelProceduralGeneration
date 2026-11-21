@@ -107,6 +107,10 @@ Watershed walk and turn at 1080p, the stepped renderer measured
 underfoot use the native 6.25 cm grid. The hillside across the clearing
 uses larger, axis-aligned faces.*
 
+![Banked voxel aircraft flying between terraced rock summits that rise through a cloud deck.](frontier/reference/gallery/highlands-cloud-pass.jpg)
+
+*At 2,298 m on Highlands seed 673, the late sun picks out individual rock terraces above the cloud deck. This in-engine 1920×1080 view uses 4× MSAA, a 16° left bank and a 6 km active view.*
+
 The Highlands recipe combines ridged summits, branching foothills, watershed
 drainage and snow. Rock formations vary in thickness along folded beds,
 and snow albedo varies between wind-scoured firn and softer drifts. The preset renders a 6 km active terrain view with a
