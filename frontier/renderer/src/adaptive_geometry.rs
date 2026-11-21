@@ -2974,14 +2974,23 @@ impl Generator<'_> {
         // Dense Highlands grids share a conservative source enclosure across
         // adjacent quads. Evaluate each actual triangle against that enclosure.
         let rows = self.key.width_cells as i64 / s;
-        let group = if rows > 16
-            && rows % 16 == 0
+        static COARSE_GROUPS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let groups = if s as f64 * voxel_size() >= 32.
+            && *COARSE_GROUPS.get_or_init(|| {
+                std::env::var("FRONTIER_HIGHLANDS_BOUND_ROWS").as_deref() != Ok("16")
+            }) {
+            8
+        } else {
+            16
+        };
+        let group = if rows > groups
+            && rows % groups == 0
             && self
                 .world
                 .fbm_terrain()
                 .is_some_and(|t| t.params().recipe == frontier_world::FbmRecipe::Highlands)
         {
-            self.key.width_cells as i64 / 16
+            self.key.width_cells as i64 / groups
         } else {
             s
         };
@@ -6724,45 +6733,47 @@ mod tests {
         )
         .unwrap();
         let terrain = world.fbm_terrain().unwrap();
-        let key = TileKey {
-            min: [20480, -4096],
-            width_cells: 4096,
-            step_cells: 128,
-            edge_steps: [64, 128, 64, 32],
-            source_revision: 0,
-        };
-        let tile = build(&world, key, || false).unwrap();
-        let width = key.width_cells / 16;
-        let mut bounds = HashMap::new();
-        let mut error = 0_f64;
-        for tri in tile.mesh.indices.chunks_exact(3) {
-            let vertices: [[f64; 3]; 3] = std::array::from_fn(|i| {
-                let p = tile.mesh.vertices[tri[i] as usize].position;
-                [
-                    key.min[0] as f64 * voxel_size() + p[0] as f64,
-                    p[1] as f64,
-                    key.min[1] as f64 * voxel_size() + p[2] as f64,
-                ]
-            });
-            let min = [0, 2].map(|axis| {
-                let center = vertices.iter().map(|p| p[axis]).sum::<f64>() / 3.;
-                (center / (voxel_size() * width as f64)).floor() as i64 * width as i64
-            });
-            let bound = bounds.entry(min).or_insert_with(|| {
-                bound_native_height(
-                    terrain,
-                    ColumnBox {
-                        min,
-                        size_cells: [width; 2],
-                    },
-                    BoundBudget::default(),
-                )
-                .unwrap()
-            });
-            error = error.max(bound.triangle_error(vertices).unwrap());
+        for (step, groups) in [(128, 16), (512, 8)] {
+            let key = TileKey {
+                min: [20480, -4096],
+                width_cells: step * 32,
+                step_cells: step,
+                edge_steps: [step / 2, step, step / 2, step / 4],
+                source_revision: 0,
+            };
+            let tile = build(&world, key, || false).unwrap();
+            let width = key.width_cells / groups;
+            let mut bounds = HashMap::new();
+            let mut error = 0_f64;
+            for tri in tile.mesh.indices.chunks_exact(3) {
+                let vertices: [[f64; 3]; 3] = std::array::from_fn(|i| {
+                    let p = tile.mesh.vertices[tri[i] as usize].position;
+                    [
+                        key.min[0] as f64 * voxel_size() + p[0] as f64,
+                        p[1] as f64,
+                        key.min[1] as f64 * voxel_size() + p[2] as f64,
+                    ]
+                });
+                let min = [0, 2].map(|axis| {
+                    let center = vertices.iter().map(|p| p[axis]).sum::<f64>() / 3.;
+                    (center / (voxel_size() * width as f64)).floor() as i64 * width as i64
+                });
+                let bound = bounds.entry(min).or_insert_with(|| {
+                    bound_native_height(
+                        terrain,
+                        ColumnBox {
+                            min,
+                            size_cells: [width; 2],
+                        },
+                        BoundBudget::default(),
+                    )
+                    .unwrap()
+                });
+                error = error.max(bound.triangle_error(vertices).unwrap());
+            }
+            assert_eq!(bounds.len(), (groups * groups) as usize);
+            assert_eq!(Some(error), tile.affine_error_m);
         }
-        assert_eq!(bounds.len(), 256);
-        assert_eq!(Some(error), tile.affine_error_m);
     }
 
     #[test]

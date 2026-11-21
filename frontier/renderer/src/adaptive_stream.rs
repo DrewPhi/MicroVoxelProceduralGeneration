@@ -480,6 +480,9 @@ fn obsolete_refinement_demand(
             })
     })
 }
+#[path = "flight_focus.rs"]
+mod flight_focus;
+
 pub struct AdaptiveStream {
     world: World,
     cache: GeometryCache,
@@ -515,6 +518,7 @@ pub struct AdaptiveStream {
     last_side_prefetch: Option<std::time::Instant>,
     min_direct_split_width: Option<u32>,
     macro_segments: u32,
+    flight_focus: Option<flight_focus::Focus>,
     visible_vertical_bound: bool,
     occlusion: Option<(Camera, OcclusionSet)>,
     prediction_occlusion: Option<(Camera, OcclusionSet)>,
@@ -605,6 +609,9 @@ impl AdaptiveStream {
             recent_turn_poses: VecDeque::new(),
             last_side_prefetch: None,
             min_direct_split_width,
+            flight_focus: (highlands
+                && std::env::var_os("FRONTIER_FLIGHT_FOCUS").is_none_or(|v| v != "0"))
+            .then(flight_focus::Focus::default),
             macro_segments: if highlands
                 && std::env::var("FRONTIER_HIGHLANDS_PATCH_ROWS").as_deref() != Ok("16")
             {
@@ -948,7 +955,21 @@ impl AdaptiveStream {
             self.settings.refinements_per_transaction,
         );
         let alpine = is_alpine(&self.world);
-        let side_slot = near.is_empty()
+        let flight = if camera.far >= 3000. && self.next_publication_id % 4 != 3 {
+            self.flight_focus.as_mut().and_then(|focus| {
+                focus.select(
+                    &self.world,
+                    camera,
+                    width as f32 / height as f32,
+                    &urgent,
+                    self.settings.refinements_per_transaction,
+                )
+            })
+        } else {
+            None
+        };
+        let side_slot = flight.is_none()
+            && near.is_empty()
             && self
                 .last_side_prefetch
                 .is_none_or(|t| t.elapsed().as_millis() >= 650)
@@ -956,7 +977,9 @@ impl AdaptiveStream {
                 .recent_turn_poses
                 .back()
                 .is_none_or(|(t, _, _)| t.elapsed().as_millis() >= 200);
-        let (mut refine, predicted_footprint) = if alpine && !near.is_empty() {
+        let (mut refine, predicted_footprint) = if let Some(flight) = flight {
+            (flight, None)
+        } else if alpine && !near.is_empty() {
             (near, None)
         } else {
             select_with_prediction(

@@ -878,7 +878,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         visual.cache_mib = adaptive_cache_mib;
     }
     visual.workers = adaptive_workers;
-    visual.refinements = adaptive_refinements;
+    visual.refinements = if visual.flight_horizon {
+        2
+    } else {
+        adaptive_refinements
+    };
     for (flag, value) in &resource_overrides {
         match flag.as_str() {
             "--terrain-cache-mib" | "--adaptive-cache-mib" => visual.cache_mib = *value,

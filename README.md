@@ -15,6 +15,10 @@ cargo build --release --locked --bin frontier
   --world-save output/worlds/highlands-19.save
 ```
 
+![The orange-tipped bush plane banking over a snowy Highlands ridge.](frontier/reference/gallery/highlands-flight.jpg)
+
+*Exterior chase view above the seed 19 Highlands, captured in-engine on the Radeon 760M.*
+
 Click the window to take the controls. **W/S** increase or decrease airspeed,
 **A/D** bank into a turn, and **Down/Up** pitch the nose up or down.
 **C** switches between the pilot and exterior chase views. **V** switches
@@ -41,6 +45,29 @@ from `frontier/`. Turn vegetation off for this measurement. The tool reports
 ridgeline displacement in screen pixels against a sampled procedural reference.
 On seed 19, halving the reference spacing from 0.5 m to 0.25 m changed the
 median by 0.09 px and left p95 unchanged across 240 screen columns.
+
+### Flight benchmark
+
+Radeon 760M, 1920×1080, MSAA 1, 6 km active view, 32 m native radius.
+Each row is a cold-cache, 10-second flight at 80 m/s with ongoing refinement.
+The ridgeline comparison samples 240 columns at the final pose, with 0.5 m
+forward spacing and vegetation off.
+
+| Highlands seed | Frame p50 / p95 / p99 (ms) | Ridgeline p95 (px) | Columns off by >5 px |
+| --- | --- | ---: | ---: |
+| 19 | 6.56 / 8.61 / 9.66 | 10.18 | 45 / 240 |
+| 40961 | 4.99 / 6.47 / 8.13 | 2.35 | 0 / 240 |
+| 673 | 6.08 / 8.28 / 9.11 | 14.21 | 54 / 240 |
+
+The flight scheduler samples the approaching ridgeline and publishes up to two
+refinements per transaction. Coarse Highlands patches share a conservative source
+bound across groups of quads. With the previous 16-row bounds and ordinary
+two-tile selection, the same flights had 84, 1 and 110 columns outside five pixels
+respectively. Near terrain and mesh transitions still have visible errors.
+`FRONTIER_FLIGHT_FOCUS=0` and `FRONTIER_HIGHLANDS_BOUND_ROWS=16` reproduce
+that control.
+
+### Earlier measurements
 
 On the Radeon 760M at 1920×1080, MSAA 1, the seed 19 Highlands flyover
 measured **13.65 / 16.20 / 17.95 ms** frame intervals at p50/p95/p99. This
