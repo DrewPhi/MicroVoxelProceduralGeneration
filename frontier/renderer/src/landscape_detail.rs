@@ -7,7 +7,8 @@ use std::sync::{
 };
 
 const SIDE: usize = 257;
-const HALO_SIDE: usize = SIDE + 2;
+const HALO: usize = 16;
+const HALO_SIDE: usize = SIDE + 2 * HALO;
 const STEP_M: f64 = 8.;
 const RECENTER: i64 = 32;
 const RIVER_SIDE: usize = SIDE * 2;
@@ -112,8 +113,8 @@ struct Grid {
 }
 impl Grid {
     fn get(&self, x: i64, z: i64) -> Option<Sample> {
-        let u = x - self.min[0] + 1;
-        let v = z - self.min[1] + 1;
+        let u = x - self.min[0] + HALO as i64;
+        let v = z - self.min[1] + HALO as i64;
         if (0..HALO_SIDE as i64).contains(&u) && (0..HALO_SIDE as i64).contains(&v) {
             Some(self.samples[v as usize * HALO_SIDE + u as usize])
         } else {
@@ -127,8 +128,8 @@ impl Grid {
         let mut samples = Vec::with_capacity(HALO_SIDE * HALO_SIDE);
         for v in 0..HALO_SIDE {
             for u in 0..HALO_SIDE {
-                let x = min[0] + u as i64 - 1;
-                let z = min[1] + v as i64 - 1;
+                let x = min[0] + u as i64 - HALO as i64;
+                let z = min[1] + v as i64 - HALO as i64;
                 let sample = reusable.and_then(|g| g.get(x, z)).unwrap_or_else(|| {
                     let c = Cell::from_meters([x as f64 * STEP_M, 0., z as f64 * STEP_M]);
                     let (col, rgb) = terrain.landscape_column(c.x, c.z, source.vegetation);
@@ -158,9 +159,10 @@ impl Grid {
         );
         let area = SIDE * SIDE;
         let mut pixels = vec![0; area * 12];
+        let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
         for v in 0..SIDE {
             for u in 0..SIDE {
-                let j = (v + 1) * HALO_SIDE + u + 1;
+                let j = (v + HALO) * HALO_SIDE + u + HALO;
                 let n = glam::Vec3::new(
                     samples[j - 1].height - samples[j + 1].height,
                     2. * STEP_M as f32,
@@ -168,14 +170,22 @@ impl Grid {
                 )
                 .normalize();
                 let at = (v * SIDE + u) * 4;
-                let [x, y, z] = n.to_array().map(|v| unorm(0.5 + v * 0.5));
+                // Upper-hemisphere octahedral normals leave a byte for skylight.
+                let oct = n / n.abs().element_sum();
+                let x = unorm(0.5 + 0.5 * oct.x);
+                let z = unorm(0.5 + 0.5 * oct.z);
+                let sky = if terrain_sky {
+                    unorm(sky_exposure(&samples, j, n))
+                } else {
+                    255
+                };
                 let [r, g, b, depth] = samples[j].albedo;
                 for k in 0..4 {
                     pixels[8 * area + at + k] =
                         rivers.cover[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2];
                 }
                 let dry = depth == 255;
-                pixels[at..at + 4].copy_from_slice(&[x, y, z, if dry { 255 } else { 0 }]);
+                pixels[at..at + 4].copy_from_slice(&[x, z, sky, if dry { 255 } else { 0 }]);
                 pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[
                     r,
                     g,
@@ -195,6 +205,41 @@ impl Grid {
         )
     }
 }
+// Angular fraction of diffuse sky hidden by the surrounding terrain, relative
+// to the sample's own tangent plane. A planar face already receives the
+// renderer's orientation-dependent sky light, so it gets no extra darkening.
+fn sky_exposure(samples: &[Sample], center: usize, n: glam::Vec3) -> f32 {
+    let h = samples[center].height;
+    let mut blocked = 0.;
+    for (dx, dz) in [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ] {
+        let stride = dx + dz * HALO_SIDE as isize;
+        let length = if dx == 0 || dz == 0 {
+            1.
+        } else {
+            std::f32::consts::SQRT_2
+        };
+        let tangent = (-(n.x * dx as f32 + n.z * dz as f32) / (n.y * length)).max(0.);
+        let mut horizon = tangent;
+        for distance in [2, 6, HALO as isize] {
+            let neighbor = (center as isize + distance * stride) as usize;
+            let slope = (samples[neighbor].height - h) / (distance as f32 * STEP_M as f32 * length);
+            horizon = horizon.max(slope);
+        }
+        let sky_blocked = |slope: f32| slope * slope / (1. + slope * slope);
+        blocked += sky_blocked(horizon) - sky_blocked(tangent);
+    }
+    1. - blocked / 8.
+}
+
 fn unorm(value: f32) -> u8 {
     (value.clamp(0., 1.) * 255.).round() as u8
 }
@@ -376,6 +421,32 @@ mod tests {
             }
         }
         assert!(mixed > 10);
+    }
+
+    #[test]
+    fn skylight_tracks_the_horizon_and_leaves_planar_slopes_unchanged() {
+        let center = HALO * HALO_SIDE + HALO;
+        let field = |f: fn(f32, f32) -> f32| {
+            (0..HALO_SIDE * (2 * HALO + 1))
+                .map(|i| {
+                    let x = (i % HALO_SIDE) as f32 - HALO as f32;
+                    let z = (i / HALO_SIDE) as f32 - HALO as f32;
+                    Sample {
+                        height: f(x * STEP_M as f32, z * STEP_M as f32),
+                        albedo: [0; 4],
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let plane = field(|x, z| 0.7 * x - 0.3 * z);
+        assert!(
+            (sky_exposure(&plane, center, glam::Vec3::new(-0.7, 1., 0.3).normalize()) - 1.).abs()
+                < 1e-5
+        );
+        let bowl = field(|x, z| x.hypot(z));
+        assert!((sky_exposure(&bowl, center, glam::Vec3::Y) - 0.5).abs() < 1e-5);
+        let dome = field(|x, z| -x.hypot(z));
+        assert_eq!(sky_exposure(&dome, center, glam::Vec3::Y), 1.);
     }
 
     #[test]

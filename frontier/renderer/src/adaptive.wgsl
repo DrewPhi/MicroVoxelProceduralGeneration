@@ -9,7 +9,10 @@ fn legacy_terrain_lighting(normal:vec3<f32>) -> vec3<f32> {
     let ambient=mix(vec3<f32>(0.12,0.105,0.085),vec3<f32>(0.28,0.33,0.40),sky);
     return ambient+vec3<f32>(0.78,0.70,0.58)*max(dot(n,sun),0.);
 }
-fn terrain_lighting(normal:vec3<f32>, visibility:f32) -> vec3<f32> {
+fn terrain_lighting(normal:vec3<f32>,visibility:f32)->vec3<f32> {
+    return terrain_skylight(normal,visibility,1.);
+}
+fn terrain_skylight(normal:vec3<f32>, visibility:f32, exposure:f32) -> vec3<f32> {
     let n=normalize(normal);
     if camera.sun.w > 0.5 {
         let sky=0.5+0.5*n.y;
@@ -21,7 +24,7 @@ fn terrain_lighting(normal:vec3<f32>, visibility:f32) -> vec3<f32> {
             sun_color=outdoor_sun_color(camera.sun.y);
         }
         let direct=sun_color*max(dot(n,camera.sun.xyz),0.);
-        return ambient*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
+        return ambient*exposure*(1.+overcast*0.3)+direct*(1.-0.72*overcast)*visibility;
     }
     return legacy_terrain_lighting(normal);
 }
@@ -500,6 +503,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
     }
 
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(in.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
+    var sky_exposure=1.;
     // The flight field is aligned to canonical 8 m samples. Fine meshes and
     // native stairs retain their own material and face response.
     if near_shadow.parameters.z > -1e10 && (camera.paint_origin.w & 26u) == 0u
@@ -514,7 +518,10 @@ fn shade(input: VertexOut) -> vec4<f32> {
             let slope = textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
             let paint = textureSampleLevel(flight_detail,flight_sampler,uv,1,0.);
             let w = weight * slope.w;
-            in.normal = normalize(mix(in.normal,2.*slope.xyz-1.,w));
+            let oct = 2.*slope.rg-1.;
+            let normal = normalize(vec3(oct.x, max(0.,1.-abs(oct.x)-abs(oct.y)), oct.y));
+            in.normal = normalize(mix(in.normal,normal,w));
+            sky_exposure = mix(1.,slope.b,w);
             in.color = mix(in.color,paint.rgb,w);
         }
     }
@@ -528,7 +535,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
         indirect=ground_irradiance(in.local-camera.eye.xyz,normalize(in.normal),camera.sun.xyz,
             outdoor_sun_color(camera.sun.y),camera.sky.x,visibility);
     }
-    let light=terrain_lighting(in.normal,visibility)+indirect;
+    let light=terrain_skylight(in.normal,visibility,sky_exposure)+indirect;
     var tint=vec3<f32>(1.);
     if camera.eye.w>0. {
         let cell=bitcast<vec3<u32>>(local_cell)+camera.paint_origin.xyz;
