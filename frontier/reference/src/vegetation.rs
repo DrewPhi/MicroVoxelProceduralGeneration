@@ -3,7 +3,7 @@
 use crate::{forward_index, material_id, Hit};
 use frontier_world::{
     vegetation::{model_for, PlantRecord, PlantVoxel, Species},
-    voxel_size, Cell, World,
+    voxel_size, World,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -36,9 +36,23 @@ impl Bounds {
     }
 }
 struct Plant {
-    voxels: Box<[PlantVoxel]>,
+    cells: Box<[Attribute]>,
+    bricks: Box<[Brick]>,
+    min: [i64; 3],
+    size: [i64; 3],
+    brick_stride: [usize; 2],
     bounds: Bounds,
     rank: usize,
+}
+#[derive(Clone, Copy, Default)]
+struct Brick {
+    occupied: u64,
+    first: u32,
+}
+#[derive(Clone, Copy)]
+struct Attribute {
+    material: u8,
+    color: [f32; 3],
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PlantHit {
@@ -46,34 +60,84 @@ pub struct PlantHit {
     pub color: [f32; 3],
     rank: usize,
 }
+// Four native cells along each axis fit exactly in one occupancy word.
+// Bricks store occupied attributes in bit order, preserving source RGB exactly.
+fn brick_address(p: [i64; 3], stride: [usize; 2]) -> (usize, u64) {
+    let [x, y, z] = p.map(|v| v as usize);
+    (
+        (x >> 2) + (y >> 2) * stride[0] + (z >> 2) * stride[1],
+        1u64 << ((x & 3) + 4 * (y & 3) + 16 * (z & 3)),
+    )
+}
 impl Plant {
     fn from_record(p: PlantRecord, rank: usize) -> Self {
         let model = model_for(&p);
-        let mut voxels: Vec<_> = model
-            .voxels
-            .iter()
-            .map(|v| PlantVoxel {
-                cell: p.world_cell(v.cell),
-                ..*v
-            })
-            .collect();
-        voxels.sort_unstable_by_key(|v| v.cell);
         let mut min = [i64::MAX; 3];
         let mut max = [i64::MIN; 3];
-        for v in &voxels {
-            for (a, q) in [v.cell.x, v.cell.y, v.cell.z].into_iter().enumerate() {
-                min[a] = min[a].min(q);
-                max[a] = max[a].max(q + 1);
+        for v in &model.voxels {
+            let c = p.world_cell(v.cell);
+            for (a, q) in [c.x, c.y, c.z].into_iter().enumerate() {
+                min[a] = min[a].min(q - 1);
+                max[a] = max[a].max(q + 2);
             }
         }
+        if model.voxels.is_empty() {
+            min = [p.root.x, p.root.y, p.root.z];
+            max = min.map(|q| q + 1);
+        }
+        let size = std::array::from_fn(|a| max[a] - min[a]);
+        let dims = size.map(|s| (s as usize).div_ceil(4));
+        let stride = [dims[0], dims[0] * dims[1]];
+        let mut bricks = vec![Brick::default(); stride[1] * dims[2]];
+        let address = |v: &PlantVoxel| {
+            let c = p.world_cell(v.cell);
+            brick_address([c.x - min[0], c.y - min[1], c.z - min[2]], stride)
+        };
+        for v in &model.voxels {
+            let (i, bit) = address(v);
+            bricks[i].occupied |= bit;
+        }
+        let mut count = 0;
+        for b in &mut bricks {
+            b.first = count;
+            count += b.occupied.count_ones();
+        }
+        let mut cells = vec![
+            Attribute {
+                material: 0,
+                color: [0.; 3]
+            };
+            count as usize
+        ];
+        for v in &model.voxels {
+            let (i, bit) = address(v);
+            let b = bricks[i];
+            let index = b.first + (b.occupied & (bit - 1)).count_ones();
+            cells[index as usize] = Attribute {
+                material: material_id(v.material),
+                color: v.color,
+            };
+        }
         Self {
-            voxels: voxels.into_boxed_slice(),
+            cells: cells.into_boxed_slice(),
+            bricks: bricks.into_boxed_slice(),
+            min,
+            size,
+            brick_stride: stride,
             bounds: Bounds {
-                min: min.map(|v| (v - 1) as f64 * voxel_size()),
-                max: max.map(|v| (v + 1) as f64 * voxel_size()),
+                min: min.map(|q| q as f64 * voxel_size()),
+                max: max.map(|q| q as f64 * voxel_size()),
             },
             rank,
         }
+    }
+    fn cell(&self, p: [i64; 3]) -> Option<Attribute> {
+        let (i, bit) = brick_address(p, self.brick_stride);
+        let b = self.bricks[i];
+        if b.occupied & bit == 0 {
+            return None;
+        }
+        Some(self.cells[(b.first + (b.occupied & (bit - 1)).count_ones()) as usize])
     }
     fn ray(&self, o: [f64; 3], d: [f64; 3], near: f64, far: f64) -> Option<PlantHit> {
         // Same integer-plane/tied-axis contract as the independent dense oracle;
@@ -85,10 +149,8 @@ impl Plant {
         let d = d.map(|v| v / scale);
         let norm = d.iter().map(|v| v * v).sum::<f64>().sqrt();
         let d = d.map(|v| v / norm);
-        let min = self.bounds.min.map(|v| (v / voxel_size()) as i64);
-        let size = std::array::from_fn::<_, 3, _>(|a| {
-            ((self.bounds.max[a] - self.bounds.min[a]) / voxel_size()) as i64
-        });
+        let min = self.min;
+        let size = self.size;
         let o = std::array::from_fn::<_, 3, _>(|a| o[a] / voxel_size() - min[a] as f64);
         let dc = d.map(|v| v / voxel_size());
         let mut enter = f64::NEG_INFINITY;
@@ -139,41 +201,25 @@ impl Plant {
                 return None;
             }
             let world = std::array::from_fn::<_, 3, _>(|a| p[a] + min[a]);
-            let cell = Cell {
-                x: world[0],
-                y: world[1],
-                z: world[2],
-            };
-            if let Ok(i) = self.voxels.binary_search_by_key(&cell, |v| v.cell) {
+            if let Some(v) = self.cell(p) {
                 let mut visible = faces;
                 for face in 0..6 {
                     if visible & (1 << face) != 0 {
-                        let mut q = world;
+                        // The occupied set has a one-cell empty border.
+                        let mut q = p;
                         q[face / 2] += if face % 2 == 0 { -1 } else { 1 };
-                        if self
-                            .voxels
-                            .binary_search_by_key(
-                                &Cell {
-                                    x: q[0],
-                                    y: q[1],
-                                    z: q[2],
-                                },
-                                |v| v.cell,
-                            )
-                            .is_ok()
-                        {
+                        if self.cell(q).is_some() {
                             visible &= !(1 << face);
                         }
                     }
                 }
                 if visible != 0 {
-                    let v = self.voxels[i];
                     return Some(PlantHit {
                         hit: Hit {
                             cell: world,
                             distance: t,
                             face: visible.trailing_zeros() as usize,
-                            material: material_id(v.material),
+                            material: v.material,
                         },
                         color: v.color,
                         rank: self.rank,
@@ -280,7 +326,7 @@ impl Vegetation {
                                             records.len()
                                         );
                                     }
-                                    (!plant.voxels.is_empty()).then_some(plant)
+                                    (!plant.cells.is_empty()).then_some(plant)
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -292,7 +338,7 @@ impl Vegetation {
                     .collect::<Vec<_>>()
             });
             result.counts[species as usize] = groups.len();
-            result.voxel_count += groups.iter().map(|p| p.voxels.len()).sum::<usize>();
+            result.voxel_count += groups.iter().map(|p| p.cells.len()).sum::<usize>();
             result.plants.append(&mut groups);
         }
         if !result.plants.is_empty() {
@@ -333,7 +379,10 @@ impl Vegetation {
     pub fn memory_bytes(&self) -> usize {
         self.plants
             .iter()
-            .map(|p| p.voxels.len() * std::mem::size_of::<PlantVoxel>())
+            .map(|p| {
+                p.cells.len() * std::mem::size_of::<Attribute>()
+                    + p.bricks.len() * std::mem::size_of::<Brick>()
+            })
             .sum::<usize>()
             + self.nodes.capacity() * std::mem::size_of::<Node>()
             + self.plants.capacity() * std::mem::size_of::<Plant>()
@@ -393,6 +442,7 @@ impl Vegetation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frontier_world::Cell;
     #[test]
     fn instance_bvh_matches_brute_force_and_canonical_materials() {
         let records: Vec<_> = (0..20)
@@ -458,18 +508,15 @@ mod tests {
             let size = std::array::from_fn(|a| {
                 ((plant.bounds.max[a] - plant.bounds.min[a]) / voxel_size()) as usize
             });
+            let model = model_for(&p);
             let dense = crate::Snapshot::build(min, size, |c| {
-                plant
-                    .voxels
-                    .binary_search_by_key(
-                        &Cell {
-                            x: c[0],
-                            y: c[1],
-                            z: c[2],
-                        },
-                        |v| v.cell,
-                    )
-                    .map_or(0, |i| material_id(plant.voxels[i].material))
+                model
+                    .voxel(p.local_cell(Cell {
+                        x: c[0],
+                        y: c[1],
+                        z: c[2],
+                    }))
+                    .map_or(0, |v| material_id(v.material))
             });
             for i in 0..1000 {
                 let a = i as f64 * 2.399963229728653;

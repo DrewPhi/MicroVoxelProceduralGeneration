@@ -1,4 +1,4 @@
-//! Compare an opaque coverage capture with the canonical unedited Highlands
+//! Compare an opaque coverage capture with the canonical unedited landscape
 //! skyline in flight. Repeat at half the sampling interval to check convergence.
 #[path = "../skyline.rs"]
 mod skyline;
@@ -18,15 +18,22 @@ fn vector<const N: usize>(s: &str) -> Result<[f64; N], Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let usage="flight_skyline COVERAGE.f32 WIDTH HEIGHT EYE_X,Y,Z TARGET_X,Y,Z FOV_Y FAR_M SEED [FORWARD_STEP_M] [PIXEL_STRIDE] [--roll-degrees BANK] [--voxel-size METERS] [--depth DEPTH.f32 --depth-stride 40]\nUse an unedited default Highlands world with vegetation and the exterior aircraft off. Banked or pitched views measure displacement along projected vertical world planes.";
+    let usage="flight_skyline COVERAGE.f32 WIDTH HEIGHT EYE_X,Y,Z TARGET_X,Y,Z FOV_Y FAR_M SEED [FORWARD_STEP_M] [PIXEL_STRIDE] [--terrain-recipe highlands|watershed] [--roll-degrees BANK] [--voxel-size METERS] [--depth DEPTH.f32 --depth-stride 40]\nUse an unedited world of the selected recipe (default Highlands) with vegetation and the exterior aircraft off. Banked or pitched views measure displacement along projected vertical world planes.";
     let mut input = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     let mut args = Vec::new();
+    let mut recipe = FbmRecipe::Highlands;
     let mut roll = 0_f64;
     let mut depth_path = None;
     let mut depth_stride = 40usize;
     while let Some(arg) = input.next() {
         if arg == "--roll-degrees" {
             roll = input.next().ok_or("missing bank angle")?.parse()?;
+        } else if arg == "--terrain-recipe" {
+            recipe = match input.next().as_deref() {
+                Some("highlands") => FbmRecipe::Highlands,
+                Some("watershed") => FbmRecipe::Watershed,
+                _ => return Err("expected --terrain-recipe highlands|watershed".into()),
+            };
         } else if arg == "--depth" {
             depth_path = Some(input.next().ok_or("missing depth file")?);
         } else if arg == "--depth-stride" {
@@ -84,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let source = FbmTerrain::new(
         seed,
         FbmParams {
-            recipe: FbmRecipe::Highlands,
+            recipe,
             ..Default::default()
         },
     )?;

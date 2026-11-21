@@ -341,13 +341,26 @@ impl Camera {
         (forward, right, cross(right, forward))
     }
     pub fn ray(&self, x: f64, y: f64, width: usize, height: usize) -> ([f64; 3], f64, f64) {
-        let (f, r, u) = self.basis();
+        self.raster_rays(width, height, 0.)(x, y)
+    }
+    pub fn raster_rays(
+        &self,
+        width: usize,
+        height: usize,
+        bank_degrees: f64,
+    ) -> impl Fn(f64, f64) -> ([f64; 3], f64, f64) + Sync + '_ {
+        let (f, right, up) = self.basis();
+        let (s, c) = bank_degrees.to_radians().sin_cos();
+        let r: [f64; 3] = std::array::from_fn(|a| right[a] * c - up[a] * s);
+        let u: [f64; 3] = std::array::from_fn(|a| up[a] * c + right[a] * s);
         let h = (self.fov_y_degrees.to_radians() * 0.5).tan();
-        let sx = (2. * x / width as f64 - 1.) * h * width as f64 / height as f64;
-        let sy = (1. - 2. * y / height as f64) * h;
-        let d = normalized(std::array::from_fn(|a| f[a] + r[a] * sx + u[a] * sy));
-        let cosine = dot(f, d);
-        (d, self.near / cosine, self.far / cosine)
+        move |x, y| {
+            let sx = (2. * x / width as f64 - 1.) * h * width as f64 / height as f64;
+            let sy = (1. - 2. * y / height as f64) * h;
+            let d = normalized(std::array::from_fn(|a| f[a] + r[a] * sx + u[a] * sy));
+            let cosine = dot(f, d);
+            (d, self.near / cosine, self.far / cosine)
+        }
     }
 }
 pub const SKY: [f64; 3] = [0.34, 0.57, 0.80];
@@ -435,6 +448,21 @@ mod tests {
         }
         best
     }
+    #[test]
+    fn right_bank_rotates_pixel_rays_and_preserves_forward_clip_planes() {
+        let camera = Camera::default();
+        let level = camera.raster_rays(200, 200, 0.);
+        let banked = camera.raster_rays(200, 200, 90.);
+        for (x, y) in [(100., 100.), (165., 87.), (12., 181.)] {
+            let (d, n, f) = banked(x, y);
+            let (expected, _, _) = level(200. - y, x);
+            assert!(d.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-12));
+            let forward = dot(camera.basis().0, d);
+            assert!((n * forward - camera.near).abs() < 1e-12);
+            assert!((f * forward - camera.far).abs() < 1e-9);
+        }
+    }
+
     #[test]
     fn independent_boxes_and_acceleration() {
         let s = Snapshot::build([-8; 3], [16; 3], |p| {

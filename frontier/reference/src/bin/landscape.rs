@@ -314,6 +314,7 @@ fn main() -> Result<()> {
     let mut pixel_crop = None;
     let mut recipe = FbmRecipe::Regional;
     let mut lighting = Lighting::default();
+    let mut bank = 0f64;
     let mut center = [-1156., 3469.];
     let mut extent = None;
     let mut output = PathBuf::from("landscape-reference");
@@ -337,7 +338,7 @@ fn main() -> Result<()> {
     let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed|highlands --sample-stride 1 [--sparse] --native-extent 128 [--plant-extent METERS] [--shadows] --shadow-distance 4096 --lighting legacy|regional|daylight --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; daylight adds native water optics, sky visibility and aerial perspective)");
+            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed|highlands --sample-stride 1 [--sparse] --native-extent 128 [--plant-extent METERS] [--shadows] --shadow-distance 4096 --lighting legacy|regional|daylight --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --bank DEGREES --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; daylight adds native water optics, sky visibility and aerial perspective)");
             return Ok(());
         }
         if a == "--shadows" {
@@ -402,6 +403,7 @@ fn main() -> Result<()> {
             "--sun-azimuth" => lighting.sun_azimuth = v.parse()?,
             "--overcast" => lighting.overcast = v.parse()?,
             "--threads" => threads = v.parse()?,
+            "--bank" => bank = v.parse()?,
             "--fov-y" => camera.fov_y_degrees = v.parse()?,
             "--near" => camera.near = v.parse()?,
             "--far" => camera.far = v.parse()?,
@@ -440,6 +442,7 @@ fn main() -> Result<()> {
             .chain(camera.target.iter())
             .chain([camera.near, camera.far, camera.fov_y_degrees, extent].iter())
             .all(|v| v.is_finite())
+        || !bank.is_finite()
         || camera.near <= 0.
         || camera.far <= camera.near
         || camera.fov_y_degrees <= 0.
@@ -597,10 +600,12 @@ fn main() -> Result<()> {
     let rows = height.div_ceil(threads.min(height));
     let render = Instant::now();
     let boundary_misses = AtomicU64::new(0);
+    let rays = camera.raster_rays(viewport_width, viewport_height, bank);
     std::thread::scope(|scope| {
         for (part, out) in pixels.chunks_mut(rows * width).enumerate() {
             let scene = &scene;
             let camera = &camera;
+            let rays = &rays;
             let boundary_misses = &boundary_misses;
             let terrain = &terrain;
             scope.spawn(move || {
@@ -619,7 +624,7 @@ fn main() -> Result<()> {
                         for sx in 0..grid {
                             let [px, py] =
                                 sample_position(x, y, viewport_width, grid, sx, sy, sample_seed);
-                            let (d, n, f) = camera.ray(px, py, viewport_width, viewport_height);
+                            let (d, n, f) = rays(px, py);
                             let c = if let Some((hit, plant)) = scene.ray(camera.eye, d, n, f) {
                                 covered += 1.;
                                 water_hits += u32::from(hit.material == 7);
@@ -798,7 +803,7 @@ fn main() -> Result<()> {
     fs::write(
         output.join("manifest.json"),
         format!(
-            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"sparse_native_traversal":{sparse},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":{daylight},"shadows":{shadows},"shadow_distance_m":{shadow_distance},"plant_extent_m":{plant_extent},"plant_min_xz":{plant_min:?},"plant_width_cells":{plant_width},"plant_voxels":{plant_voxels},"water_coverage_output":{daylight},"shadow_method":"{shadow_method}","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"{light_model}","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional and daylight profiles; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":{daylight},"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
+            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"sparse_native_traversal":{sparse},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"roll_degrees":{bank},"near":{},"far":{},"fog":{daylight},"shadows":{shadows},"shadow_distance_m":{shadow_distance},"plant_extent_m":{plant_extent},"plant_min_xz":{plant_min:?},"plant_width_cells":{plant_width},"plant_voxels":{plant_voxels},"water_coverage_output":{daylight},"shadow_method":"{shadow_method}","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"{light_model}","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional and daylight profiles; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":{daylight},"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,

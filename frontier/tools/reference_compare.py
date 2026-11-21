@@ -35,6 +35,8 @@ def same_camera(a, b, require_single_sample=True):
     for field in ('fov_y_degrees', 'near', 'far'):
         if not np.isclose(a[field], b[field], atol=1e-5, rtol=1e-7):
             raise ValueError(f'camera mismatch: {field}')
+    if not np.isclose(a.get('roll_degrees', 0.), b.get('roll_degrees', 0.), atol=1e-5, rtol=0):
+        raise ValueError('camera mismatch: roll_degrees')
     if require_single_sample and b['samples'] != 1:
         raise ValueError('GPU geometry comparison requires --msaa 1')
 

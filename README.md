@@ -197,6 +197,14 @@ the finite footprint. The foliage contains 1,731,204 occupied plant cells.
 The radius of the light source sets the penumbra around the leaves. The
 reference uses one reflected bounce and approximate underwater illumination.
 
+![Native microvoxels on the near bank and the headwaters in the distance, rendered from the Highlands valley camera.](frontier/reference/gallery/highlands-native-valley.jpg)
+
+*Zero-LOD daylight reference from the seed 673 valley floor. At 1152×648,
+81 rays per pixel resolve 6.25 cm terrain and 13,989,786 occupied plant cells.
+The terrain footprint is 8.192 km wide, the plant footprint is 768 m wide and
+the far plane is 3.4 km. No primary ray left the terrain footprint before its
+far plane. Banked reference views accept the same `--bank` angle as the game.*
+
 A matched 720×432 telephoto view measures the shape of the distant channel
 against a 36-ray-per-pixel native water mask. Within rows 50–349 of the
 cascade, overlap rose from 88.9% to 96.3% and mean row-width error fell from
