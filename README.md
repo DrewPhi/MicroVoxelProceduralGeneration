@@ -329,6 +329,20 @@ land blocks, a survey compared directional light with sixteen finer slope
 measurements per block. Mean absolute light error fell by 31% on Highlands
 673, 31% on Highlands 40961 and 53% on Watershed 997.
 
+The active renderer now blends its 8 m lighting samples into a world-aligned
+16 km field. On 228,694 matching terrain pixels in the gorge, mean absolute
+RGB difference between the active and horizon views fell from 39.4 to 13.1.
+On the headland it fell from 2.70 to 1.48. The wide field uses 128 KiB of
+GPU memory. At a 1.5 km active distance the two 100 m/s flights took
+6.54–6.75 / 8.43–8.59 / 11.08–11.62 ms at p50/p95/p99. A cold 6 km flight
+took 12.74 / 15.78 / 55.79 ms, compared with 12.02 / 15.04 / 52.78 ms
+before. The 6 km flights started with terrain still streaming.
+
+The turquoise stream visible across this gorge falls from 1,885 m to 1,489 m.
+Rays through 121 colored pixels all hit native water 0.69–2.50 m deep. Across
+the 242 surveyed bank contacts, the median water-to-dry-ground step was zero,
+the 95th percentile was 12.5 cm and the largest drop was 25 cm.
+
 The active terrain and horizon use the same sun color as its elevation changes.
 Flight and beauty views keep highlights in a floating-point scene target until
 exposure and tone mapping. The Radeon uses packed 11/11/10-bit RGB at four

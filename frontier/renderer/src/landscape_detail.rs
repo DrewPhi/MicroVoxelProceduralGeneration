@@ -8,6 +8,7 @@ use std::sync::{
 
 const SIDE: usize = 257;
 const HALO: usize = 16;
+#[cfg(test)]
 const HALO_SIDE: usize = SIDE + 2 * HALO;
 const STEP_M: f64 = 8.;
 const RECENTER: i64 = 32;
@@ -114,48 +115,74 @@ struct Source {
     params: FbmParams,
     edge: f64,
     vegetation: bool,
-    river_overlay: bool,
+    blocks: bool,
 }
 #[derive(Clone, Copy, Default)]
 struct Sample {
     height: f32,
     albedo: [u8; 4],
 }
-struct Grid {
-    source: Source,
-    // Lattice address of the first *visible* texel; the CPU grid has a halo.
-    min: [i64; 2],
-    samples: Vec<Sample>,
-    rivers: Option<Rivers>,
+#[derive(Clone, Copy)]
+struct Resolution {
+    side: usize,
+    halo: usize,
+    step: f64,
+    occluders: [isize; 3],
 }
-impl Grid {
+const NEAR: Resolution = Resolution {
+    side: SIDE,
+    halo: HALO,
+    step: STEP_M,
+    occluders: [2, 6, HALO as isize],
+};
+// The next texture mip spans 16 km in world space. Its material and normal
+// come from this coarser lattice, independently of the fine window.
+const RIDGES: Resolution = Resolution {
+    side: SIDE / 2,
+    halo: 4,
+    step: STEP_M * 16.,
+    occluders: [1, 2, 4],
+};
+
+struct ShadingGrid {
+    min: [i64; 2],
+    resolution: Resolution,
+    samples: Vec<Sample>,
+}
+
+impl ShadingGrid {
     fn get(&self, x: i64, z: i64) -> Option<Sample> {
-        let u = x - self.min[0] + HALO as i64;
-        let v = z - self.min[1] + HALO as i64;
-        if (0..HALO_SIDE as i64).contains(&u) && (0..HALO_SIDE as i64).contains(&v) {
-            Some(self.samples[v as usize * HALO_SIDE + u as usize])
+        let r = self.resolution;
+        let stride = r.side + 2 * r.halo;
+        let u = x - self.min[0] + r.halo as i64;
+        let v = z - self.min[1] + r.halo as i64;
+        if (0..stride as i64).contains(&u) && (0..stride as i64).contains(&v) {
+            Some(self.samples[v as usize * stride + u as usize])
         } else {
             None
         }
     }
-    fn make(source: Source, min: [i64; 2], previous: Option<&Grid>) -> (Self, Vec<u8>) {
-        let terrain =
-            FbmTerrain::new(source.seed, source.params).expect("validated flight terrain");
-        let reusable = previous.filter(|g| g.source == source);
-        let mut samples = Vec::with_capacity(HALO_SIDE * HALO_SIDE);
-        for v in 0..HALO_SIDE {
-            for u in 0..HALO_SIDE {
-                let x = min[0] + u as i64 - HALO as i64;
-                let z = min[1] + v as i64 - HALO as i64;
-                let sample = reusable.and_then(|g| g.get(x, z)).unwrap_or_else(|| {
-                    let c = Cell::from_meters([x as f64 * STEP_M, 0., z as f64 * STEP_M]);
+
+    fn make(
+        terrain: &FbmTerrain,
+        source: Source,
+        min: [i64; 2],
+        r: Resolution,
+        previous: Option<&Self>,
+    ) -> Self {
+        let stride = r.side + 2 * r.halo;
+        let mut samples = Vec::with_capacity(stride * stride);
+        for v in 0..stride {
+            for u in 0..stride {
+                let x = min[0] + u as i64 - r.halo as i64;
+                let z = min[1] + v as i64 - r.halo as i64;
+                let sample = previous.and_then(|g| g.get(x, z)).unwrap_or_else(|| {
+                    let c = Cell::from_meters([x as f64 * r.step, 0., z as f64 * r.step]);
                     let (col, rgb) = terrain.landscape_column(c.x, c.z, source.vegetation);
                     let wet = col.top_material() == Material::Water;
                     let [r, g, b] = if wet { col.ground_surface.color() } else { rgb }.map(unorm);
                     let depth =
                         ((col.visible_top - col.ground_top) as f64 * source.edge).clamp(0., 12.);
-                    // Keep 255 for dry land. Both near shading layers can be
-                    // constructed from the same compact canonical sample.
                     let code = if wet {
                         (depth * (254. / 12.)).round() as u8
                     } else {
@@ -169,38 +196,90 @@ impl Grid {
                 samples.push(sample);
             }
         }
-        let rivers = source.river_overlay.then(|| {
-            Rivers::make(
-                &terrain,
-                min.map(|i| i + SIDE as i64 / 2),
-                reusable.and_then(|g| g.rivers.as_ref()),
-            )
-        });
-        let area = SIDE * SIDE;
-        let layers = if rivers.is_some() { 4 } else { 2 };
-        let mut pixels = vec![0; area * 4 * layers];
-        let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
-        for v in 0..SIDE {
-            for u in 0..SIDE {
-                let j = (v + HALO) * HALO_SIDE + u + HALO;
+        Self {
+            min,
+            samples,
+            resolution: r,
+        }
+    }
+
+    fn encode(&self, pixels: &mut [u8], terrain_sky: bool) {
+        let r = self.resolution;
+        let stride = r.side + 2 * r.halo;
+        let area = r.side * r.side;
+        for v in 0..r.side {
+            for u in 0..r.side {
+                let j = (v + r.halo) * stride + u + r.halo;
                 let n = glam::Vec3::new(
-                    samples[j - 1].height - samples[j + 1].height,
-                    2. * STEP_M as f32,
-                    samples[j - HALO_SIDE].height - samples[j + HALO_SIDE].height,
+                    self.samples[j - 1].height - self.samples[j + 1].height,
+                    2. * r.step as f32,
+                    self.samples[j - stride].height - self.samples[j + stride].height,
                 )
                 .normalize();
-                let at = (v * SIDE + u) * 4;
-                // Upper-hemisphere octahedral normals leave a byte for skylight.
+                let at = (v * r.side + u) * 4;
                 let oct = n / n.abs().element_sum();
-                let x = unorm(0.5 + 0.5 * oct.x);
-                let z = unorm(0.5 + 0.5 * oct.z);
                 let sky = if terrain_sky {
-                    unorm(sky_exposure(&samples, j, n))
+                    unorm(sky_exposure(&self.samples, j, n, r))
                 } else {
                     255
                 };
-                let [r, g, b, depth] = samples[j].albedo;
-                if let Some(rivers) = &rivers {
+                let albedo = self.samples[j].albedo;
+                pixels[at..at + 4].copy_from_slice(&[
+                    unorm(0.5 + 0.5 * oct.x),
+                    unorm(0.5 + 0.5 * oct.z),
+                    sky,
+                    if albedo[3] == 255 { 255 } else { 0 },
+                ]);
+                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&albedo);
+            }
+        }
+    }
+}
+
+struct Grid {
+    source: Source,
+    fine: ShadingGrid,
+    ridges: Option<ShadingGrid>,
+    rivers: Option<Rivers>,
+}
+
+impl Grid {
+    fn make(source: Source, min: [i64; 2], previous: Option<&Grid>) -> (Self, Vec<u8>) {
+        let terrain =
+            FbmTerrain::new(source.seed, source.params).expect("validated flight terrain");
+        let reusable = previous.filter(|g| g.source == source);
+        let fine = ShadingGrid::make(&terrain, source, min, NEAR, reusable.map(|g| &g.fine));
+        let center = min.map(|i| i + SIDE as i64 / 2);
+        let ridges = source.blocks.then(|| {
+            let min = center.map(|v| v.div_euclid(16) - RIDGES.side as i64 / 2);
+            ShadingGrid::make(
+                &terrain,
+                source,
+                min,
+                RIDGES,
+                reusable.and_then(|g| g.ridges.as_ref()),
+            )
+        });
+        let rivers = (!source.blocks && source.params.recipe == FbmRecipe::Highlands)
+            .then(|| Rivers::make(&terrain, center, reusable.and_then(|g| g.rivers.as_ref())));
+        let area = SIDE * SIDE;
+        let layers = if rivers.is_some() { 4 } else { 2 };
+        let base_bytes = area * 4 * layers;
+        let ridge_bytes = if ridges.is_some() {
+            RIDGES.side * RIDGES.side * 8
+        } else {
+            0
+        };
+        let mut pixels = vec![0; base_bytes + ridge_bytes];
+        let terrain_sky = std::env::var_os("FRONTIER_HIGHLANDS_SKYLIGHT").is_none_or(|v| v != "0");
+        fine.encode(&mut pixels[..area * 8], terrain_sky);
+        if let Some(grid) = &ridges {
+            grid.encode(&mut pixels[base_bytes..], terrain_sky);
+        }
+        if let Some(rivers) = &rivers {
+            for v in 0..SIDE {
+                for u in 0..SIDE {
+                    let at = (v * SIDE + u) * 4;
                     for k in 0..4 {
                         let [lo, hi] = rivers.texels[(2 * v + k / 2) * RIVER_SIDE + 2 * u + k % 2]
                             .to_le_bytes();
@@ -208,16 +287,13 @@ impl Grid {
                         pixels[12 * area + at + k] = hi;
                     }
                 }
-                let dry = depth == 255;
-                pixels[at..at + 4].copy_from_slice(&[x, z, sky, if dry { 255 } else { 0 }]);
-                pixels[4 * area + at..4 * area + at + 4].copy_from_slice(&[r, g, b, depth]);
             }
         }
         (
             Self {
                 source,
-                min,
-                samples,
+                fine,
+                ridges,
                 rivers,
             },
             pixels,
@@ -227,7 +303,7 @@ impl Grid {
 // Angular fraction of diffuse sky hidden by the surrounding terrain, relative
 // to the sample's own tangent plane. A planar face already receives the
 // renderer's orientation-dependent sky light, so it gets no extra darkening.
-fn sky_exposure(samples: &[Sample], center: usize, n: glam::Vec3) -> f32 {
+fn sky_exposure(samples: &[Sample], center: usize, n: glam::Vec3, r: Resolution) -> f32 {
     let h = samples[center].height;
     let mut blocked = 0.;
     for (dx, dz) in [
@@ -240,7 +316,7 @@ fn sky_exposure(samples: &[Sample], center: usize, n: glam::Vec3) -> f32 {
         (0, -1),
         (1, -1),
     ] {
-        let stride = dx + dz * HALO_SIDE as isize;
+        let stride = dx + dz * (r.side + 2 * r.halo) as isize;
         let length = if dx == 0 || dz == 0 {
             1.
         } else {
@@ -248,9 +324,9 @@ fn sky_exposure(samples: &[Sample], center: usize, n: glam::Vec3) -> f32 {
         };
         let tangent = (-(n.x * dx as f32 + n.z * dz as f32) / (n.y * length)).max(0.);
         let mut horizon = tangent;
-        for distance in [2, 6, HALO as isize] {
+        for distance in r.occluders {
             let neighbor = (center as isize + distance * stride) as usize;
-            let slope = (samples[neighbor].height - h) / (distance as f32 * STEP_M as f32 * length);
+            let slope = (samples[neighbor].height - h) / (distance as f32 * r.step as f32 * length);
             horizon = horizon.max(slope);
         }
         let sky_blocked = |slope: f32| slope * slope / (1. + slope * slope);
@@ -270,12 +346,17 @@ pub(crate) struct Texture {
 }
 impl Texture {
     pub(super) fn bytes(&self) -> u64 {
-        u64::from(self.texture.width())
-            * u64::from(self.texture.height())
-            * u64::from(self.texture.depth_or_array_layers())
-            * 4
+        let layers = u64::from(self.texture.depth_or_array_layers());
+        (0..self.texture.mip_level_count())
+            .map(|mip| {
+                u64::from(self.texture.width() >> mip)
+                    * u64::from(self.texture.height() >> mip)
+                    * layers
+                    * 4
+            })
+            .sum()
     }
-    pub(crate) fn new(device: &wgpu::Device, side: u32, layers: u32) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, side: u32, layers: u32, mips: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("flight terrain normals and albedo"),
             size: wgpu::Extent3d {
@@ -283,7 +364,7 @@ impl Texture {
                 height: side,
                 depth_or_array_layers: layers,
             },
-            mip_level_count: 1,
+            mip_level_count: mips,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -340,8 +421,7 @@ impl super::AdaptiveGpu {
         // Only the surface proxy needs the additional river coverage layers.
         use crate::adaptive_geometry::distant_voxels::Mode;
         let source = Source {
-            river_overlay: terrain.params().recipe == FbmRecipe::Highlands
-                && Mode::current() != Mode::Blocks,
+            blocks: Mode::current() == Mode::Blocks,
             seed: terrain.seed(),
             params: terrain.params(),
             edge: voxel_size(),
@@ -361,30 +441,47 @@ impl super::AdaptiveGpu {
                     // Retain alignment while flying. Obsolete or teleported
                     // patches never cover the current eye by coincidence.
                     if grid.source == source
-                        && (0..2).all(|a| grid.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
+                        && (0..2).all(|a| grid.fine.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
                     {
                         let layers = if grid.rivers.is_some() { 4 } else { 2 };
                         let texture = &self.shadows.near.detail.texture;
-                        if texture.width() != SIDE as u32 || texture.depth_or_array_layers() != layers {
-                            self.shadows.near.detail = Texture::new(device, SIDE as u32, layers);
+                        let mips = 1 + u32::from(grid.ridges.is_some());
+                        if texture.width() != SIDE as u32
+                            || texture.depth_or_array_layers() != layers
+                            || texture.mip_level_count() != mips
+                        {
+                            self.shadows.near.detail =
+                                Texture::new(device, SIDE as u32, layers, mips);
                             self.refresh_visibility_bind(device);
                         }
                         let texture = &self.shadows.near.detail.texture;
-                        queue.write_texture(
-                            texture.as_image_copy(),
-                            &data,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(SIDE as u32 * 4),
-                                rows_per_image: Some(SIDE as u32),
-                            },
-                            texture.size(),
-                        );
+                        let mut offset = 0;
+                        for mip in 0..mips {
+                            let side = SIDE as u32 >> mip;
+                            let len = (side * side * 4 * layers) as usize;
+                            let mut target = texture.as_image_copy();
+                            target.mip_level = mip;
+                            queue.write_texture(
+                                target,
+                                &data[offset..offset + len],
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(side * 4),
+                                    rows_per_image: Some(side),
+                                },
+                                wgpu::Extent3d {
+                                    width: side,
+                                    height: side,
+                                    depth_or_array_layers: layers,
+                                },
+                            );
+                            offset += len;
+                        }
                         let shift = self
                             .landscape_detail
                             .grid
                             .as_ref()
-                            .map(|old| [0, 1].map(|a| grid.min[a] - old.min[a]));
+                            .map(|old| [0, 1].map(|a| grid.fine.min[a] - old.fine.min[a]));
                         self.landscape_detail.transition = Some((std::time::Instant::now(), shift));
                         self.landscape_detail.grid = Some(Arc::new(grid));
                     }
@@ -397,7 +494,7 @@ impl super::AdaptiveGpu {
             .landscape_detail
             .grid
             .as_ref()
-            .is_some_and(|g| g.min == min)
+            .is_some_and(|g| g.fine.min == min)
         {
             return;
         }
@@ -411,8 +508,8 @@ impl super::AdaptiveGpu {
     pub(super) fn landscape_offset(&self, eye: [f64; 3]) -> [f32; 2] {
         self.landscape_detail.grid.as_ref().map_or([-1e20; 2], |g| {
             [
-                (eye[0] - g.min[0] as f64 * STEP_M) as f32,
-                (eye[2] - g.min[1] as f64 * STEP_M) as f32,
+                (eye[0] - g.fine.min[0] as f64 * STEP_M) as f32,
+                (eye[2] - g.fine.min[1] as f64 * STEP_M) as f32,
             ]
         })
     }
@@ -505,19 +602,59 @@ mod tests {
         };
         let plane = field(|x, z| 0.7 * x - 0.3 * z);
         assert!(
-            (sky_exposure(&plane, center, glam::Vec3::new(-0.7, 1., 0.3).normalize()) - 1.).abs()
+            (sky_exposure(
+                &plane,
+                center,
+                glam::Vec3::new(-0.7, 1., 0.3).normalize(),
+                NEAR
+            ) - 1.)
+                .abs()
                 < 1e-5
         );
         let bowl = field(|x, z| x.hypot(z));
-        assert!((sky_exposure(&bowl, center, glam::Vec3::Y) - 0.5).abs() < 1e-5);
+        assert!((sky_exposure(&bowl, center, glam::Vec3::Y, NEAR) - 0.5).abs() < 1e-5);
         let dome = field(|x, z| -x.hypot(z));
-        assert_eq!(sky_exposure(&dome, center, glam::Vec3::Y), 1.);
+        assert_eq!(sky_exposure(&dome, center, glam::Vec3::Y, NEAR), 1.);
+    }
+
+    #[test]
+    fn ridge_lighting_stays_world_aligned_across_a_negative_window_shift() {
+        let source = Source {
+            blocks: true,
+            seed: 673,
+            params: FbmParams {
+                recipe: FbmRecipe::Highlands,
+                ..Default::default()
+            },
+            edge: voxel_size(),
+            vegetation: true,
+        };
+        let (old, old_bytes) = Grid::make(source, [-160, -192], None);
+        let (moved, moved_bytes) = Grid::make(source, [-128, -224], Some(&old));
+        let a = old.ridges.as_ref().unwrap();
+        let b = moved.ridges.as_ref().unwrap();
+        assert_eq!(a.min, [-66, -68]);
+        assert_eq!(b.min, [-64, -70]);
+        let base = SIDE * SIDE * 8;
+        let area = RIDGES.side * RIDGES.side * 4;
+        for v in 2..RIDGES.side {
+            for u in 0..RIDGES.side - 2 {
+                let i = 4 * ((v - 2) * RIDGES.side + u + 2);
+                let j = 4 * (v * RIDGES.side + u);
+                for layer in [base, base + area] {
+                    assert_eq!(
+                        old_bytes[layer + i..layer + i + 4],
+                        moved_bytes[layer + j..layer + j + 4]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn moving_window_preserves_shared_height_normal_and_albedo() {
         let source = Source {
-            river_overlay: true,
+            blocks: false,
             seed: 40961,
             params: FbmParams {
                 recipe: FbmRecipe::Highlands,
@@ -527,11 +664,18 @@ mod tests {
             vegetation: true,
         };
         let (old, before) = Grid::make(source, [-64, -128], None);
-        let (blocks, two_layers) =
-            Grid::make(Source { river_overlay: false, ..source }, old.min, None);
+        let (blocks, two_layers) = Grid::make(
+            Source {
+                blocks: true,
+                ..source
+            },
+            old.fine.min,
+            None,
+        );
         assert!(blocks.rivers.is_none());
-        assert_eq!(two_layers.len(), SIDE * SIDE * 8);
-        assert_eq!(&before[..two_layers.len()], &two_layers);
+        let near_bytes = SIDE * SIDE * 8;
+        assert_eq!(two_layers.len(), near_bytes + RIDGES.side * RIDGES.side * 8);
+        assert_eq!(before[..near_bytes], two_layers[..near_bytes]);
         let (new, after) = Grid::make(source, [-64 + RECENTER, -128 - RECENTER], Some(&old));
         let shift = RECENTER as usize;
         let area = SIDE * SIDE * 4;
@@ -555,12 +699,12 @@ mod tests {
                         &after[layer + j..layer + j + 4]
                     );
                 }
-                let x = new.min[0] + u as i64;
-                let z = new.min[1] + v as i64;
-                assert_eq!(after[area + j + 3], new.get(x, z).unwrap().albedo[3]);
+                let x = new.fine.min[0] + u as i64;
+                let z = new.fine.min[1] + v as i64;
+                assert_eq!(after[area + j + 3], new.fine.get(x, z).unwrap().albedo[3]);
                 assert_eq!(
-                    new.get(x, z).unwrap().height.to_bits(),
-                    old.get(x, z).unwrap().height.to_bits()
+                    new.fine.get(x, z).unwrap().height.to_bits(),
+                    old.fine.get(x, z).unwrap().height.to_bits()
                 );
             }
         }

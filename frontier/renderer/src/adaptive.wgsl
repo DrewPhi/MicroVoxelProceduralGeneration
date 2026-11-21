@@ -496,6 +496,15 @@ fn cliff_albedo(word:u32, face:vec2<f32>, footprint:f32)->vec3<f32> {
     let weights=clamp((vec2(1.,12.)-lo)/max(hi-lo,0.00001),vec2(0.),vec2(1.));
     return skin*weights.x+middle*(weights.y-weights.x)+deep*(1.-weights.y);
 }
+fn detail_window(cell:vec2<f32>,side:vec2<f32>,shift:vec2<f32>,transition:vec2<f32>,margin:f32)->f32 {
+    let edge=min(cell,side-1.-cell);
+    let weight=smoothstep(1.,margin,min(edge.x,edge.y));
+    if transition.x>=1. {return weight;}
+    let old=cell+shift;
+    let old_edge=min(old,side-1.-old);
+    let previous=transition.y*smoothstep(1.,margin,min(old_edge.x,old_edge.y));
+    return mix(min(previous,weight),weight,transition.x);
+}
 fn shade(input: VertexOut) -> vec4<f32> {
     var in = input;
     let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));
@@ -526,24 +535,34 @@ fn shade(input: VertexOut) -> vec4<f32> {
         let relative=in.local-camera.eye.xyz;
         let cell=(relative.xz+near_shadow.parameters.zw)/8.;
         let side=vec2<f32>(textureDimensions(flight_detail));
-        let edge=min(cell,side-1.-cell);
         // Fragment position.w is reciprocal clip depth. This footprint is
         // stable across the top and both risers of the same subpixel stair.
         let footprint=near_shadow.water_phase.w/in.position.w;
         let pitch=f32(1u<<(u32(camera.paint.w)&31u))*NATIVE_VOXEL_METERS;
-        var window=smoothstep(1.,15.,min(edge.x,edge.y));
         let transition=near_shadow.detail_transition;
-        if transition.z<1. {
-            let old_cell=cell+transition.xy;
-            let old_edge=min(old_cell,side-1.-old_cell);
-            let old=transition.w*smoothstep(1.,15.,min(old_edge.x,old_edge.y));
-            window=mix(min(old,window),window,transition.z);
+        let fine=detail_window(cell,side,transition.xy,transition.zw,15.);
+        let broad_side=floor(side*.5);
+        // The fine grid is centered on a 256 m lattice, which also fixes
+        // the origin of the 128 m samples in mip one at negative positions.
+        let broad_cell=(cell-.5*(side-1.))/16.+.5*broad_side;
+        var broad=0.;
+        if fine<1. && textureNumLevels(flight_detail)>1u {
+            broad=detail_window(broad_cell,broad_side,transition.xy/16.,transition.zw,8.);
         }
+        let weight=max(fine,broad);
         let strength=smoothstep(1.,3.2,footprint/NATIVE_VOXEL_METERS)
-            *window*(.82+.14*smoothstep(.15,1.2,footprint/pitch));
+            *weight*(.82+.14*smoothstep(.15,1.2,footprint/pitch));
         if strength>.001 {
             let uv=(cell+.5)/side;
-            let slope=textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
+            let far_uv=(broad_cell+.5)/broad_side;
+            let fine_fraction=fine/weight;
+            var slope=vec4(0.);
+            if fine_fraction<1. {
+                slope=(1.-fine_fraction)*textureSampleLevel(flight_detail,flight_sampler,far_uv,0,1.);
+            }
+            if fine_fraction>0. {
+                slope+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,0,0.);
+            }
             let oct=2.*slope.rg-1.;
             let n=vec3(oct.x,max(.0001,1.-abs(oct.x)-abs(oct.y)),oct.y);
             // Native roof and riser areas project independently onto the eye ray.
@@ -556,8 +575,14 @@ fn shade(input: VertexOut) -> vec4<f32> {
                 sky_exposure=mix(1.,slope.b,filter_weight);
                 let skin=min(vec2(1.),vec2(n.y)/max(abs(n.xz),vec2(.0001)));
                 let exposed_skin=visible_faces.y+dot(visible_faces.xz,skin);
-                let paint=textureSampleLevel(flight_detail,flight_sampler,uv,1,0.);
-                in.color=mix(in.color,paint.rgb,filter_weight*exposed_skin);
+                var paint=vec3(0.);
+                if fine_fraction<1. {
+                    paint=(1.-fine_fraction)*textureSampleLevel(flight_detail,flight_sampler,far_uv,1,1.).rgb;
+                }
+                if fine_fraction>0. {
+                    paint+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,1,0.).rgb;
+                }
+                in.color=mix(in.color,paint,filter_weight*exposed_skin);
             }
         }
     }

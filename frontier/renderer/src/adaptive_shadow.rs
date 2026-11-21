@@ -694,7 +694,7 @@ impl NearShadowResources {
         let naadf_empty = crate::naadf::Bindings::empty(device);
         let edit_mask =
             super::edit_landscape::mask_texture(device, [1, 1]).create_view(&Default::default());
-        let detail = super::landscape_detail::Texture::new(device, 1, 2);
+        let detail = super::landscape_detail::Texture::new(device, 1, 2, 1);
         let bind = near_sampling_bind(
             device,
             &view,
