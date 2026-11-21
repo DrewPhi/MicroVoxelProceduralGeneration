@@ -154,6 +154,13 @@ by 0.54–0.69 MiB. Two 8-second seed 19 flights measured 11.10–11.11 ms frame
 p95. On 20-second seed 673 flights the measured ranges overlapped at
 13.89–15.16 ms with center sampling and 12.72–14.70 ms with interpolation.
 
+The atmosphere pass owns the scene depth and multisample color attachments
+while it is active. Removing the duplicate full-resolution attachments saved
+63.3 MiB at 1920×1080 with 4× MSAA. Seven Radeon capture comparisons covering
+flight, scaled rendering, direct rendering and linear output produced identical
+pixels. Both flight sample counts and the direct renderer were checked through
+three live window resizes.
+
 A full-resolution MSAA 1 capture writes opaque coverage and depth alongside the
 finished image. To measure the skyline over unedited Highlands, use
 `cargo run --release -p frontier-reference --bin flight_skyline -- --help`

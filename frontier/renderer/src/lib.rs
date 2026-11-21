@@ -1167,7 +1167,6 @@ impl Gpu {
         self.observe_water_camera(camera, world, 0.);
         self.prepare_ground_light(world, *camera);
         let texture = self.texture(width, height, false);
-        let depth = self.texture(width, height, true);
         let floating = self.format == wgpu::TextureFormat::Rgba32Float;
         let bpp = if floating { 16 } else { 4 };
         let row = (width * bpp + 255) & !255;
@@ -1180,10 +1179,6 @@ impl Gpu {
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let target = texture.create_view(&Default::default());
-        let multisample = self.multisample_texture(width, height);
-        let multisample_view = multisample
-            .as_ref()
-            .map(|t| t.create_view(&Default::default()));
         let post_settings = self.visual_settings.as_ref().filter(|s| {
             (s.atmosphere
                 || s.exposure != 1.
@@ -1196,6 +1191,8 @@ impl Gpu {
         // and objects before sky, clouds and the 35 km horizon composite.
         let capture_scene_depth =
             self.sample_count == 1 && post_settings.is_none_or(|s| s.render_scale == 1.);
+        let depth = (post_settings.is_none() || capture_scene_depth)
+            .then(|| self.texture(width, height, true));
         let mut post_attachment_bytes = 0u64;
         let mut horizon_face_bytes = 0u64;
         if let Some(settings) = post_settings {
@@ -1208,14 +1205,9 @@ impl Gpu {
                 self.sample_count,
                 self.scene_format,
                 settings.flight_horizon,
-                capture_scene_depth.then(|| depth.create_view(&Default::default())),
+                depth.as_ref().map(|t| t.create_view(&Default::default())),
             );
-            post_attachment_bytes = atmosphere.attachment_bytes()
-                - if capture_scene_depth {
-                    u64::from(width) * u64::from(height) * 4
-                } else {
-                    0
-                };
+            post_attachment_bytes = atmosphere.attachment_bytes();
             let (rw, rh) = atmosphere.dimensions();
             atmosphere.prepare_horizon(
                 &self.device,
@@ -1260,6 +1252,13 @@ impl Gpu {
             );
             atmosphere.encode_with_shadows(&mut encoder, &target, self.adaptive.as_ref());
         } else {
+            let multisample = self.multisample_texture(width, height);
+            let multisample_view = multisample
+                .as_ref()
+                .map(|t| t.create_view(&Default::default()));
+            let depth = depth
+                .as_ref()
+                .expect("direct capture has a depth attachment");
             self.draw(
                 &mut encoder,
                 multisample_view.as_ref().unwrap_or(&target),
@@ -1301,10 +1300,10 @@ impl Gpu {
                 mapped_at_creation: false,
             })
         });
-        if let Some(buffer) = &depth_buffer {
+        if let (Some(buffer), Some(depth)) = (&depth_buffer, &depth) {
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &depth,
+                    texture: depth,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::DepthOnly,
@@ -1438,10 +1437,14 @@ impl Gpu {
             "linear_rgb_decoded_from_8bit_target"
         };
         let samples = self.sample_count as u64;
-        let mut capture_render_texture_bytes = width as u64
-            * height as u64
-            * (bpp as u64 + samples * 4 + if samples > 1 { samples * bpp as u64 } else { 0 });
-        capture_render_texture_bytes += post_attachment_bytes;
+        let direct_attachments = if post_settings.is_none() {
+            samples * 4 + if samples > 1 { samples * bpp as u64 } else { 0 }
+        } else {
+            0
+        };
+        let capture_render_texture_bytes =
+            width as u64 * height as u64 * (bpp as u64 + direct_attachments)
+                + post_attachment_bytes;
         let capture_readback_bytes = (row as u64
             + if depth_buffer.is_some() {
                 depth_row as u64
@@ -2259,8 +2262,6 @@ impl Viewer {
         config.width = width;
         config.height = height;
         surface.configure(&gpu.device, config);
-        self.depth = Some(gpu.texture(width, height, true));
-        self.multisample = gpu.multisample_texture(width, height);
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.resize(
                 &gpu.device,
@@ -2269,6 +2270,9 @@ impl Viewer {
                 self.visual_settings.render_scale,
                 gpu.sample_count,
             );
+        } else {
+            self.depth = Some(gpu.texture(width, height, true));
+            self.multisample = gpu.multisample_texture(width, height);
         }
     }
     fn render(&mut self) -> Result<()> {
@@ -2700,8 +2704,7 @@ impl Viewer {
                 .terrain_center_lag_max_m
                 .max(self.terrain_center_lag_end_m);
         }
-        let (Some(gpu), Some(surface), Some(config), Some(depth)) =
-            (&self.gpu, &self.surface, &self.config, &self.depth)
+        let (Some(gpu), Some(surface), Some(config)) = (&self.gpu, &self.surface, &self.config)
         else {
             return Ok(());
         };
@@ -2788,10 +2791,6 @@ impl Viewer {
         );
         gpu.prepare_ground_light(&self.world, self.camera);
         let target = frame.texture.create_view(&Default::default());
-        let multisample_view = self
-            .multisample
-            .as_ref()
-            .map(|t| t.create_view(&Default::default()));
         if let Some(atmosphere) = &mut self.atmosphere {
             atmosphere.prepare_horizon(
                 &gpu.device,
@@ -2840,6 +2839,14 @@ impl Viewer {
             );
             atmosphere.encode_with_shadows(&mut encoder, &target, gpu.adaptive.as_ref());
         } else {
+            let depth = self
+                .depth
+                .as_ref()
+                .ok_or("direct render has no depth attachment")?;
+            let multisample_view = self
+                .multisample
+                .as_ref()
+                .map(|t| t.create_view(&Default::default()));
             gpu.draw(
                 &mut encoder,
                 multisample_view.as_ref().unwrap_or(&target),
@@ -3053,8 +3060,6 @@ impl ApplicationHandler for Viewer {
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &config);
-            self.depth = Some(gpu.texture(config.width, config.height, true));
-            self.multisample = gpu.multisample_texture(config.width, config.height);
             if self.visual_menu_enabled {
                 self.settings_ui = Some(settings_ui::SettingsUi::new(
                     &window,
@@ -3079,6 +3084,9 @@ impl ApplicationHandler for Viewer {
                     self.visual_settings.flight_horizon,
                     None,
                 ));
+            } else {
+                self.depth = Some(gpu.texture(config.width, config.height, true));
+                self.multisample = gpu.multisample_texture(config.width, config.height);
             }
             self.config = Some(config);
             self.gpu = Some(gpu);

@@ -223,8 +223,8 @@ impl Viewer {
                 s.flight_horizon,
                 None,
             ));
-            self.depth = Some(gpu.texture(self.width, self.height, true));
-            self.multisample = gpu.multisample_texture(self.width, self.height);
+            self.depth = None;
+            self.multisample = None;
         }
         Ok(())
     }
