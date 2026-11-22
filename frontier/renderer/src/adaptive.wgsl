@@ -654,6 +654,7 @@ fn shade(input: VertexOut) -> vec4<f32> {
             let close_weight=select(0.,detail_window(close,side,temporal.xy,temporal.zw,18.),window.w>0.);
             var stair_plane=vec3(0.);
             var resolved_stairs=0.;
+            var local_surface=vec4(0.,0.,0.,1.);
             if close_weight>0. {
                 let near_sample=textureSampleLevel(flight_detail,flight_sampler,(close+.5)/side,3,0.);
                 let op=2.*near_sample.rg-1.;
@@ -662,13 +663,28 @@ fn shade(input: VertexOut) -> vec4<f32> {
                 let incidence=dot(tangent,relative);
                 var measured=near_sample;
                 var along=vec2(0.);
+                var delta=0.;
                 if incidence<-.06*length(relative) {
                     // Follow the viewing ray back to the measured hillside.
                     // Bound the correction to the block that supplied the hit.
                     let offset=relative.xz*((height-relative.y)*tangent.y/incidence);
-                    along=offset*min(1.,min(pitch*1.5,12.)/max(.001,length(offset)));
+                    let fraction=min(1.,min(pitch*1.5,12.)/max(.001,length(offset)));
+                    delta=(height-relative.y)*tangent.y/incidence*fraction;
+                    along=relative.xz*delta;
                     measured=textureSampleLevel(flight_detail,flight_sampler,(close+along*near_shadow.local_inverse_spacing+.5)/side,3,0.);
                 }
+                if native_span<2. && length(relative)<180. && incidence<-.06*length(relative) {
+                    let octant=2.*measured.rg-1.;
+                    let ny=max(.0001,1.-abs(octant.x)-abs(octant.y));
+                    let projected=dot(vec3(octant.x,ny,octant.y),relative);
+                    if projected<-.06*length(relative) {
+                        let h=window.z+window.w*dot(measured.ba,vec2(65280.,255.));
+                        let next=relative.xz*(delta+(h-relative.y*(1.+delta))*ny/projected);
+                        along=next*min(1.,min(pitch*1.5,12.)/max(.001,length(next)));
+                        measured=textureSampleLevel(flight_detail,flight_sampler,(close+along*near_shadow.local_inverse_spacing+.5)/side,3,0.);
+                    }
+                }
+                local_surface=textureSampleLevel(flight_detail,flight_sampler,(close+along*near_shadow.local_inverse_spacing+.5)/side,4,0.);
                 slope=vec4(mix(slope.rg,measured.rg,close_weight),slope.ba);
                 let h=window.z+window.w*dot(measured.ba,vec2(65280.,255.));
                 stair_plane=vec3(in.local.x+along.x,camera.eye.y+h,in.local.z+along.y);
@@ -710,16 +726,20 @@ fn shade(input: VertexOut) -> vec4<f32> {
                     if fine_fraction>0. {survey_sun+=fine_fraction*textureSampleLevel(flight_detail,flight_sampler,uv,2,0.).r;}
                     if valley_fraction>0. {survey_sun+=valley_fraction*textureSampleLevel(flight_detail,flight_sampler,(valley_cell+.5)/side,2,0.).g;}
                     if broad_fraction>0. {survey_sun+=broad_fraction*textureSampleLevel(flight_detail,flight_sampler,(broad_cell+.5)/side,2,0.).b;}
+                    survey_sun=min(survey_sun,mix(1.,local_surface.a,close_weight));
                     survey_weight=strength*.93*smoothstep(50.,185.,length(relative));
                     if near_shadow.parameters.y>.5 {survey_weight=0.;}
                 }
-                let cap=mix(skin_color,paint,slope.w);
+                let cap=mix(mix(skin_color,paint,slope.w),local_surface.rgb,close_weight*slope.w);
                 let side_x=skin.x*cap+(shallow.x-skin.x)*middle_color+(1.-shallow.x)*deep_color;
                 let side_z=skin.y*cap+(shallow.y-skin.y)*middle_color+(1.-shallow.y)*deep_color;
                 let x=side_x*visible_faces.x;
                 let top=cap*visible_faces.y;
                 let z=side_z*visible_faces.z;
-                let ambient=stair_ambient(n);
+                // The metre-scale survey resolves the folds that shelter a
+                // nearby stair. Broader distant slopes average many of them.
+                let local_ambient=close_weight*(1.-smoothstep(125.,420.,length(relative)));
+                let ambient=mix(vec3(1.),stair_ambient(n),local_ambient);
                 roof_pigment=top*ambient.y;
                 mean_pigment=x*ambient.x+roof_pigment+z*ambient.z;
                 // The signed projected area is the sun flux admitted by an

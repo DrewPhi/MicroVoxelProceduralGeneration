@@ -1569,22 +1569,37 @@ mod tests {
         tile.native_quads.clear();
         tile.native_bins.clear();
         let edge = voxel_size() as f32;
-        let origin = [tile.mesh.origin.x,tile.mesh.origin.y,tile.mesh.origin.z].map(|v| v as f64 * voxel_size());
-        tile.bounds = [origin.map(|v| v-2.), origin.map(|v| v+2.)];
+        let origin = [tile.mesh.origin.x, tile.mesh.origin.y, tile.mesh.origin.z]
+            .map(|v| v as f64 * voxel_size());
+        tile.bounds = [origin.map(|v| v - 2.), origin.map(|v| v + 2.)];
         for axis_sign in [0, 1, 2, 4, 5, 6] {
             let first = tile.native_quads.len();
             for z in 0..16 {
                 for x in 0..16 {
                     tile.native_quads.push(NativeQuad {
-                        anchor: [x as f32 * edge, if x % 2 == 0 {-0.0} else {-0.317}, z as f32 * edge],
-                        extent: [edge, edge], axis_sign, material: Material::Stone as u32, profile_index: 0,
+                        anchor: [
+                            x as f32 * edge,
+                            if x % 2 == 0 { -0.0 } else { -0.317 },
+                            z as f32 * edge,
+                        ],
+                        extent: [edge, edge],
+                        axis_sign,
+                        material: Material::Stone as u32,
+                        profile_index: 0,
                     });
                 }
             }
-            tile.native_bins.push(NativeBin {axis_sign, first_quad:first as u32,quad_count:256,min_plane:-2.,max_plane:2.});
+            tile.native_bins.push(NativeBin {
+                axis_sign,
+                first_quad: first as u32,
+                quad_count: 256,
+                min_plane: -2.,
+                max_plane: 2.,
+            });
         }
         tile.bytes = tile.native_quads.capacity() * std::mem::size_of::<NativeQuad>()
-            + tile.native_bins.capacity()*std::mem::size_of::<NativeBin>() + tile.face_profiles.capacity()*80;
+            + tile.native_bins.capacity() * std::mem::size_of::<NativeBin>()
+            + tile.face_profiles.capacity() * 80;
         let bits = |q: NativeQuad| bytemuck::cast::<NativeQuad, [u32; 8]>(q);
         let mut original: Vec<_> = tile.native_records().map(bits).collect();
         assert!(original.len() >= 512);

@@ -389,14 +389,16 @@ impl Grid {
         let rivers = (!source.blocks && source.params.recipe == FbmRecipe::Highlands)
             .then(|| Rivers::make(&terrain, center, reusable.and_then(|g| g.rivers.as_ref())));
         let area = SIDE * SIDE;
-        let layers = if ridges.is_some() || rivers.is_some() {
+        let layers = if ridges.is_some() {
+            3
+        } else if rivers.is_some() {
             4
         } else {
             2
         };
         let base_bytes = area * 4 * layers;
         let ridge_bytes = if ridges.is_some() {
-            RIDGES.side * RIDGES.side * 4 * layers
+            RIDGES.side * RIDGES.side * 16
         } else {
             0
         };
@@ -412,8 +414,8 @@ impl Grid {
                 terrain_sky,
             );
         }
-        // Block mode leaves two unused full-resolution layers at mip zero.
-        // Pack all three solar surveys in one. Keep the river layout intact.
+        // The third base layer contains the three solar surveys. The two
+        // local layers are uploaded separately when their own window moves.
         if let (Some(ridges), Some(valley)) = (&ridges, &valley) {
             let data = &mut pixels[8 * area..12 * area];
             let broad = SolarHorizon::survey(ridges, sun, None, data, 2);
@@ -541,7 +543,8 @@ struct LocalRelief {
     source: Source,
     min: [i64; 2],
     spacing: f64,
-    heights: Vec<f32>,
+    grid: ShadingGrid,
+    sun: [f32; 3],
     base: f32,
     unit: f32,
     pixels: Vec<u8>,
@@ -556,7 +559,19 @@ fn local_target(
     let eye = camera.position;
     let mut center = [eye.x, eye.z];
     let mut spacing = 1.;
-    if eye.y - f64::from(ground) > 95. {
+    let clearance = eye.y - f64::from(ground);
+    let telephoto = camera.fov_y < 32.;
+    if clearance <= 12. && !telephoto {
+        // Keep the exact ownership radius inside the survey while bringing
+        // the opposite bank into its finer half-metre samples.
+        let direction = camera.direction();
+        spacing = 0.5;
+        center = [
+            eye.x + 32. * f64::from(direction.x),
+            eye.z + 32. * f64::from(direction.z),
+        ];
+    }
+    if clearance > 95. || telephoto {
         let forward = camera.direction().as_dvec3();
         let right = forward
             .cross(camera.view_up().as_dvec3())
@@ -581,7 +596,11 @@ fn local_target(
                 }
                 let p = eye + t * ray;
                 center = [p.x, p.z];
-                spacing = if t < 420. {
+                spacing = if telephoto && t < 100. {
+                    0.25
+                } else if t < 180. {
+                    0.5
+                } else if t < 420. {
                     1.
                 } else if t < 1350. {
                     2.
@@ -601,44 +620,48 @@ fn local_target(
     Some((min, spacing))
 }
 impl LocalRelief {
-    fn make(source: Source, min: [i64; 2], spacing: f64, old: Option<&Self>) -> Self {
+    fn make(
+        source: Source,
+        min: [i64; 2],
+        spacing: f64,
+        sun: [f32; 3],
+        old: Option<&Self>,
+    ) -> Self {
         const STRIDE: usize = SIDE + 2;
         let terrain = FbmTerrain::new(source.seed, source.params).expect("validated local terrain");
         let old = old.filter(|g| g.source == source && g.spacing == spacing);
-        let mut heights = Vec::with_capacity(STRIDE * STRIDE);
+        let resolution = Resolution {
+            side: SIDE,
+            halo: 1,
+            step: spacing,
+            occluders: [1; 3],
+        };
+        let grid = ShadingGrid::make(&terrain, source, min, resolution, old.map(|g| &g.grid));
         let mut lo = f32::INFINITY;
         let mut hi = f32::NEG_INFINITY;
-        for z in 0..STRIDE {
-            for x in 0..STRIDE {
-                let at = [min[0] + x as i64 - 1, min[1] + z as i64 - 1];
-                let previous = old.and_then(|g| {
-                    let u = at[0] - g.min[0] + 1;
-                    let v = at[1] - g.min[1] + 1;
-                    ((0..STRIDE as i64).contains(&u) && (0..STRIDE as i64).contains(&v))
-                        .then(|| g.heights[v as usize * STRIDE + u as usize])
-                });
-                let height = previous.unwrap_or_else(|| {
-                    terrain.height_m(at[0] as f64 * spacing, at[1] as f64 * spacing) as f32
-                });
-                heights.push(height);
-                lo = lo.min(height);
-                hi = hi.max(height);
-            }
+        for sample in &grid.samples {
+            lo = lo.min(sample.height);
+            hi = hi.max(sample.height);
         }
         let unit = ((hi - lo) / 65535.).max(source.edge as f32);
-        let mut pixels = Vec::with_capacity(SIDE * SIDE * 4);
+        let layer = SIDE * SIDE * 4;
+        let mut pixels = vec![0; 2 * layer];
         for z in 0..SIDE {
             for x in 0..SIDE {
                 let i = (z + 1) * STRIDE + x + 1;
                 let n = glam::Vec3::new(
-                    heights[i - 1] - heights[i + 1],
+                    grid.samples[i - 1].height - grid.samples[i + 1].height,
                     2. * spacing as f32,
-                    heights[i - STRIDE] - heights[i + STRIDE],
+                    grid.samples[i - STRIDE].height - grid.samples[i + STRIDE].height,
                 );
                 let oct = n / n.abs().element_sum();
-                let word = ((heights[i] - lo) / unit).round().clamp(0., 65535.) as u16;
+                let word = ((grid.samples[i].height - lo) / unit)
+                    .round()
+                    .clamp(0., 65535.) as u16;
                 let [high, low] = word.to_be_bytes();
-                pixels.extend_from_slice(&[
+                let at = 4 * (z * SIDE + x);
+                pixels[layer + at..layer + at + 3].copy_from_slice(&grid.samples[i].albedo[..3]);
+                pixels[at..at + 4].copy_from_slice(&[
                     unorm(0.5 + 0.5 * oct.x),
                     unorm(0.5 + 0.5 * oct.z),
                     high,
@@ -646,11 +669,13 @@ impl LocalRelief {
                 ]);
             }
         }
+        SolarHorizon::survey(&grid, sun, None, &mut pixels[layer..], 3);
         Self {
             source,
             min,
             spacing,
-            heights,
+            grid,
+            sun,
             base: lo,
             unit,
             pixels,
@@ -670,7 +695,7 @@ impl LocalRelief {
             wgpu::Extent3d {
                 width: SIDE as u32,
                 height: SIDE as u32,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: 2,
             },
         );
     }
@@ -740,7 +765,9 @@ impl super::AdaptiveGpu {
                         && grid.sun == sun
                         && (0..2).all(|a| grid.fine.min[a].abs_diff(min[a]) <= SIDE as u64 / 3)
                     {
-                        let layers = if grid.ridges.is_some() || grid.rivers.is_some() {
+                        let layers = if grid.ridges.is_some() {
+                            5
+                        } else if grid.rivers.is_some() {
                             4
                         } else {
                             2
@@ -759,7 +786,13 @@ impl super::AdaptiveGpu {
                         let mut offset = 0;
                         for mip in 0..mips {
                             let side = SIDE as u32 >> mip;
-                            let len = (side * side * 4 * layers) as usize;
+                            // Local pigment and relief use their own moving window.
+                            let copied_layers = if grid.ridges.is_some() {
+                                3 + mip
+                            } else {
+                                layers
+                            };
+                            let len = (side * side * 4 * copied_layers) as usize;
                             let mut target = texture.as_image_copy();
                             target.mip_level = mip;
                             queue.write_texture(
@@ -773,13 +806,10 @@ impl super::AdaptiveGpu {
                                 wgpu::Extent3d {
                                     width: side,
                                     height: side,
-                                    depth_or_array_layers: layers,
+                                    depth_or_array_layers: copied_layers,
                                 },
                             );
                             offset += len;
-                        }
-                        if let Some(local) = &self.landscape_detail.local {
-                            local.upload(queue, texture);
                         }
                         let shift = self
                             .landscape_detail
@@ -822,6 +852,7 @@ impl super::AdaptiveGpu {
         if !source.blocks {
             return;
         }
+        let sun = [self.lighting[0], self.lighting[1], self.lighting[2]];
         let detail = &mut self.landscape_detail;
         if detail.local_aim.is_none_or(|(c, _)| {
             c.position.distance_squared(camera.position) > 16. * 16.
@@ -838,6 +869,7 @@ impl super::AdaptiveGpu {
                 Ok(local) => {
                     detail.pending_local = None;
                     if local.source == source
+                        && local.sun == sun
                         && target.is_some_and(|(min, step)| {
                             step == local.spacing
                                 && (0..2).all(|a| local.min[a].abs_diff(min[a]) <= 64)
@@ -866,7 +898,7 @@ impl super::AdaptiveGpu {
         if detail
             .local
             .as_ref()
-            .is_some_and(|g| g.min == min && g.spacing == spacing)
+            .is_some_and(|g| g.min == min && g.spacing == spacing && g.sun == sun)
         {
             return;
         }
@@ -874,7 +906,7 @@ impl super::AdaptiveGpu {
         let (tx, rx) = mpsc::sync_channel(1);
         detail.pending_local = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(LocalRelief::make(source, min, spacing, old.as_deref()));
+            let _ = tx.send(LocalRelief::make(source, min, spacing, sun, old.as_deref()));
         });
     }
     pub(super) fn local_inverse_spacing(&self) -> f32 {
@@ -884,7 +916,12 @@ impl super::AdaptiveGpu {
             .map_or(0., |g| (1. / g.spacing) as f32)
     }
     pub(super) fn local_relief_params(&self, eye: [f64; 3]) -> [f32; 8] {
-        let Some(g) = &self.landscape_detail.local else {
+        let Some(g) = self
+            .landscape_detail
+            .local
+            .as_ref()
+            .filter(|g| g.sun == self.lighting[..3])
+        else {
             return [0.; 8];
         };
         let [sx, sz, t, w] = transition(self.landscape_detail.local_transition);
@@ -1073,9 +1110,9 @@ mod tests {
             vegetation: false,
         };
         let terrain = FbmTerrain::new(source.seed, source.params).unwrap();
-        for spacing in [1., 4.] {
-            let a = LocalRelief::make(source, [-1816, 2016], spacing, None);
-            let b = LocalRelief::make(source, [-1784, 1984], spacing, Some(&a));
+        for spacing in [0.25, 0.5, 1., 4.] {
+            let a = LocalRelief::make(source, [-1816, 2016], spacing, [0., 1., 0.], None);
+            let b = LocalRelief::make(source, [-1784, 1984], spacing, [0., 1., 0.], Some(&a));
             for z in (32..SIDE).step_by(7) {
                 for x in (0..SIDE - 32).step_by(11) {
                     let old = 4 * ((z - 32) * SIDE + x + 32);
@@ -1113,7 +1150,7 @@ mod tests {
         let b = moved.ridges.as_ref().unwrap();
         assert_eq!(a.min, [-66, -68]);
         assert_eq!(b.min, [-64, -70]);
-        let base = SIDE * SIDE * 16;
+        let base = SIDE * SIDE * 12;
         let area = RIDGES.side * RIDGES.side * 4;
         for v in 2..RIDGES.side {
             for u in 0..RIDGES.side - 2 {
@@ -1142,7 +1179,7 @@ mod tests {
             vegetation: true,
         };
         let (old, before) = Grid::make(source, [-64, -128], [0., 1., 0.], None);
-        let (blocks, two_layers) = Grid::make(
+        let (blocks, block_upload) = Grid::make(
             Source {
                 blocks: true,
                 ..source
@@ -1154,10 +1191,10 @@ mod tests {
         assert!(blocks.rivers.is_none());
         let near_bytes = SIDE * SIDE * 8;
         assert_eq!(
-            two_layers.len(),
-            2 * near_bytes + RIDGES.side * RIDGES.side * 16
+            block_upload.len(),
+            SIDE * SIDE * 12 + RIDGES.side * RIDGES.side * 16
         );
-        assert_eq!(before[..near_bytes], two_layers[..near_bytes]);
+        assert_eq!(before[..near_bytes], block_upload[..near_bytes]);
         let (new, after) = Grid::make(
             source,
             [-64 + RECENTER, -128 - RECENTER],

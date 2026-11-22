@@ -205,6 +205,14 @@ The terrain footprint is 8.192 km wide, the plant footprint is 768 m wide and
 the far plane is 3.4 km. No primary ray left the terrain footprint before its
 far plane. Banked reference views accept the same `--bank` angle as the game.*
 
+### Flight terrain comparisons
+
+[Four matched views](frontier/reference/gallery/flight-lod-comparison.jpg) show a summit dive, a banked approach, a valley wall and a coastal flight. Rows 1–4 keep the camera and sun fixed across the earlier renderer (A), the current renderer (B) and offline 6.25 cm voxels (C). [Row 5](frontier/reference/gallery/valley-lod-detail.jpg) shows the crease on the valley wall at the original pixel scale. The reference uses 36 rays per pixel on the summit, 144 on the banked approach and 16 in the two 40 km panoramas. The flight renderer and offline reference use different atmospheric models.
+
+In the banked capture, the new geometry and rasterization reduced isolated missing pixels inside the mountain from 47 in A to one in B. The summit went from 54 to two. The valley-wall skyline's 95th-percentile deviation fell from 5.54 to 2.79 pixels across 60 sampled directions. At 1080p, the cold, 100 m/s mountain route on the Radeon 760M still exceeded the 16.7 ms frame budget during refinement.
+
+Full-resolution chase views show the current renderer with vegetation, atmosphere and 4× MSAA. [Mountain pass](frontier/reference/gallery/highlands-ridge-flight.jpg) · [Coastal flight](frontier/reference/gallery/highlands-cape-flight.jpg)
+
 A matched 720×432 telephoto view measures the shape of the distant channel
 against a 36-ray-per-pixel native water mask. Within rows 50–349 of the
 cascade, overlap rose from 88.9% to 96.3% and mean row-width error fell from
