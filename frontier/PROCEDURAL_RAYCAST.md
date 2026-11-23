@@ -7,6 +7,16 @@ geometric LODs. The packed hybrid remains the game renderer. The experiment
 covers the untouched Alpine heightfield at the default terrain parameters.
 The native 6.25 cm voxel source, sparse edits, and NAADF stay in Frontier.
 
+## Captures and benchmark reports
+
+![The packed hybrid and meshless renderer at the same Alpine horizon](reference/procedural-raycast/horizon-comparison.png)
+
+[Packed horizon at 1080p](reference/procedural-raycast/packed-1080.png) ·
+[Meshless horizon at 1080p](reference/procedural-raycast/horizon-1080.png) ·
+[Alpine ridgeline screenshot](reference/procedural-raycast/alpine-oblique.png) ·
+[Alpine flyby MP4](reference/procedural-raycast/alpine-flyby.mp4) ·
+[Raw JSON reports](reference/procedural-raycast/reports)
+
 ## Intersection and shading
 
 - Build an 80 m cell grid of upper height bounds on the GPU. Two 4×4 max
