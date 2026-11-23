@@ -7,6 +7,9 @@ geometric LODs. The packed hybrid remains the game renderer. The experiment
 covers the untouched Alpine heightfield at the default terrain parameters.
 The native 6.25 cm voxel source, sparse edits, and NAADF stay in Frontier.
 
+The [coherence follow-up](PROCEDURAL_COHERENCE.md) measures ray packets, sparse
+prediction and GPU work compaction against this control.
+
 ## Captures and benchmark reports
 
 ![The packed hybrid and meshless renderer at the same Alpine horizon](reference/procedural-raycast/horizon-comparison.png)

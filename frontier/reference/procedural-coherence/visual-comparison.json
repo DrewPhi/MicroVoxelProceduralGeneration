@@ -1,0 +1,316 @@
+{
+  "stationary": {
+    "packets-1920-filtered": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1283718,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "preview-1920-filtered": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1283718,
+      "depth_error_m_p50_p95_p99_max": [
+        0.029205322265625,
+        0.470947265625,
+        0.711669921875,
+        205.35595703125
+      ],
+      "depth_disagreements_over_5m": 59,
+      "depth_disagreements_over_20m": 50,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "compact-1920-filtered": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1283718,
+      "depth_error_m_p50_p95_p99_max": [
+        0.029205322265625,
+        0.470947265625,
+        0.711669921875,
+        205.35595703125
+      ],
+      "depth_disagreements_over_5m": 59,
+      "depth_disagreements_over_20m": 50,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "repair-1920-filtered": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1283718,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    }
+  },
+  "grazing": {
+    "packets-grazing": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1296411,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "compact-grazing": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1296411,
+      "depth_error_m_p50_p95_p99_max": [
+        0.060546875,
+        0.3348388671875,
+        0.501220703125,
+        101.28466796875
+      ],
+      "depth_disagreements_over_5m": 28,
+      "depth_disagreements_over_20m": 10,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "repair-grazing": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 1296411,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    }
+  },
+  "walking": {
+    "packets-walking": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 166880,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "compact-walking": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 166880,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.94189453125,
+        1.818603515625,
+        35.059326171875
+      ],
+      "depth_disagreements_over_5m": 3,
+      "depth_disagreements_over_20m": 3,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "repair-walking": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 166880,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    }
+  },
+  "turning": {
+    "packets-turning": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 126854,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "compact-turning": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 126854,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.851318359375,
+        1.5962487792968751,
+        3.834228515625
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "repair-turning": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 126854,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    }
+  },
+  "flight": {
+    "packets-flight": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 144053,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "compact-flight": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 144053,
+      "depth_error_m_p50_p95_p99_max": [
+        0.146728515625,
+        0.7618408203125,
+        1.2100781250000026,
+        78.67333984375
+      ],
+      "depth_disagreements_over_5m": 1,
+      "depth_disagreements_over_20m": 1,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    },
+    "repair-flight": {
+      "terrain_sky_disagreements": 0,
+      "joint_terrain_pixels": 144053,
+      "depth_error_m_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_disagreements_over_5m": 0,
+      "depth_disagreements_over_20m": 0,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unresolved_pixels": 0
+    }
+  }
+}

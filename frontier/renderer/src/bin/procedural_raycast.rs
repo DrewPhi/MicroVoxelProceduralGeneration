@@ -9,10 +9,13 @@ use wgpu::util::DeviceExt;
 const SIDE: u32 = 256;
 const BLOCK: f64 = 80.;
 const BOUNDS_BYTES: u64 = (256 * 256 + 64 * 64 + 16 * 16) * 4;
+const FINE_BOUNDS_BYTES: u64 = 1024 * 1024 * 4;
 const SHADER: &str = concat!(
     include_str!("alpine_source.wgsl"),
     "\n",
-    include_str!("procedural_raycast.wgsl")
+    include_str!("procedural_raycast.wgsl"),
+    "\n",
+    include_str!("coherent_packets.wgsl")
 );
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -51,6 +54,12 @@ struct Options {
     instrument: bool,
     capture_motion: bool,
     gradient_cache: bool,
+    packets: bool,
+    fine_bounds: bool,
+    sparse_mode: u32,
+    compact: bool,
+    compact_repair: bool,
+    walk: bool,
     repair: bool,
     numerical: bool,
     output: PathBuf,
@@ -87,6 +96,12 @@ fn options() -> Result<Option<Options>> {
         instrument: false,
         capture_motion: false,
         gradient_cache: false,
+        packets: false,
+        fine_bounds: false,
+        sparse_mode: 0,
+        compact: false,
+        compact_repair: false,
+        walk: false,
         repair: true,
         numerical: false,
         output: "output/continuous-rays".into(),
@@ -94,7 +109,7 @@ fn options() -> Result<Option<Options>> {
     let mut args = std::env::args().skip(1);
     while let Some(name) = args.next() {
         if name == "--help" {
-            println!("procedural_raycast --output DIR --width 640 --height 360 --eye X,Y,Z --target X,Y,Z --far 6000 --fov-y 60 --seed 7 --mode eager|lazy|band-range|clip --shading geometry|macro|filtered --tolerance-px 0.35 --haze 0 --frames 6 --warmup 2 --tile 0 --turn-deg 0 --approach-m 0 --capture-motion --instrument --gradient-cache --no-repair --numerical-fallback --oracle 0");
+            println!("procedural_raycast --output DIR --width 640 --height 360 --eye X,Y,Z --target X,Y,Z --far 6000 --fov-y 60 --seed 7 --mode eager|lazy|band-range|clip --shading geometry|macro|filtered --tolerance-px 0.35 --haze 0 --frames 6 --warmup 2 --tile 0 --turn-deg 0 --approach-m 0 --capture-motion --instrument --gradient-cache --packets --fine-bounds --sparse certified|preview --compact --compact-repair --walk --no-repair --numerical-fallback --oracle 0");
             return Ok(None);
         }
         match name.as_str() {
@@ -104,6 +119,26 @@ fn options() -> Result<Option<Options>> {
             }
             "--instrument" => {
                 o.instrument = true;
+                continue;
+            }
+            "--packets" => {
+                o.packets = true;
+                continue;
+            }
+            "--compact-repair" => {
+                o.compact_repair = true;
+                continue;
+            }
+            "--compact" => {
+                o.compact = true;
+                continue;
+            }
+            "--walk" => {
+                o.walk = true;
+                continue;
+            }
+            "--fine-bounds" => {
+                o.fine_bounds = true;
                 continue;
             }
             "--gradient-cache" => {
@@ -138,6 +173,14 @@ fn options() -> Result<Option<Options>> {
             "--turn-deg" => o.turn = value.parse()?,
             "--approach-m" => o.approach = value.parse()?,
             "--output" => o.output = value.into(),
+            "--sparse" => {
+                o.sparse_mode = match value.as_str() {
+                    "certified" => 1,
+                    "preview" => 2,
+                    _ => return Err("invalid sparse mode".into()),
+                };
+                o.packets = true;
+            }
             "--shading" => {
                 o.shading = match value.as_str() {
                     "geometry" => 2,
@@ -159,6 +202,12 @@ fn options() -> Result<Option<Options>> {
         }
     }
     let d = (o.target - o.eye).normalize();
+    if o.compact_repair && !o.repair && !o.numerical {
+        return Err("--compact-repair requires an enabled repair pass".into());
+    }
+    if o.compact && o.sparse_mode == 0 {
+        return Err("--compact requires --sparse".into());
+    }
     if o.width == 0
         || o.width > 1920
         || o.height == 0
@@ -200,9 +249,17 @@ impl Options {
         })
     }
 
-    fn view(&self, alpha: f64) -> View {
+    fn view(&self, alpha: f64, ground: Option<&FbmTerrain>) -> View {
         let d = (self.target - self.eye).normalize();
-        let eye = self.eye + d * (self.approach * alpha);
+        let path = if self.walk {
+            DVec3::new(d.x, 0., d.z).normalize()
+        } else {
+            d
+        };
+        let mut eye = self.eye + path * (self.approach * alpha);
+        if let Some(ground) = ground {
+            eye.y = ground.height_m(eye.x, eye.z) + 1.7;
+        }
         let forward =
             (glam::DQuat::from_rotation_y(self.turn.to_radians() * alpha.sin()) * d).as_vec3();
         let right = forward.cross(Vec3::Y).normalize();
@@ -267,6 +324,7 @@ fn png(path: PathBuf, w: u32, h: u32, data: &[[f32; 4]]) -> Result<()> {
         .iter()
         .flat_map(|p| {
             p[..3].iter().map(|&x| {
+                let x = x.abs();
                 let y = if x <= 0.0031308 {
                     12.92 * x
                 } else {
@@ -403,13 +461,54 @@ fn main() -> Result<()> {
             mapped_at_creation: false,
         })
     };
-    let view = o.view(0.);
+    let ground = o
+        .walk
+        .then(|| {
+            FbmTerrain::new(
+                o.seed,
+                FbmParams {
+                    recipe: FbmRecipe::Alpine,
+                    ..Default::default()
+                },
+            )
+        })
+        .transpose()?;
+    let view = o.view(0., ground.as_ref());
     let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("view"),
         contents: bytemuck::bytes_of(&view),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
-    let bounds = storage(BOUNDS_BYTES, "bounds-only cache");
+    let bounds_bytes = BOUNDS_BYTES + if o.fine_bounds { FINE_BOUNDS_BYTES } else { 0 };
+    let bounds = storage(bounds_bytes, "bounds-only cache");
+    let packet_bytes = if o.packets {
+        u64::from(o.width.div_ceil(8) * o.height.div_ceil(8)) * 16
+    } else {
+        16
+    };
+    let packet_bounds = storage(packet_bytes, "empty screen-packet prefixes");
+    let anchor_bytes = if o.sparse_mode > 0 {
+        packet_bytes * 8
+    } else {
+        32
+    };
+    let anchors = storage(anchor_bytes, "sparse primary-ray anchors");
+    let tile = if o.tile == 0 {
+        o.width.max(o.height).next_multiple_of(8)
+    } else {
+        o.tile
+    };
+    let queue_bytes = if o.compact || o.compact_repair {
+        u64::from(o.width.min(tile) * o.height.min(tile)) * 4 + 4
+    } else {
+        8
+    };
+    let pending_rays = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("compacted unresolved preview rays"),
+        size: queue_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let hits = storage(bytes, "RGB and ray distance");
     let counters = storage(if o.instrument { bytes } else { 16 }, "optional counters");
     let atlas_bytes = if o.gradient_cache {
@@ -421,7 +520,7 @@ fn main() -> Result<()> {
     let gradients = storage(atlas_bytes, "seeded gradient atlas");
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &std::array::from_fn::<_, 5, _>(|i| wgpu::BindGroupLayoutEntry {
+        entries: &std::array::from_fn::<_, 8, _>(|i| wgpu::BindGroupLayoutEntry {
             binding: i as u32,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
@@ -442,16 +541,36 @@ fn main() -> Result<()> {
         push_constant_ranges: &[],
     });
     let pipeline = |name, repair, numeric| {
+        let ray_pass = matches!(name, "render" | "trace_anchors" | "resolve_fallback");
         let mut constants = std::collections::HashMap::new();
-        if name == "render" || name == "build" {
+        if ray_pass
+            || matches!(
+                name,
+                "build" | "build_fine" | "packet_prefix" | "queue_preview"
+            )
+        {
             constants.insert("USE_ATLAS".to_owned(), f64::from(o.gradient_cache));
+            constants.insert("FINE_BOUNDS".to_owned(), f64::from(o.fine_bounds));
         }
-        if name == "render" {
+        if ray_pass {
             constants.extend([
                 ("INSTRUMENT".to_owned(), f64::from(o.instrument)),
                 ("MODE".to_owned(), f64::from(o.mode)),
-                ("REPAIR".to_owned(), f64::from(repair)),
                 ("NUMERICAL".to_owned(), f64::from(numeric)),
+            ]);
+        }
+        if matches!(name, "render" | "resolve_fallback") {
+            constants.extend([
+                ("REPAIR".to_owned(), f64::from(repair)),
+                ("USE_PACKETS".to_owned(), f64::from(o.packets)),
+                ("COMPACT".to_owned(), f64::from(o.compact)),
+                ("SPARSE_MODE".to_owned(), f64::from(o.sparse_mode)),
+            ]);
+        }
+        if name == "queue_preview" {
+            constants.extend([
+                ("INSTRUMENT".to_owned(), f64::from(o.instrument)),
+                ("SPARSE_MODE".to_owned(), f64::from(o.sparse_mode)),
             ]);
         }
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -471,20 +590,46 @@ fn main() -> Result<()> {
         .then(|| pipeline("fill_atlas", false, false));
     let builders =
         ["build", "reduce_medium", "reduce_coarse"].map(|name| pipeline(name, false, false));
-    let render = pipeline("render", false, false);
-    let repair = o.repair.then(|| pipeline("render", true, false));
-    let numerical = o.numerical.then(|| pipeline("render", false, true));
+    let fine = o.fine_bounds.then(|| pipeline("build_fine", false, false));
+    let packet_prefix = o.packets.then(|| pipeline("packet_prefix", false, false));
+    let anchor_pass = (o.sparse_mode > 0).then(|| pipeline("trace_anchors", false, o.numerical));
+    let render_entry = if o.compact {
+        "resolve_fallback"
+    } else {
+        "render"
+    };
+    let preview_queue = o.compact.then(|| pipeline("queue_preview", false, false));
+    let render = pipeline(render_entry, false, false);
+    let repair_queue = o
+        .compact_repair
+        .then(|| pipeline("queue_unresolved", false, false));
+    let repair_entry = if o.compact_repair {
+        "resolve_fallback"
+    } else {
+        render_entry
+    };
+    let repair = o.repair.then(|| pipeline(repair_entry, true, false));
+    let numerical = o.numerical.then(|| pipeline(repair_entry, false, true));
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &layout,
-        entries: &[&uniform, &bounds, &hits, &counters, &gradients]
-            .into_iter()
-            .enumerate()
-            .map(|(i, b)| wgpu::BindGroupEntry {
-                binding: i as u32,
-                resource: b.as_entire_binding(),
-            })
-            .collect::<Vec<_>>(),
+        entries: &[
+            &uniform,
+            &bounds,
+            &hits,
+            &counters,
+            &gradients,
+            &packet_bounds,
+            &anchors,
+            &pending_rays,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: b.as_entire_binding(),
+        })
+        .collect::<Vec<_>>(),
     });
     let encoder = || device.create_command_encoder(&Default::default());
     let mut cmd = encoder();
@@ -501,15 +646,16 @@ fn main() -> Result<()> {
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(groups, groups, 1);
     }
+    if let Some(fine) = &fine {
+        let mut pass = cmd.begin_compute_pass(&Default::default());
+        pass.set_pipeline(fine);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(128, 128, 1);
+    }
     let bound_start = Instant::now();
     queue.submit([cmd.finish()]);
     device.poll(wgpu::Maintain::Wait);
     let bound_ms = bound_start.elapsed().as_secs_f64() * 1000.;
-    let tile = if o.tile == 0 {
-        o.width.max(o.height)
-    } else {
-        o.tile
-    };
     let tiles_x = o.width.div_ceil(tile);
     let tiles_y = o.height.div_ceil(tile);
     let query_count = tiles_x * tiles_y * 2;
@@ -530,6 +676,7 @@ fn main() -> Result<()> {
     let mut first_frame_ms = 0.;
     let mut final_view = view;
     let mut first_image = None;
+    let mut motion_max_unresolved = None;
     let motion = o.turn != 0. || o.approach != 0.;
     let motion_dir = o.output.join("frames");
     if o.capture_motion {
@@ -540,7 +687,7 @@ fn main() -> Result<()> {
         let tic = Instant::now();
         let fraction =
             frame.saturating_sub(o.warmup) as f64 / o.frames.saturating_sub(1).max(1) as f64;
-        final_view = o.view(fraction);
+        final_view = o.view(fraction, ground.as_ref());
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
                 let x = tx * tile;
@@ -548,27 +695,75 @@ fn main() -> Result<()> {
                 let mut tile_view = final_view;
                 tile_view.image[2] = x;
                 tile_view.image[3] = y;
+                tile_view.grid[2] = (o.height - y).min(tile) as i32;
                 tile_view.controls[3] = (o.width - x).min(tile) as f32;
                 queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&tile_view));
                 let mut cmd = encoder();
                 let at = (ty * tiles_x + tx) * 2;
+                let tile_w = (o.width - x).min(tile);
+                let tile_h = (o.height - y).min(tile);
+                let compact_groups = (tile_w * tile_h).div_ceil(64);
+                let repair_pipelines = repair.iter().chain(&numerical);
+                if o.compact {
+                    cmd.clear_buffer(&pending_rays, 0, Some(4));
+                }
                 {
                     let mut pass = cmd.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("continuous primary rays"),
                         timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
                             query_set: &query,
                             beginning_of_pass_write_index: Some(at),
+                            end_of_pass_write_index: (!o.compact_repair).then_some(at + 1),
+                        }),
+                    });
+                    pass.set_bind_group(0, &bind, &[]);
+                    if let Some(prefix) = &packet_prefix {
+                        pass.set_pipeline(prefix);
+                        pass.dispatch_workgroups(
+                            (o.width - x).min(tile).div_ceil(64),
+                            (o.height - y).min(tile).div_ceil(64),
+                            1,
+                        );
+                    }
+                    if let Some(anchors) = &anchor_pass {
+                        pass.set_pipeline(anchors);
+                        pass.dispatch_workgroups(
+                            (o.width - x).min(tile).div_ceil(16),
+                            (o.height - y).min(tile).div_ceil(64),
+                            1,
+                        );
+                    }
+                    if let Some(preview) = &preview_queue {
+                        pass.set_pipeline(preview);
+                        pass.dispatch_workgroups(tile_w.div_ceil(8), tile_h.div_ceil(8), 1);
+                    }
+                    for pipeline in std::iter::once(&render)
+                        .chain(repair_pipelines.clone().filter(|_| !o.compact_repair))
+                    {
+                        pass.set_pipeline(pipeline);
+                        if o.compact {
+                            pass.dispatch_workgroups(compact_groups, 1, 1);
+                        } else {
+                            pass.dispatch_workgroups(tile_w.div_ceil(8), tile_h.div_ceil(8), 1);
+                        }
+                    }
+                }
+                if let Some(collect) = &repair_queue {
+                    cmd.clear_buffer(&pending_rays, 0, Some(4));
+                    let mut pass = cmd.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("compacted ambiguous roots"),
+                        timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                            query_set: &query,
+                            beginning_of_pass_write_index: None,
                             end_of_pass_write_index: Some(at + 1),
                         }),
                     });
                     pass.set_bind_group(0, &bind, &[]);
-                    for pipeline in std::iter::once(&render).chain(&repair).chain(&numerical) {
+                    pass.set_pipeline(collect);
+                    pass.dispatch_workgroups(tile_w.div_ceil(8), tile_h.div_ceil(8), 1);
+                    for pipeline in repair_pipelines {
                         pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(
-                            (o.width - x).min(tile).div_ceil(8),
-                            (o.height - y).min(tile).div_ceil(8),
-                            1,
-                        );
+                        pass.dispatch_workgroups(compact_groups, 1, 1);
                     }
                 }
                 queue.submit([cmd.finish()]);
@@ -603,11 +798,14 @@ fn main() -> Result<()> {
         if save_motion_frame || save_first {
             let image = read(&device, &image_read)?;
             if save_motion_frame {
+                let pixels = bytemuck::cast_slice::<u8, [f32; 4]>(&image);
+                let unresolved = pixels.iter().filter(|p| p[3] == -2.).count();
+                motion_max_unresolved = Some(unresolved.max(motion_max_unresolved.unwrap_or(0)));
                 png(
                     motion_dir.join(format!("{:04}.png", frame - o.warmup)),
                     o.width,
                     o.height,
-                    bytemuck::cast_slice(&image),
+                    pixels,
                 )?;
             }
             if save_first {
@@ -622,11 +820,27 @@ fn main() -> Result<()> {
         cmd.copy_buffer_to_buffer(&counters, 0, &read, 0, bytes);
         read
     });
+    let packet_read = (o.instrument && o.packets).then(|| {
+        let read = read_buffer(&device, packet_bytes);
+        cmd.copy_buffer_to_buffer(&packet_bounds, 0, &read, 0, packet_bytes);
+        read
+    });
+    let anchor_read = (o.instrument && o.sparse_mode > 0).then(|| {
+        let read = read_buffer(&device, anchor_bytes);
+        cmd.copy_buffer_to_buffer(&anchors, 0, &read, 0, anchor_bytes);
+        read
+    });
     queue.submit([cmd.finish()]);
     let data = read(&device, &image_read)?;
     let mut pixels = bytemuck::cast_slice::<u8, [f32; 4]>(&data).to_vec();
     let mut numerical_pixels = 0usize;
+    let mut sparse_pixels = 0usize;
+    let mut sparse_certified = 0usize;
     for p in &mut pixels {
+        if p[0].is_sign_negative() {
+            sparse_pixels += 1;
+            sparse_certified += usize::from(p[1].is_sign_negative());
+        }
         if p[3] >= 32768. {
             p[3] -= 32768.;
             numerical_pixels += 1;
@@ -658,7 +872,34 @@ fn main() -> Result<()> {
             let columns = std::array::from_fn::<_, 4, _>(|axis| {
                 stats(counters.iter().map(|p| p[axis] as f64).collect())
             });
-            Ok::<_, Box<dyn Error>>(format!("{columns:?}"))
+            let sums = std::array::from_fn::<_, 4, _>(|axis| {
+                counters.iter().map(|p| u64::from(p[axis])).sum::<u64>()
+            });
+            Ok::<_, Box<dyn Error>>((format!("{columns:?}"), format!("{sums:?}")))
+        })
+        .transpose()?
+        .unwrap_or_else(|| ("null".into(), "null".into()));
+    let (count_json, count_totals) = count_json;
+    let packet_json = packet_read.map(|buffer| {
+        let data = read(&device, &buffer)?;
+        let packets = bytemuck::cast_slice::<u8,[f32;4]>(&data);
+        let prefix = stats(packets.iter().map(|v| f64::from(v[0])).collect());
+        let tests: u64 = packets.iter().map(|v| v[1] as u64).sum();
+        let analytic: u64 = packets.iter().map(|v| v[2] as u64).sum();
+        let sky = packets.iter().filter(|v| v[3] == 1.).count();
+        Ok::<_, Box<dyn Error>>(format!(
+            "{{\"total\":{},\"sky\":{sky},\"prefix_m_p50_p95_p99\":{prefix:?},\"grid_tests\":{tests},\"analytic_tests\":{analytic}}}",
+            packets.len()
+        ))
+    }).transpose()?.unwrap_or_else(|| "null".into());
+    let anchor_json = anchor_read
+        .map(|buffer| {
+            let data = read(&device, &buffer)?;
+            let values = bytemuck::cast_slice::<u8, [u32; 8]>(&data);
+            let sums = std::array::from_fn::<_, 4, _>(|i| {
+                values.iter().map(|v| u64::from(v[i + 4])).sum::<u64>()
+            });
+            Ok::<_, Box<dyn Error>>(format!("{sums:?}"))
         })
         .transpose()?
         .unwrap_or_else(|| "null".into());
@@ -670,10 +911,27 @@ fn main() -> Result<()> {
             .find(|l| l.starts_with("VmHWM:"))
             .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
     });
-    let report=format!(
-        "{{\"adapter\":{:?},\"driver\":{:?},\"seed\":{},\"eye\":{:?},\"target\":{:?},\"fov_y\":{},\"far_m\":{},\"width\":{},\"height\":{},\"mode\":{},\"shading\":{},\"tile\":{},\"frames\":{},\"warmup\":{},\"turn_deg\":{},\"approach_m\":{},\"instrument\":{},\"capture_motion\":{},\"repair\":{},\"numerical_fallback\":{},\"gpu_ms_p50_p95_p99\":{gpu:?},\"frame_ms_p50_p95_p99\":{frame:?},\"bounds_build_wall_ms\":{bound_ms},\"process_first_frame_wall_ms\":{first_frame_ms},\"bounds_bytes\":{BOUNDS_BYTES},\"gradient_atlas_bytes\":{atlas_bytes},\"numerical_fallback_pixels\":{numerical_pixels},\"output_gpu_bytes\":{bytes},\"rss_peak_kib\":{},\"terrain_pixels\":{terrain},\"unresolved_pixels\":{missed},\"counter_names\":[\"leaf_intervals\",\"full_height_evaluations\",\"detailed_bands_bounded\",\"hierarchy_steps\"],\"counters_p50_p95_p99\":{count_json},\"oracle\":{check}}}",
-        info.name,info.driver_info,o.seed,o.eye.to_array(),o.target.to_array(),o.fov,o.far,o.width,o.height,o.mode,o.shading,o.tile,o.frames,o.warmup,o.turn,o.approach,o.instrument,o.capture_motion,o.repair,o.numerical,rss.map_or("null".to_owned(),|n|n.to_string())
-    );
+    let motion_unresolved = motion_max_unresolved.map_or("null".to_owned(), |n| n.to_string());
+    let rss = rss.map_or("null".to_owned(), |n| n.to_string());
+    let report_fields = [
+        format!(r#""adapter":{:?},"driver":{:?},"seed":{}"#, info.name, info.driver_info, o.seed),
+        format!(r#""eye":{:?},"target":{:?},"fov_y":{},"far_m":{}"#,
+            o.eye.to_array(), o.target.to_array(), o.fov, o.far),
+        format!(r#""width":{},"height":{},"tile":{},"mode":{},"shading":{},"tolerance_px":{},"haze":{}"#,
+            o.width, o.height, o.tile, o.mode, o.shading, o.tolerance, o.haze),
+        format!(r#""frames":{},"warmup":{},"turn_deg":{},"approach_m":{},"walk":{},"capture_motion":{}"#,
+            o.frames, o.warmup, o.turn, o.approach, o.walk, o.capture_motion),
+        format!(r#""instrument":{},"repair":{},"numerical_fallback":{}"#, o.instrument, o.repair, o.numerical),
+        format!(r#""gpu_ms_p50_p95_p99":{gpu:?},"frame_ms_p50_p95_p99":{frame:?},"bounds_build_wall_ms":{bound_ms},"process_first_frame_wall_ms":{first_frame_ms}"#),
+        format!(r#""bounds_bytes":{bounds_bytes},"gradient_atlas_bytes":{atlas_bytes},"output_gpu_bytes":{bytes},"rss_peak_kib":{rss}"#),
+        format!(r#""packets":{},"packet_bytes":{packet_bytes},"packet_work":{packet_json},"fine_bounds":{}"#, o.packets, o.fine_bounds),
+        format!(r#""sparse_mode":{},"sparse_pixels":{sparse_pixels},"sparse_certified_pixels":{sparse_certified},"anchor_bytes":{anchor_bytes},"anchor_counter_totals":{anchor_json}"#, o.sparse_mode),
+        format!(r#""compact":{},"compact_repair":{},"queue_bytes":{queue_bytes}"#, o.compact, o.compact_repair),
+        format!(r#""terrain_pixels":{terrain},"unresolved_pixels":{missed},"motion_max_unresolved_pixels":{motion_unresolved},"numerical_fallback_pixels":{numerical_pixels}"#),
+        r#""counter_names":["leaf_intervals","full_height_evaluations","detailed_bands_bounded","hierarchy_steps"]"#.to_owned(),
+        format!(r#""counters_p50_p95_p99":{count_json},"counter_totals":{count_totals},"oracle":{check}"#),
+    ];
+    let report = format!("{{{}}}", report_fields.join(","));
     fs::write(o.output.join("report.json"), &report)?;
     println!("{report}");
     Ok(())

@@ -17,6 +17,7 @@ struct View {
 @group(0) @binding(4) var<storage, read_write> gradients: array<u32>;
 
 override INSTRUMENT: bool = false;
+override FINE_BOUNDS: bool = false;
 override USE_ATLAS: bool = false;
 override MODE: u32 = 1u;
 override REPAIR: bool = false;
@@ -25,6 +26,7 @@ const SIDE: u32 = 256u;
 const BLOCK: f32 = 80.;
 const MEDIUM: u32 = SIDE*SIDE;
 const COARSE: u32 = MEDIUM+64u*64u;
+const FINE_OFFSET: u32 = COARSE + 16u*16u;
 const INF: f32 = 1.e20;
 const PAD: f32 = 0.0015;
 const NORMALIZATION: f32 = (1.-0.325*0.325*0.325*0.325*0.325*0.325*0.325*0.325)/(1.-0.325);
@@ -142,12 +144,33 @@ fn rect_upper(p: vec2f,r: vec2f) -> f32 {
     }
     h+=(190.*rect_hill((p-vec2(-900.,1500.))/vec2(1500.,900.),r/vec2(1500.,900.))
        +290.*rect_hill((p-vec2(1550.,2000.))/vec2(1400.,1100.),r/vec2(1400.,1100.))).y;
-    return h+e*7.5+0.45+0.04+PAD;
+    if !FINE_BOUNDS { return h+e*7.5+0.45+0.04+PAD; }
+    var detail = 1.;
+    {
+        // Bound each octave that can contribute a narrower interval than its
+        // full [-1,1] range. The omitted higher-frequency weight stays present.
+        let span = r.x+r.y;
+        var wave = 45.;
+        var weight = 1./NORMALIZATION;
+        for (var octave=0u; octave<8u; octave+=1u) {
+            if span/wave >= .45 { break; }
+            detail += weight*(rectangle_band(p,r,wave,0xa110u+octave).y-1.);
+            wave *= .5;
+            weight *= .325;
+        }
+    }
+    let scale = select(.45, .45+e*7.5, detail >= 0.);
+    return h+scale*detail+0.04+PAD;
 }
 @compute @workgroup_size(8,8)
 fn build(@builtin(global_invocation_id) id: vec3u) {
     let p=(vec2f(view.grid.xy+vec2i(id.xy))+.5)*BLOCK;
     bounds[id.y*SIDE+id.x]=rect_upper(p,vec2(BLOCK*.5+.002));
+}
+@compute @workgroup_size(8,8)
+fn build_fine(@builtin(global_invocation_id) id: vec3u) {
+    let p=(vec2f(4*view.grid.xy+vec2i(id.xy))+.5)*(BLOCK/4.);
+    bounds[FINE_OFFSET+id.y*(SIDE*4u)+id.x]=rect_upper(p,vec2(BLOCK/8.+.003));
 }
 fn reduce(g:vec2u, size:u32, src:u32, dst:u32) {
     var h=-INF;
@@ -280,31 +303,39 @@ fn clip_interval(o:vec3f,d:vec3f,start:f32,stop:f32,first:ptr<function,f32>,
 }
 fn trace(o:vec3f,d:vec3f,start:f32,stop:f32,counts:ptr<function,vec4u>) -> f32 {
     var l=start;
-    var block=block_at(fma(d.xz,vec2(l),o.xz),d.xz);
+    let sub=select(1,4,FINE_BOUNDS);
+    let cell=BLOCK/f32(sub);
+    let grid=view.grid.xy*sub;
+    let size=SIDE*u32(sub);
+    let levels=select(3u,4u,FINE_BOUNDS);
+    var block=select(block_at(fma(d.xz,vec2(l),o.xz),d.xz),
+        vec2i(floor(fma(d.xz,vec2(l),o.xz)/cell+d.xz*.000002)),FINE_BOUNDS);
     var ambiguous=INF;
     for(var iteration=0u;iteration<384u;iteration+=1u){
-        let slot=block-view.grid.xy;
-        if any(slot<vec2i(0)) || any(slot>=vec2i(i32(SIDE))) {return -2.;}
+        let slot=block-grid;
+        if any(slot<vec2i(0)) || any(slot>=vec2i(i32(size))) {return -2.;}
         var advanced=false;
-        for(var level=0u;level<3u;level+=1u){
-            let shift=4u-2u*level;
+        for(var level=0u;level<levels;level+=1u){
+            let shift=2u*(levels-1u-level);
             let span=1i<<shift;
             let region=slot>>vec2u(shift);
-            let corner=view.grid.xy+(region<<vec2u(shift));
+            let corner=grid+(region<<vec2u(shift));
             let boundary=corner+select(vec2i(0),vec2i(span),d.xz>vec2(0.));
-            let edge=select((vec2f(boundary)*BLOCK-o.xz)/d.xz,vec2(INF),abs(d.xz)<vec2(1.e-10));
+            let edge=select((vec2f(boundary)*cell-o.xz)/d.xz,vec2(INF),abs(d.xz)<vec2(1.e-10));
             let hi=min(stop,min(edge.x,edge.y));
-            let offset=array<u32,3>(COARSE,MEDIUM,0u)[level];
-            let top=bounds[offset+u32(region.y)*(SIDE>>shift)+u32(region.x)];
+            let offset=array<u32,4>(COARSE,MEDIUM,0u,FINE_OFFSET)[level];
+            let top=bounds[offset+u32(region.y)*(size>>shift)+u32(region.x)];
             if INSTRUMENT { (*counts).w+=1u; }
             let y=min(fma(d.y,l,o.y),fma(d.y,hi,o.y));
             if hi>l && y<=top+PAD {
-                if level<2u {continue;}
+                if level+1u<levels {continue;}
                 let t=clip_interval(o,d,l,hi,&ambiguous,counts);
                 if t != -1. {return t;}
-            } else if hi<=l && level<2u {continue;}
+            } else if hi<=l && level+1u<levels {continue;}
             if hi>=stop {return select(-2.,-1.,ambiguous==INF);}
-            block=clamp(block_at(fma(d.xz,vec2(hi),o.xz),d.xz),corner,corner+span-1);
+            let pos=fma(d.xz,vec2(hi),o.xz);
+            let next=select(block_at(pos,d.xz), vec2i(floor(pos/cell+d.xz*.000002)), FINE_BOUNDS);
+            block=clamp(next,corner,corner+span-1);
             if edge.x<=edge.y {block.x=boundary.x-select(1,0,d.x>0.);}
             if edge.y<=edge.x {block.y=boundary.y-select(1,0,d.z>0.);}
             l=max(l,hi);
@@ -361,27 +392,61 @@ fn shade(p:vec3f,d:vec3f,t:f32) -> vec3f {
     let haze=1.-exp(-t*view.controls.z);
     return mix(pigment*light,vec3(.37,.52,.67),haze);
 }
-@compute @workgroup_size(8,8)
-fn render(@builtin(global_invocation_id) id:vec3u) {
-    let width=view.image.x;
-    let height=view.image.y;
-    let ij=id.xy+view.image.zw;
-    if id.x>=u32(view.controls.w) || ij.x>=width || ij.y>=height {return;}
-    let index=ij.y*width+ij.x;
-    if (REPAIR || NUMERICAL) && pixels[index].w != -2. {return;}
-    let uv=2.*(vec2f(ij)+.5)/vec2f(view.image.xy)-1.;
-    let d=normalize(view.forward.xyz+uv.x*view.right.xyz-uv.y*view.up.xyz);
-    var counts=vec4u(0);
-    let forward=dot(d,view.forward.xyz);
-    let t=trace(view.eye.xyz,d,0.025/forward,view.eye.w/forward,&counts);
+fn store_pixel(index:u32, d:vec3f, t:f32, prediction_kind:f32) {
     var rgb=mix(vec3(.59,.70,.83),vec3(.23,.44,.73),smoothstep(0.,.65,max(d.y,0.)));
     if t>=0. {rgb=vec3(.5); if view.params.w!=2u {rgb=shade(fma(d,vec3(t),view.eye.xyz),d,t);}}
     if t==-2. {rgb=vec3(1.,0.,1.);}
     var stored=t;
     if NUMERICAL && t!=-2. {stored=select(-3.,t+32768.,t>=0.);}
+    // Keep the exact floating depth. The color sign bits tag preview data and
+    // are stripped by the PNG writer.
+    if prediction_kind>0. {rgb.r=-rgb.r;}
+    if prediction_kind==2. {rgb.g=-rgb.g;}
     pixels[index]=vec4(rgb,stored);
+}
+
+fn resolve_pixel(ij:vec2u) {
+    let width=view.image.x;
+    let index=ij.y*width+ij.x;
+    if (REPAIR || NUMERICAL) && pixels[index].w != -2. {return;}
+    let d=pixel_ray(ij);
+    var counts=vec4u(0);
+    let forward=dot(d,view.forward.xyz);
+    var start=.025;
+    var sky=false;
+    if USE_PACKETS {
+        let packet=packets[packet_index(ij/PACKET_EDGE)];
+        start=packet.x;
+        sky=packet.w==1.;
+    }
+    var t=-1.;
+    var prediction_kind=0.;
+    if !sky {
+        if SPARSE_MODE!=0u && !COMPACT && !REPAIR && !NUMERICAL {
+            let preview=preview_intersection(ij,d,forward,start,&counts);
+            if preview.y==2. || SPARSE_MODE==2u {
+                t=preview.x;
+                prediction_kind=preview.y;
+            }
+        }
+        if prediction_kind==0. {
+            var lower=.025/forward;
+            if USE_PACKETS {
+                lower=aligned_packet_start(view.eye.xyz,d,start/forward,lower);
+            }
+            t=trace(view.eye.xyz,d,lower,view.eye.w/forward,&counts);
+        }
+    }
+    store_pixel(index,d,t,prediction_kind);
     if INSTRUMENT {
-        if REPAIR || NUMERICAL {counts+=telemetry[index];}
+        if REPAIR || NUMERICAL || COMPACT {counts+=telemetry[index];}
         telemetry[index]=counts;
     }
+}
+
+@compute @workgroup_size(8,8)
+fn render(@builtin(global_invocation_id) id:vec3u) {
+    let ij=id.xy+view.image.zw;
+    if id.x>=u32(view.controls.w) || ij.x>=view.image.x || ij.y>=view.image.y {return;}
+    resolve_pixel(ij);
 }
