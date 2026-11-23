@@ -177,6 +177,14 @@ impl FbmTerrain {
         let c = Cell::from_meters([x, 0.0, z]);
         self.height_cells(c.x, c.z) as f64 * voxel_size()
     }
+    /// Continuous input to native column sampling. Used by the procedural
+    /// ray casting experiment's CPU oracle.
+    pub fn continuous_height_m(&self, x: f64, z: f64) -> f64 {
+        self.elevation(
+            x / self.params.horizontal_scale,
+            z / self.params.horizontal_scale,
+        )
+    }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
         if self.params.recipe.has_static_water() {
             return self.column_cells(x, z).visible_top;
