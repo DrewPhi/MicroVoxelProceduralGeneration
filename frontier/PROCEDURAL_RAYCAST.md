@@ -181,3 +181,316 @@ The meshless runner also writes `report.json`, with optional per-ray work
 percentiles via `--instrument`. Replay the small geometry pass without the
 gradient cache, with `--no-repair` alone, or with strict repair (omit both
 `--no-repair` and `--numerical-fallback`) to measure each component.
+
+## Cached heightfield research
+
+The original interval resolver spends most of its time evaluating and bounding
+noise near intersections. The [coherence results](PROCEDURAL_COHERENCE.md)
+show that removing coarse traversal alone cannot offset that cost. This follow-up
+uses resident height samples for intersections and bounds only for rejection.
+
+| Priority for Frontier | Method | Algorithm, costs and published evidence |
+| --- | --- | --- |
+| 1 | Dick, Krüger and Westermann, 2009 | Mirror horizontal direction signs to positive texel traversal, snap the crossed coordinate to the boundary, and carry the current mip level. Descend at potential hits and ascend only across a parent boundary. A descending ray may advance to a parent's height before descending. Piecewise-constant leaves provide exact roofs and step walls for that sampled grid. Bound overhead is about one third of a scalar height texture. The authors report roughly 5× over their own unnested texel walk. Their raster comparison uses tiled terrain and matching screen-error targets. Dense Vorarlberg favored the ray path with roughly 128 MB of geometry residency. Rasterization was faster and smaller on the less dense Utah data. [Paper, sections 3 and 4](https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2009/GPU_Ray-Casting/EG09AreasTerrain.pdf) |
+| 2 | Tevs, Ihrke and Seidel, 2008 | Max-reduce each four-texel group. At a bilinear leaf, four corner samples bound the patch and substitution of the ray gives a quadratic. Use the first root inside the cell's ray interval, even if both endpoint signs agree. The paper packs corner samples into RGBA to trade texture footprint for fewer fetches. Successive reductions are straightforward to update locally. Their 8800 Ultra took 2.13 ms at 2048² and 7.52 ms at 4096² for mip construction. [Paper, section 3 and Table 1](https://pure.mpg.de/rest/items/item_1325622_5/component/file_3590464/content) |
+| 3 | Vertical coherence | Maintain the angle of the highest visible terrain in a vertical plane. A constant-height cell contributes a monotone slope interval, so one traversal can resolve an entire upright screen column, including exact side hits. The 1997 method projects pencils of vertical planes onto arbitrary camera planes. The projected lines converge under pitch and uncovered pixels use interpolation. Kakkar's current compute WGSL walks increasing adaptive depth steps once per column, emits newly visible spans, and samples repeated heights and colors. It provides a shared projection reference with approximate visibility rather than an exact texel walk. The older fragment example in the README walks independently per pixel. One invocation per column reduces parallelism on integrated GPUs. [Lee and Shin](https://doi.org/10.1002/(SICI)1099-1778(199703)8:2%3C97::AID-VIS164%3E3.0.CO;2-A) · [Kakkar shader](https://github.com/rachitkakkar/gpu-voxel-terrain/blob/9f72df83b22fc6e2f206504dde24fb35f156d361/src/voxels.wgsl) |
+| 4 | Nilles and Müller, 2025 | Project into a 2D DDA and intersect vertical intervals in each cell. Per-layer min/max merge creates coarse boxes. Fine half-precision stacks carry material boundaries, and coarser levels merge excess vertical layers. The optional stackless traversal ascends after 8 misses (16 at the finest grid). Their CUDA code uses packed half pairs and specializes ray and material modes. Counter-versus-stack speed ordering reversed between their older GPUs and RTX 4080. Their 3.5 ms low preset used the RTX 4080 at 1080p on a 256 m square with 4096² columns at 6.25 cm. [Paper, sections 4 and 5](https://diglib.eg.org/server/api/core/bitstreams/37905fb9-2e91-45a2-9238-152be9d9fecc/content) · [MIT source at 81863c6](https://github.com/Clocktown/CUDA-3D-Hydraulic-Erosion-Simulation-with-Layered-Stacks/blob/81863c697e2a1b3a8948d5edad58e0304182ec30/core/geo/device/raymarch.cu) |
+| 5 | Feldmann and Hinrichs, 2012 | Cache nested active tile regions in a texture array, publish coarse tiles first, and use a tile-map lookup for the finest resident level. Traverse projected cells via 2D exits. Screen-projected face area and resident coverage determine termination. Optional local linear/bicubic reconstruction changes the hit model. The GTX 470 reached 52.3 FPS at 1080p on City 2, 42 FPS with local linear reconstruction. A bounded world-aligned cache is a good follow-up once the finite renderer reports acceptable cost and quality. [Paper, sections 3–4](https://studyres.com/doc/22424173/gpu-based-single-pass-ray-casting-of-large-heightfields) |
+| 6 | RMIP, 2023 | Four overlapping power-of-two rectangular min/max reads bound an arbitrary rectangle. Separate horizontal and vertical scales tighten slender projected footprints. The dense representation costs N²(1+log₂N)² ranges, with the paper compressing storage to mipmap order at the expense of some tighter queries. Its displacement inverse, ray-curve splits and reported 5× mean gain on RTX 3080 concern triangle-based shell displacement. Frontier could independently test anisotropic bounds for shallow planar rays. [Paper, sections 4–6](https://www.iliyan.com/publications/RMIP/RMIP_SigAsia2023.pdf) |
+| 7 | Robust cone steps, 2024 | Advance within a conservative cone, with an exact cell-boundary step to avoid stagnation. Ordinary bilinear interpolation of apertures can create an unsafe cone. The authors use a neighborhood minimum correction and compute relaxed apertures by testing limiting points that can admit a second crossing. Updates can affect cones centered beyond the edited tile. Benchmark preprocessing and invalidation along with traversal before adopting. [Paper, sections 3–6](https://diglib.eg.org/server/api/core/bitstreams/c6853f7d-4962-412f-927e-462fe29031d1/content) |
+| 8 | Moinet and Neyret, 2025 | Partial octave sums plus bounded omitted amplitudes form nested enclosures. Sub-stepping and early-stop-plus-one choose fewer bands and tighter local Lipschitz bounds. Their second-order envelope switches from quadratic to linear when the global slope cap is reached. They report gains up to 12× over classical sphere tracing in opaque cases. This is a candidate for selective residuals after caching, with independent residual error and first-hit tests. [Paper, sections 4–6 and 9](https://diglib.eg.org/bitstream/handle/10.1111/cgf70072/cgf70072.pdf) |
+
+The 2026 Vangers preprint provides a useful integrated-GPU counterexample.
+At default settings on the Radeon 780M its 128-step texture ray march averaged
+4.83 ms, its coarse 3D occupancy acceleration averaged 8.32 ms, and its fitted
+mesh averaged 4.07 ms. The simple march can miss thin features, and the fitted
+mesh incurred a roughly 2.5 s one-time fit in the worst 780M scene. Extra lookup
+work, memory and cache locality can erase benefits even when the hierarchy
+is conservative. [Malyshau, sections 3 and 5](https://arxiv.org/html/2608.17390v1)
+
+A fresh search through 2026 also surfaced QuadStack's compressed layered
+ray cast, hierarchical terrain horizon visibility and 2026 NAADF temporal
+history. QuadStack is relevant to later layered edits. Precomputed region
+horizons have potential in static terrain and incur edit maintenance.
+NAADF uses temporal accumulation of quantized voxel hits for shading, a separate
+contract from proving current-frame first visibility. [QuadStack](https://cs.purdue.edu/homes/bbenes/papers/Graciano20TVCG.pdf) · [Hierarchical terrain visibility](https://research.cs.queensu.ca/home/jstewart/papers/egwr97.html) · [NAADF, 2026](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.70413)
+
+The implementation below is independent Rust/WGSL. Source-reading provenance
+is listed for the CUDA and WGSL comparisons. All traversal modes use the same
+sampled geometry within an A/B. The existing affine source bounds and native
+reference still describe the canonical world. Coarse sample maxima certify
+only the selected reconstruction, so native fidelity is checked separately.
+
+### Experimental implementation
+
+`cached_heightfield` is a standalone compute renderer. Its finite control
+generates CPU f64 samples from seed 7, then uploads scalar height textures
+and conservative bounds. The default benchmark footprint is 16,384 m square,
+with 16, 8 and 4 m sample pitches. The separate native fixture covers 32 m
+at 6.25 cm. Rays use forward depth and an actual 6 km projection clip, with
+the established camera and a 60° vertical FOV for the stationary full-range
+comparison. The core traversals are selectable as follows.
+
+- `--modes max` restarts at the maximum mip after an empty segment.
+- `--modes dick` retains a mip and ascends on parent crossings. A small
+  conservative guard precedes the descending-ray jump at a parent maximum.
+- `--modes dda` counts misses before ascending and shares the same mip
+  and leaf intersection functions. It adapts the Nilles and Müller
+  stackless policy to one vertically solid interval per column.
+- `--modes vertical --level` holds the horizontal direction fixed over a
+  column or row band. It rejects a block using the lowest unfilled row,
+  shares horizontal intersections and writes each newly visible row once.
+  A bilinear leaf shares its height polynomial across rows. Pitched and
+  banked cameras use independent DDA, since a screen column then projects
+  to several azimuths. This keeps arbitrary aircraft orientations exact
+  for the cached sampled surface.
+- `--bilinear` analytically solves the first zero of the ray-minus-patch
+  quadratic. Opposite signs at the two endpoints are sufficient but not
+  necessary for intersection. Stepped mode intersects the top plane or a
+  vertical entry wall. Max/min and two-mip strides are selectable experiments.
+
+The GPU cache `--stream` snaps its world origin in 64-sample increments.
+Existing height samples and mip levels through level 6 stay at toroidal
+physical addresses. Strip jobs generate only newly visible interior samples
+and the top/right halo. The small upper mips are rebuilt in logical order,
+which keeps their alignment correct after arbitrary origin shifts. Reads
+use the new origin only after all writes and reductions have completed.
+This first publisher waits synchronously and keeps overlapping data resident.
+A move that displaces the entire window requires a cold fill.
+
+`--nested` adds a 512² moving grid at one sixteenth the outer pitch. A
+world-space camera-centered smoothstep blends fine and parent samples
+before reconstruction. The inner trace uses the union of fine maxima and
+covering parent bounds wherever a blend can occur. The fade reaches the
+parent heightfield inside the inner window edges. Both world-aligned grids
+then describe the same patch at the ownership boundary, so recentering a
+window need only change sampled addresses. The native fixture remains a
+separate integer-column test.
+
+`--history` tries a reprojected previous hit, tests the candidate inside
+current cached terrain, and uses the verified point only as a far limit.
+The ordinary traversal still proves visibility from the near plane. A view
+cut invalidates the candidate before texture reads. History storage and
+copy time are included in GPU results. This is a visibility experiment
+separate from temporal antialiasing.
+
+### Benchmark results
+
+Measurements use the Ryzen 5 7640U and **Radeon 760M** selected as an
+integrated Vulkan device, with Mesa RADV 25.2.8. The finite tests run
+two trials in opposite method order. The main stills contain 40 timed
+frames per method after separate warmups. Resolution is the actual
+visibility and shading dispatch size.
+
+The 8 m cached DDA took **2.72 ms p95 for visibility**
+and **3.43 ms shaded GPU p95** at 1080p. The rolling
+two-resolution path took **5.13 ms** for the stationary
+view and **5.62 ms** over the banked flight route. The
+nested GPU span includes any strip updates during the sample. These are
+standalone passes with terrain shading and depth. The packed hybrid
+control covers a broader frame with different shading and ownership.
+
+| Resolution | Restart max visibility | Dick visibility | Miss-counter DDA visibility | DDA plus shading |
+| --- | ---: | ---: | ---: | ---: |
+| 320×180 | 0.99 | 0.37 | 0.33 | 0.36 |
+| 640×360 | 3.11 | 0.78 | 0.60 | 0.68 |
+| 1920×1080 | 9.96 | 4.53 | 2.72 | 3.43 |
+
+Values above are GPU p95 in milliseconds for the same pitched bilinear
+grid. The earlier measured references are 11.54 ms for the packed
+hybrid repeat, 550.33 ms for direct fBm, and 523.94 ms for coherent fBm.
+The raw reports contain p50/p95/p99, separate complete submit-and-wait
+wall time, sample counts, cold setup and memory. The packed span includes
+its frame passes and excludes presentation. The cached path uses a
+simpler shading model and approximate far terrain. [Prior controls](PROCEDURAL_COHERENCE.md#stationary-benchmark)
+
+On the instrumented pitched still, restart traversal fetched 165.6M
+bounds, boundary ascent fetched 43.4M,
+and miss-counter DDA fetched 45.4M. The DDA is faster despite
+slightly more reads than boundary ascent. The branch and arithmetic
+sequence matter alongside request count. Native warp occupancy was
+outside the measurement scope. The cold generator evaluates fBm for
+new texture samples only. Intersection kernels perform zero procedural
+height evaluations.
+
+The max/min experiment took **2.90 ms** versus **3.04 ms**
+for max-only stepped traversal, with twice the bound storage.
+Using two mip levels per ascent took **3.45 ms** for bilinear DDA.
+The combined timings favor scalar max textures and one-level changes
+for these views. A flat full-height solid already admits an inexpensive
+max-only rejection, so extra volume lower bounds have limited value.
+
+### Vertical coherence and camera movement
+
+| Level camera | Stepped independent / vertical | Bilinear independent / vertical |
+| --- | ---: | ---: |
+| 320×180 | 0.26 / 0.94 ms | 0.34 / 1.23 ms |
+| 640×360 | 0.55 / 0.49 ms | 1.12 / 0.89 ms |
+| 1920×1080 | 3.16 / 0.54 ms | 6.36 / 0.65 ms |
+
+Band widths trade locality against parallelism. Full-column invocations
+reduce texture requests at the expense of fewer active groups and serial
+output. The corrected grid traversal tests the other axis against the
+same edge times used by the DDA and skips zero-length intervals. This
+removed a 90.8 m disagreement at one grazing pixel in the early stepped
+test. The initial Dick height jump also needed its conservative guard
+to preserve narrow native intersections. Final comparisons below use
+the corrected traversal.
+
+| 1080p route | Finite shaded GPU p95 | Nested shaded + update GPU p95 |
+| --- | ---: | ---: |
+| Grazing ridge | 3.46 ms | — |
+| Walk | 5.84 ms | 7.00 ms |
+| Rapid turn | 3.31 ms | — |
+| High flight | 3.43 ms | — |
+| Low flight | 4.19 ms | 7.00 ms |
+| Banking flight | 3.42 ms | 5.62 ms |
+| Fixed 33.8° bank | 3.27 ms | 4.87 ms |
+| Revisit | 3.79 ms | 6.04 ms |
+
+Published shaded captures use analytic terrain normals and a
+footprint-filtered trail tint. They use a single visibility sample
+per pixel and clear distance shading for comparisons. The motion
+capture uses 960×540 per panel and offline playback at 24 FPS.
+Actual 1080p route metrics above use 72 or 96 timed frames. The
+nested still and bank measured 6.02 ms and
+7.33 ms p95 for complete headless frame
+submission and readback wait. Presentation and capture encoding have
+separate scopes.
+
+### Cache behavior and temporal test
+
+The rolling 2048² plus 512² configuration holds **39.7 MiB**
+of logical height and max textures at 8 m and 0.5 m, including corner
+halos. The 1080p depth and color outputs add 15.8 and 7.9 MiB
+respectively. Capture staging, optional work counters and driver
+allocations are separate. The raw process RSS includes CPU oracle work.
+The two-tier still first completed at **121 ms**
+from a fresh process with a populated driver shader cache. The run with
+`MESA_SHADER_CACHE_DISABLE=true` first completed at **257 ms**.
+
+One outer 64-column shift regenerated 131,072 of 4,194,304 height
+samples (3.125%) plus the halo, with a **0.67 ms**
+median GPU update on the revisit route. A full 18 km relocation
+regenerated the entire texture in **18.0 ms**
+median GPU time. The nested teleport reported 3.81 / 5.42 / 21.45
+ms GPU p50/p95/p99, so p95 alone hides the cold transition. Overlapping
+data survive a return trip. An evicted strip is produced again when
+revisited. This synchronous cache validates geometry and scheduling
+cost, with asynchronous publication still needed for teleport tails.
+
+The temporal tests alternate off/on/on/off across four distinct trials
+per route, with counters enabled on both paths. Current-surface
+validation limits the tested interval without skipping the first hit.
+
+| Route | History off, GPU p95 | History on, GPU p95 |
+| --- | ---: | ---: |
+| Turn | 5.46, 5.51 ms | 6.54, 6.67 ms |
+| Bank | 5.66, 5.81 ms | 6.89, 6.92 ms |
+| Teleport | 5.84, 5.84 ms | 6.74, 6.87 ms |
+
+History candidates had no coverage disagreements in the matched last
+frames. Reprojection, sampling validation and an extra 15.8 MiB depth
+history copy made this technique slower than the inexpensive cached walk.
+The tested path is off by default. RMIP, cones and wider residual
+search remain research options, with sampling fidelity ahead of further
+traversal acceleration in the measured workload.
+
+### What the depth checks establish
+
+The exact native GPU fixture matched the independent 6.25 cm
+pixel-center reference on **all 1,079,525 visible terrain pixels**
+at 1080p with zero terrain/sky disagreements, 3.8 µm
+radial depth error at p95, and zero sampled face disagreements.
+The scene is a 32 m Alpine window with a 10 m clip. Colors use the
+two implementations' shading. The native reference emitted coverage
+and radial depth independently from GPU data.
+
+The pitched 6 km comparison uses the prior continuous GPU tracer as a
+full-frame visual control and the canonical f64 voxel DDA for targeted
+and stratified checks. The error map marks missed terrain in red, extra
+terrain in blue, and common hits differing by more than 5 m in amber.
+Full-resolution exact native terrain is used only
+in the bounded fixture. Far samples have approximation error.
+
+| Far pitch | Logical terrain | Shaded GPU p95 | Missing / extra hits | Depth p95 | Errors above 5 m |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 m | 9.3 MiB | 3.60 ms | 285 / 7 | 1.14 m | 2429 |
+| 8 m | 37.3 MiB | 3.43 ms | 114 / 2 | 0.66 m | 417 |
+| 4 m | 149.4 MiB | 3.94 ms | 45 / 1 | 0.58 m | 160 |
+| 8 m + 0.5 m | 39.7 MiB | 5.13 ms | 115 / 2 | 0.66 m | 418 |
+
+The 8 m visual skyline differs by at most one pixel against the older
+direct run, but that hides large errors at internal occlusion edges.
+At [378, 467] the cached hit is 3890.15 m
+and the native voxel first hit is 3152.11 m.
+The independent sampled oracle matches the cached surface there. This
+is a representation error at a grazing first crossing, rather than
+a missing GPU dispatch or disagreement over the cached geometry.
+
+A forced cache recenter at the same camera produced zero coverage
+changes and 0.25 mm depth p95
+(3.94 cm max). Both
+cache boundaries describe the same parent surface before entering the
+outer domain. These tests cover the named poses and captured trajectories.
+Revisiting the original pose had 0 coverage
+changes and a 0.00 mm maximum depth difference.
+Long exploration, shading antialiasing and edits need separate validation.
+
+The native-center GPU audit found 82
+and 382 integer-height
+disagreements in two 262,144-column windows, each at most one voxel.
+Native occupancy still needs canonical CPU heights or another bit-exact
+generator. GPU f32 generation is suitable for the approximate layers.
+
+### Recommendation
+
+Use the stackless cached DDA as the next meshless experimental base.
+Retain vertical profiles as an additional path for compatible cameras.
+The main performance risk now lies in cold updates and near-ground
+traversal. The main quality risk lies in first crossings lost by
+sampling, which smooth fades cannot repair. Prioritize asynchronously
+published outer coverage, canonical integer-column ownership in a near
+window, and source-aware sampling at grazing ridges. Test edit revisions
+and NAADF volume ownership together before considering production use.
+Elevation-only edits can update integer heights and their ancestors.
+An excavation or overhang needs ownership that excludes the affected
+coarse heightfield cells and delegates volume visibility to NAADF.
+Cache generation and volume ownership should publish the same revision.
+
+[Matched horizon still](reference/cached-heightfield/horizon-comparison.png) ·
+[Native fixture](reference/cached-heightfield/native-comparison.png) ·
+[Fixed 33.8° bank](reference/cached-heightfield/banked-comparison.png) ·
+[Silhouette and depth errors](reference/cached-heightfield/horizon-error-map.png) ·
+[Walking and banked flight](reference/cached-heightfield/motion.mp4) ·
+[Visual metrics](reference/cached-heightfield/visual-validation.json) ·
+[Raw reports](reference/cached-heightfield/reports)
+
+### Reproduction
+
+Run from `frontier/` with its pinned toolchain. The hardware runs selected
+Mesa RADV on the Radeon 760M. Use the Radeon Vulkan ICD on machines with
+several adapters. The benchmark refuses a software Vulkan adapter by default.
+
+```sh
+cargo build --release --locked --bin cached_heightfield --bin landscape
+cargo test --release --locked -p frontier-renderer --bin cached_heightfield
+bash tools/cached_heightfield_bench.sh output/cached-heightfield
+python3 tools/cached_heightfield_compare.py output/cached-heightfield --video
+MESA_SHADER_CACHE_DISABLE=true target/release/cached_heightfield --nested \
+  --cells 2048 --width 1920 --height 1080 --modes dda --shaded \
+  --frames 1 --warmup 0 --trials 1 --output output/cached-heightfield/nested-cold-shaders
+```
+
+The script supports independently running `stationary`, `profile`, `routes`,
+`streams` and `reference`. The optional full-screen direct baseline comparison
+reads the existing procedural-coherence output. If it is absent, regenerate
+the earlier experiment using [its commands](PROCEDURAL_COHERENCE.md#reproduce).
+The offline native reference uses one ray at the exact pixel center to match
+the GPU visibility samples. The previous offline jittered mode remains the
+default. Python comparisons need NumPy and Pillow, plus FFmpeg for the video.
+
+The new tests check dirty-strip coverage, analytic root isolation and WGSL
+validation. The checked-in reports include all final sampled configurations
+and earlier diagnostic findings. The experimental binary, prior procedural
+ray caster and production Frontier renderer remain separate entry points.

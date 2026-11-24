@@ -1,0 +1,1 @@
+{"voxel_m":0.0625,"regions":[{"origin_cells":[-960, -4928],"tested":262144,"height_disagreements":82,"max_cell_difference":1},{"origin_cells":[-14656, 47744],"tested":262144,"height_disagreements":382,"max_cell_difference":1}]}

@@ -1,0 +1,22 @@
+[
+  {
+    "case": "level-aligned",
+    "modes": [
+      "dda",
+      "vertical"
+    ],
+    "max_forward_depth_difference_m": 90.78076171875,
+    "pixels_over_centimeter": 1,
+    "coverage_disagreements": 0
+  },
+  {
+    "case": "native-aligned",
+    "modes": [
+      "dda",
+      "dick"
+    ],
+    "max_forward_depth_difference_m": 0.0,
+    "pixels_over_centimeter": 0,
+    "coverage_disagreements": 0
+  }
+]

@@ -1,0 +1,220 @@
+{
+  "native_full_frame": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1079525,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      1.753241795743321e-06,
+      3.8061632128716376e-06,
+      4.717776817102504e-06,
+      3.087428380865731e-05
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "full_frame_against_direct_fbm": {
+    "pitch-16": {
+      "missing_hits": 285,
+      "extra_hits": 7,
+      "common_hits": 1283433,
+      "radial_depth_error_m_p50_p95_p99_max": [
+        0.27900877331057927,
+        1.1415463565514528,
+        2.35325377472989,
+        972.3435475585211
+      ],
+      "depth_error_over_5m": 2429,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "shaded-1920": {
+      "missing_hits": 114,
+      "extra_hits": 2,
+      "common_hits": 1283604,
+      "radial_depth_error_m_p50_p95_p99_max": [
+        0.15273959663812775,
+        0.6604814935117957,
+        1.0484219451341867,
+        737.7428981963794
+      ],
+      "depth_error_over_5m": 417,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "pitch-4": {
+      "missing_hits": 45,
+      "extra_hits": 1,
+      "common_hits": 1283673,
+      "radial_depth_error_m_p50_p95_p99_max": [
+        0.12103073829121058,
+        0.5824837092357483,
+        0.8082148167094967,
+        670.0504018753895
+      ],
+      "depth_error_over_5m": 160,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        0.0,
+        1.0,
+        1.0
+      ]
+    },
+    "nested-still": {
+      "missing_hits": 115,
+      "extra_hits": 2,
+      "common_hits": 1283603,
+      "radial_depth_error_m_p50_p95_p99_max": [
+        0.15275162013540466,
+        0.6605990626306029,
+        1.0482554712512362,
+        737.7426100954317
+      ],
+      "depth_error_over_5m": 418,
+      "skyline_error_px_p50_p95_p99_max": [
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  },
+  "nested_recenter_fixed_pose": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1283605,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.00024839067727953077,
+      0.0005958131839361157,
+      0.03938867976557958
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "nested_revisit_same_pose": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1283605,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "vertical_same_stepped_surface": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1502661,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "vertical_same_bilinear_surface": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1501360,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "history_turn_last_frame": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1081869,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0004990403313058778
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "history_bank_last_frame": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 1726884,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.00017436986263419385
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "history_teleport_last_frame": {
+    "missing_hits": 0,
+    "extra_hits": 0,
+    "common_hits": 2073600,
+    "radial_depth_error_m_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "depth_error_over_5m": 0,
+    "skyline_error_px_p50_p95_p99_max": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}

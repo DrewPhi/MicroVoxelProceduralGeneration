@@ -317,10 +317,11 @@ fn main() -> Result<()> {
         .min(12);
     let mut build_only = false;
     let mut paint = true;
+    let mut center_sample = false;
     let mut args = frontier_world::voxel_grid_args(std::env::args().skip(1))?;
     while let Some(a) = args.next() {
         if a == "--help" {
-            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] (lighting defaults to legacy; regional enables distance grain)");
+            println!("landscape --voxel-size METERS --output DIR --cache FILE --terrain-recipe legacy|regional|alpine|seeded-world|watershed --sample-stride 1 --native-extent 128 [--shadows] --shadow-distance 4096 --lighting legacy|regional --sun-elevation 35 --sun-azimuth 135 --overcast .15 --center X,Z --extent 1024 --eye X,Y,Z --target X,Y,Z --width 1280 --height 720 --spp 16 --seed 7 --threads N --fov-y 60 --near .025 --far 20000 [--crop X,Y,WIDTH,HEIGHT] [--build-only] [--no-tint] [--center-sample] (lighting defaults to legacy; regional enables distance grain)");
             return Ok(());
         }
         if a == "--shadows" {
@@ -329,6 +330,10 @@ fn main() -> Result<()> {
         }
         if a == "--build-only" {
             build_only = true;
+            continue;
+        }
+        if a == "--center-sample" {
+            center_sample = true;
             continue;
         }
         if a == "--no-tint" {
@@ -402,6 +407,7 @@ fn main() -> Result<()> {
         || grid * grid != spp
         || spp == 0
         || spp > 65536
+        || (center_sample && spp != 1)
         || (extent - size as f64 * voxel_size()).abs() > extent.abs() * f64::EPSILON * 4.
         || !center
             .iter()
@@ -543,8 +549,11 @@ fn main() -> Result<()> {
                     let mut depth = 0.;
                     for sy in 0..grid {
                         for sx in 0..grid {
-                            let [px, py] =
-                                sample_position(x, y, viewport_width, grid, sx, sy, sample_seed);
+                            let [px, py] = if center_sample {
+                                [x as f64 + 0.5, y as f64 + 0.5]
+                            } else {
+                                sample_position(x, y, viewport_width, grid, sx, sy, sample_seed)
+                            };
                             let (d, n, f) = camera.ray(px, py, viewport_width, viewport_height);
                             let c = if let Some(hit) = scene.ray(camera.eye, d, n, f) {
                                 covered += 1.;
@@ -625,6 +634,11 @@ fn main() -> Result<()> {
         }
         w.flush()?;
     }
+    let sampling = if center_sample {
+        "pixel center"
+    } else {
+        "deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation"
+    };
     let git_revision = git(&["rev-parse", "HEAD"]);
     let git_dirty = !git(&["status", "--porcelain"]).is_empty();
     let source_fingerprint = [
@@ -670,7 +684,7 @@ fn main() -> Result<()> {
     fs::write(
         output.join("manifest.json"),
         format!(
-            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":{shadows},"shadow_distance_m":{shadow_distance},"shadow_method":"one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; no AO; occluders beyond finite footprint or shadow distance omitted","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"independent CPU f64 face lighting; canonical material palette","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional profile only; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":false,"exposure":1,"postprocessed":false,"sampling":"deterministic jittered square stratification SplitMix64; box pixel filter; f64 linear accumulation","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
+            r#"{{"schema":"frontier-landscape-reference-v1","source":"FbmTerrain CPU f64","seed":{seed},"params":{{"horizontal_scale":1800,"amplitude":1000,"octaves":8,"roughness":0.5}},"terrain_recipe":"{recipe_name}","source_version":{source_version},"appearance_version":{appearance_version},"voxel_size_m":{native_voxel_m},"lod":{approximate},"approximate_artistic_target":{approximate},"geometry":"{geometry}","crop_policy":"{crop_policy}","horizontal_sample_spacing_m":{spacing},"sample_stride_native_cells":{sample_stride},"sample_grid_min_xz":{sample_min:?},"sample_grid_size_xz":{sample_size},"exact_near_min_xz":{native_min:?},"exact_near_size_xz":{native_size},"near_cache_identity_fnv1a64":"{near_cache_identity:016x}","native_min_xz":{min:?},"native_size_xz":{size},"width":{width},"height":{height},"viewport_width":{viewport_width},"viewport_height":{viewport_height},"pixel_crop":{pixel_crop:?},"spp":{spp},"eye":{:?},"target":{:?},"fov_y_degrees":{},"near":{},"far":{},"fog":false,"shadows":{shadows},"shadow_distance_m":{shadow_distance},"shadow_method":"one hard directional visibility ray per covered subpixel, 1mm face offset; same disjoint geometry; no AO; occluders beyond finite footprint or shadow distance omitted","terrain_tint":{paint},"tint":"{tint_description}","lighting":{{"profile":"{lighting_name}","contract_version":1,"implementation":"independent CPU f64 face lighting; canonical material palette","sun_elevation_degrees":{sun_elevation},"sun_azimuth_degrees":{sun_azimuth},"overcast":{overcast},"settings_apply_to":"regional profile only; legacy retains fixed normalized [-0.5,0.8,-0.3] sun and original hemisphere"}},"atmosphere":false,"exposure":1,"postprocessed":false,"sampling":"{sampling}","sample_seed":{sample_seed},"ray_count":{ray_count},"git_revision":"{git_revision}","git_dirty":{git_dirty},"source_fnv1a64":"{source_fingerprint:016x}","cache_identity_fnv1a64":"{cache_identity:016x}","raw_format":"little endian f32 top-left row-major","depth":"mean hit distance in meters; NaN on miss","build_seconds":{build_seconds},"render_seconds":{render_seconds},"snapshot_bytes":{},"threads":{threads},"miss_fraction":{miss_fraction},"finite_domain_miss_samples":{finite_domain_miss_samples},"finite_domain_miss_fraction":{finite_domain_miss_fraction},"miss_policy":"sky on all misses; missed rays leaving the finite native footprint are incomplete oracle coverage, never a geometry pass"}}"#,
             camera.eye,
             camera.target,
             camera.fov_y_degrees,
