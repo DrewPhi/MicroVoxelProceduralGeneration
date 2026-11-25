@@ -2,9 +2,9 @@ name: Frontier CI
 
 on:
   push:
-    branches: [frontier-voxel-engine]
+    branches: [main, frontier-voxel-engine]
   pull_request:
-    branches: [frontier-voxel-engine]
+    branches: [main, frontier-voxel-engine]
   workflow_dispatch:
 
 permissions:

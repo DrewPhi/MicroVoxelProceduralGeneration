@@ -36,3 +36,18 @@ fn water_glint(direction:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>,overcast:f32)-
     let glint=pow(alignment,95.)*0.17+pow(alignment,420.)*0.37;
     return vec3(1.,0.82,0.57)*glint*(1.-0.9*overcast);
 }
+
+struct WaterOptics {
+    normal: vec3f,
+    below: vec3f,
+    detail: f32,
+}
+
+fn water_deep() -> vec3f {
+    return water_medium(vec3f(.03,.10,.08),8.);
+}
+
+fn water_interface(d:vec3f,n:vec3f,below:vec3f,above:vec3f,sun:vec3f,overcast:f32)->vec3f {
+    let fresnel=water_fresnel(-dot(d,n));
+    return mix(below,above,fresnel)+water_glint(d,n,sun,overcast)*min(1.,3.*fresnel);
+}

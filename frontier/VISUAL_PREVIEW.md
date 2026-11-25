@@ -1,11 +1,20 @@
 # Interactive visual preview
 
-From `frontier/`, launch `./run.sh`. The default preview uses the adaptive
-NAADF/raster hybrid and Regional terrain, with 6.25 cm native voxels, a
-64 m NAADF radius, voxel appearance filtering, single-sample rendering and
-scatter uploads. Esc exposes the NAADF radius; `--naadf off` selects raster
-terrain, and `--msaa 4` explicitly requests 4× sampling. Rebuild with `cargo build --release --locked` after source
-changes: the launcher prefers an existing release binary.
+From `frontier/`, launch `./run.sh`. The default preview uses Regional
+terrain, a meshless rolling terrain cache with a 6 km view distance, and an
+exact NAADF radius of 128 voxels (8 m at the default 6.25 cm voxel size).
+`./run.sh --preset seeded-world --seed random` explores biomes and static
+water. `--packed-terrain` selects the previous mesh renderer. With rolling
+terrain, `--naadf off` uses the exact column cache alone for nearby terrain.
+Use `--msaa 4` for 4× sampling. Rebuild with `cargo build --release --locked`
+after source changes because the launcher prefers an existing release binary.
+
+The rolling renderer shades static water from cached depth and bed color.
+NAADF adds precise bed refraction and nearby reflection, then fades these
+details at its coverage edge. Coarse samples can miss narrow rivers, and
+edits remain visible within the local exact window. Live water, packed
+quality probes, a requested view distance beyond 6 km, and a requested
+NAADF radius above 512 voxels automatically select the packed renderer.
 
 Press **Esc** to open or close settings. Sun elevation/azimuth, exposure, haze
 density/height falloff, cloud coverage/speed and overcast update live. **Clear air
@@ -19,7 +28,7 @@ time, pending work, refinement readiness and memory counters.
 
 | Control | Effect |
 |---|---|
-| Terrain error (px) | Lower values request finer geometry; this may reduce FPS. |
+| Terrain error (px) | Packed terrain only. Lower values request finer geometry and may reduce FPS. |
 | View distance (m) | Changes how far terrain coverage is requested. |
 | Render scale | Sets internal scene resolution; the settings overlay stays at output resolution. |
 | MSAA | Selects off or 4× edge coverage sampling. |

@@ -36,6 +36,8 @@ pub mod physical_pressure_gpu;
 mod playability;
 mod player_edit;
 mod procedural_water_live;
+mod rolling_terrain;
+mod rolling_walk;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -272,6 +274,8 @@ struct Gpu {
     hybrid: Option<hybrid_gpu::HybridGpu>,
     pages: Option<page_terrain::PageGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
+    rolling: Option<rolling_terrain::RollingTerrain>,
+    rolling_probe_depth: std::cell::Cell<Option<f32>>,
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_background_paused: bool,
@@ -533,6 +537,8 @@ impl Gpu {
             hybrid: None,
             pages: None,
             adaptive: None,
+            rolling: None,
+            rolling_probe_depth: std::cell::Cell::new(None),
             vegetation: None,
             vegetation_stream: None,
             vegetation_background_paused: false,
@@ -854,7 +860,29 @@ impl Gpu {
             t.shadow_start(encoder);
             t.shadow_end(encoder);
         }
-        let naadf_bounds = self.naadf.as_ref().and_then(|n| n.bounds_for(*camera));
+        let naadf_bounds = self.naadf.as_ref().and_then(|native| {
+            let revision_matches = self
+                .rolling
+                .as_ref()
+                .is_none_or(|rolling| rolling.revision() == native.active_revision());
+            if revision_matches {
+                native.bounds_for(*camera)
+            } else {
+                None
+            }
+        });
+        if let (Some(rolling), Some(settings)) = (&self.rolling, &self.visual_settings) {
+            rolling.prepare(
+                &self.queue,
+                *camera,
+                width,
+                height,
+                naadf_bounds,
+                settings,
+                self.water_time.get(),
+                self.rolling_probe_depth.get().is_some(),
+            );
+        }
         if let Some(adaptive) = &self.adaptive {
             adaptive.set_naadf_mask(
                 &self.queue,
@@ -919,6 +947,7 @@ impl Gpu {
                 n.draw(
                     &mut pass,
                     self.adaptive.as_ref().unwrap().far_shadow_bind(),
+                    self.rolling.as_ref().map(|rolling| rolling.water_bind()),
                     *camera,
                     width,
                     height,
@@ -942,7 +971,7 @@ impl Gpu {
         let plants_first = *PLANTS_FIRST.get_or_init(|| {
             std::env::var("FRONTIER_VEGETATION_DRAW_ORDER").as_deref() != Ok("after")
         });
-        if !plants_first {
+        if self.rolling.is_none() && !plants_first {
             if let Some(adaptive) = &self.adaptive {
                 adaptive.draw(&mut pass);
             }
@@ -955,6 +984,10 @@ impl Gpu {
         }
         if let Some(t) = &plant_timings {
             t.color_end(&mut pass);
+        }
+        if let Some(rolling) = &self.rolling {
+            rolling.draw(&mut pass);
+            return;
         }
         if let Some(adaptive) = &self.adaptive {
             if plants_first {
@@ -1056,6 +1089,18 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        self.capture_frame(world, camera, path, width, height, true)
+    }
+
+    fn capture_frame(
+        &self,
+        world: &World,
+        camera: &Camera,
+        path: &Path,
+        width: u32,
+        height: u32,
+        diagnostics: bool,
+    ) -> Result<()> {
         self.observe_water_camera(camera, world, 0.);
         self.prepare_ground_light(world, *camera);
         let texture = self.texture(width, height, false);
@@ -1077,10 +1122,11 @@ impl Gpu {
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
         let post_settings = self.visual_settings.as_ref().filter(|s| {
-            (s.atmosphere
-                || s.exposure != 1.
-                || s.render_scale != 1.
-                || self.scene_format != self.format)
+            self.rolling_probe_depth.get().is_none()
+                && (s.atmosphere
+                    || s.exposure != 1.
+                    || s.render_scale != 1.
+                    || self.scene_format != self.format)
                 && !floating
         });
         let mut post_attachment_bytes = 0u64;
@@ -1160,7 +1206,11 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
-        let depth_buffer = (self.sample_count == 1 && post_settings.is_none()).then(|| {
+        let probe = self.rolling_probe_depth.get().is_some();
+        let depth_buffer = ((diagnostics || probe)
+            && self.sample_count == 1
+            && post_settings.is_none())
+        .then(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("depth capture readback"),
                 size: depth_row as u64 * height as u64,
@@ -1226,25 +1276,33 @@ impl Gpu {
             self.device.poll(wgpu::Maintain::Wait);
             rx.recv()??;
             let bytes = buffer.slice(..).get_mapped_range();
-            let mut packed = Vec::with_capacity((width * height * 4) as usize);
-            for row_bytes in bytes.chunks_exact(depth_row as usize) {
-                packed.extend_from_slice(&row_bytes[..width as usize * 4]);
+            if probe {
+                let offset = (height / 2 * depth_row + width / 2 * 4) as usize;
+                self.rolling_probe_depth.set(Some(f32::from_le_bytes(
+                    bytes[offset..offset + 4].try_into().unwrap(),
+                )));
             }
-            let coverage: Vec<u8> = packed
-                .chunks_exact(4)
-                .flat_map(|bytes| {
-                    let d = f32::from_le_bytes(bytes.try_into().unwrap());
-                    (if d.is_finite() && d >= 0. && d < 1. {
-                        1f32
-                    } else {
-                        0f32
+            if diagnostics {
+                let mut packed = Vec::with_capacity((width * height * 4) as usize);
+                for row_bytes in bytes.chunks_exact(depth_row as usize) {
+                    packed.extend_from_slice(&row_bytes[..width as usize * 4]);
+                }
+                let coverage: Vec<u8> = packed
+                    .chunks_exact(4)
+                    .flat_map(|bytes| {
+                        let d = f32::from_le_bytes(bytes.try_into().unwrap());
+                        (if d.is_finite() && d >= 0. && d < 1. {
+                            1f32
+                        } else {
+                            0f32
+                        })
+                        .to_le_bytes()
                     })
-                    .to_le_bytes()
-                })
-                .collect();
-            std::fs::write(path.with_extension("coverage.f32"), coverage)?;
-            std::fs::write(path.with_extension("depth.f32"), packed)?;
-        } else {
+                    .collect();
+                std::fs::write(path.with_extension("coverage.f32"), coverage)?;
+                std::fs::write(path.with_extension("depth.f32"), packed)?;
+            }
+        } else if diagnostics {
             // Do not leave diagnostic files from an earlier non-postprocessed capture.
             for extension in ["depth.f32", "coverage.f32"] {
                 match std::fs::remove_file(path.with_extension(extension)) {
@@ -1253,6 +1311,14 @@ impl Gpu {
                     Err(e) => return Err(e.into()),
                 }
             }
+        }
+        if !diagnostics {
+            let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
+            png.set_color(png::ColorType::Rgba);
+            png.set_depth(png::BitDepth::Eight);
+            png.set_compression(png::Compression::Fast);
+            png.write_header()?.write_image_data(&pixels)?;
+            return Ok(());
         }
         // Float captures preserve unclipped shader radiance. Ordinary captures
         // decode their actual quantized target, retaining that limitation.
@@ -1315,8 +1381,15 @@ impl Gpu {
         let eye = camera.position.to_array();
         let target = (camera.position + camera.direction().as_dvec3()).to_array();
         let native_voxel_m = voxel_size();
+        let terrain_renderer = if self.rolling.is_some() {
+            "rolling"
+        } else if self.adaptive.is_some() {
+            "packed"
+        } else {
+            "scene-specific"
+        };
         std::fs::write(path.with_extension("capture.json"), format!(
-            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
+            "{{\"width\":{width},\"height\":{height},\"native_voxel_m\":{native_voxel_m},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":{},\"near\":0.025,\"far\":{},\"samples\":{},\"depth_encoding\":\"ndc_0_1\",\"color_encoding\":{color_encoding:?},\"voxel_filter\":{},\"adapter\":{:?},\"terrain_renderer\":{terrain_renderer:?},\"capture_render_texture_bytes\":{capture_render_texture_bytes},\"capture_readback_bytes\":{capture_readback_bytes}}}",
             camera.fov_y, camera.far, self.sample_count, self.voxel_filter, self.adapter_info
         ))?;
         if let Some(settings) = &self.visual_settings {
@@ -1552,6 +1625,7 @@ impl Default for EditTest {
 }
 
 struct Viewer {
+    rolling_terrain: bool,
     live_water: Option<discrete_water_live::WaterDriver>,
     player_edit: player_edit::PlayerEdit,
     queued_player_action: Option<(frontier_world::edit::EditTransaction, Instant, Camera)>,
@@ -1923,6 +1997,11 @@ impl Viewer {
         let origin = self.camera.position.to_array();
         let direction = self.camera.direction().as_dvec3().to_array();
         let pending = self.pending_edit.is_some();
+        if let Some(rolling) = self.gpu.as_ref().and_then(|gpu| gpu.rolling.as_ref()) {
+            return edit_target_in(&self.world, origin, direction, place, pending, |cell| {
+                rolling.owns_column(cell)
+            });
+        }
         if self.live_water.is_some() {
             edit_target_in(&self.world, origin, direction, place, pending, |cell| {
                 self.gpu
@@ -1935,6 +2014,22 @@ impl Viewer {
         }
     }
     fn edit(&mut self, place: bool) {
+        if self.rolling_terrain {
+            if let Some(cell) = self.pick_edit_target(place) {
+                if !place || !player_edit::intersects_player(cell, self.camera.position.to_array())
+                {
+                    self.world.set(
+                        cell,
+                        if place {
+                            Material::Stone
+                        } else {
+                            Material::Air
+                        },
+                    );
+                }
+            }
+            return;
+        }
         if self.live_water.is_none()
             && self.world.fbm_terrain().is_some()
             && self.world.topology_base_cells().is_none()
@@ -2303,6 +2398,7 @@ impl Viewer {
         let terrain_ms = terrain_started.elapsed().as_secs_f64() * 1000.;
         let plants_started = Instant::now();
         if let Some(gpu) = &mut self.gpu {
+            gpu.update_rolling(&self.world, self.camera)?;
             let (width, height) = self
                 .atmosphere
                 .as_ref()
@@ -2751,6 +2847,11 @@ impl Viewer {
                     if gpu.volume_owner { " + exact cave/bridge owner" } else { "" },
                     self.frames as f64 / elapsed, triangles, view.pixel_error, state
                 ));
+            } else if self.rolling_terrain {
+                window.set_title(&format!(
+                    "Frontier rolling terrain | {:.0} FPS | Esc settings / F12",
+                    self.frames as f64 / elapsed
+                ));
             } else {
                 window.set_title(&format!("Frontier {} | {:.0} FPS | {} triangles | center aim: L remove / R stone | {} | Esc settings / F12", if self.fbm { "FBM experimental rings (surface only; bounded coverage)" } else { if self.hybrid {if self.world.topology_base_cells().is_some() { "bounded exact cave/bridge owner + moving terrain" } else { "moving 64m native chunks + coherent collar + GPU proxy (heightfield only)" }} else if self.world.fbm_terrain().is_some() {"exact FBM native crop (cutaway; edits disabled)"} else {"native fixture"} }, self.frames as f64 / elapsed, gpu.terrain.as_ref().map_or(gpu.index_count, |t| t.index_count) / 3, if self.pending_teleport.is_some() { "preparing teleport destination" } else if self.pending_edit.is_some() { "edit building" } else { "ready" }));
             }
@@ -2791,6 +2892,14 @@ impl ApplicationHandler for Viewer {
                 gpu.install_bricks(&snapshot, brick_skip_mode(&self.renderer))?;
             }
             gpu.configure_visuals(&self.world, &self.visual_settings);
+            if self.rolling_terrain {
+                gpu.init_rolling(&self.world, self.camera)?;
+                window.set_title("Frontier — rolling terrain");
+                if self.benchmark_input_lock {
+                    gpu.settle_naadf(&self.world, self.camera)?;
+                    gpu.settle_vegetation(&self.world, self.camera, self.width, self.height)?;
+                }
+            }
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
             if let Some(view) = &mut self.adaptive_view {
                 view.poll(&mut gpu, self.camera, self.width, self.height)?;
@@ -2852,6 +2961,7 @@ impl ApplicationHandler for Viewer {
                     &gpu.device,
                     gpu.format,
                     self.visual_settings.clone(),
+                    self.rolling_terrain,
                 ));
             }
             if self.visual_menu_enabled
@@ -3092,6 +3202,8 @@ pub fn run() -> Result<()> {
         render_scale,
         capture,
         capture_on_exit,
+        rolling_terrain,
+        rolling_walk_frames,
         seconds,
         width,
         height,
@@ -3295,27 +3407,29 @@ pub fn run() -> Result<()> {
         } else {
             world.clone()
         };
-        adaptive_view = Some(adaptive_view::AdaptiveView::new(
-            surface_world,
-            pixel_error,
-            adaptive_cache_mib * 1024 * 1024,
-            native_bins,
-            adaptive_workers,
-            adaptive_refinements,
-            adaptive_direct_native,
-            adaptive_build_mib * 1024 * 1024,
-            adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
-                path,
-                budget_bytes: (adaptive_disk_mib * 1024 * 1024) as u64,
-                max_entry_bytes: 64 * 1024 * 1024,
-            }),
-        )?);
-        if let Some(view) = &mut adaptive_view {
-            view.reconfigure(adaptive_stream::StreamSettings {
-                native_radius_m: visual_settings.native_radius_m,
-                ..view.stream_settings()
-            })?;
-            view.set_upload_budget(visual_settings.upload_mib);
+        if !rolling_terrain {
+            adaptive_view = Some(adaptive_view::AdaptiveView::new(
+                surface_world,
+                pixel_error,
+                adaptive_cache_mib * 1024 * 1024,
+                native_bins,
+                adaptive_workers,
+                adaptive_refinements,
+                adaptive_direct_native,
+                adaptive_build_mib * 1024 * 1024,
+                adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
+                    path,
+                    budget_bytes: (adaptive_disk_mib * 1024 * 1024) as u64,
+                    max_entry_bytes: 64 * 1024 * 1024,
+                }),
+            )?);
+            if let Some(view) = &mut adaptive_view {
+                view.reconfigure(adaptive_stream::StreamSettings {
+                    native_radius_m: visual_settings.native_radius_m,
+                    ..view.stream_settings()
+                })?;
+                view.set_upload_budget(visual_settings.upload_mib);
+            }
         }
         if scene == "adaptive-topology" {
             volume::build(&world)?
@@ -3612,6 +3726,20 @@ pub fn run() -> Result<()> {
         terrain_prepare_ms += started.elapsed().as_secs_f64() * 1000.;
         page_stream = Some(pages);
     }
+    if let Some(directory) = rolling_walk_frames {
+        return rolling_walk::capture(
+            &world,
+            camera,
+            &visual_settings,
+            width,
+            height,
+            frame_limit.unwrap_or(240),
+            route_step,
+            route_speed.unwrap_or(1.45),
+            route == frontier_runtime::routes::Route::Fly,
+            &directory,
+        );
+    }
     if let Some(path) = capture {
         if std::env::var("FRONTIER_CAPTURE_DIAGNOSTICS").as_deref() == Ok("1")
             && (appearance_method::debug_view() != 0
@@ -3667,6 +3795,10 @@ pub fn run() -> Result<()> {
             gpu.init_pages(&cover);
         }
         gpu.configure_visuals(&world, &visual_settings);
+        if rolling_terrain {
+            gpu.init_rolling(&world, camera)?;
+            gpu.settle_naadf(&world, camera)?;
+        }
         if let Some(view) = &mut adaptive_view {
             if visual_settings.naadf_enabled {
                 view.poll(&mut gpu, camera, width, height)?;
@@ -3782,6 +3914,7 @@ pub fn run() -> Result<()> {
     let now = Instant::now();
     let adaptive_route_started = adaptive_view.is_none();
     let mut viewer = Viewer {
+        rolling_terrain,
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
@@ -4031,7 +4164,7 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),voxel_size(),params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if rolling_terrain {"rolling_meshless_heightfield_and_exact_voxel_columns"} else if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
             json.pop();
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));

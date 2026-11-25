@@ -100,25 +100,28 @@ fn water_phase_position(p:vec3<f32>)->vec3<f32> {
 
 // One bounded bed ray and one bounded shore ray, only on visible water.
 fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec3<f32> {
-    let ripple=water_ripple(water_phase_position(surface),normal,naadf.water.z,0.023*(1.-smoothstep(22.,78.,distance)));
-    let n=select(normal,ripple,dot(d,ripple)<-0.002);
-    let transmitted=refract(d,n,1./1.333);
-    let bed=trace_water_optics(surface*VOXELS_PER_METER-normal*0.012,transmitted,128.);
-    var below=water_medium(vec3(0.03,0.10,0.08),8.);
-    if bed.found {
-        let p=water_phase_position(surface+transmitted*bed.t*NATIVE_VOXEL_METERS);
-        // Filter the lighting of subpixel bed risers, without moving the hit.
-        let resolve=1.-0.70*smoothstep(3.,18.,distance);
-        let bed_light=mix(light(vec3(0.,1.,0.),0.48),light(bed.normal,0.48),resolve);
-        let color=palette[bed.pigment].rgb*(bed_light+bounce_at(surface+transmitted*bed.t*NATIVE_VOXEL_METERS,bed.normal,0.48));
-        let phase=sin(dot(p.xz,vec2(43.,-35.)*0.049087385)-naadf.water.z)*1.9;
-        let caustic=sin(dot(p.xz,vec2(183.,82.)*0.049087385)+naadf.water.z*1.5+phase);
-        below=water_medium(color*(1.+0.065*caustic),bed.t*NATIVE_VOXEL_METERS);
+    let optics=naadf_water_optics(surface,normal,d,distance);
+    let n=optics.normal;
+    var below=optics.below;
+    if optics.detail>0. {
+        let transmitted=refract(d,n,1./1.333);
+        let bed=trace_water_optics(surface*VOXELS_PER_METER-normal*.012,transmitted,128.);
+        if bed.found {
+            let bed_position=surface+transmitted*bed.t*NATIVE_VOXEL_METERS;
+            let p=water_phase_position(bed_position);
+            // Filter the lighting of subpixel bed risers, without moving the hit.
+            let resolve=1.-.70*smoothstep(3.,18.,distance);
+            let bed_light=mix(light(vec3(0.,1.,0.),.48),light(bed.normal,.48),resolve);
+            let color=palette[bed.pigment].rgb*(bed_light+bounce_at(bed_position,bed.normal,.48));
+            let phase=sin(dot(p.xz,vec2(43.,-35.)*.049087385)-naadf.water.z)*1.9;
+            let caustic=sin(dot(p.xz,vec2(183.,82.)*.049087385)+naadf.water.z*1.5+phase);
+            below=mix(below,water_medium(color*(1.+.065*caustic),bed.t*NATIVE_VOXEL_METERS),optics.detail);
+        }
     }
 
     let mirror=reflect(d,n);
     var above=water_sky(mirror,naadf.sun.xyz,naadf.sky.x);
-    let reflection_weight=1.-smoothstep(28.,56.,distance);
+    let reflection_weight=optics.detail*(1.-smoothstep(28.,56.,distance));
     if reflection_weight>0. && dot(mirror,normal)>0. {
         let bank=trace_water_optics(surface*VOXELS_PER_METER+normal*0.012,mirror,384.);
         if bank.found {
@@ -126,8 +129,7 @@ fn shade_water(surface:vec3<f32>,normal:vec3<f32>,d:vec3<f32>,distance:f32)->vec
             above=mix(above,color,reflection_weight*(1.-smoothstep(256.,384.,bank.t)));
         }
     }
-    let fresnel=water_fresnel(-dot(d,n));
-    return mix(below,above,fresnel)+water_glint(d,n,naadf.sun.xyz,naadf.sky.x)*min(1.,3.*fresnel);
+    return water_interface(d,n,below,above,naadf.sun.xyz,naadf.sky.x);
 }
 
 // Follow the connected water immediately above the eye. The search is limited
@@ -238,6 +240,7 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     if naadf.viewport.w<0.5 && (any(center<vec3(NATIVE_VOXEL_METERS))||any(center>=vec3<f32>(naadf.extent.xyz)*NATIVE_VOXEL_METERS-vec3(NATIVE_VOXEL_METERS))){discard;}
     let depth=naadf.projection.z+naadf.projection.w/(h.t*NATIVE_VOXEL_METERS*cosine);
     if depth<0.||depth>1.{discard;}
+    if naadf.shadow.w>0.5 {return Fragment(vec4(0.,1.,1.,1.),depth);}
     let pigment=palette[h.pigment];
     if naadf.viewport.w>1.5 {
         let blocked=trace_voxels((hit+h.normal*0.001)*VOXELS_PER_METER,normalize(naadf.sun.xyz),0.,true).found;

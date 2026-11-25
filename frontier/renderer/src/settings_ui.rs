@@ -12,6 +12,7 @@ pub struct SettingsUi {
     input: egui_winit::State,
     renderer: Renderer,
     settings: VisualSettings,
+    rolling: bool,
     loading_draft: VisualSettings,
     open: bool,
     paint_jobs: Vec<egui::ClippedPrimitive>,
@@ -28,6 +29,7 @@ impl SettingsUi {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         settings: VisualSettings,
+        rolling: bool,
     ) -> Self {
         let context = egui::Context::default();
         context.set_visuals(egui::Visuals::dark());
@@ -54,6 +56,7 @@ impl SettingsUi {
             renderer: Renderer::new(device, format, None, 1, false),
             loading_draft: settings.clone(),
             settings,
+            rolling,
             open: false,
             paint_jobs: Vec::new(),
             free_textures: Vec::new(),
@@ -234,7 +237,8 @@ impl SettingsUi {
                         .max_height((available - 80.).max(80.))
                         .show(ui, |ui| {
                             ui.heading("Image quality");
-                            ui.add(
+                            if !self.rolling {
+                                ui.add(
                                 egui::Slider::new(&mut self.loading_draft.pixel_error, 0.5..=12.)
                                     .logarithmic(true)
                                     .text("Terrain error (px)"),
@@ -242,10 +246,12 @@ impl SettingsUi {
                             .on_hover_text(
                                 "Lower values request more terrain detail and may reduce FPS.",
                             );
+                            }
+                            let max_distance = if self.rolling { crate::rolling_terrain::MAX_FAR } else { 40_000. };
                             ui.add(
                                 egui::Slider::new(
                                     &mut self.loading_draft.view_distance,
-                                    100.0..=40_000.0,
+                                    100.0..=max_distance,
                                 )
                                 .logarithmic(true)
                                 .text("View distance (m)"),
@@ -268,10 +274,10 @@ impl SettingsUi {
                                     );
                                 }
                             });
-                            ui.checkbox(
+                            ui.add_enabled(!self.rolling, egui::Checkbox::new(
                                 &mut self.loading_draft.voxel_filter,
                                 "Filter distant voxel detail",
-                            );
+                            ));
                             ui.separator();
                             ui.heading("Meadow & movement");
                             ui.checkbox(&mut self.settings.vegetation, "Procedural vegetation");
@@ -338,12 +344,18 @@ impl SettingsUi {
                             ui.heading("NAADF experiment");
                             ui.checkbox(&mut self.loading_draft.naadf_enabled, "Use exact voxel rays in test region");
                             ui.checkbox(&mut self.loading_draft.naadf_follow, "Follow player");
-                            let max_voxels = crate::naadf::stream::MAX_RADIUS_VOXELS;
+                            let max_voxels = if self.rolling {
+                                crate::rolling_terrain::MAX_NAADF_RADIUS
+                            } else {
+                                crate::naadf::stream::MAX_RADIUS_VOXELS
+                            };
                             ui.add(egui::Slider::new(
                                 &mut self.loading_draft.naadf_radius_voxels, 1..=max_voxels,
                             ).text("NAADF radius (voxels)"));
                             ui.checkbox(&mut self.loading_draft.naadf_auto_memory,"Use available RAM for NAADF (leave system headroom)");
-                            ui.checkbox(&mut self.settings.visibility_benchmark,"Diagnostic matched white lighting");
+                            if !self.rolling {
+                                ui.checkbox(&mut self.settings.visibility_benchmark,"Diagnostic matched white lighting");
+                            }
                             ui.add(egui::Slider::new(&mut self.loading_draft.naadf_budget_mib, 16..=16384).logarithmic(true).text("NAADF build estimate ceiling (MiB)"));
                             if let Ok(roots) = crate::naadf::stream::radius_roots(self.loading_draft.naadf_radius_voxels) {
                                 let radius_m = f64::from(roots) * crate::naadf::stream::root_size_m();

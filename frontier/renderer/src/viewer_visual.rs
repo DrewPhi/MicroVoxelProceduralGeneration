@@ -47,6 +47,9 @@ impl Viewer {
             stats.gpu_mib = view.stats.allocated_bytes as f64 / 1048576.;
             stats.cache_mib = view.cache_bytes as f64 / 1048576.;
             stats.quality_ready = view.quality_ready;
+        } else if let Some(rolling) = &gpu.rolling {
+            stats.gpu_mib = rolling.gpu_bytes() as f64 / 1048576.;
+            stats.quality_ready = true;
         }
         if let Some(experiment) = &gpu.naadf {
             stats.naadf_status =
@@ -186,10 +189,19 @@ impl Viewer {
                 .as_ref()
                 .and_then(|g| g.visual_settings.as_ref())
                 .is_some_and(|old| old.render_scale != s.render_scale);
+        let gpu = self.gpu.as_mut().unwrap();
+        if gpu
+            .rolling
+            .as_ref()
+            .is_some_and(|rolling| self.sample_count != s.msaa || !rolling.fits_naadf_radius(s))
+        {
+            let mut replacement = rolling_terrain::RollingTerrain::new(gpu, &self.world, s)?;
+            replacement.update(&gpu.device, &gpu.queue, &self.world, self.camera)?;
+            gpu.rolling = Some(replacement);
+        }
         self.camera.far = s.view_distance;
         self.sample_count = s.msaa;
         self.voxel_filter = s.voxel_filter;
-        let gpu = self.gpu.as_mut().unwrap();
         gpu.sample_count = s.msaa;
         gpu.voxel_filter = s.voxel_filter;
         if let Some(adaptive) = &mut gpu.adaptive {

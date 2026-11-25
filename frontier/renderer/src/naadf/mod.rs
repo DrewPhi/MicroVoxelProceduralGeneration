@@ -1529,6 +1529,9 @@ impl Experiment {
                 .as_ref()
                 .is_none_or(|shift| shift.change.retiring.contains(bounds))
     }
+    pub(crate) fn active_revision(&self) -> Option<u64> {
+        self.active.as_ref().map(|volume| volume.revision)
+    }
     pub(crate) fn full_bounds(&self) -> Option<[[f64; 3]; 2]> {
         self.active.as_ref().map(|a| a.bounds)
     }
@@ -1567,6 +1570,7 @@ impl Experiment {
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         far: &'a wgpu::BindGroup,
+        rolling_water: Option<&'a wgpu::BindGroup>,
         camera: Camera,
         width: u32,
         height: u32,
@@ -1580,6 +1584,9 @@ impl Experiment {
             pass.set_bind_group(0, &a.bind, &[]);
             pass.set_bind_group(1, far, &[]);
             a.beam.bind(pass);
+            if let Some(water) = rolling_water {
+                pass.set_bind_group(3, water, &[]);
+            }
             pass.draw(0..3, 0..1);
             pass.set_scissor_rect(0, 0, width, height);
         }
@@ -1663,14 +1670,20 @@ impl Experiment {
                     .as_ref()
                     .map_or([0; 4], |c| c.uniforms(aspect)),
                 shadow: [
-                    if s.terrain_shadows && !s.visibility_benchmark {
+                    // Rolling terrain has its own horizon light. Its
+                    // AdaptiveGpu is a layout provider with no raster shadow map.
+                    if s.terrain_shadows && !s.visibility_benchmark && gpu.rolling.is_none() {
                         1.
                     } else {
                         0.
                     },
                     f32::from(u8::from(ray_profile().0)),
                     f32::from(u8::from(ray_profile().1)),
-                    0.,
+                    if gpu.rolling_probe_depth.get().is_some() {
+                        1.
+                    } else {
+                        0.
+                    },
                 ],
                 water: [
                     origin.x.rem_euclid(128.) as f32,
@@ -2018,6 +2031,24 @@ pub(crate) fn mesh_traversal_constants() -> std::collections::HashMap<String, f6
     traversal::options().mesh_constants()
 }
 
+fn primary_shader(rolling_water: bool) -> String {
+    if rolling_water {
+        format!(
+            "{SHADER}\n{}\n{}",
+            include_str!("../rolling_water_bed.wgsl"),
+            include_str!("rolling_water.wgsl")
+        )
+    } else {
+        format!(
+            "{SHADER}\n{}",
+            r#"fn naadf_water_optics(surface:vec3f,normal:vec3f,d:vec3f,distance:f32)->WaterOptics {
+    let ripple=water_ripple(water_phase_position(surface),normal,naadf.water.z,.023*(1.-smoothstep(22.,78.,distance)));
+    return WaterOptics(select(normal,ripple,dot(d,ripple)<-.002),water_deep(),1.);
+}"#
+        )
+    }
+}
+
 fn make_pipeline(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,
@@ -2025,21 +2056,23 @@ fn make_pipeline(
     options: traversal::Options,
     format: [u32; 3],
 ) -> wgpu::RenderPipeline {
+    let rolling_water = gpu.rolling.as_ref().map(|rolling| rolling.water_layout());
     let shader = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NAADF hierarchical exact rays"),
-            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(SHADER)),
+            source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(primary_shader(
+                rolling_water.is_some(),
+            ))),
         });
+    let far_layout = crate::adaptive_gpu::adaptive_shadow::sampling_layout(&gpu.device);
+    let mut bind_group_layouts = vec![layout, &far_layout, beam_layout];
+    bind_group_layouts.extend(rolling_water);
     let pl = gpu
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("NAADF primary visibility"),
-            bind_group_layouts: &[
-                &layout,
-                &crate::adaptive_gpu::adaptive_shadow::sampling_layout(&gpu.device),
-                beam_layout,
-            ],
+            bind_group_layouts: &bind_group_layouts,
             push_constant_ranges: &[],
         });
     let mut constants = options.mesh_constants();

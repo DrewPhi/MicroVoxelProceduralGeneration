@@ -20,21 +20,24 @@ a graphics driver and the usual C linker/build tools.
 cd frontier
 cargo build --release --locked
 ./run.sh --preset alpine
+./run.sh --preset seeded-world --seed random
 ```
 
 `run.sh` launches the existing release binary; rebuild after source changes.
-The default adaptive scene combines exact NAADF voxels within a growing 64 m cube
-radius with distant coarse voxel meshes and compact seed-sampled appearance.
-Startup publishes an 8 m region and expands in 4 m shells while you move.
-Regional terrain, voxel appearance filtering, single-sample rendering and scatter
-uploads are enabled by default.
+The default renderer combines nearby exact NAADF voxels with meshless rolling
+terrain out to 6 km. The NAADF radius starts at 128 voxels, or 8 m with the
+default 6.25 cm voxel size. Exact terrain columns provide coverage around
+the volume. Static water shares riverbed shading across the handoff.
 
 - `--preset alpine`: grounded walking, seeded vegetation and a mountain backdrop.
 - `--preset seeded-world --seed 19`: streamed climate biomes and static waterways,
   without vegetation. Use `--seed random` to explore another reproducible world.
 - `--terrain-recipe legacy`: the original spiky terrain used by the primary visual check.
-- `--naadf off`: raster-only comparison. Use `--msaa 4` to enable MSAA.
-- `FRONTIER_DISTANT_TERRAIN=surface`: heightfield comparison.
+- `--packed-terrain`: select the previous packed mesh renderer and its
+  1024-voxel default NAADF radius. Live-water and packed quality tools select
+  this path automatically.
+- `--naadf off`: use the near column renderer alone with rolling terrain.
+- `FRONTIER_DISTANT_TERRAIN=surface`: packed heightfield comparison.
   `FRONTIER_DISTANT_TERRAIN=voxy` selects the detailed-map voxel comparison.
 
 Press **Esc** for lighting, atmosphere, quality and loading settings. **F** toggles
@@ -55,9 +58,7 @@ For rendering changes, run the [primary visual check](frontier/PRIMARY_VISUAL_CH
 first. The [independent offline oracle](frontier/reference/README.md) supplies exact
 voxel references; images alone do not establish motion or performance acceptance.
 The [November 14 optimization checkpoint](frontier/OPTIMIZATION_NOV14.md) records
-measured cache/edit improvements, rejected experiments and large-radius limits.
-A fully loaded 256 m run remained below the 30 FPS playtest target on the measured
-laptop; the default stays 64 m. This does not close the broader architecture gates.
+the packed renderer's cache and edit improvements and historical large-radius limits.
 
 ```sh
 cd frontier
@@ -73,7 +74,7 @@ Curated evidence under `frontier/reference/` is versioned and should be preserve
 Older engines and assets remain on their original branches and in Git history:
 
 - [Desert restoration game (`cellular-automata-game`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/cellular-automata-game)
-- [Previous game engine (`main`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/main)
+- [Previous game engine on `main`](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/80e8427103c3cff0a0e2fc7ed1bf3ffdb75bfb4d)
 - [Analytic experiments (`DrewsAnalyticRendering`)](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/tree/DrewsAnalyticRendering)
 - [Historical artifact archive](https://github.com/DrewPhi/MicroVoxelProceduralGeneration/releases/tag/legacy-research-archive-2026-11-04)
 
