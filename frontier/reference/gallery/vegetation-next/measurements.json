@@ -1,0 +1,5083 @@
+{
+  "schema": "vegetation-checkpoint-2026-11-08",
+  "base_revision": "0a6ca71",
+  "final_binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5",
+  "baseline_binary_sha256": "f949e63d6350244eac1fa5172adb049905bbe12deba02b05dfe9fa4eb7d38a20",
+  "cpu_model": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics",
+  "workspace_tests": {
+    "passed": 512,
+    "failed": 0,
+    "ignored": 15
+  },
+  "scope": "Sequential finite laptop runs; native output; no concurrent builds/recording during timing. Earlier diagnostic variants predate color/lifecycle budget corrections and are not final defaults. Derived terrain disk-cache contents differ at startup; no startup speedup attribution. Last sample_count trace frames estimate measured interval. Full raw reports/video/manifests remain ignored in output/vegetation-next. Local lab is one frozen plant, not game FPS.",
+  "runs": {
+    "baseline-720": {
+      "command_manifest": null,
+      "frames": {
+        "sample_count": 356,
+        "accepted_frames": 356,
+        "missed_budget_frames": 47,
+        "rejected_inputs": 0,
+        "p50_ms": 13.827508,
+        "p95_ms": 17.828772,
+        "p99_ms": 19.266614
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1165291520,
+        "peak_rss_bytes": 1165291520,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 265,
+        "p50_ms": 12.993688168430328,
+        "p95_ms": 14.225147957279205,
+        "p99_ms": 14.572928745082855,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 265,
+        "color_p50_ms": 2.901953748058319,
+        "color_p95_ms": 3.185813084312439,
+        "shadow_samples": 265,
+        "shadow_p50_ms": 0.21152189421844483,
+        "shadow_p95_ms": 0.22891494122314454,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 224,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 27,
+        "shadow_triangles": 199256,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 36,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112702000,
+        "total_cpu_geometry_bytes": 167429600,
+        "cpu_cache_geometry_bytes": 167429600,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            174273445,
+            2872715147,
+            433878299
+          ],
+          "max_job_nanos": [
+            14875916,
+            53229871,
+            16969158
+          ],
+          "assembly_nanos": [
+            0,
+            2220616002,
+            314259510
+          ],
+          "mesh_nanos": [
+            0,
+            650997339,
+            118698617
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 272629760,
+        "cpu_cache_bytes": 669718828,
+        "selected_cpu_bytes": 255956884,
+        "terrain_prepare_stages_cpu_ms": null,
+        "presentation_cpu_ms": {
+          "upload_enqueue": 290.7932590000043,
+          "publication_check": 137.95808899999986,
+          "gpu_visibility_uniforms_bundles": 2242.5986569999986
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 356,
+        "terrain_ready_frames": 356,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 4.178173,
+            "p95": 5.815485,
+            "p99": 6.301098
+          },
+          "terrain_ms": {
+            "p50": 3.5702659999999997,
+            "p95": 5.126841,
+            "p99": 5.478287
+          },
+          "vegetation_ms": {
+            "p50": 0.585348,
+            "p95": 0.814501,
+            "p99": 0.913048
+          }
+        }
+      }
+    },
+    "baseline-walk": {
+      "command_manifest": null,
+      "frames": {
+        "sample_count": 776,
+        "accepted_frames": 776,
+        "missed_budget_frames": 437,
+        "rejected_inputs": 0,
+        "p50_ms": 17.535502,
+        "p95_ms": 30.31223,
+        "p99_ms": 34.86322
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1373577216,
+        "peak_rss_bytes": 1373577216,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 742,
+        "p50_ms": 14.397234924648284,
+        "p95_ms": 18.117463404830932,
+        "p99_ms": 19.368480352523804,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 742,
+        "color_p50_ms": 2.3772367793197633,
+        "color_p95_ms": 2.9324917706794738,
+        "shadow_samples": 742,
+        "shadow_p50_ms": 0.259012126247406,
+        "shadow_p95_ms": 0.34433423931884766,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 243,
+        "resident_templates": 230,
+        "pending_jobs": 1,
+        "missing_tiles": 0,
+        "missing_templates": 1,
+        "selected_instances": 130,
+        "triangles": 948286,
+        "budget_rejected": 0,
+        "culled_instances": 164,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          49,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          645074
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 73750880,
+        "uploaded_bytes_last_update": 704,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 42,
+        "shadow_triangles": 198734,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 28,
+        "shadow_only_triangles": 128040,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          14,
+          15,
+          31
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          49,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 16,
+        "shadow_stream_budget_rejected": 14,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 145788,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 108415800,
+        "total_cpu_geometry_bytes": 167610000,
+        "cpu_cache_geometry_bytes": 167610000,
+        "selected_cpu_meshes": 160,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 219,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            243,
+            311,
+            373
+          ],
+          "completed": [
+            243,
+            311,
+            373
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            229558477,
+            6871672865,
+            1335881359
+          ],
+          "max_job_nanos": [
+            16063228,
+            72727992,
+            33865875
+          ],
+          "assembly_nanos": [
+            0,
+            5124712255,
+            771534794
+          ],
+          "mesh_nanos": [
+            0,
+            1744609702,
+            561640655
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4558,
+        "visible_clusters": 3872,
+        "triangles": 2036944,
+        "gpu_resident_bytes": 242313920,
+        "gpu_allocated_bytes": 297795584,
+        "cpu_cache_bytes": 670274208,
+        "selected_cpu_bytes": 243808104,
+        "terrain_prepare_stages_cpu_ms": null,
+        "presentation_cpu_ms": {
+          "upload_enqueue": 361.5727610000046,
+          "publication_check": 439.7814410000002,
+          "gpu_visibility_uniforms_bundles": 7507.154749000001
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 776,
+        "terrain_ready_frames": 776,
+        "color_coarsenings": 12,
+        "color_lod_changes": 46,
+        "plant_pending_max": 22,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 11.677273,
+            "p95": 24.588171,
+            "p99": 28.881511
+          },
+          "terrain_ms": {
+            "p50": 9.988907,
+            "p95": 22.370259,
+            "p99": 27.18721
+          },
+          "vegetation_ms": {
+            "p50": 1.1980039999999998,
+            "p95": 3.016975,
+            "p99": 4.841883
+          }
+        }
+      }
+    },
+    "baseline-1080": {
+      "command_manifest": null,
+      "frames": {
+        "sample_count": 213,
+        "accepted_frames": 213,
+        "missed_budget_frames": 213,
+        "rejected_inputs": 0,
+        "p50_ms": 21.644806,
+        "p95_ms": 26.024821,
+        "p99_ms": 27.651446999999997
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 951910400,
+        "peak_rss_bytes": 951910400,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 157,
+        "p50_ms": 20.305701083518983,
+        "p95_ms": 20.983108165363312,
+        "p99_ms": 21.367478473709106,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 157,
+        "color_p50_ms": 5.223885447040558,
+        "color_p95_ms": 5.589379891010284,
+        "shadow_samples": 157,
+        "shadow_p50_ms": 0.23484621070861816,
+        "shadow_p95_ms": 0.2443442571144104,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 215,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983128,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 42,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648440
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30474292,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 29,
+        "shadow_triangles": 199840,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 34,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112674000,
+        "total_cpu_geometry_bytes": 166128400,
+        "cpu_cache_geometry_bytes": 166128400,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            187,
+            153
+          ],
+          "completed": [
+            209,
+            187,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            176694292,
+            4319643376,
+            658633785
+          ],
+          "max_job_nanos": [
+            14924588,
+            71377996,
+            27416360
+          ],
+          "assembly_nanos": [
+            0,
+            3145839437,
+            480552723
+          ],
+          "mesh_nanos": [
+            0,
+            1172401740,
+            177064731
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        }
+      },
+      "adaptive": {
+        "pixel_error": 4.5,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289406976,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": null,
+        "presentation_cpu_ms": {
+          "upload_enqueue": 253.20978400000286,
+          "publication_check": 43.272987000000015,
+          "gpu_visibility_uniforms_bundles": 1205.2405239999998
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 213,
+        "terrain_ready_frames": 213,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 5.158897,
+            "p95": 6.558744,
+            "p99": 7.142905
+          },
+          "terrain_ms": {
+            "p50": 4.347958,
+            "p95": 5.689628000000001,
+            "p99": 6.149119
+          },
+          "vegetation_ms": {
+            "p50": 0.733762,
+            "p95": 0.980725,
+            "p99": 1.0923319999999999
+          }
+        }
+      }
+    },
+    "new-720": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/new-720.json"
+        ],
+        "env": {},
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 370,
+        "accepted_frames": 370,
+        "missed_budget_frames": 24,
+        "rejected_inputs": 0,
+        "p50_ms": 13.252797000000001,
+        "p95_ms": 17.013021,
+        "p99_ms": 17.932001
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 959291392,
+        "peak_rss_bytes": 959291392,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 275,
+        "p50_ms": 12.478108560791016,
+        "p95_ms": 13.205610824100495,
+        "p99_ms": 13.54461493611145,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 275,
+        "color_p50_ms": 2.9282837754364013,
+        "color_p95_ms": 3.192145115249634,
+        "shadow_samples": 275,
+        "shadow_p50_ms": 0.0014427412261962891,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 224,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983132,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 41,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648444
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30481156,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 29,
+        "shadow_triangles": 199840,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 34,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112565600,
+        "total_cpu_geometry_bytes": 165850800,
+        "cpu_cache_geometry_bytes": 165850800,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            262857055,
+            4462997776,
+            685855437
+          ],
+          "max_job_nanos": [
+            25101003,
+            68160129,
+            25661415
+          ],
+          "assembly_nanos": [
+            0,
+            3498044029,
+            509754229
+          ],
+          "mesh_nanos": [
+            0,
+            963620401,
+            175053996
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 222.488051,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 142.590474,
+          "resident_accounting_and_order": 74.623871,
+          "occluder_build": 212.565996,
+          "visibility_error_uniforms_upload": 262.201648
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 265.315960000001,
+          "publication_check": 43.31321699999999,
+          "gpu_visibility_uniforms_bundles": 1292.4457960000016
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 370,
+        "terrain_ready_frames": 370,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 1.8367749999999998,
+            "p95": 2.9611609999999997,
+            "p99": 3.3779090000000003
+          },
+          "terrain_ms": {
+            "p50": 1.304858,
+            "p95": 2.145476,
+            "p99": 2.533728
+          },
+          "vegetation_ms": {
+            "p50": 0.472551,
+            "p95": 0.7919379999999999,
+            "p99": 0.9439150000000001
+          }
+        }
+      }
+    },
+    "new-walk": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/new-walk.json"
+        ],
+        "env": {},
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 767,
+        "accepted_frames": 767,
+        "missed_budget_frames": 455,
+        "rejected_inputs": 0,
+        "p50_ms": 18.351123,
+        "p95_ms": 29.864506,
+        "p99_ms": 34.347803000000006
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1285443584,
+        "peak_rss_bytes": 1285443584,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 731,
+        "p50_ms": 14.241258567638397,
+        "p95_ms": 17.94854245293045,
+        "p99_ms": 19.203046025253297,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 731,
+        "color_p50_ms": 2.3739906115608216,
+        "color_p95_ms": 2.9841499218063356,
+        "shadow_samples": 731,
+        "shadow_p50_ms": 0.2439034195175171,
+        "shadow_p95_ms": 0.3605650781135559,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 244,
+        "resident_templates": 222,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 129,
+        "triangles": 953066,
+        "budget_rejected": 0,
+        "culled_instances": 165,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          48,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          649854
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 77288536,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 37,
+        "shadow_triangles": 199674,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 26,
+        "shadow_only_triangles": 118692,
+        "retained_ground_detail": 69,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          13,
+          18,
+          29
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          48,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "shadow_stream_budget_rejected": 14,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147412,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 107923400,
+        "total_cpu_geometry_bytes": 166514000,
+        "cpu_cache_geometry_bytes": 166514000,
+        "selected_cpu_meshes": 157,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 218,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            244,
+            316,
+            372
+          ],
+          "completed": [
+            244,
+            316,
+            372
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            303852621,
+            6738367262,
+            1253193181
+          ],
+          "max_job_nanos": [
+            24419484,
+            70397028,
+            26821421
+          ],
+          "assembly_nanos": [
+            0,
+            5127873333,
+            763415519
+          ],
+          "mesh_nanos": [
+            0,
+            1608283149,
+            487303324
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 135.25016200000002,
+        "prediction_lead_m": 0.5031942889461595,
+        "predicted_tiles": 1,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 3,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4570,
+        "visible_clusters": 3872,
+        "triangles": 2036944,
+        "gpu_resident_bytes": 242800896,
+        "gpu_allocated_bytes": 314573296,
+        "cpu_cache_bytes": 620300728,
+        "selected_cpu_bytes": 243268680,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 1401.8258779999985,
+          "resident_accounting_and_order": 577.2886280000001,
+          "occluder_build": 1943.9973340000015,
+          "visibility_error_uniforms_upload": 2588.6660369999963
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 335.89353000000244,
+          "publication_check": 499.6857889999999,
+          "gpu_visibility_uniforms_bundles": 6893.152604999997
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 767,
+        "terrain_ready_frames": 767,
+        "color_coarsenings": 13,
+        "color_lod_changes": 65,
+        "plant_pending_max": 20,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 12.368248,
+            "p95": 24.085849,
+            "p99": 29.264912
+          },
+          "terrain_ms": {
+            "p50": 10.469733999999999,
+            "p95": 21.425079,
+            "p99": 27.172866
+          },
+          "vegetation_ms": {
+            "p50": 1.320293,
+            "p95": 3.14282,
+            "p99": 5.220619
+          }
+        }
+      }
+    },
+    "new-1080": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/new-1080.json"
+        ],
+        "env": {},
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 219,
+        "accepted_frames": 219,
+        "missed_budget_frames": 218,
+        "rejected_inputs": 0,
+        "p50_ms": 20.829047,
+        "p95_ms": 25.651916,
+        "p99_ms": 26.953212
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 964014080,
+        "peak_rss_bytes": 964014080,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 162,
+        "p50_ms": 19.562569123592375,
+        "p95_ms": 20.618896158039092,
+        "p99_ms": 21.184009881111145,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 162,
+        "color_p50_ms": 5.192585977661133,
+        "color_p95_ms": 5.545496512046814,
+        "shadow_samples": 162,
+        "shadow_p50_ms": 0.0014828173713684082,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 215,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983128,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 42,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648440
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30474292,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 29,
+        "shadow_triangles": 199840,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 34,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112674000,
+        "total_cpu_geometry_bytes": 166128400,
+        "cpu_cache_geometry_bytes": 166128400,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            187,
+            153
+          ],
+          "completed": [
+            209,
+            187,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            190395274,
+            4416282819,
+            677933660
+          ],
+          "max_job_nanos": [
+            18216957,
+            78606115,
+            31134931
+          ],
+          "assembly_nanos": [
+            0,
+            3253921542,
+            493535503
+          ],
+          "mesh_nanos": [
+            0,
+            1160951951,
+            183374690
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 221.93119900000002,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 4.5,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289407472,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 115.95900899999997,
+          "resident_accounting_and_order": 58.95725999999998,
+          "occluder_build": 162.86147099999997,
+          "visibility_error_uniforms_upload": 199.0341740000001
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 263.2643119999985,
+          "publication_check": 34.77643000000001,
+          "gpu_visibility_uniforms_bundles": 1009.5527990000004
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 219,
+        "terrain_ready_frames": 219,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.549163,
+            "p95": 3.4538960000000003,
+            "p99": 3.710356
+          },
+          "terrain_ms": {
+            "p50": 1.7156689999999999,
+            "p95": 2.387688,
+            "p99": 2.602592
+          },
+          "vegetation_ms": {
+            "p50": 0.73376,
+            "p95": 1.087579,
+            "p99": 1.2514290000000001
+          }
+        }
+      }
+    },
+    "pooled-720": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/pooled-720.json"
+        ],
+        "env": {
+          "FRONTIER_VEGETATION_GPU": "pooled"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 380,
+        "accepted_frames": 380,
+        "missed_budget_frames": 22,
+        "rejected_inputs": 0,
+        "p50_ms": 12.793307,
+        "p95_ms": 16.796930000000003,
+        "p99_ms": 17.977119
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 944111616,
+        "peak_rss_bytes": 944111616,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 282,
+        "p50_ms": 12.164713105545044,
+        "p95_ms": 12.89990998872757,
+        "p99_ms": 13.196032625404358,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 282,
+        "color_p50_ms": 2.640537053100586,
+        "color_p95_ms": 2.8660054458389284,
+        "shadow_samples": 282,
+        "shadow_p50_ms": 0.0014828173713684082,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 224,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 27,
+        "shadow_triangles": 199256,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "pooled",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 36,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112702000,
+        "total_cpu_geometry_bytes": 167429600,
+        "cpu_cache_geometry_bytes": 167429600,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            233943570,
+            3030907171,
+            493668484
+          ],
+          "max_job_nanos": [
+            24725812,
+            51525860,
+            17464200
+          ],
+          "assembly_nanos": [
+            0,
+            2387251248,
+            362453677
+          ],
+          "mesh_nanos": [
+            0,
+            642556468,
+            130274457
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 158.79459500000002,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 268435456,
+        "pooled_used_bytes": 30475700,
+        "cull_clusters_submitted": 113,
+        "gpu_frustum_culling": true
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 306184688,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 103.546824,
+          "resident_accounting_and_order": 57.91361200000001,
+          "occluder_build": 149.22991699999997,
+          "visibility_error_uniforms_upload": 182.79172199999996
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 236.76580299999404,
+          "publication_check": 42.02021599999999,
+          "gpu_visibility_uniforms_bundles": 1107.2449830000007
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 380,
+        "terrain_ready_frames": 380,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.116981,
+            "p95": 3.138071,
+            "p99": 3.427775
+          },
+          "terrain_ms": {
+            "p50": 1.389157,
+            "p95": 2.164473,
+            "p99": 2.3829390000000004
+          },
+          "vegetation_ms": {
+            "p50": 0.656584,
+            "p95": 0.9854709999999999,
+            "p99": 1.031776
+          }
+        }
+      }
+    },
+    "pooled-direct-720": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/pooled-direct-720.json"
+        ],
+        "env": {
+          "FRONTIER_VEGETATION_GPU": "pooled",
+          "FRONTIER_VEGETATION_CULL": "off"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 367,
+        "accepted_frames": 367,
+        "missed_budget_frames": 25,
+        "rejected_inputs": 0,
+        "p50_ms": 13.347783,
+        "p95_ms": 17.015394999999998,
+        "p99_ms": 18.088727
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 948137984,
+        "peak_rss_bytes": 948137984,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 273,
+        "p50_ms": 12.604228189647674,
+        "p95_ms": 13.37272834946823,
+        "p99_ms": 13.909548314048767,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 273,
+        "color_p50_ms": 2.9333734458732605,
+        "color_p95_ms": 3.175673819583893,
+        "shadow_samples": 273,
+        "shadow_p50_ms": 0.0014828173713684082,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 224,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 29,
+        "shadow_triangles": 199840,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "pooled",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 34,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112702000,
+        "total_cpu_geometry_bytes": 166257200,
+        "cpu_cache_geometry_bytes": 166257200,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            276096770,
+            4389645383,
+            696176734
+          ],
+          "max_job_nanos": [
+            29731527,
+            73308320,
+            28199892
+          ],
+          "assembly_nanos": [
+            0,
+            3418459450,
+            510172143
+          ],
+          "mesh_nanos": [
+            0,
+            969996236,
+            184970449
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 223.61837,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 268435456,
+        "pooled_used_bytes": 30475700,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 141.411461,
+          "resident_accounting_and_order": 76.32766000000001,
+          "occluder_build": 208.85206900000003,
+          "visibility_error_uniforms_upload": 252.548784
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 290.42173200000013,
+          "publication_check": 47.33345399999999,
+          "gpu_visibility_uniforms_bundles": 1368.3519319999998
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 367,
+        "terrain_ready_frames": 367,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.34732,
+            "p95": 3.3434760000000003,
+            "p99": 3.703231
+          },
+          "terrain_ms": {
+            "p50": 1.620684,
+            "p95": 2.437555,
+            "p99": 2.823432
+          },
+          "vegetation_ms": {
+            "p50": 0.6411490000000001,
+            "p95": 0.918981,
+            "p99": 1.006842
+          }
+        }
+      }
+    },
+    "pooled-walk": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/pooled-walk.json"
+        ],
+        "env": {
+          "FRONTIER_VEGETATION_GPU": "pooled",
+          "FRONTIER_SHADOW_TRANSITIONS": "1"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 773,
+        "accepted_frames": 773,
+        "missed_budget_frames": 474,
+        "rejected_inputs": 0,
+        "p50_ms": 18.55534,
+        "p95_ms": 29.554615,
+        "p99_ms": 32.673688
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1248800768,
+        "peak_rss_bytes": 1248800768,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 738,
+        "p50_ms": 13.980082329551697,
+        "p95_ms": 17.601002121997833,
+        "p99_ms": 19.07768784315491,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 738,
+        "color_p50_ms": 2.1910430088500976,
+        "color_p95_ms": 2.6941589353408815,
+        "shadow_samples": 738,
+        "shadow_p50_ms": 0.23168019524002076,
+        "shadow_p95_ms": 0.33551748738098147,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 244,
+        "resident_templates": 220,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 130,
+        "triangles": 951042,
+        "budget_rejected": 0,
+        "culled_instances": 164,
+        "coverage_fallbacks": 31,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          49,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          647830
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 82802792,
+        "uploaded_bytes_last_update": 427400,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 38,
+        "shadow_triangles": 199504,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 21,
+        "shadow_only_triangles": 95948,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "pooled",
+        "tree_lod_changes": 1,
+        "tree_refinements": 1,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          11,
+          19,
+          30
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          49,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 10,
+        "shadow_stream_budget_rejected": 18,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 28,
+        "explicit_shadow_triangles": 131760,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          28
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 104699000,
+        "total_cpu_geometry_bytes": 166425600,
+        "cpu_cache_geometry_bytes": 166425600,
+        "selected_cpu_meshes": 151,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 219,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            244,
+            334,
+            374
+          ],
+          "completed": [
+            244,
+            334,
+            374
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            317371344,
+            7298453504,
+            1328427226
+          ],
+          "max_job_nanos": [
+            27028011,
+            68363154,
+            24560773
+          ],
+          "assembly_nanos": [
+            0,
+            5568381778,
+            820852954
+          ],
+          "mesh_nanos": [
+            0,
+            1727757662,
+            505179455
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 142.372854,
+        "prediction_lead_m": 0.29301078743491615,
+        "predicted_tiles": 1,
+        "pooled_reserved_bytes": 268435456,
+        "pooled_used_bytes": 82802792,
+        "cull_clusters_submitted": 127,
+        "gpu_frustum_culling": true
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4552,
+        "visible_clusters": 3872,
+        "triangles": 2036944,
+        "gpu_resident_bytes": 241866176,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 611471616,
+        "selected_cpu_bytes": 242225640,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 1400.2513899999997,
+          "resident_accounting_and_order": 583.4483819999994,
+          "occluder_build": 1917.9035960000008,
+          "visibility_error_uniforms_upload": 2575.7181600000063
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 347.2239889999974,
+          "publication_check": 512.8886810000001,
+          "gpu_visibility_uniforms_bundles": 6858.412439999993
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 773,
+        "terrain_ready_frames": 773,
+        "color_coarsenings": 14,
+        "color_lod_changes": 62,
+        "plant_pending_max": 28,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 12.872856,
+            "p95": 23.791394,
+            "p99": 27.378269
+          },
+          "terrain_ms": {
+            "p50": 10.947033,
+            "p95": 20.741184999999998,
+            "p99": 25.460757
+          },
+          "vegetation_ms": {
+            "p50": 1.379658,
+            "p95": 3.298357,
+            "p99": 5.11851
+          }
+        }
+      }
+    },
+    "pooled-1080": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/pooled-1080.json"
+        ],
+        "env": {
+          "FRONTIER_VEGETATION_GPU": "pooled",
+          "FRONTIER_SHADOW_TRANSITIONS": "1"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 222,
+        "accepted_frames": 222,
+        "missed_budget_frames": 221,
+        "rejected_inputs": 0,
+        "p50_ms": 20.924031,
+        "p95_ms": 24.761429,
+        "p99_ms": 26.421294000000003
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 964067328,
+        "peak_rss_bytes": 964067328,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 165,
+        "p50_ms": 19.275904457176207,
+        "p95_ms": 20.431179494052888,
+        "p99_ms": 20.86752856268692,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 165,
+        "color_p50_ms": 4.886845066143036,
+        "color_p95_ms": 5.262078013389587,
+        "shadow_samples": 165,
+        "shadow_p50_ms": 0.0014427412261962891,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 212,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983408,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 43,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648720
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30475700,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 45,
+        "shadow_triangles": 199790,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 24,
+        "shadow_only_triangles": 110696,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "pooled",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 12,
+        "shadow_stream_budget_rejected": 11,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 29,
+        "explicit_shadow_triangles": 133804,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          29
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 111332800,
+        "total_cpu_geometry_bytes": 165944400,
+        "cpu_cache_geometry_bytes": 165944400,
+        "selected_cpu_meshes": 143,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            187,
+            153
+          ],
+          "completed": [
+            209,
+            187,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            170551691,
+            4066300385,
+            624886807
+          ],
+          "max_job_nanos": [
+            13588806,
+            85526961,
+            26301375
+          ],
+          "assembly_nanos": [
+            0,
+            3019220226,
+            454960831
+          ],
+          "mesh_nanos": [
+            0,
+            1045790728,
+            168868079
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 214.714696,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 268435456,
+        "pooled_used_bytes": 30475700,
+        "cull_clusters_submitted": 113,
+        "gpu_frustum_culling": true
+      },
+      "adaptive": {
+        "pixel_error": 4.5,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289407472,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 138.08577799999995,
+          "resident_accounting_and_order": 70.25928899999997,
+          "occluder_build": 202.0784299999999,
+          "visibility_error_uniforms_upload": 246.169321
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 254.10656100000188,
+          "publication_check": 43.02943500000001,
+          "gpu_visibility_uniforms_bundles": 1122.6028130000009
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 222,
+        "terrain_ready_frames": 222,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.398374,
+            "p95": 3.286485,
+            "p99": 3.7578479999999996
+          },
+          "terrain_ms": {
+            "p50": 1.6373060000000002,
+            "p95": 2.3829390000000004,
+            "p99": 2.609716
+          },
+          "vegetation_ms": {
+            "p50": 0.723074,
+            "p95": 1.097078,
+            "p99": 1.1956250000000002
+          }
+        }
+      }
+    },
+    "terrain-reuse-off": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/terrain-reuse-off.json"
+        ],
+        "env": {
+          "FRONTIER_TERRAIN_PREPARE_REUSE": "0"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 729,
+        "accepted_frames": 729,
+        "missed_budget_frames": 487,
+        "rejected_inputs": 0,
+        "p50_ms": 19.74503,
+        "p95_ms": 29.594984,
+        "p99_ms": 34.018916000000004
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1240129536,
+        "peak_rss_bytes": 1240129536,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 694,
+        "p50_ms": 14.726660837963104,
+        "p95_ms": 18.000841822380067,
+        "p99_ms": 19.328404207351685,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 694,
+        "color_p50_ms": 2.417513305217743,
+        "color_p95_ms": 2.945035604118347,
+        "shadow_samples": 694,
+        "shadow_p50_ms": 0.2579300703277588,
+        "shadow_p95_ms": 0.3452159145126343,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 244,
+        "resident_templates": 222,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 128,
+        "triangles": 952678,
+        "budget_rejected": 0,
+        "culled_instances": 164,
+        "coverage_fallbacks": 29,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          48,
+          59
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          649466
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 126,
+        "gpu_bytes": 82371448,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 40,
+        "shadow_triangles": 194726,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 24,
+        "shadow_only_triangles": 111288,
+        "retained_ground_detail": 69,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          9,
+          23,
+          27
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          48,
+          59
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 13,
+        "shadow_stream_budget_rejected": 15,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 31,
+        "explicit_shadow_triangles": 148568,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          31
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 106396600,
+        "total_cpu_geometry_bytes": 165956200,
+        "cpu_cache_geometry_bytes": 165956200,
+        "selected_cpu_meshes": 152,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 218,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            244,
+            312,
+            372
+          ],
+          "completed": [
+            244,
+            312,
+            372
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            307724436,
+            6202180860,
+            1262774781
+          ],
+          "max_job_nanos": [
+            25256541,
+            73593275,
+            24766180
+          ],
+          "assembly_nanos": [
+            0,
+            4726241695,
+            767115157
+          ],
+          "mesh_nanos": [
+            0,
+            1473819809,
+            491879190
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 131.71671400000002,
+        "prediction_lead_m": 0.4602594595553316,
+        "predicted_tiles": 1,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4549,
+        "visible_clusters": 3872,
+        "triangles": 2036936,
+        "gpu_resident_bytes": 241862432,
+        "gpu_allocated_bytes": 314573296,
+        "cpu_cache_bytes": 603409648,
+        "selected_cpu_bytes": 242159096,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": false,
+          "shadows": 1335.6781940000012,
+          "resident_accounting_and_order": 546.0468120000006,
+          "occluder_build": 1904.9833150000004,
+          "visibility_error_uniforms_upload": 2460.406377000001
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 340.87308999999885,
+          "publication_check": 605.2807319999996,
+          "gpu_visibility_uniforms_bundles": 6620.419276000001
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 729,
+        "terrain_ready_frames": 729,
+        "color_coarsenings": 12,
+        "color_lod_changes": 62,
+        "plant_pending_max": 28,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 13.782338999999999,
+            "p95": 24.453916,
+            "p99": 29.386018
+          },
+          "terrain_ms": {
+            "p50": 11.919444,
+            "p95": 22.062666,
+            "p99": 26.981707
+          },
+          "vegetation_ms": {
+            "p50": 1.260927,
+            "p95": 3.205748,
+            "p99": 5.0543949999999995
+          }
+        }
+      }
+    },
+    "prediction-off": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/prediction-off.json"
+        ],
+        "env": {
+          "FRONTIER_VEGETATION_PREDICTION": "off"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 747,
+        "accepted_frames": 747,
+        "missed_budget_frames": 468,
+        "rejected_inputs": 0,
+        "p50_ms": 18.960214999999998,
+        "p95_ms": 30.646945,
+        "p99_ms": 35.760704999999994
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1254801408,
+        "peak_rss_bytes": 1254801408,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 711,
+        "p50_ms": 14.734876447723389,
+        "p95_ms": 18.052660278087615,
+        "p99_ms": 19.28648455950165,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 711,
+        "color_p50_ms": 2.431299499156952,
+        "color_p95_ms": 2.993728120502472,
+        "shadow_samples": 711,
+        "shadow_p50_ms": 0.2528804760360718,
+        "shadow_p95_ms": 0.3440136301574707,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 243,
+        "resident_templates": 222,
+        "pending_jobs": 1,
+        "missing_tiles": 0,
+        "missing_templates": 1,
+        "selected_instances": 130,
+        "triangles": 953066,
+        "budget_rejected": 0,
+        "culled_instances": 164,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          49,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          649854
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 77288536,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 37,
+        "shadow_triangles": 199674,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 26,
+        "shadow_only_triangles": 118692,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          13,
+          18,
+          29
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          49,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 18,
+        "shadow_stream_budget_rejected": 14,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147412,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 107923400,
+        "total_cpu_geometry_bytes": 165416400,
+        "cpu_cache_geometry_bytes": 165416400,
+        "selected_cpu_meshes": 158,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 219,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            243,
+            317,
+            373
+          ],
+          "completed": [
+            243,
+            317,
+            373
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            230439811,
+            6621877259,
+            1277316982
+          ],
+          "max_job_nanos": [
+            13264671,
+            79928781,
+            24577396
+          ],
+          "assembly_nanos": [
+            0,
+            4952073487,
+            771713632
+          ],
+          "mesh_nanos": [
+            0,
+            1667600091,
+            503131364
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 138.512898,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4549,
+        "visible_clusters": 3872,
+        "triangles": 2036936,
+        "gpu_resident_bytes": 242090400,
+        "gpu_allocated_bytes": 306184688,
+        "cpu_cache_bytes": 599021660,
+        "selected_cpu_bytes": 242351944,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 1380.6821280000001,
+          "resident_accounting_and_order": 597.0930200000004,
+          "occluder_build": 1912.5987499999997,
+          "visibility_error_uniforms_upload": 2538.6123229999976
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 364.85441599999814,
+          "publication_check": 571.4481930000004,
+          "gpu_visibility_uniforms_bundles": 6807.328542999995
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 747,
+        "terrain_ready_frames": 747,
+        "color_coarsenings": 13,
+        "color_lod_changes": 63,
+        "plant_pending_max": 21,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 13.11863,
+            "p95": 25.830012999999997,
+            "p99": 29.148554
+          },
+          "terrain_ms": {
+            "p50": 11.307977000000001,
+            "p95": 23.493379,
+            "p99": 27.397267
+          },
+          "vegetation_ms": {
+            "p50": 1.254991,
+            "p95": 3.128572,
+            "p99": 4.8418660000000004
+          }
+        }
+      }
+    },
+    "shadow-transitions-walk": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/shadow-transitions-walk.json"
+        ],
+        "env": {
+          "FRONTIER_SHADOW_TRANSITIONS": "1"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 751,
+        "accepted_frames": 751,
+        "missed_budget_frames": 457,
+        "rejected_inputs": 0,
+        "p50_ms": 18.387929,
+        "p95_ms": 30.534149,
+        "p99_ms": 35.742895
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1215586304,
+        "peak_rss_bytes": 1215586304,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 717,
+        "p50_ms": 14.724416573833466,
+        "p95_ms": 18.06444266476822,
+        "p99_ms": 19.480813787441253,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 717,
+        "color_p50_ms": 2.4386735098686216,
+        "color_p95_ms": 3.0084360657806397,
+        "shadow_samples": 717,
+        "shadow_p50_ms": 0.26770864974975583,
+        "shadow_p95_ms": 0.3494239097557068,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 244,
+        "resident_templates": 225,
+        "pending_jobs": 1,
+        "missing_tiles": 0,
+        "missing_templates": 1,
+        "selected_instances": 130,
+        "triangles": 949706,
+        "budget_rejected": 0,
+        "culled_instances": 164,
+        "coverage_fallbacks": 32,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          49,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          646494
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 76417736,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 41,
+        "shadow_triangles": 198410,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 24,
+        "shadow_only_triangles": 107292,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          16,
+          12,
+          32
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          49,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 9,
+        "shadow_stream_budget_rejected": 16,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 30,
+        "explicit_shadow_triangles": 133896,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          30
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 107474600,
+        "total_cpu_geometry_bytes": 165970800,
+        "cpu_cache_geometry_bytes": 165970800,
+        "selected_cpu_meshes": 158,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 219,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            244,
+            309,
+            373
+          ],
+          "completed": [
+            244,
+            309,
+            373
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            228906980,
+            6582326576,
+            1316167073
+          ],
+          "max_job_nanos": [
+            14208584,
+            73202647,
+            39289402
+          ],
+          "assembly_nanos": [
+            0,
+            4923866428,
+            796990333
+          ],
+          "mesh_nanos": [
+            0,
+            1656277857,
+            516640609
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 164.651613,
+        "prediction_lead_m": 0.2872128386558302,
+        "predicted_tiles": 1,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 5,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4552,
+        "visible_clusters": 3872,
+        "triangles": 2036952,
+        "gpu_resident_bytes": 242093120,
+        "gpu_allocated_bytes": 306184688,
+        "cpu_cache_bytes": 592612412,
+        "selected_cpu_bytes": 242352184,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 1373.0892689999962,
+          "resident_accounting_and_order": 555.3909939999996,
+          "occluder_build": 1882.7330500000003,
+          "visibility_error_uniforms_upload": 2472.482504000001
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 337.3634210000006,
+          "publication_check": 559.1132019999995,
+          "gpu_visibility_uniforms_bundles": 6679.715981999997
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 751,
+        "terrain_ready_frames": 751,
+        "color_coarsenings": 9,
+        "color_lod_changes": 51,
+        "plant_pending_max": 26,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 12.760062000000001,
+            "p95": 25.708906,
+            "p99": 29.374144
+          },
+          "terrain_ms": {
+            "p50": 10.919725,
+            "p95": 23.597862,
+            "p99": 27.557554000000003
+          },
+          "vegetation_ms": {
+            "p50": 1.277549,
+            "p95": 3.230681,
+            "p99": 4.784873999999999
+          }
+        }
+      }
+    },
+    "shadow-cascades-720": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/shadow-cascades-720.json"
+        ],
+        "env": {
+          "FRONTIER_SHADOW_TRANSITIONS": "1",
+          "FRONTIER_SHADOW_CASCADES": "1"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 333,
+        "accepted_frames": 333,
+        "missed_budget_frames": 70,
+        "rejected_inputs": 0,
+        "p50_ms": 14.771371,
+        "p95_ms": 18.189648,
+        "p99_ms": 19.336592
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 954474496,
+        "peak_rss_bytes": 954474496,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 247,
+        "p50_ms": 13.838894070110321,
+        "p95_ms": 14.495702013336182,
+        "p99_ms": 14.970684485916138,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 247,
+        "color_p50_ms": 2.9680393114471437,
+        "color_p95_ms": 3.214186995094299,
+        "shadow_samples": 247,
+        "shadow_p50_ms": 0.19937882223129272,
+        "shadow_p95_ms": 0.2167317930908203,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 222,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983132,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 41,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648444
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30481156,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 45,
+        "shadow_triangles": 199210,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 24,
+        "shadow_only_triangles": 110696,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 12,
+        "shadow_stream_budget_rejected": 11,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 29,
+        "explicit_shadow_triangles": 133804,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          29
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 111196400,
+        "total_cpu_geometry_bytes": 167633200,
+        "cpu_cache_geometry_bytes": 167633200,
+        "selected_cpu_meshes": 143,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            174668122,
+            4299122047,
+            633069786
+          ],
+          "max_job_nanos": [
+            13701602,
+            68447455,
+            25674474
+          ],
+          "assembly_nanos": [
+            0,
+            3345438354,
+            461259544
+          ],
+          "mesh_nanos": [
+            0,
+            952441778,
+            170744039
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 218.580593,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 293601520,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 189.23882300000002,
+          "resident_accounting_and_order": 71.017985,
+          "occluder_build": 196.3282789999999,
+          "visibility_error_uniforms_upload": 240.5770880000001
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 252.79810199999952,
+          "publication_check": 45.16423399999999,
+          "gpu_visibility_uniforms_bundles": 1415.6900690000004
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 333,
+        "terrain_ready_frames": 333,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.5883439999999998,
+            "p95": 3.507325,
+            "p99": 3.947819
+          },
+          "terrain_ms": {
+            "p50": 1.8712060000000001,
+            "p95": 2.517105,
+            "p99": 2.816309
+          },
+          "vegetation_ms": {
+            "p50": 0.68508,
+            "p95": 0.975972,
+            "p99": 1.066207
+          }
+        }
+      }
+    },
+    "shadow-cache-off": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/shadow-cache-off.json"
+        ],
+        "env": {
+          "FRONTIER_SHADOW_CACHE": "off"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 362,
+        "accepted_frames": 362,
+        "missed_budget_frames": 35,
+        "rejected_inputs": 0,
+        "p50_ms": 13.485511,
+        "p95_ms": 17.571057,
+        "p99_ms": 18.505473000000002
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 948453376,
+        "peak_rss_bytes": 948453376,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 269,
+        "p50_ms": 12.761967897045135,
+        "p95_ms": 13.556958388824462,
+        "p99_ms": 13.97619494347,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 269,
+        "color_p50_ms": 2.916060551158905,
+        "color_p95_ms": 3.15387239661026,
+        "shadow_samples": 269,
+        "shadow_p50_ms": 0.22346458547973633,
+        "shadow_p95_ms": 0.2357278859024048,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 224,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 983132,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 41,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          648444
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30481156,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 25,
+        "shadow_triangles": 199724,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 27,
+        "shadow_only_triangles": 124388,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          2,
+          1,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 38,
+        "shadow_stream_budget_rejected": 8,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 32,
+        "explicit_shadow_triangles": 147496,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 112565600,
+        "total_cpu_geometry_bytes": 167064800,
+        "cpu_cache_geometry_bytes": 167064800,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            172,
+            153
+          ],
+          "completed": [
+            209,
+            172,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            251145374,
+            3934515768,
+            634309347
+          ],
+          "max_job_nanos": [
+            23045762,
+            58341039,
+            29418075
+          ],
+          "assembly_nanos": [
+            0,
+            3111878269,
+            483160734
+          ],
+          "mesh_nanos": [
+            0,
+            821478684,
+            150077654
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 218.207775,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289407472,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 131.942616,
+          "resident_accounting_and_order": 66.20342799999999,
+          "occluder_build": 186.389266,
+          "visibility_error_uniforms_upload": 226.4753649999999
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 231.76126900000006,
+          "publication_check": 43.33458300000001,
+          "gpu_visibility_uniforms_bundles": 1305.4349279999992
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 362,
+        "terrain_ready_frames": 362,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.4351809999999996,
+            "p95": 3.485953,
+            "p99": 3.819589
+          },
+          "terrain_ms": {
+            "p50": 1.6764869999999998,
+            "p95": 2.507606,
+            "p99": 2.786626
+          },
+          "vegetation_ms": {
+            "p50": 0.661334,
+            "p95": 0.965286,
+            "p99": 1.08758
+          }
+        }
+      }
+    },
+    "cold-turn": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "18",
+          "--warmup",
+          "0",
+          "--route",
+          "walk-turn-return",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "6",
+          "--report",
+          "output/vegetation-next/cold-turn.json"
+        ],
+        "env": {
+          "FRONTIER_SHADOW_TRANSITIONS": "1"
+        },
+        "binary_sha256": "9500ad409fd33c9931d5c53bad9e45ec2f18c05e1fac6036abde9746fe0c7847"
+      },
+      "frames": {
+        "sample_count": 1924,
+        "accepted_frames": 1924,
+        "missed_budget_frames": 14,
+        "rejected_inputs": 0,
+        "p50_ms": 8.929787,
+        "p95_ms": 12.400305,
+        "p99_ms": 15.787711
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 917184512,
+        "peak_rss_bytes": 917184512,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1465,
+        "p50_ms": 8.121631199855804,
+        "p95_ms": 8.985913346637727,
+        "p99_ms": 9.49544145635605,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 1465,
+        "color_p50_ms": 2.8700130603561402,
+        "color_p95_ms": 3.154513614933014,
+        "shadow_samples": 1465,
+        "shadow_p50_ms": 0.0015629696617126465,
+        "shadow_p95_ms": 0.25139765866470337,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 222,
+        "resident_templates": 217,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 120,
+        "triangles": 902286,
+        "budget_rejected": 0,
+        "culled_instances": 162,
+        "coverage_fallbacks": 40,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          20,
+          43,
+          57
+        ],
+        "triangles_by_species": [
+          239524,
+          15648,
+          647114
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 117,
+        "gpu_bytes": 94638396,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 41,
+        "shadow_triangles": 199972,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 25,
+        "shadow_only_triangles": 109216,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          2,
+          15,
+          4,
+          36
+        ],
+        "demanded_by_species": [
+          20,
+          43,
+          57
+        ],
+        "ready_by_species": [
+          20,
+          43,
+          57
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 7,
+        "shadow_stream_budget_rejected": 12,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 30,
+        "explicit_shadow_triangles": 134468,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          30
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 103675400,
+        "total_cpu_geometry_bytes": 166840200,
+        "cpu_cache_geometry_bytes": 166840200,
+        "selected_cpu_meshes": 150,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 220,
+          "misses": 199,
+          "accounted_bytes": 57956800,
+          "budget_bytes": 67108864,
+          "entries": 199,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            226,
+            421,
+            423
+          ],
+          "completed": [
+            222,
+            417,
+            419
+          ],
+          "cancelled": [
+            4,
+            4,
+            4
+          ],
+          "worker_wall_nanos": [
+            249451064,
+            12095704534,
+            1349785794
+          ],
+          "max_job_nanos": [
+            25775395,
+            100747136,
+            43927047
+          ],
+          "assembly_nanos": [
+            0,
+            8956470630,
+            794399588
+          ],
+          "mesh_nanos": [
+            0,
+            3063733796,
+            552523597
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 170.64042,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": false,
+        "pending_clusters": 65,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 679,
+        "visible_clusters": 279,
+        "triangles": 862261,
+        "gpu_resident_bytes": 48951712,
+        "gpu_allocated_bytes": 88080880,
+        "cpu_cache_bytes": 377965244,
+        "selected_cpu_bytes": 51825548,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 204.35094500000008,
+          "resident_accounting_and_order": 51.01293299999998,
+          "occluder_build": 119.26448900000007,
+          "visibility_error_uniforms_upload": 147.67928999999987
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 332.4846719999998,
+          "publication_check": 21.846572,
+          "gpu_visibility_uniforms_bundles": 790.5883359999998
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 1924,
+        "terrain_ready_frames": 0,
+        "color_coarsenings": 8,
+        "color_lod_changes": 94,
+        "plant_pending_max": 260,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 1.361849,
+            "p95": 6.995653,
+            "p99": 12.210334999999999
+          },
+          "terrain_ms": {
+            "p50": 0.275457,
+            "p95": 2.728447,
+            "p99": 4.999778
+          },
+          "vegetation_ms": {
+            "p50": 0.962912,
+            "p95": 4.546225,
+            "p99": 9.587559
+          }
+        }
+      }
+    },
+    "final-720": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/final-720.json"
+        ],
+        "env": {},
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5"
+      },
+      "frames": {
+        "sample_count": 373,
+        "accepted_frames": 373,
+        "missed_budget_frames": 27,
+        "rejected_inputs": 0,
+        "p50_ms": 13.0106,
+        "p95_ms": 17.056969000000002,
+        "p99_ms": 18.361829
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 947740672,
+        "peak_rss_bytes": 947740672,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 277,
+        "p50_ms": 12.363931623195649,
+        "p95_ms": 13.074000763355254,
+        "p99_ms": 13.441298633857727,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 277,
+        "color_p50_ms": 2.9252780645484924,
+        "color_p95_ms": 3.153231178287506,
+        "shadow_samples": 277,
+        "shadow_p50_ms": 0.00140266508102417,
+        "shadow_p95_ms": 0.0014427412261962891,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 227,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 980386,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 39,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          645698
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 30568312,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 42,
+        "shadow_triangles": 199978,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 25,
+        "shadow_only_triangles": 117312,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          4,
+          6,
+          0,
+          38
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 17,
+        "shadow_stream_budget_rejected": 9,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 31,
+        "explicit_shadow_triangles": 149872,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          31
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 113025800,
+        "total_cpu_geometry_bytes": 166472200,
+        "cpu_cache_geometry_bytes": 166472200,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            166,
+            153
+          ],
+          "completed": [
+            209,
+            166,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            248642790,
+            4178058684,
+            699687182
+          ],
+          "max_job_nanos": [
+            21837100,
+            75869438,
+            24103685
+          ],
+          "assembly_nanos": [
+            0,
+            3243306836,
+            522398472
+          ],
+          "mesh_nanos": [
+            0,
+            933568084,
+            176213008
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 219.79059900000001,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false,
+        "shadow_lifecycle_enabled": true,
+        "near_shadow_cache_reused": true,
+        "far_shadow_cache_reused": false,
+        "shadow_cascades_enabled": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 297796080,
+        "cpu_cache_bytes": 523031604,
+        "selected_cpu_bytes": 238887244,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 135.51896800000003,
+          "resident_accounting_and_order": 68.99726300000003,
+          "occluder_build": 192.73330399999998,
+          "visibility_error_uniforms_upload": 251.107651
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 274.3303639999972,
+          "publication_check": 41.360127,
+          "gpu_visibility_uniforms_bundles": 1225.3828310000001
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 373,
+        "terrain_ready_frames": 373,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 1.8082809999999998,
+            "p95": 2.72845,
+            "p99": 3.0941430000000003
+          },
+          "terrain_ms": {
+            "p50": 1.283487,
+            "p95": 2.02556,
+            "p99": 2.287956
+          },
+          "vegetation_ms": {
+            "p50": 0.48086199999999996,
+            "p95": 0.761069,
+            "p99": 0.879801
+          }
+        }
+      }
+    },
+    "final-walk": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1280",
+          "--height",
+          "720",
+          "--pixel-error",
+          "3",
+          "--seconds",
+          "16",
+          "--route",
+          "walk-stop-resume",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--report",
+          "output/vegetation-next/final-walk.json"
+        ],
+        "env": {},
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5"
+      },
+      "frames": {
+        "sample_count": 780,
+        "accepted_frames": 780,
+        "missed_budget_frames": 472,
+        "rejected_inputs": 0,
+        "p50_ms": 18.298901,
+        "p95_ms": 28.660600000000002,
+        "p99_ms": 33.712626
+      },
+      "output": {
+        "width": 1280,
+        "height": 720
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 1382477824,
+        "peak_rss_bytes": 1382477824,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 745,
+        "p50_ms": 14.103797389698029,
+        "p95_ms": 17.712734414737703,
+        "p99_ms": 19.504699169963835,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 745,
+        "color_p50_ms": 2.39230540990448,
+        "color_p95_ms": 3.0107204060554507,
+        "shadow_samples": 745,
+        "shadow_p50_ms": 0.23821260690307616,
+        "shadow_p95_ms": 0.3465384273033142,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 244,
+        "resident_templates": 235,
+        "pending_jobs": 3,
+        "missing_tiles": 0,
+        "missing_templates": 3,
+        "selected_instances": 129,
+        "triangles": 952554,
+        "budget_rejected": 0,
+        "culled_instances": 165,
+        "coverage_fallbacks": 39,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          21,
+          48,
+          60
+        ],
+        "triangles_by_species": [
+          283176,
+          20036,
+          649342
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 127,
+        "gpu_bytes": 74696928,
+        "uploaded_bytes_last_update": 1536,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 38,
+        "shadow_triangles": 198502,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 25,
+        "shadow_only_triangles": 129960,
+        "retained_ground_detail": 69,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          0,
+          18,
+          8,
+          34
+        ],
+        "demanded_by_species": [
+          21,
+          49,
+          60
+        ],
+        "ready_by_species": [
+          21,
+          48,
+          60
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 11,
+        "shadow_stream_budget_rejected": 15,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 29,
+        "explicit_shadow_triangles": 148732,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          29
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 110128600,
+        "total_cpu_geometry_bytes": 166177400,
+        "cpu_cache_geometry_bytes": 166177400,
+        "selected_cpu_meshes": 158,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 218,
+          "misses": 155,
+          "accounted_bytes": 58999680,
+          "budget_bytes": 67108864,
+          "entries": 155,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            244,
+            285,
+            372
+          ],
+          "completed": [
+            244,
+            285,
+            372
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            307139424,
+            6318847180,
+            1317995780
+          ],
+          "max_job_nanos": [
+            23932711,
+            56103014,
+            27105217
+          ],
+          "assembly_nanos": [
+            0,
+            4768874954,
+            792154095
+          ],
+          "mesh_nanos": [
+            0,
+            1547950211,
+            523326950
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 148.632427,
+        "prediction_lead_m": 0.34817023229875566,
+        "predicted_tiles": 1,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false,
+        "shadow_lifecycle_enabled": true,
+        "near_shadow_cache_reused": false,
+        "far_shadow_cache_reused": false,
+        "shadow_cascades_enabled": false
+      },
+      "adaptive": {
+        "pixel_error": 3,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 4,
+        "unresolved": false,
+        "native_clusters": 31,
+        "resident_clusters": 4570,
+        "visible_clusters": 3872,
+        "triangles": 2036936,
+        "gpu_resident_bytes": 242654144,
+        "gpu_allocated_bytes": 322961904,
+        "cpu_cache_bytes": 670510340,
+        "selected_cpu_bytes": 244278888,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 1573.377732,
+          "resident_accounting_and_order": 616.5003020000001,
+          "occluder_build": 1968.5922169999997,
+          "visibility_error_uniforms_upload": 2684.267802999999
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 358.14878500000094,
+          "publication_check": 398.27534799999995,
+          "gpu_visibility_uniforms_bundles": 7294.295416000008
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 780,
+        "terrain_ready_frames": 780,
+        "color_coarsenings": 15,
+        "color_lod_changes": 58,
+        "plant_pending_max": 22,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 12.597413999999999,
+            "p95": 23.523087,
+            "p99": 26.806014
+          },
+          "terrain_ms": {
+            "p50": 10.318956,
+            "p95": 20.717461999999998,
+            "p99": 24.166612
+          },
+          "vegetation_ms": {
+            "p50": 1.4022189999999999,
+            "p95": 3.3885970000000003,
+            "p99": 5.283552
+          }
+        }
+      }
+    },
+    "final-1080": {
+      "command_manifest": {
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--adaptive-disk-cache",
+          "output/cozy-scene/map-cache",
+          "--adaptive-disk-mib",
+          "1024",
+          "--eye",
+          "-43.625,31.0625,-289.5625",
+          "--target",
+          "-43.625,31.3625,-259.5625",
+          "--adaptive-wait-quality",
+          "--warmup",
+          "60",
+          "--uncapped",
+          "--benchmark-input-lock",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--pixel-error",
+          "4.5",
+          "--seconds",
+          "6",
+          "--report",
+          "output/vegetation-next/final-1080.json"
+        ],
+        "env": {},
+        "binary_sha256": "7dd044637c686b1877f686323a9346816b1de3b6b1875becdc2e3df1b2dcc4a5"
+      },
+      "frames": {
+        "sample_count": 221,
+        "accepted_frames": 221,
+        "missed_budget_frames": 221,
+        "rejected_inputs": 0,
+        "p50_ms": 20.764954,
+        "p95_ms": 25.26844,
+        "p99_ms": 26.223042
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "process_memory": {
+        "rss_bytes": 959975424,
+        "peak_rss_bytes": 959975424,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 163,
+        "p50_ms": 19.596393390117644,
+        "p95_ms": 20.271516131687164,
+        "p99_ms": 20.946638873256685,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "vegetation_gpu_timing": {
+        "supported": true,
+        "color_samples": 163,
+        "color_p50_ms": 5.195351231678009,
+        "color_p95_ms": 5.592626058769226,
+        "shadow_samples": 163,
+        "shadow_p50_ms": 0.0014828173713684082,
+        "shadow_p95_ms": 0.0015228935165405274,
+        "scope": "asynchronous vegetation color and plant-only shadow spans; excludes terrain and CPU generation"
+      },
+      "vegetation": {
+        "enabled": true,
+        "source_version": 3,
+        "instance_units": "ground_tiles_and_individual_trees",
+        "model_generation": "full_record_seed_rules",
+        "resident_tiles": 209,
+        "resident_templates": 218,
+        "pending_jobs": 0,
+        "missing_tiles": 0,
+        "missing_templates": 0,
+        "selected_instances": 115,
+        "triangles": 981560,
+        "budget_rejected": 0,
+        "culled_instances": 171,
+        "coverage_fallbacks": 43,
+        "coverage_unresolved": 0,
+        "selected_by_species": [
+          24,
+          43,
+          48
+        ],
+        "triangles_by_species": [
+          311532,
+          23156,
+          646872
+        ],
+        "rejected_by_species": [
+          0,
+          0,
+          0
+        ],
+        "draw_calls": 113,
+        "gpu_bytes": 29459836,
+        "uploaded_bytes_last_update": 0,
+        "grass_radius_m": 28,
+        "flower_radius_m": 56,
+        "tree_radius_m": 220,
+        "shadow_casters": true,
+        "shadow_instances": 46,
+        "shadow_triangles": 195954,
+        "reference_mode": false,
+        "reference_budget_exceeded": false,
+        "cpu_geometry_budget_bytes": 167772160,
+        "gpu_budget_bytes": 268435456,
+        "gpu_actual_budget_bytes": 268435456,
+        "shadow_only_instances": 25,
+        "shadow_only_triangles": 117312,
+        "retained_ground_detail": 0,
+        "canonical_voxel_m": 0.0625,
+        "gpu_representation": "compact",
+        "tree_lod_changes": 0,
+        "tree_refinements": 0,
+        "tree_coarsenings": 0,
+        "tree_lod_histogram": [
+          5,
+          1,
+          2,
+          40
+        ],
+        "demanded_by_species": [
+          24,
+          43,
+          48
+        ],
+        "ready_by_species": [
+          24,
+          43,
+          48
+        ],
+        "shadow_admitted": 0,
+        "shadow_removed": 0,
+        "shadow_budget_rejected": 13,
+        "shadow_stream_budget_rejected": 9,
+        "tree_shadow_triangle_budget": 150000,
+        "total_shadow_triangle_budget": 200000,
+        "explicit_shadow_instances": 31,
+        "explicit_shadow_triangles": 149872,
+        "shadow_lod_histogram": [
+          0,
+          0,
+          0,
+          31
+        ],
+        "shadow_lod_changes": 0,
+        "selected_cpu_geometry_bytes": 113143200,
+        "total_cpu_geometry_bytes": 166265600,
+        "cpu_cache_geometry_bytes": 166265600,
+        "selected_cpu_meshes": 146,
+        "selected_mesh_evictions": 0,
+        "selected_mesh_evicted_bytes": 0,
+        "ground_assembly_cache": {
+          "hits": 86,
+          "misses": 67,
+          "accounted_bytes": 22668384,
+          "budget_bytes": 67108864,
+          "entries": 67,
+          "scope": "process-shared native ground assembly; conservative accounting excludes worker-held Arcs"
+        },
+        "jobs": {
+          "workers": 4,
+          "started": [
+            209,
+            190,
+            153
+          ],
+          "completed": [
+            209,
+            190,
+            153
+          ],
+          "cancelled": [
+            0,
+            0,
+            0
+          ],
+          "worker_wall_nanos": [
+            180971764,
+            4206821316,
+            636504199
+          ],
+          "max_job_nanos": [
+            14885370,
+            68212441,
+            25883469
+          ],
+          "assembly_nanos": [
+            0,
+            3084661287,
+            465423971
+          ],
+          "mesh_nanos": [
+            0,
+            1120856336,
+            170021144
+          ],
+          "scope": "cumulative overlapping worker wall time; order placement,tree,ground; assembly includes growth/cache lookups and native-cell assembly"
+        },
+        "shadow_transition_pairs": 0,
+        "shadow_transition_triangles": 0,
+        "shadow_fading_casters": 0,
+        "prediction_horizon_ms": 220.411563,
+        "prediction_lead_m": 0,
+        "predicted_tiles": 0,
+        "pooled_reserved_bytes": 0,
+        "pooled_used_bytes": 0,
+        "cull_clusters_submitted": 0,
+        "gpu_frustum_culling": false,
+        "shadow_lifecycle_enabled": true,
+        "near_shadow_cache_reused": true,
+        "far_shadow_cache_reused": false,
+        "shadow_cascades_enabled": false
+      },
+      "adaptive": {
+        "pixel_error": 4.5,
+        "coverage_ready": true,
+        "quality_ready": true,
+        "pending_clusters": 0,
+        "unresolved": false,
+        "native_clusters": 29,
+        "resident_clusters": 4507,
+        "visible_clusters": 3893,
+        "triangles": 1959822,
+        "gpu_resident_bytes": 238877472,
+        "gpu_allocated_bytes": 289407472,
+        "cpu_cache_bytes": 522593684,
+        "selected_cpu_bytes": 238879724,
+        "terrain_prepare_stages_cpu_ms": {
+          "reuse_enabled": true,
+          "shadows": 137.81404499999994,
+          "resident_accounting_and_order": 71.18311,
+          "occluder_build": 199.93792200000001,
+          "visibility_error_uniforms_upload": 251.13852099999997
+        },
+        "presentation_cpu_ms": {
+          "upload_enqueue": 252.24152400000273,
+          "publication_check": 43.91641199999999,
+          "gpu_visibility_uniforms_bundles": 1194.6455900000017
+        }
+      },
+      "measured_trace_tail": {
+        "frames": 221,
+        "terrain_ready_frames": 221,
+        "color_coarsenings": 0,
+        "color_lod_changes": 0,
+        "plant_pending_max": 0,
+        "cpu_ms": {
+          "prepare_ms": {
+            "p50": 2.836496,
+            "p95": 3.734106,
+            "p99": 4.326576
+          },
+          "terrain_ms": {
+            "p50": 1.965007,
+            "p95": 2.66671,
+            "p99": 3.1036420000000002
+          },
+          "vegetation_ms": {
+            "p50": 0.803812,
+            "p95": 1.086393,
+            "p99": 1.253805
+          }
+        }
+      }
+    }
+  }
+}

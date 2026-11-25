@@ -1,0 +1,12 @@
+{
+  "scatter-control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
+  },
+  "local-direct": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
+    "FRONTIER_NAADF_GPU_DISTANCE": "1",
+    "FRONTIER_NAADF_DIRECT_ROOTS": "1",
+    "FRONTIER_NAADF_DISTANCE_SCHEDULE": "retain",
+    "FRONTIER_NAADF_LOCAL_EXIT_REPAIR": "1"
+  }
+}

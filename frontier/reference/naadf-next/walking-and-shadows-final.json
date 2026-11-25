@@ -1,0 +1,678 @@
+{
+  "output/naadf-next-walking-fixed/vegetation/summary.json": {
+    "binary_sha256": "868cb1e9ea80f3d398b104175bdc8729e8eba07518769c87c14a79468cff1e2c",
+    "variants": {
+      "control": {},
+      "specialize-format": {
+        "FRONTIER_NAADF_SPECIALIZE_FORMAT": "1"
+      },
+      "cpu-cache-hash": {
+        "FRONTIER_NAADF_COLUMN_CACHE": "1",
+        "FRONTIER_NAADF_COLUMN_CACHE_MIB": "320",
+        "FRONTIER_NAADF_FAST_LEAF_HASH": "1"
+      }
+    },
+    "route": "walk-circuit",
+    "radius_m": 64,
+    "runs": [
+      {
+        "variant": "control",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 2089,
+          "accepted_frames": 2089,
+          "missed_budget_frames": 1713,
+          "rejected_inputs": 0,
+          "p50_ms": 19.777079,
+          "p95_ms": 35.891296000000004,
+          "p99_ms": 46.972493
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1763,
+          "p50_ms": 18.404568908843995,
+          "p95_ms": 22.48215637552643,
+          "p99_ms": 26.98747653963089,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1763,
+          "p50_ms": 9.132071048080444,
+          "p95_ms": 11.823905567001344,
+          "p99_ms": 13.238994253028869,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 2138865664,
+          "peak_rss_bytes": 2160435200,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 2089,
+          "coverage_ready_frames": 2089,
+          "quality_ready_frames": 600,
+          "unbounded_error_frames": 60,
+          "max_finite_visible_error_px": 20693.91546336369,
+          "peak_unresolved_clusters": 100
+        },
+        "published_shifts": 13,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 58.74246535582136,
+        "prepare_ready_p50_ms": 300.93050900000003,
+        "upload_ready_p50_ms": 1.4425860000000001,
+        "fallback_ready_p50_ms": 108.846953,
+        "publication_p50_ms": 397.727422,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 94731972,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -57,
+            12.1375,
+            -47
+          ],
+          "yaw": 0.017028531,
+          "pitch": 0.18829249
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "specialize-format",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 2034,
+          "accepted_frames": 2034,
+          "missed_budget_frames": 1713,
+          "rejected_inputs": 0,
+          "p50_ms": 20.216386,
+          "p95_ms": 36.616745,
+          "p99_ms": 46.547436
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1736,
+          "p50_ms": 18.794109039916993,
+          "p95_ms": 24.439635610313417,
+          "p99_ms": 28.332712504623412,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1736,
+          "p50_ms": 9.405510586589813,
+          "p95_ms": 12.255084812908173,
+          "p99_ms": 13.99450974181366,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 2109534208,
+          "peak_rss_bytes": 2131415040,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 2034,
+          "coverage_ready_frames": 2034,
+          "quality_ready_frames": 595,
+          "unbounded_error_frames": 59,
+          "max_finite_visible_error_px": 20850.694206926986,
+          "peak_unresolved_clusters": 107
+        },
+        "published_shifts": 13,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 58.67035799366191,
+        "prepare_ready_p50_ms": 318.013588,
+        "upload_ready_p50_ms": 1.3404770000000001,
+        "fallback_ready_p50_ms": 95.245097,
+        "publication_p50_ms": 410.944615,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 94731972,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -57,
+            12.1375,
+            -47
+          ],
+          "yaw": 0.017028531,
+          "pitch": 0.18829249
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "cpu-cache-hash",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 2004,
+          "accepted_frames": 2004,
+          "missed_budget_frames": 1698,
+          "rejected_inputs": 0,
+          "p50_ms": 20.593951999999998,
+          "p95_ms": 37.048929,
+          "p99_ms": 46.745719
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1692,
+          "p50_ms": 19.162889727790834,
+          "p95_ms": 24.260134556087493,
+          "p99_ms": 28.820719724384308,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1692,
+          "p50_ms": 9.71181256414032,
+          "p95_ms": 12.607394205116272,
+          "p99_ms": 13.786354243789672,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 2220589056,
+          "peak_rss_bytes": 2242281472,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 2004,
+          "coverage_ready_frames": 2004,
+          "quality_ready_frames": 589,
+          "unbounded_error_frames": 64,
+          "max_finite_visible_error_px": 21072.6907797746,
+          "peak_unresolved_clusters": 113
+        },
+        "published_shifts": 13,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 58.80212641041231,
+        "prepare_ready_p50_ms": 296.475736,
+        "upload_ready_p50_ms": 1.519762,
+        "fallback_ready_p50_ms": 115.84854899999999,
+        "publication_p50_ms": 386.925275,
+        "native_column_cache": {
+          "enabled": true,
+          "hits": 7616,
+          "misses": 23104,
+          "tiles": 23104,
+          "capacity_tiles": 65536,
+          "resident_payload_bytes": 118292480,
+          "payload_limit_bytes": 335544320
+        },
+        "gpu_payload_bytes": 94731972,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -57,
+            12.1375,
+            -47
+          ],
+          "yaw": 0.017028531,
+          "pitch": 0.18829249
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      }
+    ]
+  },
+  "output/naadf-next-walking-fixed/mountain/summary.json": {
+    "binary_sha256": "868cb1e9ea80f3d398b104175bdc8729e8eba07518769c87c14a79468cff1e2c",
+    "variants": {
+      "control": {},
+      "specialize-format": {
+        "FRONTIER_NAADF_SPECIALIZE_FORMAT": "1"
+      },
+      "cpu-cache-hash": {
+        "FRONTIER_NAADF_COLUMN_CACHE": "1",
+        "FRONTIER_NAADF_COLUMN_CACHE_MIB": "320",
+        "FRONTIER_NAADF_FAST_LEAF_HASH": "1"
+      }
+    },
+    "route": "walk-circuit",
+    "radius_m": 64,
+    "runs": [
+      {
+        "variant": "control",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 1884,
+          "accepted_frames": 1884,
+          "missed_budget_frames": 1634,
+          "rejected_inputs": 0,
+          "p50_ms": 21.927306,
+          "p95_ms": 39.808248,
+          "p99_ms": 50.742218
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1703,
+          "p50_ms": 20.032662306461333,
+          "p95_ms": 26.840316934558867,
+          "p99_ms": 32.435187257457734,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1703,
+          "p50_ms": 9.613585932323456,
+          "p95_ms": 13.317984335163116,
+          "p99_ms": 15.69578218051529,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1667305472,
+          "peak_rss_bytes": 1688879104,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 1884,
+          "coverage_ready_frames": 1884,
+          "quality_ready_frames": 299,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 1016.3821148444764,
+          "peak_unresolved_clusters": 233
+        },
+        "published_shifts": 17,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 58.87263288782153,
+        "prepare_ready_p50_ms": 294.44662300000005,
+        "upload_ready_p50_ms": 1.399843,
+        "fallback_ready_p50_ms": 69.346233,
+        "publication_p50_ms": 344.38027900000003,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 91592740,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            0,
+            647.45,
+            3000
+          ],
+          "yaw": 0,
+          "pitch": 0.008499796
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "specialize-format",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 1882,
+          "accepted_frames": 1882,
+          "missed_budget_frames": 1662,
+          "rejected_inputs": 0,
+          "p50_ms": 21.662535000000002,
+          "p95_ms": 40.952818,
+          "p99_ms": 51.481915
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1709,
+          "p50_ms": 19.765274265872954,
+          "p95_ms": 26.892976989315034,
+          "p99_ms": 32.63035808444595,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1709,
+          "p50_ms": 9.246608670982361,
+          "p95_ms": 12.741088225410461,
+          "p99_ms": 16.037591622688293,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1691369472,
+          "peak_rss_bytes": 1713070080,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 1882,
+          "coverage_ready_frames": 1882,
+          "quality_ready_frames": 333,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 1027.36577079506,
+          "peak_unresolved_clusters": 237
+        },
+        "published_shifts": 17,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 58.918946971036235,
+        "prepare_ready_p50_ms": 283.431926,
+        "upload_ready_p50_ms": 1.496015,
+        "fallback_ready_p50_ms": 71.207942,
+        "publication_p50_ms": 357.10947999999996,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 91592740,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            0,
+            647.45,
+            3000
+          ],
+          "yaw": 0,
+          "pitch": 0.008499796
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "cpu-cache-hash",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 1925,
+          "accepted_frames": 1925,
+          "missed_budget_frames": 1658,
+          "rejected_inputs": 0,
+          "p50_ms": 21.757520999999997,
+          "p95_ms": 36.807907,
+          "p99_ms": 47.619586
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 1727,
+          "p50_ms": 19.695822306289674,
+          "p95_ms": 25.48458101953125,
+          "p99_ms": 31.109067613712313,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 1727,
+          "p50_ms": 9.063059926094056,
+          "p95_ms": 12.72650050856781,
+          "p99_ms": 16.07402083864975,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1764683776,
+          "peak_rss_bytes": 1786417152,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 1925,
+          "coverage_ready_frames": 1925,
+          "quality_ready_frames": 312,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 277.56471847509727,
+          "peak_unresolved_clusters": 232
+        },
+        "published_shifts": 17,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": 59.011516903150046,
+        "prepare_ready_p50_ms": 246.64064499999998,
+        "upload_ready_p50_ms": 1.273987,
+        "fallback_ready_p50_ms": 59.023732,
+        "publication_p50_ms": 308.029506,
+        "native_column_cache": {
+          "enabled": true,
+          "hits": 7616,
+          "misses": 23104,
+          "tiles": 23104,
+          "capacity_tiles": 65536,
+          "resident_payload_bytes": 118292480,
+          "payload_limit_bytes": 335544320
+        },
+        "gpu_payload_bytes": 91592740,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            0,
+            647.45,
+            3000
+          ],
+          "yaw": 0,
+          "pitch": 0.008499796
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      }
+    ]
+  },
+  "output/naadf-next-shadow-timing/summary.json": {
+    "binary_sha256": "868cb1e9ea80f3d398b104175bdc8729e8eba07518769c87c14a79468cff1e2c",
+    "variants": {
+      "control": {},
+      "coarse-shadow-16m": {
+        "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "16"
+      },
+      "coarse-shadow-32m": {
+        "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "32"
+      }
+    },
+    "route": "static",
+    "radius_m": 64,
+    "runs": [
+      {
+        "variant": "control",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 487,
+          "accepted_frames": 487,
+          "missed_budget_frames": 487,
+          "rejected_inputs": 0,
+          "p50_ms": 18.835543,
+          "p95_ms": 22.123213999999997,
+          "p99_ms": 22.449725
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 363,
+          "p50_ms": 17.805791223827363,
+          "p95_ms": 18.23961549531555,
+          "p99_ms": 18.54627815817261,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 363,
+          "p50_ms": 7.2442441536026,
+          "p95_ms": 7.427472289329529,
+          "p99_ms": 7.494118918750763,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1313124352,
+          "peak_rss_bytes": 1443856384,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 487,
+          "coverage_ready_frames": 487,
+          "quality_ready_frames": 487,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9896732060682236,
+          "peak_unresolved_clusters": 0
+        },
+        "published_shifts": 0,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": null,
+        "prepare_ready_p50_ms": null,
+        "upload_ready_p50_ms": null,
+        "fallback_ready_p50_ms": null,
+        "publication_p50_ms": null,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 66960164,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -41.06016074388279,
+            28.95,
+            -250
+          ],
+          "yaw": 0.011565727,
+          "pitch": 0.17317964
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "coarse-shadow-16m",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 498,
+          "accepted_frames": 498,
+          "missed_budget_frames": 498,
+          "rejected_inputs": 0,
+          "p50_ms": 18.399799,
+          "p95_ms": 21.161491,
+          "p99_ms": 21.970051
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 371,
+          "p50_ms": 17.43087888574219,
+          "p95_ms": 17.64312215057373,
+          "p99_ms": 17.86698749750519,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 371,
+          "p50_ms": 7.023785279010773,
+          "p95_ms": 7.15062627848053,
+          "p99_ms": 7.250095270797729,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1371136000,
+          "peak_rss_bytes": 1485660160,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 498,
+          "coverage_ready_frames": 498,
+          "quality_ready_frames": 498,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9896732060682236,
+          "peak_unresolved_clusters": 0
+        },
+        "published_shifts": 0,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": null,
+        "prepare_ready_p50_ms": null,
+        "upload_ready_p50_ms": null,
+        "fallback_ready_p50_ms": null,
+        "publication_p50_ms": null,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 66960164,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -41.06016074388279,
+            28.95,
+            -250
+          ],
+          "yaw": 0.011565727,
+          "pitch": 0.17317964
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      },
+      {
+        "variant": "coarse-shadow-32m",
+        "repeat": 0,
+        "error": null,
+        "frames": {
+          "sample_count": 486,
+          "accepted_frames": 486,
+          "missed_budget_frames": 486,
+          "rejected_inputs": 0,
+          "p50_ms": 19.150181,
+          "p95_ms": 21.858443,
+          "p99_ms": 22.650381
+        },
+        "gpu_full_render": {
+          "supported": true,
+          "samples": 362,
+          "p50_ms": 17.761587235702514,
+          "p95_ms": 18.414387564411165,
+          "p99_ms": 19.045306317855836,
+          "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+        },
+        "naadf_gpu_pass": {
+          "samples": 362,
+          "p50_ms": 7.196192855541229,
+          "p95_ms": 7.429556248878479,
+          "p99_ms": 7.577437224563599,
+          "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+        },
+        "process_memory": {
+          "rss_bytes": 1377112064,
+          "peak_rss_bytes": 1489059840,
+          "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+        },
+        "coverage": {
+          "measured_frames": 486,
+          "coverage_ready_frames": 486,
+          "quality_ready_frames": 486,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9896732060682236,
+          "peak_unresolved_clusters": 0
+        },
+        "published_shifts": 0,
+        "outside_exact_frames": 0,
+        "camera_margin_min_m": null,
+        "prepare_ready_p50_ms": null,
+        "upload_ready_p50_ms": null,
+        "fallback_ready_p50_ms": null,
+        "publication_p50_ms": null,
+        "native_column_cache": {
+          "enabled": false
+        },
+        "gpu_payload_bytes": 66960164,
+        "no_voxel_shadow_clusters": 0,
+        "camera_start": {
+          "position": [
+            -41.06016074388279,
+            28.95,
+            -250
+          ],
+          "yaw": 0.011565727,
+          "pitch": 0.17317964
+        },
+        "projection": {
+          "fov_y_degrees": 60,
+          "near_m": 0.025,
+          "far_m": 6000
+        }
+      }
+    ]
+  }
+}

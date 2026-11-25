@@ -1,0 +1,98 @@
+{
+  "workspace_passed": 812,
+  "workspace_failed": 0,
+  "workspace_ignored": 45,
+  "explicit_gpu_water_test_passed": true,
+  "primary_scene": "hybrid",
+  "primary_unchanged": true,
+  "primary_linear_rgb_max_abs": 0.0,
+  "primary_baseline": "output/nov16-primary-after/realtime.linear_rgb.f32",
+  "primary_current": "output/moving-water-primary-hybrid/realtime.linear_rgb.f32",
+  "edit_checks": {
+    "scope": "Run deterministic whole-voxel player transaction and disk checkpoint checks.\n\nExercises production transaction/worker/save code without X11 input timing.\nThis checks game-state correctness; it does not certify mouse handling or FPS.\n",
+    "checks": [
+      {
+        "check": "runtime",
+        "command": [
+          "/home/drew/Projects/voxels/.toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "frontier-renderer",
+          "--lib",
+          "discrete_water_live::tests",
+          "--",
+          "--nocapture"
+        ],
+        "seconds": 0.16489528100646567,
+        "returncode": 0,
+        "passed": true
+      },
+      {
+        "check": "moving_runtime",
+        "command": [
+          "/home/drew/Projects/voxels/.toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "frontier-renderer",
+          "--lib",
+          "moving_water_live::tests",
+          "--",
+          "--nocapture"
+        ],
+        "seconds": 1.0163739069976145,
+        "returncode": 0,
+        "passed": true
+      },
+      {
+        "check": "procedural_runtime",
+        "command": [
+          "/home/drew/Projects/voxels/.toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "frontier-renderer",
+          "--lib",
+          "procedural_water_live::tests",
+          "--",
+          "--nocapture"
+        ],
+        "seconds": 0.21483050999813713,
+        "returncode": 0,
+        "passed": true
+      },
+      {
+        "check": "hand_and_transactions",
+        "command": [
+          "/home/drew/Projects/voxels/.toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "frontier-world",
+          "--lib",
+          "edit::tests",
+          "--",
+          "--nocapture"
+        ],
+        "seconds": 0.11460045499552507,
+        "returncode": 0,
+        "passed": true
+      },
+      {
+        "check": "placement_geometry",
+        "command": [
+          "/home/drew/Projects/voxels/.toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "frontier-renderer",
+          "--lib",
+          "player_edit::tests",
+          "--",
+          "--nocapture"
+        ],
+        "seconds": 0.1648006069881376,
+        "returncode": 0,
+        "passed": true
+      }
+    ],
+    "passed": true
+  },
+  "additional_adaptive_capture": "Strict quality-settle timeout at 120s for adaptive pixel-error1; not the fixed hybrid primary. Remains unresolved."
+}

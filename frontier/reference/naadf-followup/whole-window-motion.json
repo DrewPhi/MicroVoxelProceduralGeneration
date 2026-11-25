@@ -1,0 +1,17 @@
+{
+  "scatter-control": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
+  },
+  "direct-repair": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
+    "FRONTIER_NAADF_GPU_DISTANCE": "1",
+    "FRONTIER_NAADF_DIRECT_ROOTS": "1",
+    "FRONTIER_NAADF_DISTANCE_SCHEDULE": "retain"
+  },
+  "lookup-repair": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
+    "FRONTIER_NAADF_GPU_DISTANCE": "1",
+    "FRONTIER_NAADF_ROOT_REPAIR": "1",
+    "FRONTIER_NAADF_DISTANCE_SCHEDULE": "retain"
+  }
+}

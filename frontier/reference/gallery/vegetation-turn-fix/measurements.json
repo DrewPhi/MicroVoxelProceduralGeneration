@@ -1,0 +1,271 @@
+{
+  "scope": "Stationary X11 full yaw circle, pitch down, reverse yaw circle, pitch up; 1920x1080, MSAA4, pixel-error4.5, seed7 Alpine canonical6.25cm, 20s preload. Same actual resource budgets; after uses explicit overrides to hold original budget despite changing system availability. Recordings are20FPS and perturb timings.",
+  "before-turn": {
+    "manifest": {
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-turn-fix/before-frontier",
+        "--preset",
+        "alpine",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--seconds",
+        "64.0",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-turn-fix/before-turn/game.json",
+        "--resource-profile",
+        "development",
+        "--pixel-error",
+        "4.5"
+      ],
+      "binary_sha256": "c802fbd289ec074d44b6bc324ef30b2c965766baec68d915d570edc13a6a3178",
+      "settle_seconds": 20.0,
+      "movement": {
+        "max_displacement_m": 0.012499989999998462,
+        "yaw_range_radians": 6.399995327,
+        "walk_verified": false,
+        "turn_verified": true
+      },
+      "failure": null,
+      "events": [
+        {
+          "seconds_from_launch": 0.8273,
+          "action": "settle_begin"
+        },
+        {
+          "seconds_from_launch": 20.8276,
+          "action": "settle_end"
+        },
+        {
+          "seconds_from_launch": 20.8276,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 24.9294,
+          "action": "turn_20_0"
+        },
+        {
+          "seconds_from_launch": 29.8575,
+          "action": "turn_0_6"
+        },
+        {
+          "seconds_from_launch": 33.3528,
+          "action": "turn_-20_0"
+        },
+        {
+          "seconds_from_launch": 38.2538,
+          "action": "turn_0_-6"
+        },
+        {
+          "seconds_from_launch": 41.6661,
+          "action": "stop_after_turn"
+        },
+        {
+          "seconds_from_launch": 51.3651,
+          "action": "record_end"
+        }
+      ],
+      "scope": "Stationary full yaw/pitch sweeps with actual X11 inputs and 20 FPS recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+    },
+    "resources": {
+      "profile": "Development",
+      "available_mib": 1432,
+      "process_mib": 1303.1953125,
+      "background_paused": false,
+      "native_radius_m": 4,
+      "vegetation_near_m": 12,
+      "terrain_cpu_mib": 700,
+      "build_mib": 700,
+      "terrain_gpu_mib": 466,
+      "plant_cpu_mib": 186,
+      "plant_gpu_mib": 280,
+      "plant_triangle_budget": 4000000,
+      "native_geometry": "conforming-v1"
+    },
+    "ground_decisions": {
+      "selected": 203,
+      "missing_mesh": 2,
+      "budget_rejected": 0,
+      "retained": 203,
+      "coarse_fallback": 16
+    },
+    "final_pending_jobs": 0,
+    "final_selected_mesh_evictions": 0,
+    "minimum_native_patches_after_first_12": 1,
+    "final_lod_histogram": [
+      1,
+      31,
+      159,
+      12
+    ],
+    "missing_near_patches": [
+      {
+        "distance_m": 3.57537128971353,
+        "reason": "missing_mesh",
+        "selected_lod": null
+      },
+      {
+        "distance_m": 5.458629224693909,
+        "reason": "missing_mesh",
+        "selected_lod": null
+      }
+    ],
+    "process_memory": {
+      "rss_bytes": 1369792512,
+      "peak_rss_bytes": 1377185792,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "video_timing_scope": "recording overhead; not isolated performance evidence",
+    "frames": {
+      "sample_count": 3256,
+      "accepted_frames": 3256,
+      "missed_budget_frames": 2336,
+      "rejected_inputs": 0,
+      "p50_ms": 18.555381999999998,
+      "p95_ms": 35.162377,
+      "p99_ms": 51.698142000000004
+    }
+  },
+  "after-turn": {
+    "manifest": {
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--seconds",
+        "64.0",
+        "--report",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/vegetation-turn-fix/after-turn/game.json",
+        "--resource-profile",
+        "development",
+        "--pixel-error",
+        "4.5",
+        "--plant-cpu-mib",
+        "186",
+        "--plant-gpu-mib",
+        "280",
+        "--terrain-cache-mib",
+        "700",
+        "--terrain-gpu-mib",
+        "466",
+        "--build-memory-mib",
+        "700",
+        "--triangle-budget",
+        "4000000",
+        "--native-radius",
+        "4",
+        "--vegetation-near",
+        "12",
+        "--upload-mib",
+        "8"
+      ],
+      "binary_sha256": "a44b2b006b9306cefd94a46c78f292aaf1fbbdc3b0ad719454c2846a098c91c7",
+      "settle_seconds": 20.0,
+      "movement": {
+        "max_displacement_m": 0.012499989999998462,
+        "yaw_range_radians": 6.399995327,
+        "walk_verified": false,
+        "turn_verified": true
+      },
+      "failure": null,
+      "events": [
+        {
+          "seconds_from_launch": 0.8244,
+          "action": "settle_begin"
+        },
+        {
+          "seconds_from_launch": 20.8248,
+          "action": "settle_end"
+        },
+        {
+          "seconds_from_launch": 20.8248,
+          "action": "record_start"
+        },
+        {
+          "seconds_from_launch": 24.9488,
+          "action": "turn_20_0"
+        },
+        {
+          "seconds_from_launch": 29.9148,
+          "action": "turn_0_6"
+        },
+        {
+          "seconds_from_launch": 33.4114,
+          "action": "turn_-20_0"
+        },
+        {
+          "seconds_from_launch": 38.3113,
+          "action": "turn_0_-6"
+        },
+        {
+          "seconds_from_launch": 41.7261,
+          "action": "stop_after_turn"
+        },
+        {
+          "seconds_from_launch": 51.2735,
+          "action": "record_end"
+        }
+      ],
+      "scope": "Stationary full yaw/pitch sweeps with actual X11 inputs and 20 FPS recording; normal startup unless an explicit settle delay is given. Recording perturbs timings; inspect synchronized game.json observations and benchmark separately. Mouse turn delivery depends on X11 input support."
+    },
+    "resources": {
+      "profile": "Custom",
+      "available_mib": 1147,
+      "process_mib": 1343.703125,
+      "background_paused": false,
+      "native_radius_m": 4,
+      "vegetation_near_m": 12,
+      "terrain_cpu_mib": 700,
+      "build_mib": 700,
+      "terrain_gpu_mib": 466,
+      "plant_cpu_mib": 186,
+      "plant_gpu_mib": 280,
+      "plant_triangle_budget": 4000000,
+      "native_geometry": "conforming-v1"
+    },
+    "ground_decisions": {
+      "selected": 205,
+      "missing_mesh": 0,
+      "budget_rejected": 0,
+      "retained": 205,
+      "coarse_fallback": 0
+    },
+    "final_pending_jobs": 0,
+    "final_selected_mesh_evictions": 0,
+    "minimum_native_patches_after_first_12": 12,
+    "final_lod_histogram": [
+      12,
+      38,
+      155,
+      0
+    ],
+    "missing_near_patches": [],
+    "process_memory": {
+      "rss_bytes": 1409122304,
+      "peak_rss_bytes": 1409122304,
+      "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+    },
+    "video_timing_scope": "recording overhead; not isolated performance evidence",
+    "frames": {
+      "sample_count": 2918,
+      "accepted_frames": 2918,
+      "missed_budget_frames": 2204,
+      "rejected_inputs": 0,
+      "p50_ms": 20.874167999999997,
+      "p95_ms": 41.268665000000006,
+      "p99_ms": 62.756671
+    }
+  },
+  "primary_regression": {
+    "png": true,
+    "depth.f32": true,
+    "linear_rgb.f32": true,
+    "initial_variance": "Initial old capture differed at4colorpixels from both repeatold and new; repeatold/newmatch. Initial depthmatch."
+  },
+  "candidate_sha256": "a44b2b006b9306cefd94a46c78f292aaf1fbbdc3b0ad719454c2846a098c91c7"
+}

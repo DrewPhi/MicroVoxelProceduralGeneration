@@ -1,0 +1,23 @@
+[package]
+name = "frontier-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frontier-world = { path = "../world" }
+frontier-runtime = { path = "../runtime" }
+wgpu = "=24.0.5"
+winit = { version = "=0.30.13", default-features = false, features = ["x11", "rwh_06"] }
+glam = "=0.29.3"
+pollster = "=0.4.0"
+bytemuck = { version = "=1.25.2", features = ["derive"] }
+png = "=0.17.16"
+egui = "=0.31.1"
+egui-wgpu = { version = "=0.31.1", default-features = false }
+egui-winit = { version = "=0.31.1", default-features = false, features = ["x11"] }
+
+lz4_flex = "=0.11.6"
+
+[dev-dependencies]
+zstd = "=0.13.3"
+naga = { version = "=24.0.0", features = ["wgsl-in"] }

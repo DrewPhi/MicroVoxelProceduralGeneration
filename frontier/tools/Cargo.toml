@@ -1,0 +1,17 @@
+[package]
+name = "frontier-tools"
+version = "0.1.0"
+edition = "2021"
+default-run = "frontier"
+
+[[bin]]
+name = "frontier"
+path = "src/main.rs"
+
+[dependencies]
+frontier-renderer = { path = "../renderer" }
+
+frontier-world = { path = "../world" }
+
+[dev-dependencies]
+glam = "=0.29.3"

@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "evidence_kind": "log-derived settled-preparation refusal snapshot; not a measured frame report",
+  "source_log": "frontier/output/issue74/distance-current/4000/static.log",
+  "source_log_sha256": "8fe3863f0531a5dd21dab29b9857dd5c70298c256b20c616125304d4e9ce8bf9",
+  "extraction": "json.loads(Error-line outer quoted string), verify failure prefix, json.loads(inner adaptive JSON); no eval",
+  "failure_prefix": "adaptive settled benchmark could not meet initial quality: ",
+  "binary_sha256": "b40bded52348fec67e75ab815c971eaf21d94679b7841e7f26c5618b32fe98cd",
+  "process_exit_code": 1,
+  "process_wall_seconds": 102.89296460803598,
+  "adaptive": {
+    "pixel_error": 5,
+    "coverage_ready": true,
+    "quality_ready": false,
+    "refinement_ready": false,
+    "unresolved": true,
+    "elapsed_since_stream_start_ms": 102606.186235,
+    "elapsed_preparation_ms": 102606.174362,
+    "first_coverage_ms": 176.36597600000002,
+    "first_quality_ms": null,
+    "first_refinement_ms": null,
+    "pending_clusters": 0,
+    "gpu_pending_clusters": 0,
+    "visible_unresolved_count": 976,
+    "max_visible_error_px": 24.92933641949147,
+    "cpu_max_visible_error_px": 24.92933641949147,
+    "resident_clusters": 15982,
+    "visible_clusters": 14775,
+    "native_clusters": 43,
+    "triangles": 5597446,
+    "draw_calls": 14848,
+    "cpu_cache_bytes": 531331136,
+    "cpu_cache_budget_bytes": 536870912,
+    "source_cache_bytes": 28034304,
+    "source_budget_bytes": 33554432,
+    "selected_cpu_bytes": 501061648,
+    "live_tile_payload_bytes": 502136336,
+    "peak_live_tile_payload_bytes": 502695888,
+    "gpu_resident_bytes": 414162688,
+    "gpu_allocated_bytes": 427819008,
+    "gpu_pool_budget_bytes": 536870912,
+    "gpu_cluster_capacity": 16384,
+    "gpu_available_cluster_slots": 402,
+    "gpu_resource_limited": false,
+    "builds": 32041,
+    "total_build_ms": 241689.73221599567,
+    "generated_columns": 212677302,
+    "upload_budget_bytes_per_frame": 8388608,
+    "surface_source_revision": 0,
+    "displayed_world_revision": 0,
+    "build_memory_model": {
+      "budget_bytes": 536870912,
+      "reserved_bytes": 0,
+      "peak_reserved_bytes": 399648512,
+      "evicted_arc_bytes": 758784,
+      "refused_jobs": 0,
+      "last_batch_jobs": 4
+    }
+  },
+  "derived_capacity": {
+    "note": "mesh allowance = CPU cache budget minus reserved source budget; resident mesh + LRU = CPU cache bytes minus actual source-cache bytes",
+    "mesh_budget_bytes": 503316480,
+    "resident_mesh_and_lru_bytes": 503296832,
+    "remaining_mesh_budget_bytes": 19648
+  },
+  "largest_current_gpu_offender": {
+    "key": {
+      "min": [
+        8192,
+        -65536
+      ],
+      "width_cells": 4096,
+      "step_cells": 512,
+      "edge_steps": [
+        512,
+        256,
+        512,
+        512
+      ],
+      "source_revision": 0
+    },
+    "canonical_bounds": [
+      [
+        512.0,
+        327.4673615200862,
+        -4096.0
+      ],
+      [
+        768.0,
+        769.2319878737404,
+        -3840.0
+      ]
+    ],
+    "proxy_bounds": [
+      [
+        512.0,
+        378.4375,
+        -4096.0
+      ],
+      [
+        768.0,
+        692.9375,
+        -3840.0
+      ]
+    ],
+    "cached_vertical_error_m": 100.35677915357093,
+    "projected_error_px": 24.92933641949147,
+    "current_bounds_visible": true,
+    "current_occlusion_rejected": false
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "command": [
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+    "--preset",
+    "alpine",
+    "--width",
+    "1280",
+    "--height",
+    "720",
+    "--seconds",
+    "58.0",
+    "--report",
+    "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-playtest-settled/game.json",
+    "--start-xz",
+    "-57,-47",
+    "--naadf-radius",
+    "64",
+    "--msaa",
+    "1",
+    "--resource-profile",
+    "development",
+    "--uncapped"
+  ],
+  "binary_sha256": "868cb1e9ea80f3d398b104175bdc8729e8eba07518769c87c14a79468cff1e2c",
+  "settle_seconds": 30.0,
+  "movement": {
+    "max_displacement_m": 22.340339076103117,
+    "yaw_range_radians": 1.279999831,
+    "walk_verified": true,
+    "turn_verified": true
+  },
+  "turn_only": false,
+  "failure": null,
+  "events": [
+    {
+      "seconds_from_launch": 0.7682,
+      "action": "settle_begin"
+    },
+    {
+      "seconds_from_launch": 30.7683,
+      "action": "settle_end"
+    },
+    {
+      "seconds_from_launch": 30.7684,
+      "action": "record_start"
+    },
+    {
+      "seconds_from_launch": 31.8988,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 35.0022,
+      "action": "hold_None"
+    },
+    {
+      "seconds_from_launch": 37.1019,
+      "action": "hold_w"
+    },
+    {
+      "seconds_from_launch": 40.2041,
+      "action": "mouse_turn"
+    },
+    {
+      "seconds_from_launch": 41.9054,
+      "action": "walk_after_turn"
+    },
+    {
+      "seconds_from_launch": 44.9056,
+      "action": "stop_after_turn"
+    },
+    {
+      "seconds_from_launch": 51.086,
+      "action": "record_end"
+    }
+  ],
+  "scope": "720p recorded settled-native walking, not 1080p timing",
+  "naadf": {
+    "build_ms": 14898.465465,
+    "status": "Ready \u00b7 following player",
+    "stream_shifts": 4,
+    "stream_active_frames": 4082,
+    "stream_outside_frames": 0
+  }
+}

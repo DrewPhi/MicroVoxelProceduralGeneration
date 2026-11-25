@@ -1,0 +1,791 @@
+{
+  "full_scene_original": {
+    "binary_sha256": "b634d3d0ba61823e59696b687436b99597fef3cb13cd8ee808921b7731421266",
+    "variants": {
+      "control": {},
+      "integer": {
+        "FRONTIER_NAADF_INTEGER_FASTPATH": "1"
+      },
+      "mixed-root-cache": {
+        "FRONTIER_NAADF_CACHE_NODES": "3"
+      },
+      "integer-and-cache": {
+        "FRONTIER_NAADF_INTEGER_FASTPATH": "1",
+        "FRONTIER_NAADF_CACHE_NODES": "3"
+      },
+      "cross-shell-cubes": {
+        "FRONTIER_NAADF_CPU_ROOT_REFRESH": "cube"
+      },
+      "compact-overlay": {
+        "FRONTIER_NAADF_COMPACT_OVERLAY": "1"
+      },
+      "incremental-order": {
+        "FRONTIER_TERRAIN_INCREMENTAL_ORDER": "1"
+      }
+    },
+    "mode": "capture",
+    "radius_m": 64,
+    "route": "static",
+    "runs": [
+      {
+        "name": "control",
+        "repeat": 0,
+        "environment": {},
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-control/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "integer",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_NAADF_INTEGER_FASTPATH": "1"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-integer/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "mixed-root-cache",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_NAADF_CACHE_NODES": "3"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-mixed-root-cache/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "integer-and-cache",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_NAADF_INTEGER_FASTPATH": "1",
+          "FRONTIER_NAADF_CACHE_NODES": "3"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-integer-and-cache/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": false,
+            "different_values": 9,
+            "max_absolute_error": 8.478760719299316e-06,
+            "rmse": 8.406246372194173e-09
+          },
+          "depth": {
+            "equal": false,
+            "different_values": 1,
+            "max_absolute_error": 5.960464477539063e-08,
+            "rmse": 4.13921144273546e-11
+          }
+        },
+        "error": "exact capture mismatch: linear_rgb, depth"
+      },
+      {
+        "name": "cross-shell-cubes",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_NAADF_CPU_ROOT_REFRESH": "cube"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-cross-shell-cubes/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "compact-overlay",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_NAADF_COMPACT_OVERLAY": "1"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-compact-overlay/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "incremental-order",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_TERRAIN_INCREMENTAL_ORDER": "1"
+        },
+        "command": [
+          "/tmp/frontier-candidate-nov14",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "64",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/exact-capture-development/0-incremental-order/frame.png",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": false,
+            "different_values": 9,
+            "max_absolute_error": 8.478760719299316e-06,
+            "rmse": 8.406246372194173e-09
+          },
+          "depth": {
+            "equal": false,
+            "different_values": 1,
+            "max_absolute_error": 5.960464477539063e-08,
+            "rmse": 4.13921144273546e-11
+          }
+        },
+        "error": "exact capture mismatch: linear_rgb, depth"
+      }
+    ]
+  },
+  "full_scene_reclassification": {
+    "note": "Read-only reclassification of original captures; no new GPU run and original summary retained. Metadata counts identify unmatched displayed geometry; they do not fingerprint equal triangle identities when counts match.",
+    "different_rgb_pixels_xy": [
+      [
+        0,
+        547
+      ],
+      [
+        1,
+        547
+      ],
+      [
+        2,
+        547
+      ]
+    ],
+    "different_depth_pixels_xy": [
+      [
+        0,
+        547
+      ]
+    ],
+    "depth_unprojected_world_m_approx": [
+      33.59212052549727,
+      28.12566361524555,
+      -178.4225213890702
+    ],
+    "exact_volume_world_m": [
+      [
+        -106,
+        -36,
+        -314
+      ],
+      [
+        22,
+        92,
+        -186
+      ]
+    ],
+    "runs": {
+      "control": {
+        "classification": "matched_scene",
+        "comparison": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      "integer": {
+        "classification": "unmatched_adaptive_partition",
+        "differences": {
+          "triangles": {
+            "control": 613544,
+            "candidate": 613552
+          }
+        },
+        "comparison": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      "mixed-root-cache": {
+        "classification": "matched_scene",
+        "comparison": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      "integer-and-cache": {
+        "classification": "unmatched_adaptive_partition",
+        "differences": {
+          "visible_clusters": {
+            "control": 2384,
+            "candidate": 2396
+          },
+          "triangles": {
+            "control": 613544,
+            "candidate": 616624
+          },
+          "gpu_occluded_clusters": {
+            "control": 4,
+            "candidate": 0
+          },
+          "gpu_occluded_triangles": {
+            "control": 1024,
+            "candidate": 0
+          }
+        },
+        "comparison": {
+          "linear_rgb": {
+            "equal": false,
+            "different_values": 9,
+            "max_absolute_error": 8.478760719299316e-06,
+            "rmse": 8.406246372194173e-09
+          },
+          "depth": {
+            "equal": false,
+            "different_values": 1,
+            "max_absolute_error": 5.960464477539063e-08,
+            "rmse": 4.13921144273546e-11
+          }
+        }
+      },
+      "cross-shell-cubes": {
+        "classification": "matched_scene",
+        "comparison": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      "compact-overlay": {
+        "classification": "matched_scene",
+        "comparison": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      "incremental-order": {
+        "classification": "unmatched_adaptive_partition",
+        "differences": {
+          "visible_clusters": {
+            "control": 2384,
+            "candidate": 2396
+          },
+          "triangles": {
+            "control": 613544,
+            "candidate": 616624
+          },
+          "gpu_occluded_clusters": {
+            "control": 4,
+            "candidate": 0
+          },
+          "gpu_occluded_triangles": {
+            "control": 1024,
+            "candidate": 0
+          }
+        },
+        "comparison": {
+          "linear_rgb": {
+            "equal": false,
+            "different_values": 9,
+            "max_absolute_error": 8.478760719299316e-06,
+            "rmse": 8.406246372194173e-09
+          },
+          "depth": {
+            "equal": false,
+            "different_values": 1,
+            "max_absolute_error": 5.960464477539063e-08,
+            "rmse": 4.13921144273546e-11
+          }
+        }
+      }
+    }
+  },
+  "deferred_cover": {
+    "binary_sha256": "c283872524ca546052d06de33dbaedfb5514b0a2d24ac6b1de6e3a000ce0e6da",
+    "variants": {
+      "control": {},
+      "geometry-first-cover": {
+        "FRONTIER_DEFERRED_GROUND_COVER": "1"
+      }
+    },
+    "mode": "capture",
+    "radius_m": 32,
+    "route": "static",
+    "runs": [
+      {
+        "name": "control",
+        "repeat": 0,
+        "environment": {},
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "32",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/deferred-cover-live/0-control/frame.png",
+          "--width",
+          "640",
+          "--height",
+          "360",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          },
+          "depth": {
+            "equal": true,
+            "different_values": 0,
+            "max_absolute_error": 0.0,
+            "rmse": 0.0
+          }
+        }
+      },
+      {
+        "name": "geometry-first-cover",
+        "repeat": 0,
+        "environment": {
+          "FRONTIER_DEFERRED_GROUND_COVER": "1"
+        },
+        "command": [
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+          "--preset",
+          "alpine",
+          "--seed",
+          "7",
+          "--msaa",
+          "1",
+          "--naadf-radius",
+          "32",
+          "--naadf-follow",
+          "off",
+          "--pixel-error",
+          "5",
+          "--native-radius",
+          "4",
+          "--vegetation-near",
+          "32",
+          "--resource-profile",
+          "development",
+          "--capture-far",
+          "6000",
+          "--capture-linear",
+          "--atmosphere",
+          "off",
+          "--no-adaptive-disk-cache",
+          "--capture",
+          "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/optimization-nov14/deferred-cover-live/0-geometry-first-cover/frame.png",
+          "--width",
+          "640",
+          "--height",
+          "360",
+          "--eye",
+          "-41.06016,28.95,-250",
+          "--target",
+          "-39,28.1,0"
+        ],
+        "returncode": 0,
+        "comparison_to_first": {
+          "linear_rgb": {
+            "equal": false,
+            "different_values": 6069,
+            "max_absolute_error": 0.7360126748681068,
+            "rmse": 0.004401480308757559
+          },
+          "depth": {
+            "equal": false,
+            "different_values": 949,
+            "max_absolute_error": 3.2782554626464844e-06,
+            "rmse": 2.505225027270591e-08
+          }
+        },
+        "comparison_classification": "unmatched_adaptive_partition",
+        "adaptive_partition_differences": {
+          "visible_clusters": {
+            "control": 516,
+            "candidate": 609
+          },
+          "triangles": {
+            "control": 132696,
+            "candidate": 157232
+          }
+        },
+        "error": "unmatched adaptive partition: visible_clusters, triangles"
+      }
+    ]
+  }
+}

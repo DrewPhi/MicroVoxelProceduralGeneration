@@ -2,11 +2,13 @@
 /target/
 /native/target/
 /build/
+/frontier/**/target/
 
 # Generated artifacts; PNG assets in source/asset directories remain trackable.
 /output/
 /screenshots/
 /worlds/
+/frontier/**/output/
 /*.pgm
 /*.obj
 /*.png

@@ -1,0 +1,104 @@
+{
+  "status": "opt-in ghost candidate, M1 not accepted",
+  "boundary": "Ghost",
+  "theta_floor": 1e-06,
+  "baseline_commit": "d806e68",
+  "domain_m": [
+    0.75,
+    0.75,
+    0.25
+  ],
+  "timing_caveat": "Concurrent CPU jobs; not isolated benchmarks",
+  "samples": {
+    "0.1": {
+      "base": {
+        "centre_m": [
+          0.139428465,
+          0.21726728,
+          0.125
+        ],
+        "kinetic_j": 8.823248189,
+        "volume99_x_m": 0.310788911,
+        "volume_error_voxels": 2.387423592e-12,
+        "roundoff_absolute_voxels": 8.881784197e-16,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 9.242127347,
+        "front99_error_vs_finer_percent": 0.16349470036440847,
+        "energy_error_vs_finer_percent": 10.66314844935648
+      },
+      "fine": {
+        "centre_m": [
+          0.138555238,
+          0.216803399,
+          0.124999994
+        ],
+        "kinetic_j": 9.665523748,
+        "volume99_x_m": 0.310336819,
+        "volume_error_voxels": -1.136868377e-12,
+        "roundoff_absolute_voxels": 8.168500035e-14,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 23.18549681,
+        "front99_error_vs_finer_percent": 0.017790934742993952,
+        "energy_error_vs_finer_percent": 2.1349686943170223
+      },
+      "finer": {
+        "centre_m": [
+          0.138266055,
+          0.216744016,
+          0.124999986
+        ],
+        "kinetic_j": 9.876381399,
+        "volume99_x_m": 0.310281617,
+        "volume_error_voxels": 1.637090463e-11,
+        "roundoff_absolute_voxels": 8.029362335e-13,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 109.3695929
+      }
+    },
+    "0.25": {
+      "base": {
+        "centre_m": [
+          0.24264206,
+          0.117163475,
+          0.125000059
+        ],
+        "kinetic_j": 32.90809491,
+        "volume99_x_m": 0.641323722,
+        "volume_error_voxels": 8.355982573e-12,
+        "roundoff_absolute_voxels": 6.3603737e-14,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 6.146731209,
+        "front99_error_vs_finer_percent": 3.458616247042932,
+        "energy_error_vs_finer_percent": 15.679762577977383
+      },
+      "fine": {
+        "centre_m": [
+          0.2429811,
+          0.115339789,
+          0.124999896
+        ],
+        "kinetic_j": 36.97291673,
+        "volume99_x_m": 0.654906023,
+        "volume_error_voxels": -6.593836588e-12,
+        "roundoff_absolute_voxels": 3.706877062e-13,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 22.4962603,
+        "front99_error_vs_finer_percent": 1.4140105539929964,
+        "energy_error_vs_finer_percent": 5.264491141633457
+      },
+      "finer": {
+        "centre_m": [
+          0.24326197,
+          0.114854198,
+          0.124999941
+        ],
+        "kinetic_j": 39.0275169,
+        "volume99_x_m": 0.664299285,
+        "volume_error_voxels": 1.455191523e-11,
+        "roundoff_absolute_voxels": 3.127468601e-12,
+        "wall_leak_m_s": 0.0,
+        "unpressurized_volume_voxels": 90.75933276
+      }
+    }
+  }
+}

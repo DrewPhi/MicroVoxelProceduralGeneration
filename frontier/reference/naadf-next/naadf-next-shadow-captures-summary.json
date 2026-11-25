@@ -1,0 +1,148 @@
+{
+  "binary_sha256": "eddf2a5d181b6727101281223fc6438b4a4dcdee363dfdbc81415e393f236ace",
+  "variants": {
+    "control": {},
+    "coarse-shadow-16m": {
+      "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "16"
+    },
+    "coarse-shadow-32m": {
+      "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "32"
+    }
+  },
+  "mode": "capture",
+  "radius_m": 64,
+  "route": "static",
+  "runs": [
+    {
+      "name": "control",
+      "repeat": 0,
+      "environment": {},
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-shadow-captures/0-control/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "comparison_to_first": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      }
+    },
+    {
+      "name": "coarse-shadow-16m",
+      "repeat": 0,
+      "environment": {
+        "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "16"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-shadow-captures/0-coarse-shadow-16m/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "error": "unmatched vegetation triangles"
+    },
+    {
+      "name": "coarse-shadow-32m",
+      "repeat": 0,
+      "environment": {
+        "FRONTIER_NAADF_SHADOW_COARSE_AFTER_M": "32"
+      },
+      "command": [
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/target/release/frontier",
+        "--preset",
+        "alpine",
+        "--seed",
+        "7",
+        "--msaa",
+        "1",
+        "--naadf-radius",
+        "64",
+        "--naadf-follow",
+        "off",
+        "--pixel-error",
+        "5",
+        "--capture-far",
+        "6000",
+        "--capture-linear",
+        "--atmosphere",
+        "off",
+        "--no-adaptive-disk-cache",
+        "--capture",
+        "/home/drew/Projects/voxels/MicroVoxelProceduralGeneration/frontier/output/naadf-next-shadow-captures/0-coarse-shadow-32m/frame.png",
+        "--width",
+        "1920",
+        "--height",
+        "1080",
+        "--eye",
+        "-41.06016,28.95,-250",
+        "--target",
+        "-39,28.1,0"
+      ],
+      "returncode": 0,
+      "error": "unmatched vegetation triangles"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "reference": "output/naadf-next-captures/0-control/frame.png",
+  "reason": "The separate shadow control retained one extra distant tree LOD; reject that unmatched control, use the earlier strictly matched exact control.",
+  "coarse-shadow-16m": {
+    "linear_rgb": {
+      "equal": true,
+      "different_values": 0,
+      "max_absolute_error": 0.0,
+      "rmse": 0.0
+    },
+    "depth": {
+      "equal": true,
+      "different_values": 0,
+      "max_absolute_error": 0.0,
+      "rmse": 0.0
+    }
+  },
+  "coarse-shadow-32m": {
+    "linear_rgb": {
+      "equal": true,
+      "different_values": 0,
+      "max_absolute_error": 0.0,
+      "rmse": 0.0
+    },
+    "depth": {
+      "equal": true,
+      "different_values": 0,
+      "max_absolute_error": 0.0,
+      "rmse": 0.0
+    }
+  }
+}

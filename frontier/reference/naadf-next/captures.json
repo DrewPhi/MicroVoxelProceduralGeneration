@@ -1,0 +1,14 @@
+{
+  "control": {},
+  "specialize-format": {
+    "FRONTIER_NAADF_SPECIALIZE_FORMAT": "1"
+  },
+  "split-shaders": {
+    "FRONTIER_NAADF_SPLIT_SHADERS": "1"
+  },
+  "cpu-cache-hash": {
+    "FRONTIER_NAADF_COLUMN_CACHE": "1",
+    "FRONTIER_NAADF_COLUMN_CACHE_MIB": "320",
+    "FRONTIER_NAADF_FAST_LEAF_HASH": "1"
+  }
+}

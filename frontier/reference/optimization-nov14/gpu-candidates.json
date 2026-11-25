@@ -1,0 +1,9 @@
+{
+  "control": {},
+  "integer": {"FRONTIER_NAADF_INTEGER_FASTPATH": "1"},
+  "mixed-root-cache": {"FRONTIER_NAADF_CACHE_NODES": "3"},
+  "integer-and-cache": {"FRONTIER_NAADF_INTEGER_FASTPATH": "1", "FRONTIER_NAADF_CACHE_NODES": "3"},
+  "cross-shell-cubes": {"FRONTIER_NAADF_CPU_ROOT_REFRESH": "cube"},
+  "compact-overlay": {"FRONTIER_NAADF_COMPACT_OVERLAY": "1"},
+  "incremental-order": {"FRONTIER_TERRAIN_INCREMENTAL_ORDER": "1"}
+}

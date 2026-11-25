@@ -1,0 +1,495 @@
+{
+  "instrumented": true,
+  "valid_for_timing": false,
+  "binary_sha256": "a08625b95ff7b5f07f04f5ca174969be323a33d25b21212f782e8e2f5ce82fe7",
+  "radius_m": 128,
+  "camera": {
+    "eye": [
+      -41.06016,
+      28.95,
+      -250.0
+    ],
+    "target": [
+      -41.051919686730805,
+      28.946600134996697,
+      -249.00003975629807
+    ],
+    "width": 640,
+    "height": 360
+  },
+  "methodology": {
+    "source": "output/naadf-followup/diagnostics-forward/{0-variant}/frame.capture.json",
+    "raw_summary": "output/naadf-followup/diagnostics-forward/counter-summaries.json",
+    "loads": "Executed shader load operations, not cache-line or memory transactions; includes retry loads. One-step diagnostic probe loads are excluded and separately counted.",
+    "distance": "Native cells per event rounded down, summed with64bit counters;0.0625metres/cell. Positive/negative difference compares each height resumption against the AADF step it replaces.",
+    "warnings": "Atomic shaders and blocking readback are explicitly diagnostic. Counts are cumulative from volume creation. Failed queries plus candidate queries equal all height queries; applied candidates may be fewer."
+  },
+  "variants": {
+    "control": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 3172563,
+        "block_word_fetches": 1716129,
+        "leaf_word_fetches": 759195,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 634627,
+        "block_word_fetches": 298325,
+        "leaf_word_fetches": 160446,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "beam": {
+        "tiles": 0,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 0,
+        "slabs_tested": 0,
+        "height_fetches": 0,
+        "obstacle_rejections": 0,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 0,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": null,
+        "useful_ray_fraction": null,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      }
+    },
+    "cache": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_CACHE_NODES": "2"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 2331851,
+        "block_word_fetches": 1473218,
+        "leaf_word_fetches": 759195,
+        "root_cache_hits": 840712,
+        "block_cache_hits": 242911,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 493054,
+        "block_word_fetches": 260748,
+        "leaf_word_fetches": 160446,
+        "root_cache_hits": 141573,
+        "block_cache_hits": 37577,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "beam": {
+        "tiles": 0,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 0,
+        "slabs_tested": 0,
+        "height_fetches": 0,
+        "obstacle_rejections": 0,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 0,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": null,
+        "useful_ray_fraction": null,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      }
+    },
+    "flat": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_HEIGHT_TILE_ROOTS": "8"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 2955759,
+        "block_word_fetches": 1723770,
+        "leaf_word_fetches": 762717,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 2946857,
+        "height_level_fetches": 2946857,
+        "height_applied": 490324,
+        "height_failed": 2456533,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 3146523,
+        "lost_native_cells": 53773982,
+        "stall_replays": 0,
+        "boundary_replays": 508,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 556547,
+        "block_word_fetches": 298494,
+        "leaf_word_fetches": 160608,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 556378,
+        "height_level_fetches": 556378,
+        "height_applied": 72818,
+        "height_failed": 483560,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 1599253,
+        "lost_native_cells": 6178265,
+        "stall_replays": 0,
+        "boundary_replays": 52,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "beam": {
+        "tiles": 0,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 0,
+        "slabs_tested": 0,
+        "height_fetches": 0,
+        "obstacle_rejections": 0,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 0,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": null,
+        "useful_ray_fraction": null,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      }
+    },
+    "mips": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_HEIGHT_MIPS": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 2449836,
+        "block_word_fetches": 1723770,
+        "leaf_word_fetches": 762717,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 2440934,
+        "height_level_fetches": 13738660,
+        "height_applied": 453617,
+        "height_failed": 1987317,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 169587536,
+        "lost_native_cells": 6643529,
+        "stall_replays": 0,
+        "boundary_replays": 508,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 433541,
+        "block_word_fetches": 298494,
+        "leaf_word_fetches": 160608,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 433372,
+        "height_level_fetches": 2337103,
+        "height_applied": 98495,
+        "height_failed": 334877,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 44696159,
+        "lost_native_cells": 830289,
+        "stall_replays": 0,
+        "boundary_replays": 52,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "beam": {
+        "tiles": 0,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 0,
+        "slabs_tested": 0,
+        "height_fetches": 0,
+        "obstacle_rejections": 0,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 0,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": null,
+        "useful_ray_fraction": null,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      }
+    },
+    "beam": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_BEAM": "1"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 3172563,
+        "block_word_fetches": 1716129,
+        "leaf_word_fetches": 759195,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "shadow": {
+        "rays": 79558,
+        "root_word_fetches": 634627,
+        "block_word_fetches": 298325,
+        "leaf_word_fetches": 160446,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 0,
+        "direct_native_cells": 0
+      },
+      "beam": {
+        "tiles": 3600,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 3600,
+        "slabs_tested": 3600,
+        "height_fetches": 7560,
+        "obstacle_rejections": 3600,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 230400,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": 0.0,
+        "useful_ray_fraction": 0.0,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      }
+    },
+    "direct": {
+      "environment": {
+        "FRONTIER_NAADF_DIAGNOSTICS": "1",
+        "FRONTIER_NAADF_GPU_DISTANCE": "1",
+        "FRONTIER_NAADF_DIRECT_ROOTS": "1",
+        "FRONTIER_NAADF_DISTANCE_SCHEDULE": "retain"
+      },
+      "comparison_to_control": {
+        "linear_rgb": {
+          "equal": false,
+          "different_values": 8,
+          "max_absolute_error": 0.1405756212770939,
+          "rmse": 0.0002036323728500714
+        },
+        "depth": {
+          "equal": true,
+          "different_values": 0,
+          "max_absolute_error": 0.0,
+          "rmse": 0.0
+        }
+      },
+      "primary": {
+        "rays": 230400,
+        "root_word_fetches": 22316902,
+        "block_word_fetches": 2105436,
+        "leaf_word_fetches": 797500,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 6758,
+        "direct_native_cells": 19144339
+      },
+      "shadow": {
+        "rays": 79559,
+        "root_word_fetches": 5809437,
+        "block_word_fetches": 371337,
+        "leaf_word_fetches": 172481,
+        "root_cache_hits": 0,
+        "block_cache_hits": 0,
+        "height_queries": 0,
+        "height_level_fetches": 0,
+        "height_applied": 0,
+        "height_failed": 0,
+        "height_negative_cache_bypasses": 0,
+        "saved_native_cells": 0,
+        "lost_native_cells": 0,
+        "stall_replays": 0,
+        "boundary_replays": 0,
+        "direct_native_replays": 1541,
+        "direct_native_cells": 5174798
+      },
+      "beam": {
+        "tiles": 0,
+        "positive_tiles": 0,
+        "empty_prefix_tiles": 0,
+        "slabs_tested": 0,
+        "height_fetches": 0,
+        "obstacle_rejections": 0,
+        "work_capped": 0,
+        "useful_primary_rays": 0,
+        "primary_rays": 0,
+        "whole_volume_skipped_rays": 0,
+        "positive_tile_fraction": null,
+        "useful_ray_fraction": null,
+        "tile_prefix_native_cells": 0,
+        "ray_saved_native_cells": 0
+      },
+      "readiness": {
+        "gpu_root_distance_tiles_ready": 1,
+        "gpu_root_distance_tiles_total": 64,
+        "gpu_root_distance_direct_publications": 1,
+        "gpu_root_distance_cpu_fallback": true
+      }
+    }
+  },
+  "analysis": {
+    "cache_primary_root_load_reduction": 0.26499458009186894,
+    "cache_primary_block_load_reduction": 0.14154588611928354,
+    "control_shadow_share_of_root_loads": 0.16669170700700517,
+    "flat_failed_primary_query_fraction": 0.833611200000543,
+    "mip_height_reads_per_primary_root_load_avoided": 19.009473840053023,
+    "observations": [
+      "Flat bounds frequently resume earlier than the existing exact cuboid exit:53.77M primary native cells of lost reach versus3.15M of positive gain. Lost reach is additional traversal work, not missing geometry.",
+      "Mip bounds have substantial geometric reach but13.74M extra primary height reads for0.72M root loads avoided;81% of queries fail in this view.",
+      "All3600beam tiles reject their first slab. No rays obtain a useful prefix. Height-only beams need a camera origin above the starting XZ max to establish a prefix; nearby terrain/vegetation can prevent that at player height.",
+      "Direct mode reaches1of64tiles in this capture. Its broad corner replay redoes24.32M native cells, including unchanged CPUproofs; it is not yet a steady-state warm-cache comparison.",
+      "Direct depth is exact but8RGBvalues differ from control with matched vegetation geometry. This candidate fails exact image parity until diagnosed or corrected. Other candidates are byte-identical.",
+      "Cache loads fall but compiler allocation rises40\u219248VGPRs. Operation counts do not establish frame-time speedups; uninstrumented timing is separate."
+    ]
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "scope": "Artistic bounded native-plant raster reference; adaptive distant terrain, not a full-world exact oracle",
+  "base_git_revision": "fbf2084fae58b91d377af0c71e5ccffd806d822e",
+  "working_tree_checkpoint": true,
+  "camera": {
+    "eye": [
+      -43.625,
+      31.0625,
+      -289.5625
+    ],
+    "target": [
+      -43.625,
+      31.3625,
+      -259.5625
+    ]
+  },
+  "preset_overrides": {
+    "sun_elevation": 34,
+    "sun_azimuth": 100,
+    "exposure": 1.15
+  },
+  "sampling": {
+    "player-view": {
+      "source_dimensions": [
+        1600,
+        900
+      ],
+      "output_dimensions": [
+        1280,
+        720
+      ],
+      "msaa": 4,
+      "resample": "per-channel linear-light Lanczos"
+    },
+    "native-reference": {
+      "source_dimensions": [
+        2560,
+        1440
+      ],
+      "output_dimensions": [
+        1280,
+        720
+      ],
+      "msaa": 4,
+      "resample": "2x2 linear-light box average",
+      "environment": {
+        "FRONTIER_VEGETATION_REFERENCE": "1",
+        "FRONTIER_BEAUTY_REFERENCE": "1"
+      }
+    },
+    "starting-view": {
+      "source_dimensions": [
+        1920,
+        1080
+      ],
+      "output_dimensions": [
+        1280,
+        720
+      ],
+      "msaa": 4,
+      "resample": "per-channel linear-light Lanczos"
+    }
+  },
+  "color_input": "linear float sidecars decoded by renderer from actual quantized 8-bit sRGB targets; not unclipped HDR",
+  "art_capture_provenance_note": "Final interactive and starting-view captures use the recorded final executable. Native reference predates final preset defaults and coarse-only structural split; its explicitly matched lighting, canonical plants, native stride1 mesher and shaders are unchanged. Native stride1/2 identity is tested. Original native-reference executable hash was not frozen.",
+  "image_sha256": {
+    "native-reference.png": "366042d15ea129e2c1fd2ad118ce2db71e8b73c099c10e459544ab16f6d6c9dc",
+    "player-view.png": "41daf529f987234294b0bf65c196664c1f1ef1965a14f0f77e08f4223388ec99",
+    "comparison.png": "5e8504923dff3fc160428077f2f1f3c73624ca83479fd71d68edee6dd6133e07",
+    "starting-view.png": "31e190a6bdf1ba8fb061397d398d6a638d4a8f51b9a2997b6684230381b4a044",
+    "tree-support-comparison.png": "197da8c40ef16d76ea04ca011979be4591fc26d7439b286be14e1eec301bdf83"
+  },
+  "interactive_binary_sha256": "bc98a7d6620f0fa3cdd4e021fa0d64e0951fa59004f96f04394ff93fa36fbbb6",
+  "capture_binary_sha256": {
+    "player-view": "bc98a7d6620f0fa3cdd4e021fa0d64e0951fa59004f96f04394ff93fa36fbbb6",
+    "starting-view": "bc98a7d6620f0fa3cdd4e021fa0d64e0951fa59004f96f04394ff93fa36fbbb6",
+    "native-reference": null
+  }
+}

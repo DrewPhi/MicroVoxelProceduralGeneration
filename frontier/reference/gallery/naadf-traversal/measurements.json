@@ -1,0 +1,931 @@
+{
+  "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics",
+  "diagnostics": {
+    "meadow": {
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "eye": [
+        -41.06016,
+        28.95,
+        -250.0
+      ],
+      "target": [
+        -39.0,
+        28.1,
+        0.0
+      ],
+      "dimensions": [
+        640,
+        360
+      ],
+      "radius_m": 64,
+      "root_format": "dense",
+      "visits": {
+        "root": {
+          "mean": 11.697134971618652,
+          "p50": 8.0,
+          "p95": 33.0,
+          "p99": 56.0,
+          "max": 162
+        },
+        "block": {
+          "mean": 7.165160655975342,
+          "p50": 0.0,
+          "p95": 28.0,
+          "p99": 47.0,
+          "max": 149
+        },
+        "leaf": {
+          "mean": 3.2043228149414062,
+          "p50": 0.0,
+          "p95": 13.0,
+          "p99": 21.0,
+          "max": 81
+        }
+      },
+      "raster_depth_opportunity": {
+        "pixels": 230400,
+        "rays_entering_cube": 230400,
+        "cutoff_candidates": 0,
+        "before_cube": 0,
+        "partial": 0,
+        "candidates_percent": 0.0,
+        "ndc_safety_bias": 2e-06
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "native_voxel_m": 0.0625,
+      "source_version": 4,
+      "terrain_recipe": "Alpine",
+      "near": 0.025,
+      "far": 6000,
+      "fov_y_degrees": 60
+    },
+    "mountain": {
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "eye": [
+        -41.06016,
+        28.95,
+        -250.0
+      ],
+      "target": [
+        -39.0,
+        76.0,
+        0.0
+      ],
+      "dimensions": [
+        640,
+        360
+      ],
+      "radius_m": 128,
+      "root_format": "dense",
+      "visits": {
+        "root": {
+          "mean": 13.384886741638184,
+          "p50": 8.0,
+          "p95": 37.0,
+          "p99": 64.0,
+          "max": 212
+        },
+        "block": {
+          "mean": 6.11500883102417,
+          "p50": 0.0,
+          "p95": 29.0,
+          "p99": 51.0,
+          "max": 189
+        },
+        "leaf": {
+          "mean": 2.576918363571167,
+          "p50": 0.0,
+          "p95": 13.0,
+          "p99": 21.0,
+          "max": 84
+        }
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "native_voxel_m": 0.0625,
+      "source_version": 4,
+      "terrain_recipe": "Alpine",
+      "near": 0.025,
+      "far": 6000,
+      "fov_y_degrees": 60
+    },
+    "uphill": {
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "eye": [
+        -900.0,
+        114.6875,
+        1000.0
+      ],
+      "target": [
+        -900.0,
+        119.6875,
+        1100.0
+      ],
+      "dimensions": [
+        640,
+        360
+      ],
+      "radius_m": 64,
+      "root_format": "dense",
+      "visits": {
+        "root": {
+          "mean": 14.420534133911133,
+          "p50": 12.0,
+          "p95": 31.0,
+          "p99": 55.0,
+          "max": 199
+        },
+        "block": {
+          "mean": 8.716771125793457,
+          "p50": 7.0,
+          "p95": 22.0,
+          "p99": 39.0,
+          "max": 182
+        },
+        "leaf": {
+          "mean": 4.541206359863281,
+          "p50": 4.0,
+          "p95": 12.0,
+          "p99": 19.0,
+          "max": 92
+        }
+      },
+      "raster_depth_opportunity": {
+        "pixels": 230400,
+        "rays_entering_cube": 230400,
+        "cutoff_candidates": 0,
+        "before_cube": 0,
+        "partial": 0,
+        "candidates_percent": 0.0,
+        "ndc_safety_bias": 2e-06
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "native_voxel_m": 0.0625,
+      "source_version": 4,
+      "terrain_recipe": "Alpine",
+      "near": 0.025,
+      "far": 6000,
+      "fov_y_degrees": 60
+    },
+    "sparse_short": {
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "eye": [
+        -41.06016,
+        28.95,
+        -250.0
+      ],
+      "target": [
+        -39.0,
+        28.1,
+        0.0
+      ],
+      "dimensions": [
+        640,
+        360
+      ],
+      "radius_m": 64,
+      "root_format": "short",
+      "visits": {
+        "root": {
+          "mean": 23.82634162902832,
+          "p50": 24.0,
+          "p95": 39.0,
+          "p99": 60.0,
+          "max": 165
+        },
+        "block": {
+          "mean": 7.165160655975342,
+          "p50": 0.0,
+          "p95": 28.0,
+          "p99": 47.0,
+          "max": 149
+        },
+        "leaf": {
+          "mean": 3.2043228149414062,
+          "p50": 0.0,
+          "p95": 13.0,
+          "p99": 21.0,
+          "max": 81
+        }
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "native_voxel_m": 0.0625,
+      "source_version": 4,
+      "terrain_recipe": "Alpine",
+      "near": 0.025,
+      "far": 6000,
+      "fov_y_degrees": 60
+    },
+    "sparse_long": {
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "eye": [
+        -41.06016,
+        28.95,
+        -250.0
+      ],
+      "target": [
+        -39.0,
+        28.1,
+        0.0
+      ],
+      "dimensions": [
+        640,
+        360
+      ],
+      "radius_m": 64,
+      "root_format": "sparse",
+      "visits": {
+        "root": {
+          "mean": 10.261063575744629,
+          "p50": 6.0,
+          "p95": 32.0,
+          "p99": 54.0,
+          "max": 162
+        },
+        "block": {
+          "mean": 7.165160655975342,
+          "p50": 0.0,
+          "p95": 28.0,
+          "p99": 47.0,
+          "max": 149
+        },
+        "leaf": {
+          "mean": 3.2043228149414062,
+          "p50": 0.0,
+          "p95": 13.0,
+          "p99": 21.0,
+          "max": 81
+        }
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "native_voxel_m": 0.0625,
+      "source_version": 4,
+      "terrain_recipe": "Alpine",
+      "near": 0.025,
+      "far": 6000,
+      "fov_y_degrees": 60
+    }
+  },
+  "benchmarks": {
+    "timing-dense": {
+      "naadf": {
+        "status": "Ready \u00b7 fixed region",
+        "stage": 100,
+        "requested_radius_m": 64,
+        "resident_radius_m": 64,
+        "world_bounds_m": [
+          [
+            -106.0,
+            -36.0,
+            -314.0
+          ],
+          [
+            22.0,
+            92.0,
+            -186.0
+          ]
+        ],
+        "native_voxel_m": 0.0625,
+        "requested_build_budget_mib": 0,
+        "gpu_payload_bytes": 58571552,
+        "build_ms": 10637.048512,
+        "upload_cpu_ms": 8.651982,
+        "mixed_chunks": 34867,
+        "unique_blocks": 321625,
+        "sampled_columns": 4194304,
+        "plant_cells": 2435963,
+        "palette_entries": 5562,
+        "color_channel_bits": 10,
+        "refused": 0,
+        "fixed_snapshot": true,
+        "stream_shifts": 0,
+        "stream_build_ms": 0,
+        "stream_sampled_columns": 0,
+        "stream_shared_leaves_last_shift": 0,
+        "camera_margin_m": 63.05,
+        "min_camera_margin_m": null,
+        "stream_active_frames": 0,
+        "stream_outside_frames": 0,
+        "initial_snapshot_payload_bytes": 58571552,
+        "initial_snapshot_wide_leaf_payload_bytes": 99739552,
+        "initial_leaf_bytes": 41168000,
+        "gpu_leaf_bits": 16,
+        "lighting": "primary_visibility_lambert_without_GI",
+        "includes_distant_and_boundary_raster_overhead": true,
+        "interior_meshes_omitted": true,
+        "supports_direct_voxel_shadows": true,
+        "effective_build_budget_mib": 7927,
+        "auto_memory": true,
+        "gpu_root_distance_requested": false,
+        "gpu_root_distance_tiles_ready": 0,
+        "gpu_root_distance_tiles_total": 0,
+        "sparse_roots_requested": false,
+        "sparse_roots_active": false,
+        "gpu_root_texture_bytes": 8388608,
+        "stream_lead_s": 0,
+        "stream_stage_ms": []
+      },
+      "frames": {
+        "sample_count": 396,
+        "accepted_frames": 396,
+        "missed_budget_frames": 396,
+        "rejected_inputs": 0,
+        "p50_ms": 18.230071,
+        "p95_ms": 21.097442,
+        "p99_ms": 22.185024000000002
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 295,
+        "p50_ms": 17.236188972496034,
+        "p95_ms": 17.483899625804902,
+        "p99_ms": 17.639435145217895,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "naadf_gpu_pass": {
+        "samples": 295,
+        "p50_ms": 6.817633588245392,
+        "p95_ms": 6.952089055297852,
+        "p99_ms": 6.99064230695343,
+        "scope": "primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "process_memory": {
+        "rss_bytes": 1315278848,
+        "peak_rss_bytes": 1457803264,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "terrain_recipe": "Alpine",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "motion": {
+        "start_eye": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "end_eye": [
+          -41.06016074388279,
+          28.95,
+          -250.0
+        ],
+        "horizontal_displacement_m": 0.0,
+        "elapsed_seconds": 8.008372428
+      },
+      "watched_tile": null,
+      "status": "ok",
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "static",
+        "route_speed_mps": 2.5,
+        "seconds": 8.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": null,
+        "target": null,
+        "watch_xz": null,
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "dense",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      }
+    },
+    "timing-sparse": {
+      "naadf": {
+        "status": "Ready \u00b7 fixed region",
+        "stage": 100,
+        "requested_radius_m": 64,
+        "resident_radius_m": 64,
+        "world_bounds_m": [
+          [
+            -106.0,
+            -36.0,
+            -314.0
+          ],
+          [
+            22.0,
+            92.0,
+            -186.0
+          ]
+        ],
+        "native_voxel_m": 0.0625,
+        "requested_build_budget_mib": 0,
+        "gpu_payload_bytes": 50772768,
+        "build_ms": 11247.834528,
+        "upload_cpu_ms": 6.973115999999999,
+        "mixed_chunks": 34867,
+        "unique_blocks": 321625,
+        "sampled_columns": 4194304,
+        "plant_cells": 2435963,
+        "palette_entries": 5562,
+        "color_channel_bits": 10,
+        "refused": 0,
+        "fixed_snapshot": true,
+        "stream_shifts": 0,
+        "stream_build_ms": 0,
+        "stream_sampled_columns": 0,
+        "stream_shared_leaves_last_shift": 0,
+        "camera_margin_m": 63.05,
+        "min_camera_margin_m": null,
+        "stream_active_frames": 0,
+        "stream_outside_frames": 0,
+        "initial_snapshot_payload_bytes": 50772768,
+        "initial_snapshot_wide_leaf_payload_bytes": 91940768,
+        "initial_leaf_bytes": 41168000,
+        "gpu_leaf_bits": 16,
+        "lighting": "primary_visibility_lambert_without_GI",
+        "includes_distant_and_boundary_raster_overhead": true,
+        "interior_meshes_omitted": true,
+        "supports_direct_voxel_shadows": true,
+        "effective_build_budget_mib": 8012,
+        "auto_memory": true,
+        "gpu_root_distance_requested": false,
+        "gpu_root_distance_tiles_ready": 0,
+        "gpu_root_distance_tiles_total": 0,
+        "sparse_roots_requested": true,
+        "sparse_roots_active": true,
+        "gpu_root_texture_bytes": 589824,
+        "stream_lead_s": 0,
+        "stream_stage_ms": []
+      },
+      "frames": {
+        "sample_count": 355,
+        "accepted_frames": 355,
+        "missed_budget_frames": 355,
+        "rejected_inputs": 0,
+        "p50_ms": 20.206952,
+        "p95_ms": 23.066012,
+        "p99_ms": 23.601493
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 264,
+        "p50_ms": 19.22204211806488,
+        "p95_ms": 19.516361328208923,
+        "p99_ms": 19.808957264110564,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "naadf_gpu_pass": {
+        "samples": 264,
+        "p50_ms": 8.539344860984801,
+        "p95_ms": 8.703897513061523,
+        "p99_ms": 8.853662067569733,
+        "scope": "primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "process_memory": {
+        "rss_bytes": 1326374912,
+        "peak_rss_bytes": 1435967488,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "terrain_recipe": "Alpine",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "motion": {
+        "start_eye": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "end_eye": [
+          -41.06016074388279,
+          28.95,
+          -250.0
+        ],
+        "horizontal_displacement_m": 0.0,
+        "elapsed_seconds": 8.002255903
+      },
+      "watched_tile": null,
+      "status": "ok",
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "static",
+        "route_speed_mps": 2.5,
+        "seconds": 8.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": null,
+        "target": null,
+        "watch_xz": null,
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "sparse",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      }
+    },
+    "follow-control": {
+      "naadf": {
+        "status": "Ready \u00b7 following player",
+        "stage": 100,
+        "requested_radius_m": 128,
+        "resident_radius_m": 128,
+        "world_bounds_m": [
+          [
+            -170.0,
+            -100.0,
+            -298.0
+          ],
+          [
+            86.0,
+            156.0,
+            -42.0
+          ]
+        ],
+        "native_voxel_m": 0.0625,
+        "requested_build_budget_mib": 0,
+        "gpu_payload_bytes": 359628016,
+        "build_ms": 40841.639177,
+        "upload_cpu_ms": 33.45147200000001,
+        "mixed_chunks": 140040,
+        "unique_blocks": 1232043,
+        "sampled_columns": 16777216,
+        "plant_cells": 9638216,
+        "palette_entries": 5899,
+        "color_channel_bits": 10,
+        "refused": 0,
+        "fixed_snapshot": false,
+        "stream_shifts": 5,
+        "stream_build_ms": 1388.446165,
+        "stream_sampled_columns": 1048576,
+        "stream_shared_leaves_last_shift": 3463,
+        "camera_margin_m": 123.73787987311712,
+        "min_camera_margin_m": 110.23365581851905,
+        "stream_active_frames": 1400,
+        "stream_outside_frames": 0,
+        "initial_snapshot_payload_bytes": 260754992,
+        "initial_snapshot_wide_leaf_payload_bytes": 418456496,
+        "initial_leaf_bytes": 157701504,
+        "gpu_leaf_bits": 16,
+        "lighting": "primary_visibility_lambert_without_GI",
+        "includes_distant_and_boundary_raster_overhead": true,
+        "interior_meshes_omitted": true,
+        "supports_direct_voxel_shadows": true,
+        "effective_build_budget_mib": 8064,
+        "auto_memory": true,
+        "gpu_root_distance_requested": false,
+        "gpu_root_distance_tiles_ready": 0,
+        "gpu_root_distance_tiles_total": 0,
+        "sparse_roots_requested": false,
+        "sparse_roots_active": false,
+        "gpu_root_texture_bytes": 67108864,
+        "stream_lead_s": 0,
+        "stream_stage_ms": [
+          [
+            1106.5759779999998,
+            130.64762499999998,
+            63.179518,
+            1237.227165
+          ],
+          [
+            1270.747482,
+            2717.226192,
+            63.051286999999995,
+            3987.9772359999997
+          ],
+          [
+            1115.721849,
+            1818.9317489999999,
+            42.622308,
+            2934.654785
+          ],
+          [
+            1168.878017,
+            1579.0568729999998,
+            101.354133,
+            2747.937264
+          ],
+          [
+            1420.564278,
+            1360.154771,
+            67.81479999999999,
+            2780.7226109999997
+          ]
+        ]
+      },
+      "frames": {
+        "sample_count": 1367,
+        "accepted_frames": 1367,
+        "missed_budget_frames": 1145,
+        "rejected_inputs": 0,
+        "p50_ms": 25.066637999999998,
+        "p95_ms": 37.782804000000006,
+        "p99_ms": 42.359911
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1272,
+        "p50_ms": 21.2204390970726,
+        "p95_ms": 27.711331873729705,
+        "p99_ms": 31.12830416339493,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "naadf_gpu_pass": {
+        "samples": 1272,
+        "p50_ms": 10.565554684741974,
+        "p95_ms": 14.601983950332642,
+        "p99_ms": 16.923995801605226,
+        "scope": "primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "process_memory": {
+        "rss_bytes": 1584222208,
+        "peak_rss_bytes": 2188918784,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "terrain_recipe": "Alpine",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "motion": {
+        "start_eye": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "end_eye": [
+          -40.120749681619785,
+          23.73787987311713,
+          -168.7799296984595
+        ],
+        "horizontal_displacement_m": 81.22550284812696,
+        "elapsed_seconds": 35.015930029
+      },
+      "watched_tile": {
+        "world_xz_m": "1100,3100",
+        "events": [
+          {
+            "seconds": 43.05819166,
+            "tile_width_cells": 1024,
+            "terrain_owner": 2
+          }
+        ]
+      },
+      "status": "ok",
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "walk-stop-resume",
+        "route_speed_mps": 2.5,
+        "seconds": 35.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": null,
+        "target": null,
+        "watch_xz": "1100,3100",
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "dense",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      }
+    },
+    "follow-lead": {
+      "naadf": {
+        "status": "Ready \u00b7 following player",
+        "stage": 100,
+        "requested_radius_m": 128,
+        "resident_radius_m": 128,
+        "world_bounds_m": [
+          [
+            -170.0,
+            -100.0,
+            -298.0
+          ],
+          [
+            86.0,
+            156.0,
+            -42.0
+          ]
+        ],
+        "native_voxel_m": 0.0625,
+        "requested_build_budget_mib": 0,
+        "gpu_payload_bytes": 359628016,
+        "build_ms": 41634.174391,
+        "upload_cpu_ms": 35.268063,
+        "mixed_chunks": 140040,
+        "unique_blocks": 1232043,
+        "sampled_columns": 16777216,
+        "plant_cells": 9638216,
+        "palette_entries": 5899,
+        "color_channel_bits": 10,
+        "refused": 0,
+        "fixed_snapshot": false,
+        "stream_shifts": 5,
+        "stream_build_ms": 1376.88386,
+        "stream_sampled_columns": 1048576,
+        "stream_shared_leaves_last_shift": 3463,
+        "camera_margin_m": 123.74530755694329,
+        "min_camera_margin_m": 116.35533721112017,
+        "stream_active_frames": 1386,
+        "stream_outside_frames": 0,
+        "initial_snapshot_payload_bytes": 260754992,
+        "initial_snapshot_wide_leaf_payload_bytes": 418456496,
+        "initial_leaf_bytes": 157701504,
+        "gpu_leaf_bits": 16,
+        "lighting": "primary_visibility_lambert_without_GI",
+        "includes_distant_and_boundary_raster_overhead": true,
+        "interior_meshes_omitted": true,
+        "supports_direct_voxel_shadows": true,
+        "effective_build_budget_mib": 8185,
+        "auto_memory": true,
+        "gpu_root_distance_requested": false,
+        "gpu_root_distance_tiles_ready": 0,
+        "gpu_root_distance_tiles_total": 0,
+        "sparse_roots_requested": false,
+        "sparse_roots_active": false,
+        "gpu_root_texture_bytes": 67108864,
+        "stream_lead_s": 4,
+        "stream_stage_ms": [
+          [
+            1002.739002,
+            106.434651,
+            55.688726,
+            1109.176027
+          ],
+          [
+            1135.042894,
+            2785.0868570000002,
+            48.736984,
+            3920.1321249999996
+          ],
+          [
+            1269.7131100000001,
+            1808.85589,
+            43.395244,
+            3078.5725620000003
+          ],
+          [
+            1166.852273,
+            1626.525555,
+            63.382536,
+            2793.380202
+          ],
+          [
+            1379.1682569999998,
+            1429.145982,
+            61.254864,
+            2808.316614
+          ]
+        ]
+      },
+      "frames": {
+        "sample_count": 1353,
+        "accepted_frames": 1353,
+        "missed_budget_frames": 1136,
+        "rejected_inputs": 0,
+        "p50_ms": 25.218609999999998,
+        "p95_ms": 38.00364,
+        "p99_ms": 42.832456
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 1268,
+        "p50_ms": 21.30700357064438,
+        "p95_ms": 27.266526738464357,
+        "p99_ms": 30.45013563479233,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "naadf_gpu_pass": {
+        "samples": 1268,
+        "p50_ms": 10.829776709861756,
+        "p95_ms": 14.709828856990814,
+        "p99_ms": 16.535738107177735,
+        "scope": "primary exact visibility and its direct shadows; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "process_memory": {
+        "rss_bytes": 1608802304,
+        "peak_rss_bytes": 2217738240,
+        "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+      },
+      "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+      "seed": 7,
+      "terrain_recipe": "Alpine",
+      "output": {
+        "width": 1920,
+        "height": 1080
+      },
+      "motion": {
+        "start_eye": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "end_eye": [
+          -40.12094432228487,
+          23.74530755694328,
+          -168.7967580382101
+        ],
+        "horizontal_displacement_m": 81.20867338278342,
+        "elapsed_seconds": 35.022256269
+      },
+      "watched_tile": {
+        "world_xz_m": "1100,3100",
+        "events": [
+          {
+            "seconds": 43.906130266,
+            "tile_width_cells": 1024,
+            "terrain_owner": 2
+          }
+        ]
+      },
+      "status": "ok",
+      "binary_sha256": "ab8d5bd7037e22a663e2b454f99bcd454974a439f3cb4c8c212413d06ae6c345",
+      "conditions": {
+        "width": 1920,
+        "height": 1080,
+        "msaa": 1,
+        "preset": "alpine",
+        "seed": 7,
+        "clip_m": 6000,
+        "native_mesh_radius_m": 4,
+        "vegetation_near_m": 32,
+        "pixel_error": 5,
+        "route": "walk-stop-resume",
+        "route_speed_mps": 2.5,
+        "seconds": 35.0,
+        "lighting": "ordinary beauty and sun shadows",
+        "atmosphere": "on",
+        "ray_profile": "full",
+        "eye": null,
+        "target": null,
+        "watch_xz": "1100,3100",
+        "gpu_distance": "off",
+        "leaf_format": "auto",
+        "root_format": "dense",
+        "naadf_estimate_ceiling_mib": null,
+        "resource_profile": "development; available RAM with system headroom"
+      }
+    }
+  },
+  "tests": {
+    "naadf-diag-tests.log": [
+      "test result: ok. 437 passed; 0 failed; 17 ignored; 0 measured; 0 filtered out; finished in 6.97s"
+    ],
+    "naadf-diag-oracle.log": [
+      "NAADF GPU oracle: 17834 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 17834 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 15612 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 15612 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 17834 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 21274 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "NAADF GPU oracle: 17834 covered primary/shadow samples across four headings; 32768 coverage decisions checked",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 450 filtered out; finished in 3.23s"
+    ]
+  },
+  "shift_stage_fields": [
+    "worker_reply",
+    "upload_submission",
+    "raster_restoration",
+    "total_publication"
+  ],
+  "legacy_primary_byte_equal": [
+    "PNG",
+    "linear RGB",
+    "depth"
+  ],
+  "fixed_dense_sparse_linear_rgb_byte_equal": true,
+  "meadow_sparse_block_leaf_visit_arrays_identical_to_dense": true
+}

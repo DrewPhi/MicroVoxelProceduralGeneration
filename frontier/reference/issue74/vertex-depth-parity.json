@@ -1,0 +1,16 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "tolerance_srgb_byte": 1,
+  "different_pixels": 0,
+  "different_fraction": 0.0,
+  "max_channel_error_srgb_byte": 0,
+  "mae_srgb_byte": 0.0,
+  "rmse_srgb_byte": 0.0,
+  "depth": {
+    "coverage_disagreement_pixels": 0,
+    "common_hit_pixels": 967122,
+    "max_normalized_error": 0.0,
+    "p99_normalized_error": 0.0
+  }
+}

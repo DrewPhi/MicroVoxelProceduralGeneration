@@ -1,0 +1,205 @@
+{
+  "scope": "Marginal effects of uniform shadow query switches; changed lighting, not candidate optimization wins. Unpaired timestamps; differences are not independent additive stage durations. Single64m static runs, no significance for small effects.",
+  "rows": [
+    {
+      "mode": "full",
+      "quality_ablation_only": true,
+      "source": "output/naadf-followup/v4/control-sanity/0-control/r64.json",
+      "frames": {
+        "sample_count": 512,
+        "accepted_frames": 512,
+        "missed_budget_frames": 512,
+        "rejected_inputs": 0,
+        "p50_ms": 17.891583,
+        "p95_ms": 20.800494999999998,
+        "p99_ms": 21.604305
+      },
+      "naadf_gpu_pass": {
+        "samples": 382,
+        "p50_ms": 6.750105283630371,
+        "p95_ms": 6.856307068336487,
+        "p99_ms": 6.920148367595672,
+        "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 382,
+        "p50_ms": 16.93886405146408,
+        "p95_ms": 17.15856147929764,
+        "p99_ms": 17.247851130741118,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "ray_profile": {
+        "voxel_shadows": true,
+        "mesh_receiver_shadows": true
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    },
+    {
+      "mode": "primary",
+      "quality_ablation_only": true,
+      "source": "output/naadf-followup/v4/shadow-ablations/primary/r64.json",
+      "frames": {
+        "sample_count": 526,
+        "accepted_frames": 526,
+        "missed_budget_frames": 425,
+        "rejected_inputs": 0,
+        "p50_ms": 17.396478,
+        "p95_ms": 20.791,
+        "p99_ms": 21.137695
+      },
+      "naadf_gpu_pass": {
+        "samples": 392,
+        "p50_ms": 6.041118199390412,
+        "p95_ms": 6.132291429656982,
+        "p99_ms": 6.1772568645401,
+        "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 392,
+        "p50_ms": 16.475223127967833,
+        "p95_ms": 16.65219938504791,
+        "p99_ms": 16.774752236984252,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "ray_profile": {
+        "voxel_shadows": false,
+        "mesh_receiver_shadows": false
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    },
+    {
+      "mode": "voxel-shadows",
+      "quality_ablation_only": true,
+      "source": "output/naadf-followup/v4/shadow-ablations/voxel-shadows/r64.json",
+      "frames": {
+        "sample_count": 506,
+        "accepted_frames": 506,
+        "missed_budget_frames": 506,
+        "rejected_inputs": 0,
+        "p50_ms": 18.067311,
+        "p95_ms": 21.030839,
+        "p99_ms": 21.753912
+      },
+      "naadf_gpu_pass": {
+        "samples": 377,
+        "p50_ms": 6.892255370555878,
+        "p95_ms": 6.984510656742096,
+        "p99_ms": 7.015249060089111,
+        "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 377,
+        "p50_ms": 17.125378431095122,
+        "p95_ms": 17.35000522478485,
+        "p99_ms": 17.453521907764436,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "ray_profile": {
+        "voxel_shadows": true,
+        "mesh_receiver_shadows": false
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    },
+    {
+      "mode": "mesh-shadows",
+      "quality_ablation_only": true,
+      "source": "output/naadf-followup/v4/shadow-ablations/mesh-shadows/r64.json",
+      "frames": {
+        "sample_count": 500,
+        "accepted_frames": 500,
+        "missed_budget_frames": 500,
+        "rejected_inputs": 0,
+        "p50_ms": 18.233536,
+        "p95_ms": 21.404844,
+        "p99_ms": 22.11367
+      },
+      "naadf_gpu_pass": {
+        "samples": 373,
+        "p50_ms": 6.487285923591614,
+        "p95_ms": 6.583027834407806,
+        "p99_ms": 6.62450664466095,
+        "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+      },
+      "gpu_full_render": {
+        "supported": true,
+        "samples": 373,
+        "p50_ms": 17.332532025489808,
+        "p95_ms": 17.584410597896575,
+        "p99_ms": 17.707003525978088,
+        "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+      },
+      "ray_profile": {
+        "voxel_shadows": false,
+        "mesh_receiver_shadows": true
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    }
+  ],
+  "binary_sha256": "6e1a1cd7813378267fa7b64a3cf78774ab4ec5ba6333ed1dda9181fce6cb0651",
+  "conditions": {
+    "seed": 7,
+    "recipe": "alpine",
+    "native_voxel_m": 0.0625,
+    "radius_m": 64,
+    "width": 1920,
+    "height": 1080,
+    "msaa": 1,
+    "pixel_error": 5,
+    "clip_m": 6000
+  }
+}

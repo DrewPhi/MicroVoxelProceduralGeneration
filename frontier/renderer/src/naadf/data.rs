@@ -1,0 +1,1718 @@
+//! Exact three-layer voxel snapshot; greenfield NAADF experiment.
+//! 4³ voxels/block, 4³ blocks/chunk. Uniform nodes remain exact. Empty nodes
+//! store a proven-empty cuboid, never six independently unsafe axis distances.
+use super::prepare_profile::{self, Collector, Metrics, Stage};
+use bytemuck::{Pod, Zeroable};
+use frontier_world::{
+    vegetation::{self, Species},
+    Cell, Material, World,
+};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
+    sync::atomic::{AtomicU32, Ordering},
+    time::Instant,
+};
+#[path = "overlay.rs"]
+mod overlay;
+const FULL: u32 = 1 << 30;
+const CHILD: u32 = 1 << 31;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Pigment {
+    pub rgb: [f32; 3],
+    pub material: u32,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ColumnSummary {
+    pub low: i64,
+    pub high: i64,
+    pub deep: u32,
+    pub fast: bool,
+    /// Surface/edit vertical envelope can be exclusively owned by native voxels.
+    pub owned: bool,
+}
+#[derive(Debug)]
+pub struct Snapshot {
+    pub ownership: std::sync::Arc<super::ownership::Ownership>,
+    pub origin: Cell,
+    pub chunks_per_edge: u32,
+    pub dims: [usize; 3],
+    pub columns: Vec<ColumnSummary>,
+    pub gpu_distance: bool,
+    pub cpu_root_fallback: bool,
+    /// Y-fast layout: (z*n+x)*n+y. Texture coordinates are (y,x,z).
+    pub chunks: Vec<u32>,
+    pub blocks: Vec<u32>,
+    pub voxels: Vec<u32>,
+    pub palette: Vec<Pigment>,
+    pub build_ms: f64,
+    pub cpu_profile: Option<Metrics>,
+    pub source_revision: u64,
+    pub mixed_chunks: usize,
+    pub unique_blocks: usize,
+    pub sampled_columns: usize,
+    pub plant_cells: usize,
+    pub fast_skipped_chunks: usize,
+    pub constructed_chunks: usize,
+    pub edit_blocked_chunks: usize,
+}
+impl Snapshot {
+    pub fn bytes(&self) -> usize {
+        (self.chunks.len() + self.blocks.len().max(1) + self.voxels.len().max(1)) * 4
+            + self.palette.len() * 16
+    }
+    pub fn bounds(&self) -> [[f64; 3]; 2] {
+        self.region().bounds()
+    }
+    pub fn region(&self) -> super::stream::Region {
+        let lo = [self.origin.x, self.origin.y, self.origin.z].map(|v| v.div_euclid(16));
+        super::stream::Region {
+            lo,
+            hi: std::array::from_fn(|axis| lo[axis] + self.dims[axis] as i64),
+        }
+    }
+    pub fn material(&self, p: [usize; 3]) -> u32 {
+        let [nx, ny, _] = self.dims;
+        let c = p.map(|v| v / 16);
+        let mut node = self.chunks[(c[2] * nx + c[0]) * ny + c[1]];
+        if node & CHILD != 0 {
+            let b = p.map(|v| (v % 16) / 4);
+            node = self.blocks[(node & 0x3fff_ffff) as usize + b[0] + 4 * (b[1] + 4 * b[2])];
+            if node & CHILD != 0 {
+                let v = p.map(|v| v % 4);
+                let i = v[0] + 4 * (v[1] + 4 * v[2]);
+                let value = self.voxels[(node & 0x3fff_ffff) as usize + i];
+                return if value & FULL != 0 { value } else { 0 };
+            }
+        }
+        if node & FULL != 0 {
+            FULL | (node as u32 & 0x3fff_ffff)
+        } else {
+            0
+        }
+    }
+}
+pub fn id(m: Material) -> u32 {
+    match m {
+        Material::Air => 0,
+        Material::Grass => 1,
+        Material::Soil => 2,
+        Material::Stone => 3,
+        Material::Wood => 4,
+        Material::Leaf => 5,
+        Material::Flower => 6,
+        Material::Water => 7,
+        Material::Sand => 8,
+        Material::Snow => 9,
+    }
+}
+fn palette() -> Vec<Pigment> {
+    [
+        [0., 0., 0.],
+        [0.18, 0.34, 0.10],
+        [0.32, 0.22, 0.13],
+        [0.35, 0.37, 0.39],
+        [0.41, 0.25, 0.13],
+        [0.40, 0.53, 0.25],
+        [0.93, 0.92, 0.84],
+        Material::Water.color(),
+        Material::Sand.color(),
+        Material::Snow.color(),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, rgb)| Pigment {
+        rgb,
+        material: i as u32,
+    })
+    .collect()
+}
+fn pigment(
+    p: &mut Vec<Pigment>,
+    map: &mut HashMap<[u32; 4], u32>,
+    rgb: [f32; 3],
+    m: Material,
+) -> Result<u32, String> {
+    // Visibility stays exact; RGB10 precision avoids treating insignificant
+    // float variations as millions of distinct palette entries.
+    let rgb = rgb.map(|v| (v.clamp(0., 1.) * 1023.).round() / 1023.);
+    let key = [
+        rgb[0].to_bits(),
+        rgb[1].to_bits(),
+        rgb[2].to_bits(),
+        id(m) as u32,
+    ];
+    if let Some(&v) = map.get(&key) {
+        return Ok(v);
+    }
+    if p.len() >= FULL as usize {
+        return Err("NAADF palette address exhausted; snapshot not published".into());
+    }
+    let result = p.len() as u32;
+    p.push(Pigment {
+        rgb,
+        material: id(m) as u32,
+    });
+    map.insert(key, result);
+    Ok(result)
+}
+/// Expand one pair of faces using a neighbor's already proven-empty box.
+/// Looking up the cell just beyond the old face and checking both transverse
+/// extents proves the entire added slab is empty, including its corners.
+fn expand(
+    nodes: &[u32],
+    dims: [usize; 3],
+    strides: [usize; 3],
+    i: usize,
+    axis: usize,
+    bits: u32,
+) -> u32 {
+    let coordinate = (i / strides[axis]) % dims[axis];
+    expand_at(nodes, dims, strides, i, axis, bits, coordinate)
+}
+// Axis spans supply the coordinate once for all contiguous words in a plane.
+// The Jacobi input remains immutable throughout each axis pass.
+fn expand_at(
+    nodes: &[u32],
+    dims: [usize; 3],
+    strides: [usize; 3],
+    i: usize,
+    axis: usize,
+    bits: u32,
+    coordinate: usize,
+) -> u32 {
+    let old = nodes[i];
+    if old & 0xc000_0000 != 0 {
+        return old;
+    }
+    let mask = (1u32 << bits) - 1;
+    let mut out = old;
+    for positive in [false, true] {
+        let side = axis * 2 + usize::from(positive);
+        let shift = side as u32 * bits;
+        let extent = (old >> shift) & mask;
+        if extent == mask {
+            continue;
+        }
+        let gap = extent as usize + 1;
+        let adjacent = if positive {
+            coordinate.checked_add(gap).filter(|v| *v < dims[axis])
+        } else {
+            coordinate.checked_sub(gap)
+        };
+        let Some(adjacent) = adjacent else {
+            continue;
+        };
+        let j = if positive {
+            i + gap * strides[axis]
+        } else {
+            i - gap * strides[axis]
+        };
+        let neighbor = nodes[j];
+        if neighbor & 0xc000_0000 != 0 {
+            continue;
+        }
+        if (0..6)
+            .filter(|s| s / 2 != axis)
+            .any(|s| ((neighbor >> (s as u32 * bits)) & mask) < ((old >> (s as u32 * bits)) & mask))
+        {
+            continue;
+        }
+        let neighbor_extent = (neighbor >> shift) & mask;
+        let available = if positive {
+            dims[axis] - 1 - coordinate
+        } else {
+            coordinate
+        };
+        let value = (extent + 1 + neighbor_extent)
+            .min(mask)
+            .min(available as u32);
+        let _ = adjacent;
+        out = (out & !(mask << shift)) | (value << shift);
+    }
+    out
+}
+pub fn bounds(
+    nodes: &mut Vec<u32>,
+    dims: [usize; 3],
+    strides: [usize; 3],
+    bits: u32,
+    cancel: &impl Fn() -> bool,
+) -> Result<(), String> {
+    let mut scratch = vec![0; nodes.len()];
+    // Deterministic Jacobi updates; every intermediate cache is safe to use.
+    for _ in 0..((1 << bits) - 1) {
+        let mut changed = false;
+        for axis in 0..3 {
+            let stride = strides[axis];
+            let period = stride * dims[axis];
+            for base in (0..nodes.len()).step_by(period) {
+                for coordinate in 0..dims[axis] {
+                    let start = base + coordinate * stride;
+                    for i in start..start + stride {
+                        if i % 32768 == 0 && cancel() {
+                            return Err("NAADF build superseded".into());
+                        }
+                        scratch[i] = expand_at(nodes, dims, strides, i, axis, bits, coordinate);
+                        changed |= scratch[i] != nodes[i];
+                    }
+                }
+            }
+            std::mem::swap(nodes, &mut scratch);
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(())
+}
+fn pack_block(mut nodes: [u32; 64]) -> [u32; 64] {
+    let mut scratch = [0; 64];
+    for _ in 0..3 {
+        let mut changed = false;
+        for axis in 0..3 {
+            for i in 0..64 {
+                scratch[i] = expand(&nodes, [4; 3], [1, 4, 16], i, axis, 2);
+                changed |= scratch[i] != nodes[i];
+            }
+            std::mem::swap(&mut nodes, &mut scratch);
+        }
+        if !changed {
+            break;
+        }
+    }
+    nodes
+}
+
+enum ChunkBlocks {
+    Stack([u32; 64]),
+    Heap(Vec<u32>),
+}
+impl ChunkBlocks {
+    fn words(&mut self) -> &mut [u32] {
+        match self {
+            Self::Stack(words) => words,
+            Self::Heap(words) => words,
+        }
+    }
+}
+
+// Fingerprints only select an equality bucket. They never establish identity;
+// LeafIndex compares all 64 canonical occupancy/pigment words on every hit.
+fn leaf_fingerprint(values: &[u32; 64], fast: bool) -> u64 {
+    if !fast {
+        let mut h = DefaultHasher::new();
+        values.hash(&mut h);
+        return h.finish();
+    }
+    // Four independent FNV-1a-style lanes avoid a single long dependency chain.
+    let mut lanes = [0xcbf29ce484222325_u64; 4];
+    for row in values.chunks_exact(4) {
+        for i in 0..4 {
+            lanes[i] = (lanes[i] ^ u64::from(row[i])).wrapping_mul(0x100000001b3);
+        }
+    }
+    lanes[0] ^ lanes[1].rotate_left(13) ^ lanes[2].rotate_left(29) ^ lanes[3].rotate_left(47)
+}
+#[derive(Default)]
+struct LeafIndex {
+    first: HashMap<u64, u32>,
+    collisions: HashMap<u64, Vec<u32>>,
+    collision_entries: usize,
+}
+impl LeafIndex {
+    fn intern(
+        &mut self,
+        fingerprint: u64,
+        values: [u32; 64],
+        voxels: &mut Vec<u32>,
+    ) -> Result<u32, String> {
+        let same = |p: u32| {
+            voxels[p as usize..p as usize + 64]
+                .iter()
+                .zip(&values)
+                .all(|(&stored, &raw)| if stored & FULL != 0 { stored } else { 0 } == raw)
+        };
+        let first = self.first.get(&fingerprint).copied();
+        if let Some(p) = first {
+            if same(p) {
+                return Ok(p);
+            }
+            if let Some(p) = self
+                .collisions
+                .get(&fingerprint)
+                .and_then(|v| v.iter().copied().find(|&p| same(p)))
+            {
+                return Ok(p);
+            }
+        }
+        let p = u32::try_from(voxels.len()).map_err(|_| "NAADF voxel buffer address overflow")?;
+        if p >= FULL {
+            return Err("NAADF voxel address exhausted".into());
+        }
+        voxels.extend(pack_block(values));
+        if first.is_some() {
+            self.collisions.entry(fingerprint).or_default().push(p);
+            self.collision_entries += 1;
+        } else {
+            self.first.insert(fingerprint, p);
+        }
+        Ok(p)
+    }
+
+    fn workspace_bytes(&self) -> usize {
+        // Includes hash buckets, control bytes and spare collision capacity.
+        self.first.capacity().saturating_mul(24)
+            + self.collisions.capacity().saturating_mul(48)
+            + self.collision_entries.saturating_mul(16)
+    }
+}
+fn budget(
+    s: &Snapshot,
+    overlay_bytes: usize,
+    hash_bytes: usize,
+    limit: usize,
+) -> Result<usize, String> {
+    // New CPU + GPU payload, top-level Jacobi scratch and hash table workspace.
+    // Includes capacity slack; resident old snapshot is reported separately.
+    let estimate = s
+        .chunks
+        .capacity()
+        .saturating_mul(if s.gpu_distance { 8 } else { 12 })
+        .saturating_add((s.blocks.capacity() + s.voxels.capacity()).saturating_mul(8))
+        .saturating_add(s.palette.capacity().saturating_mul(32))
+        .saturating_add(overlay_bytes)
+        .saturating_add(hash_bytes);
+    if estimate > limit {
+        return Err(format!(
+            "NAADF build estimate {} MiB exceeds {} MiB working budget",
+            estimate.div_ceil(1048576),
+            limit / 1048576
+        ));
+    }
+    Ok(estimate)
+}
+fn address(c: Cell, min: Cell, dims: [usize; 3]) -> Option<u64> {
+    let p = [c.x - min.x, c.y - min.y, c.z - min.z];
+    if (0..3).any(|a| p[a] < 0 || p[a] >= dims[a] as i64 * 16) {
+        return None;
+    }
+    let q = p.map(|v| v as usize);
+    let chunk = ((q[2] / 16 * dims[0] + q[0] / 16) * dims[1] + q[1] / 16) as u64;
+    Some(chunk * 4096 + (q[0] % 16 + 16 * (q[1] % 16 + 16 * (q[2] % 16))) as u64)
+}
+fn cell_at(a: u64, min: Cell, dims: [usize; 3]) -> Cell {
+    let c = a / 4096;
+    let v = a % 4096;
+    Cell {
+        x: min.x + ((c as usize / dims[1]) % dims[0] * 16) as i64 + (v % 16) as i64,
+        y: min.y + (c as usize % dims[1] * 16) as i64 + ((v / 16) % 16) as i64,
+        z: min.z + (c as usize / (dims[0] * dims[1]) * 16) as i64 + (v / 256) as i64,
+    }
+}
+#[cfg(test)]
+pub fn build(
+    world: &World,
+    eye: [f64; 3],
+    radius: u32,
+    limit: usize,
+    stage: &AtomicU32,
+    cancel: impl Fn() -> bool + Sync,
+) -> Result<Snapshot, String> {
+    build_with_root_mode(world, eye, radius, limit, stage, false, cancel)
+}
+
+pub fn build_with_root_mode(
+    world: &World,
+    eye: [f64; 3],
+    radius: u32,
+    limit: usize,
+    stage: &AtomicU32,
+    gpu_distance: bool,
+    cancel: impl Fn() -> bool + Sync,
+) -> Result<Snapshot, String> {
+    if eye.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
+        return Err("NAADF eye outside supported finite coordinate range".into());
+    }
+    if !(1..=super::stream::MAX_RADIUS_ROOTS).contains(&radius) {
+        return Err("NAADF root radius outside the supported range".into());
+    }
+    let n = radius as usize * 2;
+    let count = n.checked_pow(3).ok_or("NAADF chunk count overflow")?;
+    if count
+        .checked_mul(if gpu_distance { 8 } else { 12 })
+        .is_none_or(|v| v > limit)
+    {
+        return Err(format!(
+            "NAADF top grid plus build/copy workspace alone needs {} MiB",
+            count
+                .saturating_mul(if gpu_distance { 8 } else { 12 })
+                .div_ceil(1048576)
+        ));
+    }
+    let centre = frontier_world::voxel_grid()
+        .checked_cell(eye)
+        .ok_or("NAADF eye outside the native cell lattice")?;
+    let r = i64::from(radius * super::stream::ROOT_EDGE_VOXELS);
+    let min = Cell {
+        x: centre.x.div_euclid(16) * 16 - r,
+        y: centre.y.div_euclid(16) * 16 - r,
+        z: centre.z.div_euclid(16) * 16 - r,
+    };
+    build_region(
+        world,
+        min,
+        [n; 3],
+        limit,
+        stage,
+        None,
+        gpu_distance,
+        &cancel,
+    )
+}
+
+pub fn build_region(
+    world: &World,
+    min: Cell,
+    dims: [usize; 3],
+    limit: usize,
+    stage: &AtomicU32,
+    cached: Option<&(dyn Fn(i64, i64) -> Option<ColumnSummary> + Sync)>,
+    gpu_distance: bool,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Snapshot, String> {
+    build_region_options(
+        world,
+        min,
+        dims,
+        limit,
+        stage,
+        cached,
+        gpu_distance,
+        cancel,
+        prepare_profile::enabled(),
+        prepare_profile::stack_blocks(),
+        prepare_profile::column_extrema(),
+        overlay::enabled(),
+        overlay::chunk_local_enabled(),
+    )
+}
+
+fn build_region_options(
+    world: &World,
+    min: Cell,
+    dims: [usize; 3],
+    limit: usize,
+    stage: &AtomicU32,
+    cached: Option<&(dyn Fn(i64, i64) -> Option<ColumnSummary> + Sync)>,
+    gpu_distance: bool,
+    cancel: &(dyn Fn() -> bool + Sync),
+    profiling: bool,
+    stack_blocks: bool,
+    column_extrema: bool,
+    compact_overlay: bool,
+    chunk_local_overlay: bool,
+) -> Result<Snapshot, String> {
+    let start = Instant::now();
+    let mut profile = Collector::with_enabled(profiling);
+    let phase = profile.start();
+    if dims.iter().any(|v| *v == 0 || *v > 512) {
+        return Err("invalid NAADF region dimensions".into());
+    }
+    let [nx, ny, nz] = dims;
+    let count = nx * ny * nz;
+    if count.saturating_mul(if gpu_distance { 8 } else { 12 }) > limit {
+        return Err("NAADF strip exceeds build budget".into());
+    }
+    let mut safe_columns = vec![false; nx * nz];
+    let mut out = Snapshot {
+        ownership: std::sync::Arc::new(super::ownership::Ownership::new([[0.; 3]; 2], 0, &[])),
+        origin: min,
+        chunks_per_edge: nx as u32,
+        dims,
+        columns: vec![ColumnSummary::default(); nx * nz],
+        gpu_distance,
+        cpu_root_fallback: false,
+        chunks: vec![0; count],
+        blocks: vec![],
+        voxels: vec![],
+        palette: palette(),
+        build_ms: 0.,
+        cpu_profile: None,
+        source_revision: world.revision(),
+        mixed_chunks: 0,
+        unique_blocks: 0,
+        sampled_columns: 0,
+        plant_cells: 0,
+        fast_skipped_chunks: 0,
+        constructed_chunks: 0,
+        edit_blocked_chunks: 0,
+    };
+    let mut pigments = HashMap::new();
+    let mut overlay = overlay::Overlay::new(compact_overlay);
+    stage.store(1, Ordering::Relaxed);
+    profile.end(Stage::Initialization, phase);
+    let phase = profile.start();
+    let pad = vegetation::MAX_PLANT_RADIUS_CELLS;
+    let mut records = world.vegetation_records(
+        [min.x - pad, min.z - pad],
+        [min.x + nx as i64 * 16 + pad, min.z + nz as i64 * 16 + pad],
+    );
+    // For intersections between models below, ask the canonical lookup rather
+    // than infer precedence from this enumeration's ordering.
+    records.sort_by_key(|p| {
+        (
+            match p.species {
+                Species::Rowan => 0,
+                Species::Grass => 1,
+                Species::Edelweiss => 2,
+            },
+            p.root.x,
+            p.root.z,
+            p.seed,
+        )
+    });
+    profile.end(Stage::VegetationEnumeration, phase);
+    for record in records {
+        if cancel() {
+            return Err("NAADF build superseded".into());
+        }
+        let radius = if record.species == Species::Rowan {
+            vegetation::MAX_PLANT_RADIUS_CELLS
+        } else {
+            8
+        };
+        let height = if record.species == Species::Rowan {
+            vegetation::MAX_PLANT_HEIGHT_CELLS
+        } else {
+            12
+        };
+        if record.root.x + radius < min.x
+            || record.root.x - radius >= min.x + nx as i64 * 16
+            || record.root.z + radius < min.z
+            || record.root.z - radius >= min.z + nz as i64 * 16
+            || record.root.y + height < min.y
+            || record.root.y >= min.y + ny as i64 * 16
+        {
+            continue;
+        }
+        let phase = profile.start();
+        let Some(model) = vegetation::model_for_cancellable(&record, &cancel) else {
+            return Err("NAADF build superseded".into());
+        };
+        profile.end(Stage::VegetationModels, phase);
+        let phase = profile.start();
+        for v in &model.voxels {
+            if let Some(a) = address(record.world_cell(v.cell), min, dims) {
+                let ty = pigment(&mut out.palette, &mut pigments, v.color, v.material)?;
+                overlay.push(a, ty);
+            }
+        }
+        profile.workspace(budget(
+            &out,
+            overlay.bytes(),
+            pigments.capacity().saturating_mul(32),
+            limit,
+        )?);
+        profile.end(Stage::VegetationAssembly, phase);
+    }
+    let phase = profile.start();
+    if chunk_local_overlay {
+        profile.workspace(budget(
+            &out,
+            overlay
+                .bytes()
+                .saturating_add(overlay::CHUNK_SORT_SCRATCH_BYTES),
+            pigments.capacity().saturating_mul(32),
+            limit,
+        )?);
+    }
+    overlay.resolve_ordered(
+        |a| {
+            let v = world
+                .vegetation_voxel(cell_at(a, min, dims))
+                .ok_or("canonical plant overlap lookup failed")?;
+            pigment(&mut out.palette, &mut pigments, v.color, v.material)
+        },
+        &cancel,
+        chunk_local_overlay,
+    )?;
+    out.plant_cells = overlay.len();
+    // Canonical overlap resolution may introduce a previously unseen wide
+    // pigment. Account for exact promotion's temporary old+new payload peak.
+    profile.workspace(budget(
+        &out,
+        overlay.bytes(),
+        pigments.capacity().saturating_mul(32),
+        limit,
+    )?);
+    profile.end(Stage::VegetationOverlap, phase);
+    let phase = profile.start();
+    // Explicit edits override both terrain and plants. Material-only edited
+    // cells use the ordinary semantic palette, matching canonical material.
+    let mut edits = HashMap::<usize, Vec<(usize, u32)>>::new();
+    let mut edit_payload_bytes = 0usize;
+    let mut edit_extrema = HashMap::<(i64, i64), (i64, i64)>::new();
+    let local_edits = world.edit_cells_in_columns(
+        [min.x, min.z],
+        [
+            min.x.saturating_add(nx as i64 * 16),
+            min.z.saturating_add(nz as i64 * 16),
+        ],
+    );
+    for (index, c) in local_edits.iter().copied().enumerate() {
+        if c.x >= min.x
+            && c.x < min.x + nx as i64 * 16
+            && c.z >= min.z
+            && c.z < min.z + nz as i64 * 16
+        {
+            let key = ((c.x - min.x).div_euclid(16), (c.z - min.z).div_euclid(16));
+            let e = edit_extrema
+                .entry(key)
+                .or_insert((c.y, c.y.saturating_add(1)));
+            e.0 = e.0.min(c.y);
+            e.1 = e.1.max(c.y.saturating_add(1));
+        }
+        if index % 1024 == 0 && cancel() {
+            return Err("NAADF edit index superseded".into());
+        }
+        if let Some(a) = address(c, min, dims) {
+            // Native addresses need up to39bits although the root index fits32.
+            // Divide before narrowing on32-bit targets.
+            let values = edits.entry((a / 4096) as usize).or_default();
+            let old_capacity = values.capacity();
+            values.push(((a % 4096) as usize, id(world.material(c))));
+            edit_payload_bytes +=
+                (values.capacity() - old_capacity) * std::mem::size_of::<(usize, u32)>();
+            if index % 1024 == 0 {
+                profile.workspace(budget(
+                    &out,
+                    overlay.bytes(),
+                    pigments
+                        .capacity()
+                        .saturating_mul(32)
+                        .saturating_add(edits.capacity().saturating_mul(48))
+                        .saturating_add(edit_payload_bytes),
+                    limit,
+                )?);
+            }
+        }
+    }
+    let edited_columns: HashSet<_> = edit_extrema.keys().copied().collect();
+    let edit_workspace_bytes = local_edits
+        .capacity()
+        .saturating_mul(std::mem::size_of::<Cell>())
+        .saturating_add(edit_payload_bytes)
+        .saturating_add(edits.capacity().saturating_mul(48))
+        .saturating_add(edited_columns.capacity().saturating_mul(24));
+    profile.workspace(budget(
+        &out,
+        overlay.bytes(),
+        pigments
+            .capacity()
+            .saturating_mul(32)
+            .saturating_add(edit_workspace_bytes),
+        limit,
+    )?);
+    profile.end(Stage::EditIndex, phase);
+    let mut leaves = LeafIndex::default();
+    let mut cursor = 0;
+    stage.store(2, Ordering::Relaxed);
+    for cz in 0..nz {
+        for cx in 0..nx {
+            if cancel() {
+                return Err("NAADF build superseded".into());
+            }
+            // Streaming summaries describe world-aligned metre columns. A
+            // nonaligned extraction crosses their boundaries and cannot reuse
+            // one column's extrema as a proof for its shifted native tile.
+            let summary = if min.x.rem_euclid(16) == 0 && min.z.rem_euclid(16) == 0 {
+                cached.and_then(|f| f(min.x / 16 + cx as i64, min.z / 16 + cz as i64))
+            } else {
+                None
+            };
+            let plant_column = cursor < overlay.len()
+                && (overlay.address(cursor) >> 12) / ny as u64 == (cz * nx + cx) as u64;
+            let column_edited = edited_columns.contains(&(cx as i64, cz as i64));
+            if let Some(v) = summary.filter(|v| v.fast && !column_edited && !plant_column) {
+                let air = min.y >= v.high;
+                let solid = min.y + ny as i64 * 16 < v.low - 12 && v.deep != 0;
+                if air || solid {
+                    out.columns[cz * nx + cx] = v;
+                    out.fast_skipped_chunks += ny;
+                    if solid {
+                        out.chunks[(cz * nx + cx) * ny..(cz * nx + cx + 1) * ny]
+                            .fill(FULL | v.deep);
+                    }
+                    continue;
+                }
+            }
+            let source_fast = world.fbm_terrain().is_some()
+                // The fixture's ownership boundary is metre aligned. A shifted
+                // native tile can straddle it despite an unowned origin, so
+                // retain exact column queries for all nonaligned extractions.
+                && (world.topology_base_cells().is_none()
+                    || (min.x.rem_euclid(16)==0 && min.z.rem_euclid(16)==0))
+                && !world.volume_owned(Cell {
+                    x: min.x + (cx * 16) as i64,
+                    y: 0,
+                    z: min.z + (cz * 16) as i64,
+                });
+            // Whole-column summaries/cache entries still require no overrides.
+            // Chunk classification can use immutable source samples despite
+            // edits elsewhere in this column; exact edit values apply last.
+            let fast = source_fast && !column_edited;
+            let cache_x = min.x + (cx * 16) as i64;
+            let cache_z = min.z + (cz * 16) as i64;
+            let reusable = fast && super::column_cache::enabled();
+            let cached_samples = if reusable {
+                super::column_cache::get_unedited(world, cache_x, cache_z)
+            } else {
+                None
+            };
+            let phase = profile.start();
+            // Fixed-size tile scratch avoids three allocations per column tile.
+            // Cache hits borrow immutable arrays rather than cloning their payload.
+            let columns = (cached_samples.is_none() && !source_fast).then(|| {
+                std::array::from_fn::<_, 256, _>(|i| {
+                    world.column(cache_x + (i % 16) as i64, cache_z + (i / 16) as i64)
+                })
+            });
+            let local_samples = if cached_samples.is_none() && source_fast {
+                let terrain = world.fbm_terrain().unwrap();
+                let mut samples = super::column_cache::Samples {
+                    heights: [0; 256],
+                    ground_heights: [0; 256],
+                    bands: [[0; 3]; 256],
+                };
+                for i in 0..256 {
+                    let source =
+                        terrain.column_cells(cache_x + (i % 16) as i64, cache_z + (i / 16) as i64);
+                    let h = source.ground_top;
+                    samples.heights[i] = source.visible_top;
+                    samples.ground_heights[i] = h;
+                    samples.bands[i] = [
+                        id(source.material(h - 1)),
+                        id(source.material(h - 2)),
+                        id(source.material(h - 13)),
+                    ];
+                }
+                Some(samples)
+            } else {
+                columns.as_ref().map(|columns| {
+                    let heights = std::array::from_fn(|i| columns[i].height_cells());
+                    let ground_heights = std::array::from_fn(|i| columns[i].ground_height_cells());
+                    let bands = std::array::from_fn(|i| {
+                        let h = ground_heights[i];
+                        [
+                            id(columns[i].material(h - 1)),
+                            id(columns[i].material(h - 2)),
+                            id(columns[i].material(h - 13)),
+                        ]
+                    });
+                    super::column_cache::Samples {
+                        heights,
+                        ground_heights,
+                        bands,
+                    }
+                })
+            };
+            let samples = cached_samples
+                .as_deref()
+                .or(local_samples.as_ref())
+                .unwrap();
+            let heights = &samples.heights;
+            let bands = &samples.bands;
+            let ground_heights = &samples.ground_heights;
+            if reusable && cached_samples.is_none() {
+                super::column_cache::insert_unedited(world, cache_x, cache_z, samples.clone());
+            }
+            profile.end(Stage::ColumnSampling, phase);
+            if cached_samples.is_none() {
+                out.sampled_columns += 256;
+            }
+            let owned = world.fbm_terrain().is_some() && world.topology_base_cells().is_none();
+            safe_columns[cz * nx + cx] = owned
+                && heights
+                    .iter()
+                    .all(|h| *h > min.y + 1 && *h < min.y + ny as i64 * 16 - 1);
+            let extrema = edit_extrema.get(&(cx as i64, cz as i64));
+            safe_columns[cz * nx + cx] &=
+                extrema.is_none_or(|&(lo, hi)| lo > min.y + 1 && hi < min.y + ny as i64 * 16 - 1);
+            let low_ground = *ground_heights.iter().min().unwrap();
+            let high_ground = *ground_heights.iter().max().unwrap();
+            let low_visible = *heights.iter().min().unwrap();
+            let has_water = ground_heights.iter().zip(heights).any(|(g, h)| h > g);
+            let high_height = *heights.iter().max().unwrap();
+            let uniform_deep = bands.iter().all(|b| b[2] == bands[0][2]);
+            out.columns[cz * nx + cx] = ColumnSummary {
+                low: extrema.map_or(low_ground, |e| low_ground.min(e.0)),
+                high: extrema.map_or(high_height, |e| high_height.max(e.1)),
+                deep: if uniform_deep { bands[0][2] } else { 0 },
+                fast,
+                owned,
+            };
+            let chunk_stages = [
+                Stage::NativeCellAssembly,
+                Stage::LeafHierarchyDedup,
+                Stage::BlockProofs,
+            ];
+            let chunk_loop = profile.exclusive_start(&chunk_stages);
+            for cy in 0..ny {
+                let ci = (cz * nx + cx) * ny + cy;
+                let y0 = min.y + (cy * 16) as i64;
+                let plant_start = cursor;
+                while cursor < overlay.len() && (overlay.address(cursor) >> 12) == ci as u64 {
+                    cursor += 1;
+                }
+                let chunk_edits = edits.get(&ci);
+                out.edit_blocked_chunks += usize::from(chunk_edits.is_some());
+                let clean = cursor == plant_start && chunk_edits.is_none();
+                if source_fast
+                    && clean
+                    && (if column_extrema {
+                        y0 >= high_height
+                    } else {
+                        heights.iter().all(|h| y0 >= *h)
+                    })
+                {
+                    out.fast_skipped_chunks += 1;
+                    continue;
+                }
+                if source_fast
+                    && clean
+                    && (if column_extrema {
+                        y0 + 15 < low_ground - 12 && uniform_deep
+                    } else {
+                        ground_heights.iter().all(|h| y0 + 15 < *h - 12)
+                            && bands.iter().all(|b| b[2] == bands[0][2])
+                    })
+                {
+                    out.chunks[ci] = FULL | bands[0][2] as u32;
+                    out.fast_skipped_chunks += 1;
+                    continue;
+                }
+                // Both bounds are over every native x/z column in this tile.
+                // The complete clean chunk lies above every bed and below every
+                // visible top, so it is canonical water without cell assembly.
+                if source_fast && clean && has_water && y0 >= high_ground && y0 + 16 <= low_visible
+                {
+                    out.chunks[ci] = FULL | id(Material::Water);
+                    out.fast_skipped_chunks += 1;
+                    continue;
+                }
+                let phase = profile.start();
+                out.constructed_chunks += 1;
+                let mut cells = [0u32; 4096];
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let col = z * 16 + x;
+                        let h = heights[col];
+                        for y in 0..16 {
+                            let py = y0 + y as i64;
+                            let ty = if source_fast {
+                                if py >= h {
+                                    0
+                                } else if py >= ground_heights[col] {
+                                    id(Material::Water)
+                                } else if py == ground_heights[col] - 1 {
+                                    bands[col][0]
+                                } else if py >= ground_heights[col] - 12 {
+                                    bands[col][1]
+                                } else {
+                                    bands[col][2]
+                                }
+                            } else {
+                                id(columns.as_ref().unwrap()[col].material(py))
+                            };
+                            cells[x + 16 * (y + 16 * z)] = if ty == 0 { 0 } else { FULL | ty };
+                        }
+                    }
+                }
+                overlay.for_each(plant_start, cursor, |address, pigment| {
+                    let vi = (address & 4095) as usize;
+                    if cells[vi] == 0 {
+                        cells[vi] = FULL | pigment;
+                    }
+                });
+                if let Some(chunk_edits) = chunk_edits {
+                    for &(vi, ty) in chunk_edits {
+                        cells[vi] = if ty == 0 { 0 } else { FULL | ty };
+                    }
+                }
+                profile.end(Stage::NativeCellAssembly, phase);
+                if cells.iter().all(|c| *c == cells[0]) {
+                    out.chunks[ci] = if cells[0] == 0 {
+                        0
+                    } else {
+                        FULL | (cells[0] & 0x3fff_ffff) as u32
+                    };
+                    continue;
+                }
+                let phase = profile.start();
+                let mut storage = if stack_blocks {
+                    ChunkBlocks::Stack([0; 64])
+                } else {
+                    ChunkBlocks::Heap(vec![0; 64])
+                };
+                let blocks = storage.words();
+                let mut leaf_requests = 0;
+                for bz in 0..4 {
+                    for by in 0..4 {
+                        for bx in 0..4 {
+                            let values: [u32; 64] = std::array::from_fn(|i| {
+                                cells[bx * 4
+                                    + i % 4
+                                    + 16 * (by * 4 + (i / 4) % 4 + 16 * (bz * 4 + i / 16))]
+                            });
+                            let bi = bx + 4 * (by + 4 * bz);
+                            if values.iter().all(|v| *v == values[0]) {
+                                blocks[bi] = if values[0] == 0 {
+                                    0
+                                } else {
+                                    FULL | (values[0] & 0x3fff_ffff) as u32
+                                };
+                                continue;
+                            }
+                            leaf_requests += 1;
+                            let fingerprint =
+                                leaf_fingerprint(&values, super::prepare_profile::fast_hash());
+                            let pointer = leaves.intern(fingerprint, values, &mut out.voxels)?;
+                            blocks[bi] = CHILD | pointer;
+                        }
+                    }
+                }
+                profile.end(Stage::LeafHierarchyDedup, phase);
+                let phase = profile.start();
+                let p =
+                    u32::try_from(out.blocks.len()).map_err(|_| "NAADF block address overflow")?;
+                if p >= FULL {
+                    return Err("NAADF block address exhausted".into());
+                }
+                match storage {
+                    ChunkBlocks::Stack(nodes) => {
+                        if cancel() {
+                            return Err("NAADF build superseded".into());
+                        }
+                        out.blocks.extend(pack_block(nodes));
+                    }
+                    ChunkBlocks::Heap(mut nodes) => {
+                        bounds(&mut nodes, [4; 3], [1, 4, 16], 2, &cancel)?;
+                        out.blocks.extend(nodes);
+                    }
+                }
+                profile.end(Stage::BlockProofs, phase);
+                if let Some(m) = &mut profile.metrics {
+                    m.requested_leaves += leaf_requests;
+                    if !stack_blocks {
+                        m.block_vec_allocations += 2;
+                        m.block_vec_bytes += 2 * 64 * 4;
+                    }
+                }
+                out.chunks[ci] = CHILD | p;
+                out.mixed_chunks += 1;
+            }
+            profile.exclusive_end(
+                Stage::ChunkDispatchClassification,
+                chunk_loop,
+                &chunk_stages,
+            );
+            profile.workspace(budget(
+                &out,
+                overlay.bytes(),
+                leaves
+                    .workspace_bytes()
+                    .saturating_add(edit_workspace_bytes)
+                    + pigments.capacity().saturating_mul(32),
+                limit,
+            )?);
+            stage.store(
+                10 + ((cz * nx + cx) * 70 / (nx * nz)) as u32,
+                Ordering::Relaxed,
+            );
+        }
+    }
+    out.unique_blocks = out.voxels.len() / 64;
+    drop(leaves);
+    drop(overlay);
+    drop(pigments);
+    stage.store(85, Ordering::Relaxed);
+    // GPU mode publishes exact roots first. An empty root itself is a
+    // conservative one-chunk skip; block and leaf proofs are unchanged.
+    let phase = profile.start();
+    if !gpu_distance {
+        bounds(&mut out.chunks, dims, [ny, 1, nx * ny], 5, &cancel)?;
+    }
+    profile.end(Stage::RootProofs, phase);
+    let phase = profile.start();
+    if nx == nz {
+        out.ownership = std::sync::Arc::new(super::ownership::Ownership::new(
+            out.bounds(),
+            nx,
+            &safe_columns,
+        ));
+    }
+    profile.end(Stage::Ownership, phase);
+    if let Some(m) = &mut profile.metrics {
+        m.region_worker_wall_ms = start.elapsed().as_secs_f64() * 1000.;
+        m.region_unclassified_wall_ms = (m.region_worker_wall_ms
+            - m.ms[..=Stage::Ownership as usize].iter().sum::<f64>())
+        .max(0.);
+        m.regions = 1;
+        m.sampled_columns = out.sampled_columns as u64;
+        m.mixed_chunks = out.mixed_chunks as u64;
+        m.unique_leaves = out.unique_blocks as u64;
+    }
+    out.cpu_profile = profile.metrics;
+    out.build_ms = start.elapsed().as_secs_f64() * 1000.;
+    stage.store(100, Ordering::Relaxed);
+    Ok(out)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn compact_leaf_index_resolves_collisions_exactly() {
+        let mut index = LeafIndex::default();
+        let mut words = Vec::new();
+        let mut a = [0; 64];
+        let mut b = [0; 64];
+        a[0] = FULL | 7;
+        b[0] = FULL | 8;
+        let a_ptr = index.intern(0, a, &mut words).unwrap();
+        let b_ptr = index.intern(0, b, &mut words).unwrap();
+        assert_ne!(a_ptr, b_ptr);
+        assert_eq!(index.intern(0, a, &mut words).unwrap(), a_ptr);
+        assert_eq!(index.intern(0, b, &mut words).unwrap(), b_ptr);
+        assert_eq!(words.len(), 128);
+    }
+    #[test]
+    fn rgb10_pigments_and_leaf_words_survive_more_than_32767_colors() {
+        let mut palette = palette();
+        let mut map = HashMap::new();
+        let mut last = 0;
+        for i in 0..40000u32 {
+            last = pigment(
+                &mut palette,
+                &mut map,
+                [(i & 255) as f32 / 255., (i >> 8) as f32 / 255., 0.7],
+                Material::Leaf,
+            )
+            .unwrap();
+        }
+        assert!(last > 32767);
+        let mut cells = [0u32; 64];
+        cells[23] = FULL | last;
+        let block = pack_block(cells);
+        assert_eq!(block[23], FULL | last);
+        let source = [(39999 & 255) as f32 / 255., (39999 >> 8) as f32 / 255., 0.7];
+        for (actual, original) in palette[last as usize].rgb.into_iter().zip(source) {
+            assert!((actual - original).abs() <= 0.5 / 1023. + 1e-7);
+        }
+    }
+    #[test]
+    fn empty_cuboids_never_cross_occupied_cells() {
+        for seed in 1..33u64 {
+            let mut rng = seed;
+            let mut a: Vec<u32> = (0..64)
+                .map(|_| {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if rng >> 61 == 0 {
+                        FULL | 1
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let occupied = a.clone();
+            bounds(&mut a, [4; 3], [1, 4, 16], 2, &|| false).unwrap();
+            for i in 0..64 {
+                if occupied[i] != 0 {
+                    continue;
+                }
+                let c = [i % 4, (i / 4) % 4, i / 16];
+                for z in c[2] - ((a[i] >> 8) & 3) as usize..=c[2] + ((a[i] >> 10) & 3) as usize {
+                    for y in c[1] - ((a[i] >> 4) & 3) as usize..=c[1] + ((a[i] >> 6) & 3) as usize {
+                        for x in c[0] - (a[i] & 3) as usize..=c[0] + ((a[i] >> 2) & 3) as usize {
+                            assert_eq!(occupied[x + 4 * (y + 4 * z)], 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn y_fast_top_bounds_are_sound() {
+        let mut v = vec![0; 8 * 8 * 8];
+        v[(3 * 8 + 4) * 8 + 2] = FULL | 1;
+        bounds(&mut v, [8; 3], [8, 1, 64], 5, &|| false).unwrap();
+        for i in 0..v.len() {
+            if v[i] & FULL != 0 {
+                continue;
+            }
+            let c = [(i / 8) % 8, i % 8, i / 64];
+            let mut lo = [0; 3];
+            let mut hi = [0; 3];
+            for a in 0..3 {
+                lo[a] = c[a] - ((v[i] >> (a * 10)) & 31) as usize;
+                hi[a] = c[a] + ((v[i] >> (a * 10 + 5)) & 31) as usize;
+            }
+            assert!(
+                !(lo[0] <= 4 && hi[0] >= 4 && lo[1] <= 2 && hi[1] >= 2 && lo[2] <= 3 && hi[2] >= 3)
+            );
+        }
+    }
+    #[test]
+    fn snapshot_matches_canonical_fixture_with_edit() {
+        let mut w = World::new(7);
+        w.set(Cell { x: 0, y: 30, z: 0 }, Material::Wood);
+        let s = build(
+            &w,
+            [0., 3., 0.],
+            1,
+            32 * 1048576,
+            &AtomicU32::new(0),
+            || false,
+        )
+        .unwrap();
+        for z in 0..32 {
+            for y in 0..32 {
+                for x in 0..32 {
+                    let c = Cell {
+                        x: s.origin.x + x as i64,
+                        y: s.origin.y + y as i64,
+                        z: s.origin.z + z as i64,
+                    };
+                    assert_eq!(s.material([x, y, z]) & 0x3fff_ffff, id(w.material(c)));
+                }
+            }
+        }
+    }
+    #[test]
+    fn fbm_and_seeded_plants_match_canonical_materials() {
+        let world = World::fbm(
+            7,
+            frontier_world::FbmParams {
+                recipe: frontier_world::FbmRecipe::Alpine,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .with_vegetation();
+        let eye = [-41., world.height_m(-41., -250.) + 1.7, -250.];
+        let s = build(&world, eye, 2, 128 * 1048576, &AtomicU32::new(0), || false).unwrap();
+        assert!(s.plant_cells > 0);
+        let mut rng = 123u64;
+        for _ in 0..4096 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let p = [
+                (rng & 63) as usize,
+                ((rng >> 9) & 63) as usize,
+                ((rng >> 18) & 63) as usize,
+            ];
+            let c = Cell {
+                x: s.origin.x + p[0] as i64,
+                y: s.origin.y + p[1] as i64,
+                z: s.origin.z + p[2] as i64,
+            };
+            let ty = s.material(p) & 0x3fff_ffff;
+            assert_eq!(
+                s.palette[ty as usize].material,
+                id(world.material(c)) as u32,
+                "{c:?}"
+            );
+        }
+    }
+    #[test]
+    fn oversized_request_is_rejected_before_allocation() {
+        assert!(build(
+            &World::new(7),
+            [0.; 3],
+            256,
+            16 * 1048576,
+            &AtomicU32::new(0),
+            || false
+        )
+        .unwrap_err()
+        .contains("top grid"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn stack_block_proofs_match_heap_jacobi_words_exactly() {
+    for seed in 0..64_u64 {
+        let mut rng = seed + 1;
+        let nodes: [u32; 64] = std::array::from_fn(|_| {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            match rng >> 61 {
+                0 => FULL | 5,
+                1 => CHILD | 64,
+                _ => 0,
+            }
+        });
+        let mut heap = nodes.to_vec();
+        bounds(&mut heap, [4; 3], [1, 4, 16], 2, &|| false).unwrap();
+        assert_eq!(pack_block(nodes).as_slice(), heap);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_profiling_and_stack_scratch_preserve_exact_snapshot() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Legacy,
+            amplitude: 2.,
+            horizontal_scale: 30.,
+            octaves: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .with_vegetation();
+    let height = (world.height_m(-1., -3.) * 16.) as i64;
+    let min = Cell {
+        x: -32,
+        y: height.div_euclid(16) * 16 - 32,
+        z: -64,
+    };
+    let build = |profiling, stack| {
+        build_region_options(
+            &world,
+            min,
+            [4, 4, 3],
+            128 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+            profiling,
+            stack,
+            false,
+            false,
+            false,
+        )
+        .unwrap()
+    };
+    let baseline = build(false, false);
+    assert!(baseline.cpu_profile.is_none());
+    let profiled = build(true, false);
+    let optimized = build(true, true);
+    for snapshot in [&profiled, &optimized] {
+        assert_eq!(snapshot.chunks, baseline.chunks);
+        assert_eq!(snapshot.blocks, baseline.blocks);
+        assert_eq!(snapshot.voxels, baseline.voxels);
+        assert_eq!(
+            bytemuck::cast_slice::<Pigment, u8>(&snapshot.palette),
+            bytemuck::cast_slice::<Pigment, u8>(&baseline.palette)
+        );
+        assert_eq!(snapshot.sampled_columns, baseline.sampled_columns);
+        assert_eq!(snapshot.plant_cells, baseline.plant_cells);
+    }
+    let baseline_metrics = profiled.cpu_profile.as_ref().unwrap();
+    let optimized_metrics = optimized.cpu_profile.as_ref().unwrap();
+    assert!(baseline.mixed_chunks > 0);
+    assert_eq!(
+        baseline_metrics.block_vec_allocations,
+        2 * baseline.mixed_chunks as u64
+    );
+    assert_eq!(optimized_metrics.block_vec_allocations, 0);
+    assert!(baseline_metrics
+        .ms
+        .iter()
+        .all(|ms| ms.is_finite() && *ms >= 0.));
+    assert!(baseline_metrics.region_unclassified_wall_ms >= 0.);
+    assert_eq!(baseline_metrics.column_vec_allocations, 0);
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "bounded CPU preparation fixture; run only with GPU timings idle"]
+fn profile_region_preparation_stages() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::Alpine,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .with_vegetation();
+    let x = -48.;
+    let z = -250.;
+    let y = (world.height_m(x, z).floor() as i64 - 16) * 16;
+    let min = Cell {
+        x: x as i64 * 16,
+        y,
+        z: z as i64 * 16,
+    };
+    for pass in 0..2 {
+        for stack in if pass == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let snapshot = build_region_options(
+                &world,
+                min,
+                [32, 32, 2],
+                128 * 1048576,
+                &AtomicU32::new(0),
+                None,
+                false,
+                &|| false,
+                true,
+                stack,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+            eprintln!(
+                "{{\"test\":\"profile_region_preparation_stages\",\"seed\":7,\"recipe\":\"Alpine\",\"dims_m\":[32,32,2],\"origin_cell\":[{},{},{}],\"pass\":{},\"stack_blocks\":{},\"build_wall_ms\":{},\"profile\":{}}}",
+                min.x, min.y, min.z, pass, stack, snapshot.build_ms,
+                snapshot.cpu_profile.as_ref().unwrap().json(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn column_extrema_rejection_matches_full_height_and_band_scans() {
+    let mut rng = 7123_u64;
+    for _ in 0..64 {
+        let heights: [i64; 256] = std::array::from_fn(|_| {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng >> 32) as i32 as i64 / 1024
+        });
+        let low = *heights.iter().min().unwrap();
+        let high = *heights.iter().max().unwrap();
+        for y0 in [low - 16, low - 12, low, high - 1, high, high + 16] {
+            assert_eq!(y0 >= high, heights.iter().all(|h| y0 >= *h));
+            assert_eq!(
+                y0 + 15 < low - 12,
+                heights.iter().all(|h| y0 + 15 < *h - 12)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn column_extrema_preserves_snapshot_words_and_canonical_materials_across_sources() {
+    use frontier_world::{FbmParams, FbmRecipe};
+    for recipe in [
+        FbmRecipe::Legacy,
+        FbmRecipe::Alpine,
+        FbmRecipe::Regional,
+        FbmRecipe::RegionalUnwarped,
+    ] {
+        for seed in [7, 91] {
+            for plants in [false, true] {
+                let base = World::fbm(
+                    seed,
+                    FbmParams {
+                        recipe,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let base = if plants { base.with_vegetation() } else { base };
+                for edited in [false, true] {
+                    let mut world = base.clone();
+                    let x = -41.;
+                    let z = -250.;
+                    let height = (world.height_m(x, z) * 16.).floor() as i64;
+                    let min = Cell {
+                        x: -42 * 16,
+                        y: height.div_euclid(16) * 16 - 32,
+                        z: -251 * 16,
+                    };
+                    if edited {
+                        world.set(
+                            Cell {
+                                x: min.x + 20,
+                                y: height,
+                                z: min.z + 20,
+                            },
+                            Material::Wood,
+                        );
+                        world.set(
+                            Cell {
+                                x: min.x + 21,
+                                y: height - 1,
+                                z: min.z + 20,
+                            },
+                            Material::Air,
+                        );
+                    }
+                    let build = |extrema| {
+                        build_region_options(
+                            &world,
+                            min,
+                            [4; 3],
+                            128 * 1048576,
+                            &AtomicU32::new(0),
+                            None,
+                            false,
+                            &|| false,
+                            true,
+                            false,
+                            extrema,
+                            false,
+                            false,
+                        )
+                        .unwrap()
+                    };
+                    let baseline = build(false);
+                    let optimized = build(true);
+                    assert_eq!(
+                        optimized.chunks, baseline.chunks,
+                        "{recipe:?} seed{seed} plants{plants} edits{edited}"
+                    );
+                    assert_eq!(optimized.blocks, baseline.blocks);
+                    assert_eq!(optimized.voxels, baseline.voxels);
+                    assert_eq!(
+                        bytemuck::cast_slice::<Pigment, u8>(&optimized.palette),
+                        bytemuck::cast_slice::<Pigment, u8>(&baseline.palette)
+                    );
+                    assert_eq!(
+                        optimized
+                            .columns
+                            .iter()
+                            .map(|c| (c.low, c.high, c.deep, c.fast))
+                            .collect::<Vec<_>>(),
+                        baseline
+                            .columns
+                            .iter()
+                            .map(|c| (c.low, c.high, c.deep, c.fast))
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(optimized.mixed_chunks, baseline.mixed_chunks);
+                    let mut rng = seed;
+                    for _ in 0..256 {
+                        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let p = [
+                            (rng & 63) as usize,
+                            ((rng >> 9) & 63) as usize,
+                            ((rng >> 18) & 63) as usize,
+                        ];
+                        let word = optimized.material(p);
+                        let actual = if word & FULL == 0 {
+                            0
+                        } else {
+                            optimized.palette[(word & (FULL - 1)) as usize].material
+                        };
+                        assert_eq!(
+                            actual,
+                            id(world.material(Cell {
+                                x: min.x + p[0] as i64,
+                                y: min.y + p[1] as i64,
+                                z: min.z + p[2] as i64,
+                            }))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "cpu_tests.rs"]
+mod cpu_tests;
+
+#[cfg(test)]
+#[test]
+fn seeded_static_water_snapshot_matches_canonical_bed_water_and_air() {
+    let world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::SeededWorld,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let terrain = world.fbm_terrain().unwrap();
+    let (x, z, column) = (-1..=1)
+        .flat_map(|z| (-1..=1).map(move |x| (x * 38400, z * 38400)))
+        .find_map(|(x, z)| {
+            let c = terrain.column_cells(x, z);
+            (c.visible_top > c.ground_top && c.visible_top - c.ground_top < 200)
+                .then_some((x, z, c))
+        })
+        .expect("seed 7 has water at a nearby global drainage node");
+    let min = Cell {
+        x,
+        y: (column.ground_top - 32).div_euclid(16) * 16,
+        z,
+    };
+    let snapshot = build_region(
+        &world,
+        min,
+        [1, 16, 1],
+        32 * 1048576,
+        &AtomicU32::new(0),
+        None,
+        false,
+        &|| false,
+    )
+    .unwrap();
+    let mut seen = [false; 3];
+    for z in 0..16 {
+        for x in 0..16 {
+            let c = world.column(min.x + x as i64, min.z + z as i64);
+            for y in 0..256 {
+                let material = c.material(min.y + y as i64);
+                seen[if material == Material::Air {
+                    0
+                } else if material == Material::Water {
+                    1
+                } else {
+                    2
+                }] = true;
+                let word = snapshot.material([x, y, z]);
+                let actual = if word == 0 {
+                    0
+                } else {
+                    snapshot.palette[(word & 0x3fff_ffff) as usize].material
+                };
+                assert_eq!(actual, id(material), "local={x},{y},{z}");
+            }
+        }
+    }
+    assert_eq!(
+        seen, [true; 3],
+        "fixture must cross ground, static water and air"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn deep_ocean_uniform_chunks_preserve_bed_air_and_edits() {
+    let mut world = World::fbm(
+        7,
+        frontier_world::FbmParams {
+            recipe: frontier_world::FbmRecipe::SeededWorld,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let terrain = world.fbm_terrain().unwrap();
+    let (x, z, c) = (-4..=4)
+        .flat_map(|z| (-4..=4).map(move |x| (x * 320000, z * 320000)))
+        .find_map(|(x, z)| {
+            let c = terrain.column_cells(x, z);
+            (c.visible_top == 0 && (-2048..-128).contains(&c.ground_top)).then_some((x, z, c))
+        })
+        .expect("seed7 contains a bounded deep ocean fixture");
+    let min = Cell {
+        x,
+        y: (c.ground_top - 32).div_euclid(16) * 16,
+        z,
+    };
+    let ny = ((16 - min.y) / 16) as usize;
+    let build = |world: &World| {
+        build_region(
+            world,
+            min,
+            [1, ny, 1],
+            32 * 1048576,
+            &AtomicU32::new(0),
+            None,
+            false,
+            &|| false,
+        )
+        .unwrap()
+    };
+    let baseline = build(&world);
+    let water_only = build_region_options(
+        &world,
+        Cell { x, y: -64, z },
+        [1, 2, 1],
+        32 * 1048576,
+        &AtomicU32::new(0),
+        None,
+        false,
+        &|| false,
+        true,
+        false,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(water_only.chunks, vec![FULL | id(Material::Water); 2]);
+    assert!(water_only.blocks.is_empty() && water_only.voxels.is_empty());
+    assert_eq!(
+        water_only.cpu_profile.as_ref().unwrap().ms[Stage::NativeCellAssembly as usize],
+        0.
+    );
+    assert!(baseline
+        .chunks
+        .iter()
+        .any(|w| *w == FULL | id(Material::Water)));
+    let edited = Cell {
+        x: x + 3,
+        y: -32,
+        z: z + 5,
+    };
+    assert_eq!(world.material(edited), Material::Water);
+    world.set(edited, Material::Stone);
+    world.set(
+        Cell {
+            x: x + 8,
+            y: -31,
+            z: z + 7,
+        },
+        Material::Air,
+    );
+    let changed = build(&world);
+    assert_ne!(
+        changed.material([3, (-32 - min.y) as usize, 5]),
+        FULL | id(Material::Water)
+    );
+    let mut seen = [false; 3];
+    for z in 0..16 {
+        for x in 0..16 {
+            let column = world.column(min.x + x as i64, min.z + z as i64);
+            for y in 0..ny * 16 {
+                let expected = column.material(min.y + y as i64);
+                seen[if expected == Material::Air {
+                    0
+                } else if expected == Material::Water {
+                    1
+                } else {
+                    2
+                }] = true;
+                let word = changed.material([x, y, z]);
+                let actual = if word == 0 {
+                    0
+                } else {
+                    changed.palette[(word & (FULL - 1)) as usize].material
+                };
+                assert_eq!(actual, id(expected), "local={x},{y},{z}");
+                let cell = Cell {
+                    x: min.x + x as i64,
+                    y: min.y + y as i64,
+                    z: min.z + z as i64,
+                };
+                if cell != edited
+                    && cell
+                        != (Cell {
+                            x: min.x + 8,
+                            y: -31,
+                            z: min.z + 7,
+                        })
+                {
+                    assert_eq!(word, baseline.material([x, y, z]));
+                }
+            }
+        }
+    }
+    assert_eq!(seen, [true; 3]);
+}

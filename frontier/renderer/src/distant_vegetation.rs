@@ -1,0 +1,211 @@
+//! Cached display-only Rowan proxies. Same seeded growth strokes/sprays as the
+//! native tree, sampled directly on a coarse grid; never allocate native leaves.
+//! Greenfield implementation inspired by multiscale forest representations
+//! (Bruneton & Neyret 2012), not a port of their precomputed impostor renderer.
+use super::{mesh_cells, VegetationMesh};
+use frontier_world::{vegetation::plant_recipe, Cell, Material};
+use std::collections::BTreeSet;
+
+// Match canonical PlantModel's sRGB pigment -> linear radiance convention.
+fn linear_rgb(rgb: [u8; 3]) -> [f32; 3] {
+    rgb.map(|v| {
+        let c = f32::from(v) / 255.;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
+pub(super) fn distant_tree_radius() -> f64 {
+    std::env::var("FRONTIER_VEGETATION_FAR_RADIUS_M")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(768.)
+        .clamp(220., 1024.)
+}
+pub(super) fn tree_baseline(distance: f64) -> u8 {
+    if distance > 220. {
+        16
+    } else {
+        8
+    }
+}
+/// Experimental half-cell contour displacement estimate with a 25% safety
+/// factor for foliage; wood keeps a separately halved display stride. These
+/// estimates require image validation and are not exact silhouette guarantees.
+pub(super) fn matched_tree_stride(distance: f64, projection: f64, pixel_error: f64) -> u8 {
+    let pixels_per_cell = frontier_world::voxel_size() * projection / distance.max(1.);
+    let mut stride = 4;
+    for next in [8, 16] {
+        let foliage_deviation = next as f64 * 0.5 * 1.25 * pixels_per_cell;
+        let wood_deviation = (next / 2) as f64 * 0.5 * pixels_per_cell;
+        if foliage_deviation <= pixel_error && wood_deviation <= pixel_error * 0.5 {
+            stride = next;
+        }
+    }
+    stride
+}
+pub(super) fn matched_transition_requested() -> bool {
+    std::env::var("FRONTIER_VEGETATION_TREE_TRANSITION").is_ok_and(|v| v == "matched")
+}
+pub(super) fn distant_tree_mesh(
+    seed: u64,
+    variant: u8,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
+    recipe_tree_mesh(seed, variant, 16, cancel)
+}
+/// Same rooted recipe and pigments for intermediate and distant crowns. No
+/// canonical leaf model is allocated at either display stride.
+pub(super) fn recipe_tree_mesh(
+    seed: u64,
+    variant: u8,
+    stride: u8,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
+    let stride = i64::from(stride.clamp(8, 16));
+    if cancel() {
+        return VegetationMesh::default();
+    }
+    let recipe = plant_recipe::rowan_recipe(seed, variant);
+    let mut wood = BTreeSet::new();
+    for s in &recipe.wood {
+        if cancel() {
+            return VegetationMesh::default();
+        }
+        let from = s.from.map(f64::from);
+        let delta: [f64; 3] = std::array::from_fn(|i| f64::from(s.to[i]) - from[i]);
+        let count = (delta.iter().map(|v| v.abs()).fold(0., f64::max) / 4.)
+            .ceil()
+            .max(1.) as usize;
+        for i in 0..=count {
+            let p: [i64; 3] = std::array::from_fn(|a| {
+                (from[a] + delta[a] * i as f64 / count as f64).floor() as i64
+            });
+            wood.insert(Cell {
+                x: p[0],
+                y: p[1],
+                z: p[2],
+            });
+        }
+    }
+    let mut leaves = BTreeSet::new();
+    for s in &recipe.foliage {
+        if cancel() {
+            return VegetationMesh::default();
+        }
+        let c = s.center.map(f64::from);
+        let r = [s.rx, 1.8, s.rz];
+        let low: [i64; 3] =
+            std::array::from_fn(|i| ((c[i] - r[i]).floor() as i64).div_euclid(stride));
+        let high: [i64; 3] =
+            std::array::from_fn(|i| ((c[i] + r[i]).ceil() as i64).div_euclid(stride));
+        for x in low[0]..=high[0] {
+            for y in low[1]..=high[1] {
+                for z in low[2]..=high[2] {
+                    let q = [x, y, z];
+                    // Closest point of each coarse cube to the spray centre: a
+                    // conservative ellipsoid/cube intersection, not a centre sample
+                    // that could erase a thin spray between samples.
+                    let d: f64 = (0..3)
+                        .map(|i| {
+                            let nearest =
+                                c[i].clamp((q[i] * stride) as f64, ((q[i] + 1) * stride) as f64);
+                            ((nearest - c[i]) / r[i]).powi(2)
+                        })
+                        .sum();
+                    if d <= 1. {
+                        leaves.insert(Cell {
+                            x: x * stride,
+                            y: y * stride,
+                            z: z * stride,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut trunk = mesh_cells(
+        wood.into_iter()
+            .map(|c| (c, Material::Wood as u8, linear_rgb([128, 116, 96]))),
+        (stride / 2) as u8,
+        &cancel,
+    );
+    let canopy = mesh_cells(
+        leaves
+            .into_iter()
+            .map(|c| (c, Material::Leaf as u8, linear_rgb([107, 140, 66]))),
+        stride as u8,
+        &cancel,
+    );
+    if cancel() {
+        return VegetationMesh::default();
+    }
+    let base = trunk.vertices.len() as u32;
+    trunk.vertices.extend(canopy.vertices);
+    trunk
+        .indices
+        .extend(canopy.indices.into_iter().map(|i| i + base));
+    trunk
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn intermediate_recipe_is_repeatable_rooted_and_bounded_without_native_leaves() {
+        for seed in [7, 941, 1274974721108113005] {
+            for stride in [8, 16] {
+                let a = recipe_tree_mesh(seed, 3, stride, || false);
+                let b = recipe_tree_mesh(seed, 3, stride, || false);
+                assert!(!a.indices.is_empty());
+                assert!(a.indices.len() / 3 < 20_000);
+                assert_eq!(a.indices, b.indices);
+                assert_eq!(
+                    bytemuck::cast_slice::<_, u8>(&a.vertices),
+                    bytemuck::cast_slice::<_, u8>(&b.vertices)
+                );
+                assert!(a.vertices.iter().any(|v| v.position[1] <= 0.));
+                assert!(a
+                    .vertices
+                    .iter()
+                    .all(|v| v.position.iter().all(|p| p.is_finite())));
+            }
+        }
+        assert!(recipe_tree_mesh(7, 3, 8, || true).indices.is_empty());
+    }
+    #[test]
+    fn projected_contour_policy_inserts_intermediate_lod_and_scales_with_resolution() {
+        let projection = 1080. / (2. * (60f64.to_radians() / 2.).tan());
+        for (distance, stride) in [(150., 4), (220., 4), (260., 8), (300., 8), (520., 16)] {
+            assert_eq!(matched_tree_stride(distance, projection, 1.25), stride);
+        }
+        assert_eq!(matched_tree_stride(300., projection * 2., 1.25), 4);
+        assert_eq!(matched_tree_stride(300., projection, 0.625), 4);
+    }
+    #[test]
+    fn distant_recipes_are_bounded_repeatable_and_keep_rooted_wood() {
+        for seed in [7, 941, 1274974721108113005] {
+            let a = distant_tree_mesh(seed, 3, || false);
+            let b = distant_tree_mesh(seed, 3, || false);
+            assert!(!a.indices.is_empty());
+            assert!(a.indices.len() / 3 < 5000);
+            assert_eq!(a.indices, b.indices);
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&a.vertices),
+                bytemuck::cast_slice::<_, u8>(&b.vertices)
+            );
+            assert!(a.vertices.iter().any(|v| v.position[1] <= 0.));
+            assert!(a
+                .vertices
+                .iter()
+                .all(|v| v.position.iter().all(|p| p.is_finite())));
+        }
+        assert!(distant_tree_mesh(7, 3, || true).indices.is_empty());
+        assert_eq!(tree_baseline(220.), 8);
+        assert_eq!(tree_baseline(220.001), 16);
+    }
+}

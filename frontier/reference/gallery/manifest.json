@@ -1,0 +1,1096 @@
+{
+  "schema": "frontier-reference-gallery-v1",
+  "scope": "Issue66 P0 bounded exact native fixture; not certified landscape/LOD/temporal fidelity",
+  "scenes": [
+    {
+      "id": "fixture",
+      "reference_manifest": {
+        "schema": "frontier-reference-v1",
+        "source": "World::new",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "scene": "fixture",
+        "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+        "git_dirty": true,
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "width": 1920,
+        "height": 1080,
+        "spp": 256,
+        "threads": 8,
+        "accelerated": true,
+        "voxel_size_m": 0.0625,
+        "lod": false,
+        "eye": [
+          11.0,
+          9.0,
+          -15.0
+        ],
+        "target": [
+          -1.0,
+          3.0,
+          1.0
+        ],
+        "up": [
+          0,
+          1,
+          0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "crop_policy": "canonical exposed faces only; no crop caps",
+        "sampling": "deterministic jittered square stratification (SplitMix64)",
+        "sample_seed": 83,
+        "pixel_filter": "box",
+        "exposure": 1.0,
+        "ray_count": 530841600,
+        "accumulation": "f64 linear then f32 storage",
+        "png_transfer": "IEC 61966-2-1 sRGB",
+        "lighting": {
+          "sun_direction": [
+            -0.5,
+            0.8,
+            -0.3
+          ],
+          "sun_color": [
+            0.78,
+            0.7,
+            0.58
+          ],
+          "ambient_ground": [
+            0.12,
+            0.105,
+            0.085
+          ],
+          "ambient_sky": [
+            0.28,
+            0.33,
+            0.4
+          ],
+          "sky_clear_linear": [
+            0.34,
+            0.57,
+            0.8
+          ],
+          "shadows": false,
+          "fog": false
+        },
+        "raw_format": "little-endian IEEE754 f32; top-left origin row-major interleaved",
+        "files": {
+          "linear_rgb.f32": [
+            "R",
+            "G",
+            "B"
+          ],
+          "coverage.f32": [
+            "hit fraction"
+          ],
+          "depth.f32": [
+            "min distance m",
+            "max distance m",
+            "mean distance m",
+            "population variance m2"
+          ],
+          "normals.f32": [
+            "-X",
+            "+X",
+            "-Y",
+            "+Y",
+            "-Z",
+            "+Z"
+          ],
+          "materials.f32": [
+            "Grass",
+            "Soil",
+            "Stone",
+            "Wood"
+          ]
+        },
+        "histogram_normalization": "counts/spp; sum equals coverage",
+        "depth_conditioning": "hits only; NaN for no hits",
+        "build_seconds": 0.133324607,
+        "render_seconds": 31.67363056,
+        "total_seconds": 32.35905587,
+        "snapshot_bytes": 31457728,
+        "peak_rss_bytes": 180953088,
+        "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics"
+      },
+      "center_manifest": {
+        "schema": "frontier-reference-centers-v1",
+        "source": "World::new",
+        "scene": "fixture",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "voxel_size_m": 0.0625,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "git_dirty": true,
+        "width": 1920,
+        "height": 1080,
+        "eye": [
+          11.0,
+          9.0,
+          -15.0
+        ],
+        "target": [
+          -1.0,
+          3.0,
+          1.0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "sampling": "pixel center (0.5,0.5)",
+        "depth": "ray distance meters, NaN on miss",
+        "raw_format": "little endian f32, top-left row-major",
+        "git_revision": "2bcf23c5bdbec9e34c0be319d505196ea9b50bcc"
+      },
+      "gpu_manifest": {
+        "width": 1920,
+        "height": 1080,
+        "eye": [
+          11.0,
+          9.0,
+          -15.0
+        ],
+        "target": [
+          10.425304174423218,
+          8.712652117013931,
+          -14.233738958835602
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "samples": 1,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_float32_render_target",
+        "voxel_filter": false,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "seed": 7,
+        "scene": "fixture",
+        "renderer": "mesh",
+        "source_version": 1,
+        "edit_revision": 0,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ]
+      },
+      "metrics": {
+        "reference": "output/reference-checkpoint/fixture-256",
+        "gpu": "output/reference-checkpoint/gpu-fixture.png",
+        "width": 1920,
+        "height": 1080,
+        "reference_spp": 256,
+        "world": {
+          "seed": 7,
+          "source_version": 1,
+          "edit_revision": 0,
+          "native_min_cell": [
+            -128,
+            -32,
+            -128
+          ],
+          "native_size_cells": [
+            256,
+            224,
+            256
+          ]
+        },
+        "reference_provenance": {
+          "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "geometry": {
+          "false_coverage_pixels": 0,
+          "missing_coverage_pixels": 24,
+          "reference_partial_coverage_pixels": 3606,
+          "coverage_absolute_error": {
+            "samples": 2073600,
+            "mae": 0.0003762892734857253,
+            "rmse": 0.011554429372293487,
+            "p95_absolute": 0.0,
+            "max_absolute": 1.0
+          },
+          "depth_tolerance_m": 0.002,
+          "depth_outside_reference_range_pixels": 10,
+          "depth_range_residual_m_on_fully_covered_pixels": {
+            "samples": 463467,
+            "mae": 4.147998374002907e-05,
+            "rmse": 0.014087764604755769,
+            "p95_absolute": 0.0,
+            "max_absolute": 7.544599577658666
+          },
+          "depth_mean_difference_m_diagnostic": {
+            "samples": 463467,
+            "mae": 0.005191327860567117,
+            "rmse": 0.06344624770529887,
+            "p95_absolute": 0.01013434807598017,
+            "max_absolute": 7.566129729025853
+          },
+          "pixel_center": {
+            "false_coverage_pixels": 3,
+            "missing_coverage_pixels": 25,
+            "depth_error_above_tolerance_pixels": 10474,
+            "depth_error_m_on_shared_hits": {
+              "samples": 465327,
+              "mae": 0.000733284877156275,
+              "rmse": 0.014242547609612716,
+              "p95_absolute": 0.0016673512616307553,
+              "max_absolute": 7.55489735292722
+            },
+            "interpretation": "Matched pixel-center rays; raster edge fill conventions and GPU float projection can differ at exact voxel edges."
+          }
+        },
+        "appearance": {
+          "all_pixels_linear_rgb_error": {
+            "samples": 6220800,
+            "mae": 0.002123762598823432,
+            "rmse": 0.01160473868659672,
+            "p95_absolute": 0.010997340083122253,
+            "max_absolute": 0.7684750147163868
+          },
+          "matched_full_coverage_depth_linear_rgb_error": {
+            "samples": 1390371,
+            "mae": 0.008764918831111987,
+            "rmse": 0.021382188517646655,
+            "p95_absolute": 0.05137510597705841,
+            "max_absolute": 0.2252342775464058
+          },
+          "gpu_encoding": "linear_rgb_float32_render_target",
+          "reference_radiance_above_one_fraction": 0.0,
+          "interpretation": "Lighting, shadows, indirect transport and sampling differ; ordinary 8-bit captures also include quantization. Color error is not geometry error."
+        },
+        "limitations": [
+          "Finite reference samples cannot prove absence of thin subpixel geometry.",
+          "Partial-coverage pixels are excluded from strict false/missing counts.",
+          "Depth range acceptance may hide a wrong surface between reference min/max.",
+          "Normals and materials are reference histograms only; GPU MRT parity is not measured."
+        ],
+        "center_provenance": {
+          "git_revision": "2bcf23c5bdbec9e34c0be319d505196ea9b50bcc",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "reference_convergence": {
+          "other_spp": 64,
+          "reference_sample_seed": 83,
+          "other_sample_seed": 19,
+          "reference_sampling": "deterministic jittered square stratification (SplitMix64)",
+          "other_sampling": "deterministic jittered square stratification (SplitMix64)",
+          "linear_rgb_difference": {
+            "samples": 6220800,
+            "mae": 0.00013723088781486615,
+            "rmse": 0.000767621829319912,
+            "p95_absolute": 0.0006880462169647217,
+            "max_absolute": 0.05624106526374817
+          },
+          "coverage_difference": {
+            "samples": 2073600,
+            "mae": 2.3562584394290123e-05,
+            "rmse": 0.0007264497386632746,
+            "p95_absolute": 0.0,
+            "max_absolute": 0.078125
+          }
+        },
+        "geometry_image_legend": {
+          "magenta": "false coverage",
+          "cyan": "missing coverage",
+          "orange": "depth outside range",
+          "gray": "partial reference coverage"
+        }
+      },
+      "full_outputs": "output/reference-checkpoint/fixture-256",
+      "preview": "fixture.png",
+      "reproduce": "python3 tools/reference_gate.py --output output/reference-fixture --camera fixture --width 1920 --height 1080"
+    },
+    {
+      "id": "cave",
+      "reference_manifest": {
+        "schema": "frontier-reference-v1",
+        "source": "World::new",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "scene": "fixture",
+        "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+        "git_dirty": true,
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "width": 1280,
+        "height": 720,
+        "spp": 256,
+        "threads": 8,
+        "accelerated": true,
+        "voxel_size_m": 0.0625,
+        "lod": false,
+        "eye": [
+          -3.0,
+          3.0,
+          -7.0
+        ],
+        "target": [
+          -3.0,
+          3.0,
+          6.0
+        ],
+        "up": [
+          0,
+          1,
+          0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "crop_policy": "canonical exposed faces only; no crop caps",
+        "sampling": "deterministic jittered square stratification (SplitMix64)",
+        "sample_seed": 83,
+        "pixel_filter": "box",
+        "exposure": 1.0,
+        "ray_count": 235929600,
+        "accumulation": "f64 linear then f32 storage",
+        "png_transfer": "IEC 61966-2-1 sRGB",
+        "lighting": {
+          "sun_direction": [
+            -0.5,
+            0.8,
+            -0.3
+          ],
+          "sun_color": [
+            0.78,
+            0.7,
+            0.58
+          ],
+          "ambient_ground": [
+            0.12,
+            0.105,
+            0.085
+          ],
+          "ambient_sky": [
+            0.28,
+            0.33,
+            0.4
+          ],
+          "sky_clear_linear": [
+            0.34,
+            0.57,
+            0.8
+          ],
+          "shadows": false,
+          "fog": false
+        },
+        "raw_format": "little-endian IEEE754 f32; top-left origin row-major interleaved",
+        "files": {
+          "linear_rgb.f32": [
+            "R",
+            "G",
+            "B"
+          ],
+          "coverage.f32": [
+            "hit fraction"
+          ],
+          "depth.f32": [
+            "min distance m",
+            "max distance m",
+            "mean distance m",
+            "population variance m2"
+          ],
+          "normals.f32": [
+            "-X",
+            "+X",
+            "-Y",
+            "+Y",
+            "-Z",
+            "+Z"
+          ],
+          "materials.f32": [
+            "Grass",
+            "Soil",
+            "Stone",
+            "Wood"
+          ]
+        },
+        "histogram_normalization": "counts/spp; sum equals coverage",
+        "depth_conditioning": "hits only; NaN for no hits",
+        "build_seconds": 0.13124324,
+        "render_seconds": 30.33931339,
+        "total_seconds": 30.846045646,
+        "snapshot_bytes": 31457728,
+        "peak_rss_bytes": 98488320,
+        "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics"
+      },
+      "center_manifest": {
+        "schema": "frontier-reference-centers-v1",
+        "source": "World::new",
+        "scene": "fixture",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "voxel_size_m": 0.0625,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "git_dirty": true,
+        "width": 1280,
+        "height": 720,
+        "eye": [
+          -3.0,
+          3.0,
+          -7.0
+        ],
+        "target": [
+          -3.0,
+          3.0,
+          6.0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "sampling": "pixel center (0.5,0.5)",
+        "depth": "ray distance meters, NaN on miss",
+        "raw_format": "little endian f32, top-left row-major",
+        "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9"
+      },
+      "gpu_manifest": {
+        "width": 1280,
+        "height": 720,
+        "eye": [
+          -3.0,
+          3.0,
+          -7.0
+        ],
+        "target": [
+          -3.0,
+          3.0,
+          -6.0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "samples": 1,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_float32_render_target",
+        "voxel_filter": false,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "seed": 7,
+        "scene": "fixture",
+        "renderer": "mesh",
+        "source_version": 1,
+        "edit_revision": 0,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ]
+      },
+      "metrics": {
+        "reference": "output/reference-checkpoint/cave-256",
+        "gpu": "output/reference-checkpoint/gpu-cave.png",
+        "width": 1280,
+        "height": 720,
+        "reference_spp": 256,
+        "world": {
+          "seed": 7,
+          "source_version": 1,
+          "edit_revision": 0,
+          "native_min_cell": [
+            -128,
+            -32,
+            -128
+          ],
+          "native_size_cells": [
+            256,
+            224,
+            256
+          ]
+        },
+        "reference_provenance": {
+          "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "geometry": {
+          "false_coverage_pixels": 0,
+          "missing_coverage_pixels": 37,
+          "reference_partial_coverage_pixels": 488,
+          "coverage_absolute_error": {
+            "samples": 921600,
+            "mae": 0.00017570919460720486,
+            "rmse": 0.009229438641389164,
+            "p95_absolute": 0.0,
+            "max_absolute": 1.0
+          },
+          "depth_tolerance_m": 0.002,
+          "depth_outside_reference_range_pixels": 0,
+          "depth_range_residual_m_on_fully_covered_pixels": {
+            "samples": 909262,
+            "mae": 0.0,
+            "rmse": 0.0,
+            "p95_absolute": 0.0,
+            "max_absolute": 0.0
+          },
+          "depth_mean_difference_m_diagnostic": {
+            "samples": 909262,
+            "mae": 0.00019420395804184271,
+            "rmse": 0.0016640598554255475,
+            "p95_absolute": 0.00032360781338605036,
+            "max_absolute": 0.11291683234830074
+          },
+          "pixel_center": {
+            "false_coverage_pixels": 283,
+            "missing_coverage_pixels": 37,
+            "depth_error_above_tolerance_pixels": 13,
+            "depth_error_m_on_shared_hits": {
+              "samples": 909194,
+              "mae": 0.00013022028451544553,
+              "rmse": 0.02771633981950492,
+              "p95_absolute": 8.986650996956058e-05,
+              "max_absolute": 8.255286580583912
+            },
+            "interpretation": "Matched pixel-center rays; raster edge fill conventions and GPU float projection can differ at exact voxel edges."
+          }
+        },
+        "appearance": {
+          "all_pixels_linear_rgb_error": {
+            "samples": 2764800,
+            "mae": 0.002034638781003903,
+            "rmse": 0.011551827555078165,
+            "p95_absolute": 0.00667794793844223,
+            "max_absolute": 0.7368573397397995
+          },
+          "matched_full_coverage_depth_linear_rgb_error": {
+            "samples": 2727786,
+            "mae": 0.0019893767325607392,
+            "rmse": 0.010835054678119564,
+            "p95_absolute": 0.006781242787837982,
+            "max_absolute": 0.1313454508781433
+          },
+          "gpu_encoding": "linear_rgb_float32_render_target",
+          "reference_radiance_above_one_fraction": 0.0,
+          "interpretation": "Lighting, shadows, indirect transport and sampling differ; ordinary 8-bit captures also include quantization. Color error is not geometry error."
+        },
+        "limitations": [
+          "Finite reference samples cannot prove absence of thin subpixel geometry.",
+          "Partial-coverage pixels are excluded from strict false/missing counts.",
+          "Depth range acceptance may hide a wrong surface between reference min/max.",
+          "Normals and materials are reference histograms only; GPU MRT parity is not measured."
+        ],
+        "center_provenance": {
+          "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "geometry_image_legend": {
+          "magenta": "false coverage",
+          "cyan": "missing coverage",
+          "orange": "depth outside range",
+          "gray": "partial reference coverage"
+        }
+      },
+      "full_outputs": "output/reference-checkpoint/cave-256",
+      "preview": "cave.png",
+      "reproduce": "python3 tools/reference_gate.py --output output/reference-cave --camera cave --width 1280 --height 720"
+    },
+    {
+      "id": "bridge",
+      "reference_manifest": {
+        "schema": "frontier-reference-v1",
+        "source": "World::new",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "scene": "fixture",
+        "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+        "git_dirty": true,
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "width": 1280,
+        "height": 720,
+        "spp": 256,
+        "threads": 8,
+        "accelerated": true,
+        "voxel_size_m": 0.0625,
+        "lod": false,
+        "eye": [
+          4.5,
+          2.8,
+          -2.5
+        ],
+        "target": [
+          4.5,
+          4.1,
+          -1.5
+        ],
+        "up": [
+          0,
+          1,
+          0
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "crop_policy": "canonical exposed faces only; no crop caps",
+        "sampling": "deterministic jittered square stratification (SplitMix64)",
+        "sample_seed": 83,
+        "pixel_filter": "box",
+        "exposure": 1.0,
+        "ray_count": 235929600,
+        "accumulation": "f64 linear then f32 storage",
+        "png_transfer": "IEC 61966-2-1 sRGB",
+        "lighting": {
+          "sun_direction": [
+            -0.5,
+            0.8,
+            -0.3
+          ],
+          "sun_color": [
+            0.78,
+            0.7,
+            0.58
+          ],
+          "ambient_ground": [
+            0.12,
+            0.105,
+            0.085
+          ],
+          "ambient_sky": [
+            0.28,
+            0.33,
+            0.4
+          ],
+          "sky_clear_linear": [
+            0.34,
+            0.57,
+            0.8
+          ],
+          "shadows": false,
+          "fog": false
+        },
+        "raw_format": "little-endian IEEE754 f32; top-left origin row-major interleaved",
+        "files": {
+          "linear_rgb.f32": [
+            "R",
+            "G",
+            "B"
+          ],
+          "coverage.f32": [
+            "hit fraction"
+          ],
+          "depth.f32": [
+            "min distance m",
+            "max distance m",
+            "mean distance m",
+            "population variance m2"
+          ],
+          "normals.f32": [
+            "-X",
+            "+X",
+            "-Y",
+            "+Y",
+            "-Z",
+            "+Z"
+          ],
+          "materials.f32": [
+            "Grass",
+            "Soil",
+            "Stone",
+            "Wood"
+          ]
+        },
+        "histogram_normalization": "counts/spp; sum equals coverage",
+        "depth_conditioning": "hits only; NaN for no hits",
+        "build_seconds": 0.130266076,
+        "render_seconds": 18.798632351,
+        "total_seconds": 19.317951299,
+        "snapshot_bytes": 31457728,
+        "peak_rss_bytes": 98426880,
+        "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics"
+      },
+      "center_manifest": {
+        "schema": "frontier-reference-centers-v1",
+        "source": "World::new",
+        "scene": "fixture",
+        "source_version": 1,
+        "seed": 7,
+        "edit_revision": 0,
+        "voxel_size_m": 0.0625,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ],
+        "source_fnv1a64": "5c3db99e41ae08be",
+        "canonical_source_fnv1a64": "2168994f362a5d26",
+        "git_dirty": true,
+        "width": 1280,
+        "height": 720,
+        "eye": [
+          4.5,
+          2.8,
+          -2.5
+        ],
+        "target": [
+          4.5,
+          4.1,
+          -1.5
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "sampling": "pixel center (0.5,0.5)",
+        "depth": "ray distance meters, NaN on miss",
+        "raw_format": "little endian f32, top-left row-major",
+        "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9"
+      },
+      "gpu_manifest": {
+        "width": 1280,
+        "height": 720,
+        "eye": [
+          4.5,
+          2.8,
+          -2.5
+        ],
+        "target": [
+          4.5,
+          3.592623996734619,
+          -1.8902892470359802
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 20000,
+        "samples": 1,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_float32_render_target",
+        "voxel_filter": false,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "seed": 7,
+        "scene": "fixture",
+        "renderer": "mesh",
+        "source_version": 1,
+        "edit_revision": 0,
+        "native_min_cell": [
+          -128,
+          -32,
+          -128
+        ],
+        "native_size_cells": [
+          256,
+          224,
+          256
+        ]
+      },
+      "metrics": {
+        "reference": "output/reference-checkpoint/bridge-256",
+        "gpu": "output/reference-checkpoint/gpu-bridge.png",
+        "width": 1280,
+        "height": 720,
+        "reference_spp": 256,
+        "world": {
+          "seed": 7,
+          "source_version": 1,
+          "edit_revision": 0,
+          "native_min_cell": [
+            -128,
+            -32,
+            -128
+          ],
+          "native_size_cells": [
+            256,
+            224,
+            256
+          ]
+        },
+        "reference_provenance": {
+          "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "geometry": {
+          "false_coverage_pixels": 0,
+          "missing_coverage_pixels": 1,
+          "reference_partial_coverage_pixels": 2591,
+          "coverage_absolute_error": {
+            "samples": 921600,
+            "mae": 0.00046986473931206595,
+            "rmse": 0.009596007749325388,
+            "p95_absolute": 0.0,
+            "max_absolute": 1.0
+          },
+          "depth_tolerance_m": 0.002,
+          "depth_outside_reference_range_pixels": 0,
+          "depth_range_residual_m_on_fully_covered_pixels": {
+            "samples": 546000,
+            "mae": 0.0,
+            "rmse": 0.0,
+            "p95_absolute": 0.0,
+            "max_absolute": 0.0
+          },
+          "depth_mean_difference_m_diagnostic": {
+            "samples": 546000,
+            "mae": 0.0003996236853088587,
+            "rmse": 0.006716639568201771,
+            "p95_absolute": 7.414806787522376e-05,
+            "max_absolute": 0.5546723008085039
+          },
+          "pixel_center": {
+            "false_coverage_pixels": 0,
+            "missing_coverage_pixels": 1,
+            "depth_error_above_tolerance_pixels": 1,
+            "depth_error_m_on_shared_hits": {
+              "samples": 547172,
+              "mae": 4.7966307757535054e-05,
+              "rmse": 0.00037869801935484315,
+              "p95_absolute": 7.098757403343201e-05,
+              "max_absolute": 0.2777575865792494
+            },
+            "interpretation": "Matched pixel-center rays; raster edge fill conventions and GPU float projection can differ at exact voxel edges."
+          }
+        },
+        "appearance": {
+          "all_pixels_linear_rgb_error": {
+            "samples": 2764800,
+            "mae": 0.0003254275296448786,
+            "rmse": 0.00558180040807684,
+            "p95_absolute": 3.725290298461914e-09,
+            "max_absolute": 0.77879249304533
+          },
+          "matched_full_coverage_depth_linear_rgb_error": {
+            "samples": 1638000,
+            "mae": 0.00015184460018030272,
+            "rmse": 0.0023478518520729697,
+            "p95_absolute": 7.450580596923828e-09,
+            "max_absolute": 0.06435031443834305
+          },
+          "gpu_encoding": "linear_rgb_float32_render_target",
+          "reference_radiance_above_one_fraction": 0.0,
+          "interpretation": "Lighting, shadows, indirect transport and sampling differ; ordinary 8-bit captures also include quantization. Color error is not geometry error."
+        },
+        "limitations": [
+          "Finite reference samples cannot prove absence of thin subpixel geometry.",
+          "Partial-coverage pixels are excluded from strict false/missing counts.",
+          "Depth range acceptance may hide a wrong surface between reference min/max.",
+          "Normals and materials are reference histograms only; GPU MRT parity is not measured."
+        ],
+        "center_provenance": {
+          "git_revision": "683420bd27afc53b5e252f366648a8e79a005bb9",
+          "git_dirty": true,
+          "source_fnv1a64": "5c3db99e41ae08be",
+          "canonical_source_fnv1a64": "2168994f362a5d26"
+        },
+        "geometry_image_legend": {
+          "magenta": "false coverage",
+          "cyan": "missing coverage",
+          "orange": "depth outside range",
+          "gray": "partial reference coverage"
+        }
+      },
+      "full_outputs": "output/reference-checkpoint/bridge-256",
+      "preview": "bridge.png",
+      "reproduce": "python3 tools/reference_gate.py --output output/reference-bridge --camera bridge --width 1280 --height 720"
+    }
+  ],
+  "convergence_lower_reference": {
+    "schema": "frontier-reference-v1",
+    "source": "World::new",
+    "source_version": 1,
+    "seed": 7,
+    "edit_revision": 0,
+    "scene": "fixture",
+    "git_revision": "2bcf23c5bdbec9e34c0be319d505196ea9b50bcc",
+    "git_dirty": true,
+    "source_fnv1a64": "5c3db99e41ae08be",
+    "canonical_source_fnv1a64": "2168994f362a5d26",
+    "width": 1920,
+    "height": 1080,
+    "spp": 64,
+    "threads": 8,
+    "accelerated": true,
+    "voxel_size_m": 0.0625,
+    "lod": false,
+    "eye": [
+      11.0,
+      9.0,
+      -15.0
+    ],
+    "target": [
+      -1.0,
+      3.0,
+      1.0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ],
+    "fov_y_degrees": 60,
+    "near": 0.025,
+    "far": 20000,
+    "native_min_cell": [
+      -128,
+      -32,
+      -128
+    ],
+    "native_size_cells": [
+      256,
+      224,
+      256
+    ],
+    "crop_policy": "canonical exposed faces only; no crop caps",
+    "sampling": "deterministic jittered square stratification (SplitMix64)",
+    "sample_seed": 19,
+    "pixel_filter": "box",
+    "exposure": 1.0,
+    "ray_count": 132710400,
+    "accumulation": "f64 linear then f32 storage",
+    "png_transfer": "IEC 61966-2-1 sRGB",
+    "lighting": {
+      "sun_direction": [
+        -0.5,
+        0.8,
+        -0.3
+      ],
+      "sun_color": [
+        0.78,
+        0.7,
+        0.58
+      ],
+      "ambient_ground": [
+        0.12,
+        0.105,
+        0.085
+      ],
+      "ambient_sky": [
+        0.28,
+        0.33,
+        0.4
+      ],
+      "sky_clear_linear": [
+        0.34,
+        0.57,
+        0.8
+      ],
+      "shadows": false,
+      "fog": false
+    },
+    "raw_format": "little-endian IEEE754 f32; top-left origin row-major interleaved",
+    "files": {
+      "linear_rgb.f32": [
+        "R",
+        "G",
+        "B"
+      ],
+      "coverage.f32": [
+        "hit fraction"
+      ],
+      "depth.f32": [
+        "min distance m",
+        "max distance m",
+        "mean distance m",
+        "population variance m2"
+      ],
+      "normals.f32": [
+        "-X",
+        "+X",
+        "-Y",
+        "+Y",
+        "-Z",
+        "+Z"
+      ],
+      "materials.f32": [
+        "Grass",
+        "Soil",
+        "Stone",
+        "Wood"
+      ]
+    },
+    "histogram_normalization": "counts/spp; sum equals coverage",
+    "depth_conditioning": "hits only; NaN for no hits",
+    "build_seconds": 0.412911983,
+    "render_seconds": 9.444945072,
+    "total_seconds": 10.645914949,
+    "snapshot_bytes": 31457728,
+    "peak_rss_bytes": 180973568,
+    "cpu": "AMD Ryzen 5 7640U w/ Radeon 760M Graphics"
+  },
+  "future_gallery": [
+    "regional FBM100m/1km/2miles",
+    "hybrid collar",
+    "edited tower and tunnel",
+    "forests and rivers when canonical",
+    "motion/flight/teleport sequences"
+  ]
+}

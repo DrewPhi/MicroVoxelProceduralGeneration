@@ -1,0 +1,1132 @@
+{
+  "schema": "frontier-adaptive-checkpoint-v1",
+  "reference": "../gallery/player-spiky.json",
+  "cpu": "AMD Ryzen 5 7640U",
+  "date": "2026-11-05",
+  "runs": [
+    {
+      "local_artifacts": "output/adaptive-static4-locked",
+      "report": {
+        "schema": 1,
+        "scene": "adaptive",
+        "seed": 7,
+        "route": "Stationary",
+        "output": {
+          "width": 1920,
+          "height": 1080
+        },
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "vsync": false,
+        "warmup": {
+          "policy": "discard_first_frames",
+          "frames": 60
+        },
+        "frames": {
+          "sample_count": 1233,
+          "accepted_frames": 1233,
+          "missed_budget_frames": 3,
+          "rejected_inputs": 0,
+          "p50_ms": 8.781376,
+          "p95_ms": 12.403872,
+          "p99_ms": 14.074424
+        },
+        "isolated_gpu_ms": 6.919587301563263,
+        "used_memory_bytes": null,
+        "committed_memory_bytes": null,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 4348353,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 536863872,
+          "cache_hits": 3609557,
+          "builds": 5141,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 70728.887799,
+          "first_coverage_ms": 296.929453,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 62915.13247299991,
+          "max_build_ms": 66.57626499999999,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 47019621,
+          "source_cache_hits": 15707959,
+          "source_cache_bytes": 20309824,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 16588800,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1821167,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0
+        },
+        "adaptive_wait_quality": true,
+        "adaptive_route_quality": {
+          "measured_frames": 1233,
+          "coverage_ready_frames": 1233,
+          "quality_ready_frames": 1233,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9958660950461624,
+          "peak_unresolved_clusters": 0
+        },
+        "adaptive_preparation_policy": "clear1Hz_poll20Hz_until_quality",
+        "benchmark_input_lock": true,
+        "terrain_recipe": "Legacy",
+        "appearance_version": 0,
+        "render_appearance_version": 1,
+        "source": {
+          "version": 1,
+          "native_voxel_m": 0.0625,
+          "horizontal_scale_m": 1800,
+          "amplitude_m": 1000,
+          "octaves": 8,
+          "roughness": 0.5
+        },
+        "representation": {
+          "name": "adaptive_pooled_canonical_clusters",
+          "surface_only": true,
+          "fixed_center": false,
+          "half_extent_m": 300,
+          "finest_spacing_m": 0.0625,
+          "levels": 1,
+          "triangles": 4348353,
+          "gpu_page_bytes": 0
+        },
+        "route_height_policy": "FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained",
+        "route_step_seconds": 0.016666666666666666,
+        "camera_start": {
+          "position": [
+            0,
+            94.8875,
+            0
+          ],
+          "yaw": -3.1415925,
+          "pitch": -0.049958397
+        },
+        "route_clock": "realtime",
+        "route_elapsed_seconds": 12.006712009,
+        "route_speed_mps": 3,
+        "streaming": {
+          "initial_preparation_ms": 0,
+          "uploads": 0,
+          "upload_bytes": 0,
+          "upload_cpu_ms": 0,
+          "camera_to_center_max_m": 0,
+          "camera_to_center_end_m": 0,
+          "requests": 0,
+          "publications": 0,
+          "stale_rejections": 0,
+          "generated_pages": 0,
+          "generated_samples": 0,
+          "cache_hits": 0,
+          "reused_vertex_samples": 0,
+          "cancellations": 0,
+          "resident_bytes": 0,
+          "inflight_bytes": 0,
+          "generation_ms": 0
+        },
+        "msaa_samples": 1,
+        "voxel_filter": true,
+        "renderer_backend": "mesh",
+        "gpu_render_pass": {
+          "samples": 1166,
+          "p50_ms": 6.919587301563263,
+          "p95_ms": 8.643823371448518,
+          "p99_ms": 8.79935889086151
+        },
+        "teleports": {
+          "completed": 0,
+          "last_readiness_ms": 0
+        },
+        "prediction_horizon_seconds": null,
+        "brick_gpu_bytes": 0,
+        "topology_owner": {
+          "enabled": false,
+          "world_revision": 0,
+          "exact_at_all_distances": false,
+          "full_G3_passed": false
+        },
+        "teleport_readiness": [],
+        "gpu_timing_dropped": 82,
+        "edits": {
+          "test_enabled": false,
+          "test_restored": false,
+          "published_count": 0,
+          "last_build_ms": 0,
+          "last_input_to_publish_ms": 0,
+          "world_revision": 0,
+          "records": []
+        },
+        "benchmark_interrupted": false,
+        "benchmark_requested_seconds": 12.0,
+        "benchmark_run_exit_code": 0
+      },
+      "capture_camera": {
+        "width": 1920,
+        "height": 1080,
+        "eye": [
+          0.0,
+          94.8875,
+          0.0
+        ],
+        "target": [
+          -1.508074092271272e-07,
+          94.83756238296628,
+          -0.9987523555755615
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 300,
+        "samples": 1,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_decoded_from_8bit_target",
+        "voxel_filter": true,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "capture_render_texture_bytes": 16588800,
+        "capture_readback_bytes": 16588800,
+        "scene": "adaptive",
+        "seed": 7,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 4348353,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 536863872,
+          "cache_hits": 3609557,
+          "builds": 5141,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 70728.657461,
+          "first_coverage_ms": 296.929453,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 62915.13247299991,
+          "max_build_ms": 66.57626499999999,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 47019621,
+          "source_cache_hits": 15707959,
+          "source_cache_bytes": 20309824,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 16588800,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1821167,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0
+        }
+      },
+      "comparison": {
+        "linear_rgb_rmse": 0.021868845434018618,
+        "linear_rgb_mae": 0.008825049612268952,
+        "interpretation": "Appearance comparison, not a geometry error bound: exact sampled microfaces versus filtered LOD geometry/shading.",
+        "geometry_diagnostics": {
+          "available": true,
+          "false_coverage_pixels": 2,
+          "missing_coverage_pixels": 165,
+          "partial_reference_pixels": 3323,
+          "coverage_absolute_error": {
+            "samples": 2073600,
+            "mae": 0.0005194996021412037,
+            "rmse": 0.017202480821718904,
+            "p95_absolute": 0.0,
+            "max_absolute": 1.0
+          },
+          "center_vs_subpixel_mean_depth_difference_m": {
+            "samples": 965788,
+            "mae": 0.07337191038062638,
+            "rmse": 1.7783596247237101,
+            "p95_absolute": 0.1059222286399965,
+            "max_absolute": 278.51899035056374
+          },
+          "limitations": "Finite sampled coverage cannot prove thin-feature absence. Depth is candidate pixel-center versus reference subpixel mean, not a strict geometry-error test."
+        },
+        "reference_full_terrain_linear_rgb_error": {
+          "samples": 2897859,
+          "mae": 0.016988873500273716,
+          "rmse": 0.02994223830396083,
+          "p95_absolute": 0.06583723984658722,
+          "max_absolute": 0.7687775976955891
+        },
+        "fully_covered_terrain_mask": "reference_full_and_candidate_hit",
+        "fully_covered_terrain_linear_rgb_error": {
+          "samples": 2897364,
+          "mae": 0.016908808022241217,
+          "rmse": 0.029139273815432274,
+          "p95_absolute": 0.06574272327125075,
+          "max_absolute": 0.24338793382048607
+        },
+        "appearance_by_reference_distance_m": [
+          {
+            "range": [
+              0,
+              10
+            ],
+            "pixels": 693,
+            "linear_rgb_error": {
+              "samples": 2079,
+              "mae": 0.008003281355047524,
+              "rmse": 0.02062103771607206,
+              "p95_absolute": 0.045626568794250484,
+              "max_absolute": 0.1390438973903656
+            }
+          },
+          {
+            "range": [
+              10,
+              25
+            ],
+            "pixels": 139939,
+            "linear_rgb_error": {
+              "samples": 419817,
+              "mae": 0.017410559641264048,
+              "rmse": 0.032592811230248486,
+              "p95_absolute": 0.08057504594326015,
+              "max_absolute": 0.24338793382048607
+            }
+          },
+          {
+            "range": [
+              25,
+              50
+            ],
+            "pixels": 466941,
+            "linear_rgb_error": {
+              "samples": 1400823,
+              "mae": 0.017821257145530373,
+              "rmse": 0.030062831921612486,
+              "p95_absolute": 0.06758423969149588,
+              "max_absolute": 0.22057200223207474
+            }
+          },
+          {
+            "range": [
+              50,
+              100
+            ],
+            "pixels": 232937,
+            "linear_rgb_error": {
+              "samples": 698811,
+              "mae": 0.019901309697182016,
+              "rmse": 0.03135591581688908,
+              "p95_absolute": 0.06835237145423889,
+              "max_absolute": 0.22425732761621475
+            }
+          },
+          {
+            "range": [
+              100,
+              200
+            ],
+            "pixels": 106331,
+            "linear_rgb_error": {
+              "samples": 318993,
+              "mae": 0.007770266668141567,
+              "rmse": 0.013129852834376394,
+              "p95_absolute": 0.02661021649837493,
+              "max_absolute": 0.18834393471479416
+            }
+          },
+          {
+            "range": [
+              200,
+              500
+            ],
+            "pixels": 18947,
+            "linear_rgb_error": {
+              "samples": 56841,
+              "mae": 0.005537239022149117,
+              "rmse": 0.009570283929629211,
+              "p95_absolute": 0.018808625638484955,
+              "max_absolute": 0.1881401389837265
+            }
+          }
+        ]
+      }
+    },
+    {
+      "local_artifacts": "output/adaptive-static4-msaa4-locked",
+      "report": {
+        "schema": 1,
+        "scene": "adaptive",
+        "seed": 7,
+        "route": "Stationary",
+        "output": {
+          "width": 1920,
+          "height": 1080
+        },
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "vsync": false,
+        "warmup": {
+          "policy": "discard_first_frames",
+          "frames": 60
+        },
+        "frames": {
+          "sample_count": 888,
+          "accepted_frames": 888,
+          "missed_budget_frames": 44,
+          "rejected_inputs": 0,
+          "p50_ms": 11.647558,
+          "p95_ms": 16.539293999999998,
+          "p99_ms": 21.617438999999997
+        },
+        "isolated_gpu_ms": 10.399158529987336,
+        "used_memory_bytes": null,
+        "committed_memory_bytes": null,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 4348353,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 536836232,
+          "cache_hits": 3559078,
+          "builds": 5093,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 75274.768225,
+          "first_coverage_ms": 308.659068,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 66909.04722000005,
+          "max_build_ms": 82.789083,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 46968930,
+          "source_cache_hits": 14947594,
+          "source_cache_bytes": 20707360,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 74649600,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1821167,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0
+        },
+        "adaptive_wait_quality": true,
+        "adaptive_route_quality": {
+          "measured_frames": 888,
+          "coverage_ready_frames": 888,
+          "quality_ready_frames": 888,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9958660950461624,
+          "peak_unresolved_clusters": 0
+        },
+        "adaptive_preparation_policy": "clear1Hz_poll20Hz_until_quality",
+        "benchmark_input_lock": true,
+        "terrain_recipe": "Legacy",
+        "appearance_version": 0,
+        "render_appearance_version": 1,
+        "source": {
+          "version": 1,
+          "native_voxel_m": 0.0625,
+          "horizontal_scale_m": 1800,
+          "amplitude_m": 1000,
+          "octaves": 8,
+          "roughness": 0.5
+        },
+        "representation": {
+          "name": "adaptive_pooled_canonical_clusters",
+          "surface_only": true,
+          "fixed_center": false,
+          "half_extent_m": 300,
+          "finest_spacing_m": 0.0625,
+          "levels": 1,
+          "triangles": 4348353,
+          "gpu_page_bytes": 0
+        },
+        "route_height_policy": "FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained",
+        "route_step_seconds": 0.016666666666666666,
+        "camera_start": {
+          "position": [
+            0,
+            94.8875,
+            0
+          ],
+          "yaw": -3.1415925,
+          "pitch": -0.049958397
+        },
+        "route_clock": "realtime",
+        "route_elapsed_seconds": 12.005561582,
+        "route_speed_mps": 3,
+        "streaming": {
+          "initial_preparation_ms": 0,
+          "uploads": 0,
+          "upload_bytes": 0,
+          "upload_cpu_ms": 0,
+          "camera_to_center_max_m": 0,
+          "camera_to_center_end_m": 0,
+          "requests": 0,
+          "publications": 0,
+          "stale_rejections": 0,
+          "generated_pages": 0,
+          "generated_samples": 0,
+          "cache_hits": 0,
+          "reused_vertex_samples": 0,
+          "cancellations": 0,
+          "resident_bytes": 0,
+          "inflight_bytes": 0,
+          "generation_ms": 0
+        },
+        "msaa_samples": 4,
+        "voxel_filter": true,
+        "renderer_backend": "mesh",
+        "gpu_render_pass": {
+          "samples": 679,
+          "p50_ms": 10.399158529987336,
+          "p95_ms": 13.58641435552597,
+          "p99_ms": 14.139465158901215
+        },
+        "teleports": {
+          "completed": 0,
+          "last_readiness_ms": 0
+        },
+        "prediction_horizon_seconds": null,
+        "brick_gpu_bytes": 0,
+        "topology_owner": {
+          "enabled": false,
+          "world_revision": 0,
+          "exact_at_all_distances": false,
+          "full_G3_passed": false
+        },
+        "teleport_readiness": [],
+        "gpu_timing_dropped": 215,
+        "edits": {
+          "test_enabled": false,
+          "test_restored": false,
+          "published_count": 0,
+          "last_build_ms": 0,
+          "last_input_to_publish_ms": 0,
+          "world_revision": 0,
+          "records": []
+        },
+        "benchmark_interrupted": false,
+        "benchmark_requested_seconds": 12.0,
+        "benchmark_run_exit_code": 0
+      },
+      "capture_camera": {
+        "width": 1920,
+        "height": 1080,
+        "eye": [
+          0.0,
+          94.8875,
+          0.0
+        ],
+        "target": [
+          -1.508074092271272e-07,
+          94.83756238296628,
+          -0.9987523555755615
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 300,
+        "samples": 4,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_decoded_from_8bit_target",
+        "voxel_filter": true,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "capture_render_texture_bytes": 74649600,
+        "capture_readback_bytes": 8294400,
+        "scene": "adaptive",
+        "seed": 7,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 4348353,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 536836232,
+          "cache_hits": 3559078,
+          "builds": 5093,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 75274.280238,
+          "first_coverage_ms": 308.659068,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 66909.04722000005,
+          "max_build_ms": 82.789083,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 46968930,
+          "source_cache_hits": 14947594,
+          "source_cache_bytes": 20707360,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 74649600,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1821167,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0
+        }
+      },
+      "comparison": {
+        "linear_rgb_rmse": 0.011661462254112227,
+        "linear_rgb_mae": 0.004527249863187587,
+        "interpretation": "Appearance comparison, not a geometry error bound: exact sampled microfaces versus filtered LOD geometry/shading.",
+        "geometry_diagnostics": {
+          "available": false,
+          "limitations": "This capture has no single-sample depth/coverage export; color is not used to infer geometry."
+        },
+        "reference_full_terrain_linear_rgb_error": {
+          "samples": 2897859,
+          "mae": 0.007930260402729561,
+          "rmse": 0.01498644894398278,
+          "p95_absolute": 0.029528053849935534,
+          "max_absolute": 0.7667682841420174
+        },
+        "fully_covered_terrain_mask": "reference_full_only",
+        "fully_covered_terrain_linear_rgb_error": {
+          "samples": 2897859,
+          "mae": 0.007930260402729561,
+          "rmse": 0.01498644894398278,
+          "p95_absolute": 0.029528053849935534,
+          "max_absolute": 0.7667682841420174
+        },
+        "appearance_by_reference_distance_m": [
+          {
+            "range": [
+              0,
+              10
+            ],
+            "pixels": 693,
+            "linear_rgb_error": {
+              "samples": 2079,
+              "mae": 0.0027442260162869915,
+              "rmse": 0.006120320791325241,
+              "p95_absolute": 0.014400833100080487,
+              "max_absolute": 0.04573315382003784
+            }
+          },
+          {
+            "range": [
+              10,
+              25
+            ],
+            "pixels": 139941,
+            "linear_rgb_error": {
+              "samples": 419823,
+              "mae": 0.005601960117158632,
+              "rmse": 0.010195804625598388,
+              "p95_absolute": 0.023913667351007445,
+              "max_absolute": 0.1886121742427349
+            }
+          },
+          {
+            "range": [
+              25,
+              50
+            ],
+            "pixels": 466957,
+            "linear_rgb_error": {
+              "samples": 1400871,
+              "mae": 0.005988599418589044,
+              "rmse": 0.010244569489692719,
+              "p95_absolute": 0.022689087316393852,
+              "max_absolute": 0.18963966891169548
+            }
+          },
+          {
+            "range": [
+              50,
+              100
+            ],
+            "pixels": 233048,
+            "linear_rgb_error": {
+              "samples": 699144,
+              "mae": 0.013488539733026132,
+              "rmse": 0.023307905746053428,
+              "p95_absolute": 0.0468406172469258,
+              "max_absolute": 0.7667682841420174
+            }
+          },
+          {
+            "range": [
+              100,
+              200
+            ],
+            "pixels": 106359,
+            "linear_rgb_error": {
+              "samples": 319077,
+              "mae": 0.007783699518856867,
+              "rmse": 0.014863099609220833,
+              "p95_absolute": 0.026082992553710944,
+              "max_absolute": 0.7653889395296574
+            }
+          },
+          {
+            "range": [
+              200,
+              500
+            ],
+            "pixels": 18955,
+            "linear_rgb_error": {
+              "samples": 56865,
+              "mae": 0.005626539376353951,
+              "rmse": 0.013123434551226191,
+              "p95_absolute": 0.018289096653461397,
+              "max_absolute": 0.7658283337950706
+            }
+          }
+        ]
+      }
+    },
+    {
+      "local_artifacts": "output/adaptive-optimized4-msaa4",
+      "report": {
+        "schema": 1,
+        "scene": "adaptive",
+        "seed": 7,
+        "route": "Stationary",
+        "output": {
+          "width": 1920,
+          "height": 1080
+        },
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "vsync": false,
+        "warmup": {
+          "policy": "discard_first_frames",
+          "frames": 60
+        },
+        "frames": {
+          "sample_count": 1288,
+          "accepted_frames": 1288,
+          "missed_budget_frames": 1,
+          "rejected_inputs": 0,
+          "p50_ms": 8.565247,
+          "p95_ms": 10.993293,
+          "p99_ms": 12.941667
+        },
+        "isolated_gpu_ms": 7.495962421428681,
+        "used_memory_bytes": null,
+        "committed_memory_bytes": null,
+        "benchmark_interrupted": false,
+        "benchmark_failed": false,
+        "benchmark_requested_seconds": 12.0,
+        "benchmark_requested_frames": null,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 2830555,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 535618208,
+          "cache_hits": 3854446,
+          "builds": 5442,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 48223.599196999996,
+          "first_coverage_ms": 213.62056600000003,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 39900.6723400001,
+          "max_build_ms": 30.668188999999998,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 28022699,
+          "source_cache_hits": 39591006,
+          "source_cache_bytes": 32351568,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 74649600,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1062268,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0,
+          "elapsed_since_stream_start_ms": 48223.603947,
+          "first_quality_ms": 36091.288609,
+          "native_bins_enabled": true,
+          "native_bin_tests": 299,
+          "native_bin_skipped_quads": 758899,
+          "draw_calls": 1341,
+          "source_cache_peak_bytes": 33554416,
+          "source_cache_pages": 34333,
+          "source_cache_columns": 1132011,
+          "source_cache_promotions": 22720,
+          "source_cache_page_evictions": 480670,
+          "affine_quad_bounds": 132736,
+          "affine_noise_cells": 1628804,
+          "affine_full_range_fallbacks": 6927,
+          "affine_unavailable_quads": 0,
+          "affine_ms": 5106.378534999997
+        },
+        "adaptive_wait_quality": true,
+        "adaptive_route_quality": {
+          "measured_frames": 1288,
+          "coverage_ready_frames": 1288,
+          "quality_ready_frames": 1288,
+          "unbounded_error_frames": 0,
+          "max_finite_visible_error_px": 3.9958660950461624,
+          "peak_unresolved_clusters": 0
+        },
+        "adaptive_preparation_policy": "clear1Hz_poll20Hz_until_quality",
+        "benchmark_input_lock": true,
+        "terrain_recipe": "Legacy",
+        "appearance_version": 0,
+        "render_appearance_version": 1,
+        "source": {
+          "version": 1,
+          "native_voxel_m": 0.0625,
+          "horizontal_scale_m": 1800,
+          "amplitude_m": 1000,
+          "octaves": 8,
+          "roughness": 0.5
+        },
+        "representation": {
+          "name": "adaptive_pooled_canonical_clusters",
+          "surface_only": true,
+          "fixed_center": false,
+          "half_extent_m": 300,
+          "finest_spacing_m": 0.0625,
+          "levels": 1,
+          "triangles": 2830555,
+          "gpu_page_bytes": 0
+        },
+        "route_height_policy": "FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained",
+        "route_step_seconds": 0.016666666666666666,
+        "camera_start": {
+          "position": [
+            0,
+            94.8875,
+            0
+          ],
+          "yaw": -3.1415925,
+          "pitch": -0.049958397
+        },
+        "route_clock": "realtime",
+        "route_elapsed_seconds": 12.002607772,
+        "route_speed_mps": 3,
+        "streaming": {
+          "initial_preparation_ms": 0,
+          "uploads": 0,
+          "upload_bytes": 0,
+          "upload_cpu_ms": 0,
+          "camera_to_center_max_m": 0,
+          "camera_to_center_end_m": 0,
+          "requests": 0,
+          "publications": 0,
+          "stale_rejections": 0,
+          "generated_pages": 0,
+          "generated_samples": 0,
+          "cache_hits": 0,
+          "reused_vertex_samples": 0,
+          "cancellations": 0,
+          "resident_bytes": 0,
+          "inflight_bytes": 0,
+          "generation_ms": 0
+        },
+        "msaa_samples": 4,
+        "voxel_filter": true,
+        "renderer_backend": "mesh",
+        "gpu_render_pass": {
+          "samples": 1103,
+          "p50_ms": 7.495962421428681,
+          "p95_ms": 7.717343047359466,
+          "p99_ms": 7.989059311626434
+        },
+        "teleports": {
+          "completed": 0,
+          "last_readiness_ms": 0
+        },
+        "prediction_horizon_seconds": null,
+        "brick_gpu_bytes": 0,
+        "topology_owner": {
+          "enabled": false,
+          "world_revision": 0,
+          "exact_at_all_distances": false,
+          "full_G3_passed": false
+        },
+        "teleport_readiness": [],
+        "gpu_timing_dropped": 198,
+        "edits": {
+          "test_enabled": false,
+          "test_restored": false,
+          "published_count": 0,
+          "last_build_ms": 0,
+          "last_input_to_publish_ms": 0,
+          "world_revision": 0,
+          "records": []
+        },
+        "benchmark_run_exit_code": 0
+      },
+      "capture_camera": {
+        "width": 1920,
+        "height": 1080,
+        "eye": [
+          0.0,
+          94.8875,
+          0.0
+        ],
+        "target": [
+          -1.508074092271272e-07,
+          94.83756238296628,
+          -0.9987523555755615
+        ],
+        "fov_y_degrees": 60,
+        "near": 0.025,
+        "far": 300,
+        "samples": 4,
+        "depth_encoding": "ndc_0_1",
+        "color_encoding": "linear_rgb_decoded_from_8bit_target",
+        "voxel_filter": true,
+        "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+        "capture_render_texture_bytes": 74649600,
+        "capture_readback_bytes": 8294400,
+        "scene": "adaptive",
+        "seed": 7,
+        "adaptive": {
+          "pixel_error": 4,
+          "coverage_ready": true,
+          "quality_ready": true,
+          "pending_clusters": 4,
+          "unresolved": false,
+          "published_epoch": 1,
+          "requested_epoch": 1,
+          "native_clusters": 63,
+          "resident_clusters": 1687,
+          "visible_clusters": 1234,
+          "triangles": 2830555,
+          "gpu_resident_bytes": 170292448,
+          "gpu_allocated_bytes": 201326592,
+          "upload_bytes": 491979124,
+          "max_upload_frame_bytes": 8249856,
+          "cpu_cache_bytes": 535618208,
+          "cache_hits": 3854446,
+          "builds": 5442,
+          "appearance_self_occlusion_exact": false,
+          "topology_supported": false,
+          "elapsed_preparation_ms": 48223.374796000004,
+          "first_coverage_ms": 213.62056600000003,
+          "empirical_geometry_error_m": 24.4375,
+          "uncertified_clusters": 295,
+          "selected_cpu_bytes": 203086280,
+          "selected_sampled_columns": 25037348,
+          "total_build_ms": 39900.6723400001,
+          "max_build_ms": 30.668188999999998,
+          "surface_source_revision": 0,
+          "displayed_world_revision": 0,
+          "base_source_reused_outside_edited_owner": false,
+          "generated_columns": 28022699,
+          "source_cache_hits": 39591006,
+          "source_cache_bytes": 32351568,
+          "cpu_cache_budget_bytes": 536870912,
+          "pending_selection_arc_bytes": 0,
+          "cpu_selection_bytes_overlap_cache": true,
+          "gpu_pool_budget_bytes": 536870912,
+          "max_visible_error_px": 3.9958660950461624,
+          "visible_unresolved_count": 0,
+          "visible_global_bound_clusters": 0,
+          "visible_local_certified_clusters": 1171,
+          "gpu_pool_allocated_bytes": 201326592,
+          "gpu_camera_uniform_bytes": 2097152,
+          "frame_attachment_logical_bytes": 74649600,
+          "visible_uncertified_count": 0,
+          "native_quad_record_bytes": 32,
+          "resident_native_quad_bytes": 58277344,
+          "resident_profile_bytes": 25240476,
+          "visible_native_quads": 1062268,
+          "deferred_selection_arc_bytes": 0,
+          "gpu_pending_clusters": 0,
+          "selection_arc_bytes_may_overlap_each_other": true,
+          "gpu_occluded_clusters": 105,
+          "gpu_occluded_triangles": 28276,
+          "gpu_occluder_boxes": 64,
+          "gpu_occlusion_uses_current_camera": true,
+          "quality_assessment": "current_gpu_draw_candidates_after_current_occlusion",
+          "visible_affine_bound_clusters": 0,
+          "elapsed_since_stream_start_ms": 48223.386669,
+          "first_quality_ms": 36091.288609,
+          "native_bins_enabled": true,
+          "native_bin_tests": 299,
+          "native_bin_skipped_quads": 758899,
+          "draw_calls": 1341,
+          "source_cache_peak_bytes": 33554416,
+          "source_cache_pages": 34333,
+          "source_cache_columns": 1132011,
+          "source_cache_promotions": 22720,
+          "source_cache_page_evictions": 480670,
+          "affine_quad_bounds": 132736,
+          "affine_noise_cells": 1628804,
+          "affine_full_range_fallbacks": 6927,
+          "affine_unavailable_quads": 0,
+          "affine_ms": 5106.378534999997
+        }
+      },
+      "image_equivalent_to": "adaptive-static4-msaa4-locked (PNG and float RGB byte-for-byte)"
+    }
+  ],
+  "limitations": [
+    "Stationary 1080p results do not establish route, horizon, or full G3/G4 acceptance.",
+    "MSAA4 exit captures have no resolved geometry/depth export.",
+    "Residual proxy shading bands and cold refinement remain limitations.",
+    "Timing percentiles include presentation and OS scheduling; separate render-pass timestamps are also reported."
+  ],
+  "native_bin_smoke": {
+    "local_artifacts": "output/adaptive-bin-smoke",
+    "equivalence": {
+      "linear_rgb.f32": true,
+      "depth.f32": true,
+      "coverage.f32": true
+    },
+    "also_byte_identical_to": "output/adaptive-primary/quad-sanity-down, before cache/bin changes"
+  }
+}

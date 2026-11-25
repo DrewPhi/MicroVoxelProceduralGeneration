@@ -1,0 +1,253 @@
+{
+  "schema": "smear-handoff-evidence-v1",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "motion": "six-second fly route at3m/s, after settled quality and60 warmup frames; uncapped MSAA1; no atmosphere or terrain shadows",
+  "hardware": "Ryzen5 7640U, Radeon760M RADV Vulkan",
+  "runs": {
+    "motion-before": {
+      "frames": {
+        "sample_count": 325,
+        "accepted_frames": 325,
+        "missed_budget_frames": 88,
+        "rejected_inputs": 0,
+        "p50_ms": 14.358184,
+        "p95_ms": 23.570551,
+        "p99_ms": 26.048475
+      },
+      "isolated_gpu_ms": 9.958881999126435,
+      "elapsed_preparation_ms": 39779.228467,
+      "gpu_resident_bytes": 330473824,
+      "gpu_allocated_bytes": 373293056,
+      "cpu_cache_bytes": 536056264,
+      "resident_clusters": 6019,
+      "visible_clusters": 5188,
+      "pending_clusters": 9,
+      "triangles": 2553374,
+      "quality_ready": true,
+      "coverage_ready": true,
+      "benchmark_failed": false,
+      "benchmark_interrupted": false,
+      "command": {
+        "command": [
+          "target/release/frontier",
+          "--preset",
+          "alpine",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--msaa",
+          "1",
+          "--atmosphere",
+          "off",
+          "--terrain-shadows",
+          "off",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--route",
+          "fly",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--seconds",
+          "6",
+          "--adaptive-wait-quality",
+          "--capture-on-exit",
+          "output/smear-pass/motion-before/beauty.png",
+          "--report",
+          "output/smear-pass/motion-before/report.json"
+        ],
+        "environment": {
+          "FRONTIER_LOD_APPEARANCE": "map"
+        },
+        "binary_sha256": "306ebe93d33322ce986f9bf5ff2c0653813c31f8cc5a61e4983d6e6629ecf9d5"
+      },
+      "visual": {
+        "atmosphere": false,
+        "render_scale": 1,
+        "exposure": 1,
+        "fog_density": 2.2e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 24,
+        "sun_azimuth": 120,
+        "cloud_coverage": 0.25,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": false,
+        "terrain_shadows_active": false,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "terrain_pass_only",
+        "settings_may_have_changed": false
+      },
+      "adaptive_appearance": {
+        "spatial_profiles": true,
+        "profile_probe_cells": 4,
+        "profile_footprint": "half",
+        "near_detail": true,
+        "method": "map",
+        "map_intervals": 2,
+        "visibility_grid": 6,
+        "visibility_spatial": true,
+        "voxel_grain_amplitude": 0.055,
+        "debug_view": 0,
+        "near_profile_shared": false,
+        "near_blend": 0,
+        "map_prefilter_radius_cells": 0,
+        "map_anisotropy_taps": 1,
+        "map_prefilter_mode": "off",
+        "map_filter_soft_surfaces": false
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    },
+    "motion-after": {
+      "frames": {
+        "sample_count": 310,
+        "accepted_frames": 310,
+        "missed_budget_frames": 93,
+        "rejected_inputs": 0,
+        "p50_ms": 15.147749000000001,
+        "p95_ms": 24.129777,
+        "p99_ms": 27.163363999999998
+      },
+      "isolated_gpu_ms": 10.731990915641784,
+      "elapsed_preparation_ms": 53125.870521000004,
+      "gpu_resident_bytes": 335985392,
+      "gpu_allocated_bytes": 373293056,
+      "cpu_cache_bytes": 536171008,
+      "resident_clusters": 6040,
+      "visible_clusters": 5188,
+      "pending_clusters": 0,
+      "triangles": 2553374,
+      "quality_ready": true,
+      "coverage_ready": true,
+      "benchmark_failed": false,
+      "benchmark_interrupted": false,
+      "command": {
+        "command": [
+          "target/release/frontier",
+          "--preset",
+          "alpine",
+          "--width",
+          "1920",
+          "--height",
+          "1080",
+          "--msaa",
+          "1",
+          "--atmosphere",
+          "off",
+          "--terrain-shadows",
+          "off",
+          "--uncapped",
+          "--warmup",
+          "60",
+          "--benchmark-input-lock",
+          "--route",
+          "fly",
+          "--route-clock",
+          "realtime",
+          "--route-speed",
+          "3",
+          "--seconds",
+          "6",
+          "--adaptive-wait-quality",
+          "--capture-on-exit",
+          "output/smear-pass/motion-after/beauty.png",
+          "--report",
+          "output/smear-pass/motion-after/report.json"
+        ],
+        "environment": {
+          "FRONTIER_LOD_APPEARANCE": "map",
+          "FRONTIER_NEAR_APPEARANCE": "shared",
+          "FRONTIER_NEAR_BLEND": "balanced",
+          "FRONTIER_MAP_ANISOTROPY": "2",
+          "FRONTIER_MAP_PREFILTER": "on",
+          "FRONTIER_MAP_FILTER_SURFACES": "soft",
+          "FRONTIER_MAP_PREFILTER_RADIUS_CELLS": "1"
+        },
+        "binary_sha256": "306ebe93d33322ce986f9bf5ff2c0653813c31f8cc5a61e4983d6e6629ecf9d5"
+      },
+      "visual": {
+        "atmosphere": false,
+        "render_scale": 1,
+        "exposure": 1,
+        "fog_density": 2.2e-05,
+        "fog_height_falloff": 0.0012,
+        "sun_elevation": 24,
+        "sun_azimuth": 120,
+        "cloud_coverage": 0.25,
+        "cloud_speed": 0,
+        "overcast": 0.08,
+        "terrain_shadows_requested": false,
+        "terrain_shadows_active": false,
+        "shadow_map_size": 2048,
+        "shadow_footprint_m": 2048,
+        "shadow_casters": "published_adaptive_terrain_owners_only",
+        "menu_enabled": false,
+        "gpu_timing_scope": "terrain_pass_only",
+        "settings_may_have_changed": false
+      },
+      "adaptive_appearance": {
+        "spatial_profiles": true,
+        "profile_probe_cells": 4,
+        "profile_footprint": "half",
+        "near_detail": true,
+        "method": "map",
+        "map_intervals": 2,
+        "visibility_grid": 6,
+        "visibility_spatial": true,
+        "voxel_grain_amplitude": 0.055,
+        "debug_view": 0,
+        "near_profile_shared": true,
+        "near_blend": 1,
+        "map_prefilter_radius_cells": 1,
+        "map_anisotropy_taps": 2,
+        "map_prefilter_mode": "native-box",
+        "map_filter_soft_surfaces": true
+      },
+      "camera_start": {
+        "position": [
+          -41.06016074388279,
+          28.95,
+          -250
+        ],
+        "yaw": 0.011565727,
+        "pitch": 0.17317964
+      },
+      "projection": {
+        "fov_y_degrees": 60,
+        "near_m": 0.025,
+        "far_m": 6000
+      }
+    }
+  },
+  "primary": {
+    "default_rgb_depth": "bitwise identical to frozen adf6dfa binary",
+    "polish_vs_point_map_reference_rmse": {
+      "before": 0.028843392,
+      "after": 0.032349173
+    },
+    "interpretation": "Alpine tuning is not a universal replacement. Defaults unchanged. Opt-in appearance-version differences expected; harness reports provenance mismatch on this deliberate appearance experiment."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "png": {
+    "identical": true,
+    "baseline_sha256": "56eab7bb9f1c909d1e1408b0a2b9030e35a30f62b867c779d8754df5a4b473a4",
+    "final_sha256": "56eab7bb9f1c909d1e1408b0a2b9030e35a30f62b867c779d8754df5a4b473a4"
+  },
+  "depth.f32": {
+    "identical": true,
+    "baseline_sha256": "20196b4ab4f9217dcc9f26c24968977936d1ce4991b65ffe4cf140ed5495fa8f",
+    "final_sha256": "20196b4ab4f9217dcc9f26c24968977936d1ce4991b65ffe4cf140ed5495fa8f"
+  },
+  "linear_rgb.f32": {
+    "identical": true,
+    "baseline_sha256": "f553d36160f597bfa85922bb8e2ab6c9783678d9b62de164a0fb417de2327f9f",
+    "final_sha256": "f553d36160f597bfa85922bb8e2ab6c9783678d9b62de164a0fb417de2327f9f"
+  }
+}

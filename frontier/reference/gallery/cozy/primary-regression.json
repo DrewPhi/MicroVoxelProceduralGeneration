@@ -1,0 +1,28 @@
+{
+  "baseline_commit": "f82108c",
+  "baseline_executable_sha256": "1400507d58c490f4cfa8afb18b70fa4d09c4d257c7c737031e4aab27970fe294",
+  "candidate_executable_sha256": "e8a7313940c3e350c6b8549622f25f4fbfba07cf14ac656e094911adb1e9b56b",
+  "frozen_settings": "PRIMARY_VISUAL_CHECK.md; headless phasea_iteration_check.py",
+  "artifacts": {
+    "png": {
+      "baseline_sha256": "6ff80d1f04cdc315ee6d8cca54b5a9b6b1d80b07d916201ac65f7e9800fd856e",
+      "candidate_sha256": "6ff80d1f04cdc315ee6d8cca54b5a9b6b1d80b07d916201ac65f7e9800fd856e",
+      "equal": true
+    },
+    "linear_rgb.f32": {
+      "baseline_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50",
+      "candidate_sha256": "ea5d6c6ec975051dfeac018a050f29a32da555cfa2ec43df276c46a50ede7b50",
+      "equal": true
+    },
+    "depth.f32": {
+      "baseline_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e",
+      "candidate_sha256": "6fc8b1049ce1bb77cffa6953e12acc9046e1367403800c35ce93c697c385a81e",
+      "equal": true
+    },
+    "coverage.f32": {
+      "baseline_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7",
+      "candidate_sha256": "ad52da4f3c860135c94187c1e549a27b054e87d32e5a1f8427ba34221e1333d7",
+      "equal": true
+    }
+  }
+}

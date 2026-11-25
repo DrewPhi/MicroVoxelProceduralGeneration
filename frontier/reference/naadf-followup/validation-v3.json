@@ -1,0 +1,70 @@
+{
+  "binary": "/tmp/frontier-naadf-followup-v3",
+  "sha256": "52c6c900a79ba22637306997dee23ef32bee66182b50fa1815ac751dd52fa8a3",
+  "adapter": "AMD Radeon 760M / RADV Mesa 25.2.8",
+  "cpu_suites": {
+    "renderer_passed": 458,
+    "renderer_ignored": 26,
+    "runtime_passed": 35,
+    "log": "output/naadf-followup/v3/full-tests.log"
+  },
+  "canonical_gpu": {
+    "configurations": 12,
+    "batches_per_run": 72,
+    "runs": 2,
+    "coverage_decisions": 4718592,
+    "normal": {
+      "passed": true,
+      "seconds": 32.54,
+      "log": "output/naadf-followup/v3/traversal-gpu.log"
+    },
+    "direct_publication": {
+      "passed": true,
+      "seconds": 31.99,
+      "environment": {
+        "FRONTIER_NAADF_DIRECT_ROOTS": "1"
+      },
+      "log": "output/naadf-followup/v3/traversal-gpu-direct.log"
+    },
+    "scope": [
+      "primary coverage",
+      "material",
+      "depth",
+      "shadow visibility",
+      "cold/warm cache",
+      "sparse roots",
+      "staged/published wrapped windows",
+      "one selected-height read per query"
+    ]
+  },
+  "focused_gpu": {
+    "passed": true,
+    "tests": [
+      "local_exit_matches_native_events_and_hit_material_shadow",
+      "directly_published_roots_match_native_corner_primary_and_shadow",
+      "direct_gpu_root_proofs_survive_wrap_and_pending_shift_publication",
+      "retained_gpu_tiles_remain_conservative_across_wraps",
+      "naadf_gpu_distance_matches_canonical_rays"
+    ],
+    "log": "output/naadf-followup/v3/direct-gpu.log",
+    "local_fixture": {
+      "cases": 11,
+      "scope": [
+        "exact and perturbed native corners",
+        "96-cell grazing cuboid",
+        "zero direction components",
+        "moderate outside origin",
+        "huge outside-origin rejection",
+        "zero-axis outside-box rejection",
+        "NaN rejection",
+        "primary/material/shadow equality with native DDA"
+      ],
+      "required_work": "Successful grazing handoff emits event 19 with no event 30 global replay; failed huge-origin guard retains event 30."
+    }
+  },
+  "limitations": [
+    "These are device-specific native float-event parity checks, not an exact-real or portable WGSL error proof.",
+    "No timing is inferred from diagnostic atomic runs or compiler-stat captures.",
+    "Settled image comparisons are a separate gate."
+  ]
+}

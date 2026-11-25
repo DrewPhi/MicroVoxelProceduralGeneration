@@ -1,0 +1,9 @@
+{
+  "scatter": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1"
+  },
+  "scatter-stack": {
+    "FRONTIER_NAADF_SCATTER_UPLOAD": "1",
+    "FRONTIER_NAADF_STACK_BLOCK_BOUNDS": "1"
+  }
+}

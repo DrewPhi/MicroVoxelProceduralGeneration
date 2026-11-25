@@ -1,0 +1,31 @@
+
+running 22 tests
+test tests::disconnected_enclosed_components_have_explicit_gauges ... ok
+test tests::ghost_outside_centre_liquid_is_retained_and_diagnosed ... ok
+test tests::invalid_inputs_are_rejected ... ok
+test tests::report_ghost_long_hydrostatic_gate ... ignored, offline ghost-fluid 60s hydrostatic acceptance reporter
+test tests::report_long_hydrostatic_acceptance_gate ... ignored, offline 60s M1 motion gate; inspect reported motion and conservation separately
+test tests::manufactured_pressure_gradient_projects_to_zero_velocity ... ok
+test tests::hydrostatic_pressure_depth_and_no_motion ... ok
+test tests::falling_liquid_accelerates_in_metres_per_second ... ok
+test tests::restart_is_exact_and_failed_steps_are_atomic ... ok
+test transport::geometry_tests::analytical_box_volumes_and_complements ... ok
+test transport::geometry_tests::nearly_axis_aligned_slabs_partition_without_cancellation ... ok
+test tests::trace_fraction_volume_survives_classification_and_restart ... ok
+translated block L1 voxel volumes: geometric=0e0, donor=2.0859588623046875e1
+test tests::transport_translation_is_conservative_bounded_and_sharper_than_donor ... ok
+test tests::ghost_surface_has_correct_hydrostatic_distance_and_restart_mode ... ok
+test tests::small_dam_has_front_motion_with_measured_volume ... ok
+test tests::maccormack_ghost_checkpoint_preserves_candidate_and_mass ... ok
+dam temporal refinement dt0.005 vs0.0025: coarse=PhysicalStats { time: 0.10000000000000002, liquid_volume: 0.023437500000001707, liquid_mass: 23.437500000001705, volume_error: 1.7069679003611782e-15, volume_error_voxels: 6.991740519879386e-12, roundoff_adjustment_voxels: 0.0, roundoff_absolute_voxels: 0.0, transport_residual_voxels: 6.991740519879386e-12, trace_volume_voxels: 0.0, unpressurized_volume_voxels: 0.0, centre_of_volume: [0.13848115832214186, 0.16614069375809193, 0.12499999999999999], kinetic_energy: 3.7987518422737407, max_speed: 1.2067350004969508, max_divergence: 7.742436636477768e-11, rms_divergence: 3.361155267918826e-11, full_max_divergence: 6.917215625454321e-11, interface_max_divergence: 7.742436636477768e-11, boundary_max_normal_speed: 0.0, liquid_cells: 120, interface_cells: 40 }, fine=PhysicalStats { time: 0.10000000000000005, liquid_volume: 0.02343750000000041, liquid_mass: 23.43750000000041, volume_error: 4.0939474033052647e-16, volume_error_voxels: 1.6768808563938364e-12, roundoff_adjustment_voxels: 0.0, roundoff_absolute_voxels: 0.0, transport_residual_voxels: 1.6768808563938364e-12, trace_volume_voxels: 0.0, unpressurized_volume_voxels: 0.0, centre_of_volume: [0.13810226592590916, 0.16676352194454655, 0.12500000000000003], kinetic_energy: 3.7575705489400906, max_speed: 1.2058255438920575, max_divergence: 2.516888836906769e-11, rms_divergence: 9.941772830873173e-12, full_max_divergence: 2.516888836906769e-11, interface_max_divergence: 2.2779271864424934e-11, boundary_max_normal_speed: 0.0, liquid_cells: 120, interface_cells: 40 }
+test tests::small_dam_short_interval_timestep_refinement ... ok
+test tests::limited_maccormack_preserves_periodic_uniform_flow_and_steady_shear ... ok
+periodic smooth-wave L2 SL=7.590266875639661e-1, MacCormack=6.324915947518046e-2; energy initial=3.456e1, SL=2.6213259010630708e1, Mac=3.42671459416032e1
+test tests::limited_maccormack_periodic_wave_has_less_error_without_energy_overshoot ... ok
+test tests::dam_wall_impact_has_rebound_and_independent_correction_ledger ... ok
+rotated square90deg L1 voxel volumes geometric=1.4682398531255867e1, donor=9.82574380866088e1; geometric=PhysicalStats { time: 0.0, liquid_volume: 0.03515624999999999, liquid_mass: 35.15624999999999, volume_error: -6.938893903907228e-18, volume_error_voxels: -2.842170943040401e-14, roundoff_adjustment_voxels: 4.099165512962688e-15, roundoff_absolute_voxels: 5.875522352362936e-15, transport_residual_voxels: -3.2520874943366694e-14, trace_volume_voxels: 0.0, unpressurized_volume_voxels: 0.0, centre_of_volume: [0.7500000000000001, 0.75, 0.12499999999999997], kinetic_energy: 0.40450200835277605, max_speed: 0.71875, max_divergence: 0.0, rms_divergence: 0.0, full_max_divergence: 0.0, interface_max_divergence: 0.0, boundary_max_normal_speed: 0.0, liquid_cells: 224, interface_cells: 112 }
+test tests::rotating_square_transport_conserves_volume_and_reduces_diffusion ... ok
+test tests::communicating_vessels_reduce_level_difference_through_open_channel ... ok
+
+test result: ok. 20 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.22s
+

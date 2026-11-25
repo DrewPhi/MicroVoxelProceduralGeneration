@@ -1,0 +1,28 @@
+{
+  "renderer_unit_tests": {
+    "passed": 463,
+    "failed": 0,
+    "ignored": 28
+  },
+  "runtime_unit_tests": {
+    "passed": 35,
+    "failed": 0
+  },
+  "gpu_checks": {
+    "naadf_gpu_matches_canonical_rays": 0,
+    "naadf_wide_gpu_matches_canonical_rays": 0,
+    "naadf_sparse_roots_match_canonical_rays": 0,
+    "naadf_gpu_distance_matches_canonical_rays": 0
+  },
+  "canonical_fixture_arrays_identical": {
+    "mountain.aadf": true,
+    "meadow.vox": true,
+    "rowan.aadf": true,
+    "mountain.vox": true,
+    "rowan.vox": true,
+    "meadow.aadf": true
+  },
+  "game_binary_sha256": "868cb1e9ea80f3d398b104175bdc8729e8eba07518769c87c14a79468cff1e2c",
+  "rt_binary_sha256": "eb8b498a642f72e71beba817554661428f4ff6bd9374c0efd11b27ef079c62df",
+  "defaults": "Existing CPU-proof NAADF/raster hybrid + scatter. Shared-instance vegetation ownership fix active; new performance experiments remain opt-in."
+}

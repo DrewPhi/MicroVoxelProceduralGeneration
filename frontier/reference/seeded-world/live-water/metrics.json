@@ -1,0 +1,127 @@
+{
+  "frames": {
+    "sample_count": 1500,
+    "accepted_frames": 1500,
+    "missed_budget_frames": 749,
+    "rejected_inputs": 0,
+    "p50_ms": 16.665488,
+    "p95_ms": 18.205092999999998,
+    "p99_ms": 18.970978
+  },
+  "process_memory": {
+    "rss_bytes": 377782272,
+    "peak_rss_bytes": 409829376,
+    "scope": "Linux whole-process RSS and high-water RSS including startup and active workers; not GPU allocation accounting or a hard memory bound"
+  },
+  "live_water": {
+    "tick": 248,
+    "tick_seconds": 0.1,
+    "last_step_ms": 7.711761999999999,
+    "loaded_cells": 110592,
+    "stored_cells": 110592,
+    "initial_mass": 0,
+    "additions": 460800,
+    "removals": 0,
+    "resident_mass": 460800,
+    "dormant_mass": 0,
+    "displaced_mass": 0,
+    "conserved": true,
+    "activation_error": ""
+  },
+  "naadf_gpu_pass": {
+    "samples": 1499,
+    "p50_ms": 9.656146798496247,
+    "p95_ms": 10.567157730548859,
+    "p99_ms": 12.002404717597962,
+    "scope": "primary exact visibility and its direct shadows; includes render pass setup and any active traversal compute prepass; mesh receiver NAADF shadow queries are in raster spans"
+  },
+  "gpu_full_render": {
+    "supported": true,
+    "samples": 1499,
+    "p50_ms": 10.906602680156707,
+    "p95_ms": 11.866306128593445,
+    "p99_ms": 13.375774136501311,
+    "scope": "GPU command span: shadows, opaque terrain and plants, atmosphere, UI; excludes prior uploads, CPU preparation and presentation; asynchronous unpaired timestamps"
+  },
+  "source": {
+    "version": 8,
+    "native_voxel_m": 0.0625,
+    "horizontal_scale_m": 1800,
+    "amplitude_m": 1000,
+    "octaves": 8,
+    "roughness": 0.5
+  },
+  "render_appearance_version": 6,
+  "msaa_samples": 1,
+  "scope": "Final corrected dam. Static camera with real flow; 25 seconds including startup; compilers held; no recording. Distant requested quality unresolved. Not G3/G4 or grounded-motion acceptance.",
+  "seed": 19,
+  "source_version": 8,
+  "appearance_version": 2,
+  "native_voxel_m": 0.0625,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "requested_native_radius_m": 64,
+  "native": {
+    "resident_radius_m": 64,
+    "published_world_revision": 2233,
+    "content_update_pending": false,
+    "startup_expanding": false,
+    "stream_shifts": 45,
+    "gpu_payload_bytes": 55910564
+  },
+  "world_revision": 2233,
+  "adapter": "AdapterInfo { name: \"AMD Radeon 760M Graphics (RADV PHOENIX)\", vendor: 4098, device: 5567, device_type: IntegratedGpu, driver: \"radv\", driver_info: \"Mesa 25.2.8-0ubuntu0.24.04.2\", backend: Vulkan }",
+  "binary_sha256": "1abc8dfccf27be5c72865383ed472c91772ecb634974b6cc6ae23a370b589f95",
+  "full_report": "output/live-water/final-quiet/game.json",
+  "recording": "output/live-water/final-demo/water.mp4",
+  "flow": {
+    "dam_center_cells": [
+      -14336,
+      6320,
+      6144
+    ],
+    "left_mass": 417780,
+    "right_mass": 29460,
+    "tick": 80,
+    "initial_mass": 0,
+    "additions": 460800,
+    "removals": 0
+  },
+  "before_after_source": "20 FPS child-window X11 video, timings in recorder manifest. Not independent reference renders.",
+  "reload": {
+    "scope": "Five-second resume including startup; final capture waits for native64m publication after measurement",
+    "frames": {
+      "sample_count": 303,
+      "accepted_frames": 303,
+      "missed_budget_frames": 146,
+      "rejected_inputs": 0,
+      "p50_ms": 16.659216,
+      "p95_ms": 17.261212,
+      "p99_ms": 17.781846
+    },
+    "live_water": {
+      "tick": 296,
+      "tick_seconds": 0.1,
+      "last_step_ms": 7.31677,
+      "loaded_cells": 110592,
+      "stored_cells": 110592,
+      "initial_mass": 0,
+      "additions": 460800,
+      "removals": 0,
+      "resident_mass": 460800,
+      "dormant_mass": 0,
+      "displaced_mass": 0,
+      "conserved": true,
+      "activation_error": ""
+    },
+    "native": {
+      "resident_radius_m": 64,
+      "published_world_revision": 1815,
+      "content_update_pending": false,
+      "startup_expanding": false
+    },
+    "world_revision": 1815
+  }
+}

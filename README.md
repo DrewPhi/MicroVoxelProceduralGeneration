@@ -1,5 +1,22 @@
 # MicroVoxel Procedural Generation
 
+## Play Frontier
+
+The Frontier game engine lives in [`frontier/`](frontier/). Its default
+renderer uses exact NAADF voxels nearby and meshless rolling terrain out to
+6 km. To start a new procedural world with biomes and static water, run
+
+```sh
+cd frontier
+cargo build --release --locked --bin frontier
+./run.sh --preset seeded-world --seed random
+```
+
+Use `--packed-terrain` to select the previous Frontier mesh renderer.
+See the [controls and launch options](frontier/VISUAL_PREVIEW.md).
+
+## Legacy engine
+
 ![A voxel mountain valley, grasslands and lake, captured at 1440p in the native mesh renderer](assets/cover.png)
 
 An experimental Rust foundation for an Earth-like voxel world, built without a

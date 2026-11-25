@@ -1,0 +1,59 @@
+[
+  {
+    "pose": "cave",
+    "comparison": {
+      "width": 1920,
+      "height": 1080,
+      "tolerance_srgb_byte": 1,
+      "different_pixels": 5763,
+      "different_fraction": 0.002779224537037037,
+      "max_channel_error_srgb_byte": 23,
+      "mae_srgb_byte": 0.009689750514403293,
+      "rmse_srgb_byte": 0.24687019777066066,
+      "depth": {
+        "coverage_disagreement_pixels": 0,
+        "common_hit_pixels": 2073549,
+        "max_normalized_error": 0.00013118982315063477,
+        "p99_normalized_error": 0.0
+      }
+    }
+  },
+  {
+    "pose": "bridge",
+    "comparison": {
+      "width": 1920,
+      "height": 1080,
+      "tolerance_srgb_byte": 1,
+      "different_pixels": 62500,
+      "different_fraction": 0.030140817901234566,
+      "max_channel_error_srgb_byte": 173,
+      "mae_srgb_byte": 0.27921006944444443,
+      "rmse_srgb_byte": 5.053327150565047,
+      "depth": {
+        "coverage_disagreement_pixels": 4203,
+        "common_hit_pixels": 858115,
+        "max_normalized_error": 0.00017565488815307617,
+        "p99_normalized_error": 2.205371856689453e-06
+      }
+    }
+  },
+  {
+    "pose": "topology",
+    "comparison": {
+      "width": 1920,
+      "height": 1080,
+      "tolerance_srgb_byte": 1,
+      "different_pixels": 111123,
+      "different_fraction": 0.053589409722222224,
+      "max_channel_error_srgb_byte": 169,
+      "mae_srgb_byte": 0.5776205632716049,
+      "rmse_srgb_byte": 6.833609882238943,
+      "depth": {
+        "coverage_disagreement_pixels": 7408,
+        "common_hit_pixels": 2034470,
+        "max_normalized_error": 0.0001138448715209961,
+        "p99_normalized_error": 1.0132789611816406e-06
+      }
+    }
+  }
+]

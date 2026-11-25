@@ -1,0 +1,9 @@
+{
+  "before": "output/live-water/primary-before/realtime.linear_rgb.f32",
+  "after": "output/live-water/primary-final/realtime.linear_rgb.f32",
+  "shape_equal": true,
+  "float32_components": 6220800,
+  "bit_identical": true,
+  "changed_components": 0,
+  "max_abs_difference": 0.0
+}
