@@ -135,6 +135,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(build(&steep).err().unwrap().contains("limit is 64m"));
+        let limit_m = MAX_HEIGHT_CELLS as f64 * voxel_size();
+        let error = build(&steep).err().unwrap();
+        assert!(
+            error.contains(&format!(
+                "The {MAX_HEIGHT_CELLS}-cell limit is {limit_m:.2} m"
+            )),
+            "{error}"
+        );
     }
 }
