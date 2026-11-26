@@ -355,6 +355,49 @@ pub(super) fn incision(
     cut
 }
 
+pub(in crate::terrain) fn gpu_tile_dimensions(terrain: FbmParams) -> (f64, usize) {
+    let spacing = NODE_SPACING * terrain.horizontal_scale / 1800.;
+    (CELLS as f64 * spacing, CELLS)
+}
+
+pub(super) fn gpu_gully_tile(
+    seed: u64,
+    terrain: FbmParams,
+    x: f64,
+    z: f64,
+    primary: impl Fn(f64, f64) -> SeededFields,
+) -> ([f64; 2], f64, Vec<Vec<[f64; 12]>>) {
+    let spacing = NODE_SPACING * terrain.horizontal_scale / 1800.;
+    let width = CELLS as f64 * spacing;
+    let origin = [(x / width).floor() as i64, (z / width).floor() as i64];
+    let tile = build(Key { seed, terrain, origin }, spacing, primary);
+    let bins = tile
+        .bins
+        .into_iter()
+        .map(|bin| {
+            bin.into_iter()
+                .map(|g| {
+                    [
+                        g.start[0],
+                        g.start[1],
+                        g.delta[0],
+                        g.delta[1],
+                        g.inverse_length_squared,
+                        g.radius,
+                        g.depth,
+                        g.t0,
+                        g.t1,
+                        0.,
+                        0.,
+                        0.,
+                    ]
+                })
+                .collect()
+        })
+        .collect();
+    (tile.origin, tile.spacing, bins)
+}
+
 fn build(key: Key, spacing: f64, primary: impl Fn(f64, f64) -> SeededFields) -> Tile {
     let side = CELLS + 2 * HALO;
     let start = key.origin.map(|n| n * CELLS as i64 - HALO as i64);

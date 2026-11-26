@@ -13,6 +13,8 @@ use std::{
 };
 #[path = "eroded_relief.rs"]
 pub(crate) mod eroded_relief;
+#[path = "eroded_gpu_data.rs"]
+pub(super) mod eroded_gpu_data;
 pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
 

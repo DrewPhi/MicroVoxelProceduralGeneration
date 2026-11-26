@@ -626,6 +626,18 @@ impl FbmTerrain {
     pub fn sample_climate_surface(&self, x: f64, z: f64) -> [f64; 3] {
         seeded_world::climate_surface(self.seed, self.params, x, z)
     }
+    /// Bounded drainage descriptors for the experimental GPU evaluator.
+    pub fn eroded_gpu_descriptors(&self, min: [f64; 2], max: [f64; 2]) -> Option<Vec<f64>> {
+        let span = (8. * seeded_world::eroded_relief::gpu_tile_dimensions(self.params).0)
+            .min(16_000.);
+        let valid = min
+            .into_iter()
+            .zip(max)
+            .all(|(lo, hi)| lo.abs() <= 1e8 && hi.abs() <= 1e8 && lo <= hi && hi - lo <= span);
+        (valid && self.params.recipe == FbmRecipe::Eroded && self.runway.is_none()).then(|| {
+            seeded_world::eroded_gpu_data::bounds_descriptors(self.seed, self.params, min, max)
+        })
+    }
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
         self.column_cells(c.x, c.z).ground_top as f64 * voxel_size()
