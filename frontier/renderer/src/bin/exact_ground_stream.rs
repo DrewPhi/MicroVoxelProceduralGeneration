@@ -17,10 +17,14 @@ use std::{
     time::Instant,
 };
 
+const TRACE_SHADER: &str = concat!(
+    include_str!("exact_ground_stream/trace.wgsl"),
+    include_str!("exact_ground_stream/vertical.wgsl"),
+);
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct View {
     eye: [f32; 4],
     forward: [f32; 4],
@@ -51,11 +55,23 @@ struct Options {
     node_limit: usize,
     workers: usize,
     land_bound: bool,
+    interval_bounds: bool,
+    drainage_bounds: bool,
+    certificates: bool,
+    refine_roofs: bool,
+    block_packing: bool,
+    delta_bounds: bool,
+    sparse_blocks: bool,
     prefetch: bool,
     stackless: bool,
+    beams: bool,
+    resume: bool,
+    vertical: u32,
+    lookahead: u32,
     batch: usize,
     rounds: u32,
     frames: u32,
+    stationary_frames: u32,
     step: f64,
     speed: f64,
     bank: f64,
@@ -80,11 +96,23 @@ impl Options {
             node_limit: 1 << 20,
             workers: 8,
             land_bound: true,
+            interval_bounds: false,
+            drainage_bounds: false,
+            certificates: false,
+            refine_roofs: false,
+            block_packing: false,
+            delta_bounds: false,
+            sparse_blocks: false,
             prefetch: false,
             stackless: false,
+            beams: false,
+            resume: false,
+            vertical: 0,
+            lookahead: 0,
             batch: 65536,
             rounds: 64,
             frames: 1,
+            stationary_frames: 0,
             step: 1. / 60.,
             speed: 80.,
             bank: 0.,
@@ -98,15 +126,33 @@ impl Options {
         while let Some(name) = args.next() {
             match name.as_str() {
                 "--help" => {
-                    println!("exact_ground_stream [--interactive] [--seed N --recipe eroded|legacy|alpine --eye X,Y,Z --target X,Y,Z --far 6000] [--width 320 --height 180 --page-side 16 --cache-mib 96 --node-limit 1048576 --workers 8 --batch 65536 --rounds 64 --frames 1 --step .0166667 --speed 80 --bank 0 --audit 0 --capture-motion --allow-software --output DIR] [--full-bounds --stackless --prefetch-siblings]");
+                    println!("exact_ground_stream [--interactive] [--seed N --recipe eroded|legacy|alpine --eye X,Y,Z --target X,Y,Z --far 6000] [--width 320 --height 180 --page-side 16 --cache-mib 96 --node-limit 1048576 --workers 8 --batch 65536 --rounds 64 --frames 1 --stationary-frames 0 --step .0166667 --speed 80 --bank 0 --audit 0 --capture-motion --allow-software --output DIR] [--full-bounds --interval-bounds --drainage-bounds --certificates --refine-roofs --block-packing --delta-bounds --sparse-blocks --stackless --beams --resume --vertical 0 --lookahead 0 --prefetch-siblings]");
                     return Ok(None);
                 }
                 "--allow-software" => o.software = true,
                 "--capture-motion" => o.capture_motion = true,
                 "--interactive" => o.interactive = true,
                 "--full-bounds" => o.land_bound = false,
+                "--interval-bounds" => o.interval_bounds = true,
+                "--drainage-bounds" => {
+                    o.interval_bounds = true;
+                    o.drainage_bounds = true;
+                }
+                "--certificates" => o.certificates = true,
+                "--refine-roofs" => {
+                    o.certificates = true;
+                    o.refine_roofs = true;
+                }
                 "--prefetch-siblings" => o.prefetch = true,
+                "--block-packing" => o.block_packing = true,
+                "--delta-bounds" => o.delta_bounds = true,
+                "--sparse-blocks" => {
+                    o.sparse_blocks = true;
+                    o.certificates = true;
+                }
                 "--stackless" => o.stackless = true,
+                "--beams" => o.beams = true,
+                "--resume" => o.resume = true,
                 _ => {
                     let val = args.next().ok_or_else(|| format!("{name} needs a value"))?;
                     match name.as_str() {
@@ -125,12 +171,15 @@ impl Options {
                             }
                         }
                         "--page-side" => o.page_side = val.parse()?,
+                        "--vertical" => o.vertical = val.parse()?,
+                        "--lookahead" => o.lookahead = val.parse()?,
                         "--cache-mib" => o.cache_mib = val.parse()?,
                         "--node-limit" => o.node_limit = val.parse()?,
                         "--workers" => o.workers = val.parse()?,
                         "--batch" => o.batch = val.parse()?,
                         "--rounds" => o.rounds = val.parse()?,
                         "--frames" => o.frames = val.parse()?,
+                        "--stationary-frames" => o.stationary_frames = val.parse()?,
                         "--step" => o.step = val.parse()?,
                         "--speed" => o.speed = val.parse()?,
                         "--bank" => o.bank = val.parse::<f64>()?.to_radians(),
@@ -141,6 +190,7 @@ impl Options {
                 }
             }
         }
+        let max_nodes = if o.page_side == 64 { 1 << 22 } else { 1 << 23 };
         if !(32..=1920).contains(&o.width)
             || !(32..=1080).contains(&o.height)
             || !(1. ..=7000.).contains(&o.far)
@@ -150,23 +200,44 @@ impl Options {
             || (o.target - o.eye).with_y(0.).length_squared() < 1e-8
             || !(0. ..=1.6).contains(&o.bank.abs())
             || ![4, 8, 16, 32, 64].contains(&o.page_side)
-            || !(1..=96).contains(&o.cache_mib)
-            || !(5..=(1 << 22)).contains(&o.node_limit)
+            || !(1..=512).contains(&o.cache_mib)
+            || !(5..=max_nodes).contains(&o.node_limit)
             || !(1..=32).contains(&o.workers)
             || !(1..=600_000).contains(&o.batch)
-            || !(1..=512).contains(&o.rounds)
+            || !(1..=4096).contains(&o.rounds)
             || !(1..=3600).contains(&o.frames)
+            || o.stationary_frames >= o.frames
             || o.audit > 32
+            || o.lookahead > 64
         {
             return Err("benchmark options out of range".into());
+        }
+        if o.sparse_blocks && o.prefetch {
+            return Err("--sparse-blocks already requests individual native blocks".into());
+        }
+        if ![0, 2, 4, 8, 16].contains(&o.vertical)
+            || (o.vertical > 0
+                && (o.eye.y != o.target.y
+                    || o.bank != 0.
+                    || o.interactive
+                    || o.resume
+                    || o.lookahead != 0
+                    || o.beams
+                    || o.sparse_blocks))
+        {
+            return Err(
+                "--vertical requires a level headless view with no independent-ray options".into(),
+            );
         }
         Ok(Some(o))
     }
     fn pose(&self, frame: u32) -> (DVec3, DVec3, DVec3, DVec3) {
         let base = (self.target - self.eye).normalize();
         let flight = base.with_y(0.).normalize();
-        let time = f64::from(frame) * self.step;
-        let progress = f64::from(frame) / f64::from(self.frames.saturating_sub(1).max(1));
+        let motion_frame = frame.saturating_sub(self.stationary_frames);
+        let time = f64::from(motion_frame) * self.step;
+        let last_motion = (self.frames - self.stationary_frames - 1).max(1);
+        let progress = f64::from(motion_frame) / f64::from(last_motion);
         let yaw = self.bank * 1.6 * progress;
         let forward = DQuat::from_rotation_y(yaw) * base;
         let roll =
@@ -222,30 +293,59 @@ fn metrics(values: &mut [f64]) -> [f64; 3] {
         .map(|q| values[((values.len() as f64 * q).ceil() as usize).saturating_sub(1)])
 }
 
-fn classify(hits: &[[u32; 2]], cache: &Cache) -> Result<(Vec<(u32, u32)>, usize, usize)> {
-    let mut counts = vec![0u32; cache.nodes.len()];
+const PENDING_BIT: u32 = 0x8000_0000;
+
+fn hit_depth([bits, data]: [u32; 2]) -> f32 {
+    if data & PENDING_BIT != 0 {
+        -2.
+    } else {
+        f32::from_bits(bits)
+    }
+}
+
+fn classify(
+    hits: &[[u32; 2]],
+    hints: &[[u32; 2]],
+    cache: &Cache,
+) -> Result<(Vec<cache::Request>, usize, usize)> {
+    let mut counts = std::collections::HashMap::<u32, (u32, f32)>::new();
     let mut pending = 0;
     let mut failed = 0;
     for [bits, key] in hits.iter().copied() {
-        match f32::from_bits(bits) {
-            -2. => {
-                let need = counts
-                    .get_mut(key as usize)
-                    .ok_or("unresolved node outside live tree")?;
-                *need += 1;
-                pending += 1;
+        if key & PENDING_BIT != 0 {
+            let key = key & !PENDING_BIT;
+            if cache.node_of(key) >= cache.nodes.len() {
+                return Err("unresolved node outside live tree".into());
             }
-            -3. => failed += 1,
-            _ => (),
+            let need = counts.entry(key).or_insert((0, f32::INFINITY));
+            need.0 += 1;
+            need.1 = need.1.min(f32::from_bits(bits));
+            pending += 1;
+        } else if f32::from_bits(bits) == -3. {
+            failed += 1;
+        }
+    }
+    if pending > 0 {
+        for [bits, key] in hints.iter().copied() {
+            if key & PENDING_BIT != 0 {
+                let key = key & !PENDING_BIT;
+                if cache.node_of(key) >= cache.nodes.len() {
+                    return Err("speculative node outside live tree".into());
+                }
+                let need = counts.entry(key).or_insert((0, f32::INFINITY));
+                need.1 = need.1.min(f32::from_bits(bits));
+            }
         }
     }
     let mut requests: Vec<_> = counts
         .into_iter()
-        .enumerate()
-        .filter(|&(_, n)| n > 0)
-        .map(|(id, n)| (id as u32, n))
+        .map(|(key, (count, minimum))| cache::Request {
+            key,
+            count,
+            minimum,
+        })
         .collect();
-    requests.sort_unstable_by_key(|&(id, count)| (std::cmp::Reverse(count), id));
+    requests.sort_unstable_by_key(|q| (std::cmp::Reverse(q.count), q.key));
     Ok((requests, pending, failed))
 }
 
@@ -255,7 +355,7 @@ fn image(path: &Path, view: View, hits: &[[u32; 2]]) -> Result<()> {
     let normal = [DVec3::Y, -DVec3::X, DVec3::X, -DVec3::Z, DVec3::Z];
     let mut rgb = Vec::with_capacity(hits.len() * 3);
     for (index, &[bits, mat]) in hits.iter().enumerate() {
-        let d = f32::from_bits(bits);
+        let d = hit_depth([bits, mat]);
         let color = if d >= 0. {
             let n = normal[(mat >> 8) as usize];
             let light = (0.39 + 0.16 * n.y + 0.52 * n.dot(sun).max(0.)) as f32;
@@ -364,7 +464,16 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     let terrain = FbmTerrain::new(o.seed, params)?;
-    let workers = cache::Workers::new(&terrain, o.workers, o.page_side, o.land_bound);
+    let workers = cache::Workers::new(
+        &terrain,
+        o.workers,
+        o.page_side,
+        o.land_bound,
+        o.interval_bounds,
+        o.drainage_bounds,
+        o.refine_roofs,
+        o.block_packing,
+    );
     let capacity_words = o.cache_mib * 1024 * 256;
     let mut cache = Cache::new(o.eye.to_array(), o.page_side, capacity_words, o.node_limit);
     fs::create_dir_all(&o.output)?;
@@ -372,15 +481,7 @@ fn main() -> Result<()> {
     let mut report = BufWriter::new(File::create(o.output.join("frames.csv"))?);
     writeln!(trace,"frame,round,pending,failed,requested,submitted_jobs,nodes,pages,gpu_ms,readback_wall_ms,build_ms")?;
     writeln!(report,"frame,pending,failed,rounds,ready_wall_ms,ready_gpu_ms,nodes,pages,branch_jobs,page_jobs,root_resets,ground_clearance_m,farthest_hit_m,hits_past_1000m,hits_past_3000m")?;
-    let gpu = pollster::block_on(gpu::Gpu::new(
-        o.width,
-        o.height,
-        o.node_limit,
-        capacity_words,
-        o.software,
-        o.stackless,
-        None,
-    ))?;
+    let gpu = pollster::block_on(gpu::Gpu::new(&o, None))?;
     gpu.bounds(&cache);
     let capture = o.output.join("frames");
     if o.capture_motion {
@@ -403,15 +504,15 @@ fn main() -> Result<()> {
         let view = o.view(frame, &cache);
         for round in 0..o.rounds {
             let timer = Instant::now();
-            let (hits, gpu_ms) = gpu.render(&view)?;
+            let (hits, hints, gpu_ms) = gpu.render(view, round > 0)?;
             let read_ms = millis(timer);
-            let (requests, pending, failed) = classify(&hits, &cache)?;
+            let (requests, pending, failed) = classify(&hits, &hints, &cache)?;
             let ready = pending == 0 && failed == 0;
             let mut jobs = 0;
             let mut build_ms = 0.;
             if !requests.is_empty() && round + 1 < o.rounds && failed == 0 {
                 let timer = Instant::now();
-                let data = cache.fill(&workers, &requests, o.batch, o.prefetch);
+                let data = cache.fill(&workers, &requests, o.batch, o.prefetch, o.certificates);
                 build_ms = millis(timer);
                 jobs = data.jobs;
                 if jobs > 0 {
@@ -425,6 +526,9 @@ fn main() -> Result<()> {
                 cache.nodes.len(),
                 cache.pages
             )?;
+            if round % 16 == 15 {
+                trace.flush()?;
+            }
             if ready || jobs == 0 || failed > 0 {
                 let wall = millis(start);
                 if ready {
@@ -443,8 +547,8 @@ fn main() -> Result<()> {
                 let clearance = eye.y - ground;
                 let mut farthest = 0f32;
                 let mut beyond = [0u32; 2];
-                for &[bits, _] in &hits {
-                    let depth = f32::from_bits(bits);
+                for &hit in &hits {
+                    let depth = hit_depth(hit);
                     farthest = farthest.max(depth);
                     beyond[0] += u32::from(depth > 1000.);
                     beyond[1] += u32::from(depth > 3000.);
@@ -467,12 +571,14 @@ fn main() -> Result<()> {
                 if o.capture_motion {
                     image(&capture.join(format!("{frame:04}.png")), view, &hits)?;
                 }
-                if frame + 1 == o.frames {
-                    if ready && o.audit > 0 {
+                let last = frame + 1 == o.frames;
+                if frame == 0 || last {
+                    if last && ready && o.audit > 0 {
                         (final_bad, final_error) = audit(&o, &terrain, eye, view, &hits);
                     }
-                    let raw: Vec<_> = hits.iter().map(|hit| hit[0]).collect();
-                    fs::write(o.output.join("depth.f32"), bytemuck::cast_slice(&raw))?;
+                    let raw: Vec<_> = hits.iter().map(|&hit| hit_depth(hit).to_bits()).collect();
+                    let name = if last { "depth.f32" } else { "first.depth.f32" };
+                    fs::write(o.output.join(name), bytemuck::cast_slice(&raw))?;
                 }
                 break;
             }
@@ -491,7 +597,7 @@ fn main() -> Result<()> {
         }
     };
     let summary = format!(
-        r#"{{"adapter":{:?},"driver":{:?},"seed":{},"recipe":"{:?}","voxel_m":{},"width":{},"height":{},"horizon_m":{},"frame_count_requested":{},"frame_count_ready":{},"unresolved_frames":{unresolved_frames},"pages":{},"nodes":{},"page_side":{},"resident_page_bytes":{},"root_resets":{root_resets},"gpu_page_capacity_bytes":{},"gpu_bound_capacity_bytes":{},"ready_wall_ms_p50_p95_p99":{},"ready_gpu_ms_p50_p95_p99":{},"audited_rays":{},"audit_coverage_errors":{final_bad},"audit_max_depth_error_m":{final_error}}}"#,
+        r#"{{"adapter":{:?},"driver":{:?},"seed":{},"recipe":"{:?}","voxel_m":{},"width":{},"height":{},"horizon_m":{},"frame_count_requested":{},"frame_count_ready":{},"unresolved_frames":{unresolved_frames},"pages":{},"nodes":{},"page_side":{},"resident_page_bytes":{},"empty_certificates":{},"refined_roofs":{},"resident_sparse_blocks":{},"root_resets":{root_resets},"gpu_page_capacity_bytes":{},"gpu_bound_capacity_bytes":{},"ready_wall_ms_p50_p95_p99":{},"ready_gpu_ms_p50_p95_p99":{},"audited_rays":{},"audit_coverage_errors":{final_bad},"audit_max_depth_error_m":{final_error}}}"#,
         gpu.info.name,
         gpu.info.driver_info,
         o.seed,
@@ -506,6 +612,9 @@ fn main() -> Result<()> {
         cache.nodes.len(),
         o.page_side,
         u64::from(cache.words) * 4,
+        cache.certificates,
+        cache.refined_roofs,
+        cache.resident_sparse_blocks,
         u64::from(o.cache_mib) * 1024 * 1024,
         o.node_limit * std::mem::size_of::<cache::Node>(),
         timing(&mut wall_times),
@@ -526,8 +635,9 @@ mod tests {
     #[test]
     fn shader_validates() {
         for source in [
-            include_str!("exact_ground_stream/trace.wgsl"),
+            super::TRACE_SHADER,
             include_str!("exact_ground_stream/display.wgsl"),
+            include_str!("exact_ground_stream/patches.wgsl"),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));

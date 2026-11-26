@@ -1,6 +1,6 @@
 use super::{
     cache::{Cache, Node, Upload},
-    Result, View,
+    Options, Result, View,
 };
 
 pub struct Gpu {
@@ -13,10 +13,16 @@ pub struct Gpu {
     nodes: wgpu::Buffer,
     heights: wgpu::Buffer,
     output: wgpu::Buffer,
+    requests_ahead: wgpu::Buffer,
     readback: wgpu::Buffer,
     queries: wgpu::QuerySet,
     query_resolve: wgpu::Buffer,
     pixel_bytes: u64,
+    request_bytes: u64,
+    lookahead: u32,
+    vertical: u32,
+    patches: Option<Patches>,
+    bound_patches: Option<Patches>,
     display: Option<Display>,
 }
 impl Gpu {
@@ -28,14 +34,25 @@ impl Gpu {
     }
 
     pub async fn new(
-        width: u32,
-        height: u32,
-        nodes: usize,
-        capacity_words: u32,
-        software: bool,
-        stackless: bool,
+        options: &Options,
         window: Option<std::sync::Arc<winit::window::Window>>,
     ) -> Result<Self> {
+        let Options {
+            width,
+            height,
+            node_limit,
+            cache_mib,
+            software,
+            stackless,
+            beams,
+            resume,
+            lookahead,
+            vertical,
+            sparse_blocks,
+            delta_bounds,
+            batch,
+            ..
+        } = *options;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
@@ -56,10 +73,13 @@ impl Gpu {
         if !software && info.device_type == wgpu::DeviceType::Cpu {
             return Err("software Vulkan requires --allow-software".into());
         }
-        let height_bytes = 4 * u64::from(capacity_words);
+        let height_bytes = u64::from(cache_mib) * 1024 * 1024;
         let pixel_bytes = 8 * u64::from(width) * u64::from(height);
+        let request_bytes =
+            8 * u64::from(lookahead) * u64::from(width.div_ceil(8)) * u64::from(height.div_ceil(8));
         let max_storage = adapter.limits().max_storage_buffer_binding_size;
-        if height_bytes > u64::from(max_storage) {
+        let max_buffer = adapter.limits().max_buffer_size;
+        if height_bytes > u64::from(max_storage) || height_bytes > max_buffer {
             return Err(
                 format!("page cache exceeds adapter's {max_storage}-byte binding limit").into(),
             );
@@ -68,6 +88,7 @@ impl Gpu {
             max_storage_buffer_binding_size: wgpu::Limits::default()
                 .max_storage_buffer_binding_size
                 .max(height_bytes as u32),
+            max_buffer_size: wgpu::Limits::default().max_buffer_size.max(height_bytes),
             ..Default::default()
         };
         let (device, queue) = adapter
@@ -95,14 +116,26 @@ impl Gpu {
             "camera",
         );
         let nodes = buffer(
-            (nodes * std::mem::size_of::<Node>()) as u64,
+            (node_limit * std::mem::size_of::<Node>()) as u64,
             U::STORAGE | U::COPY_DST,
             "bounds",
         );
         let heights = buffer(height_bytes, U::STORAGE | U::COPY_DST, "native heights");
+        let patches = sparse_blocks.then(|| Patches::new(&device, &heights, batch));
+        let bound_patches = delta_bounds.then(|| Patches::new(&device, &nodes, 262144));
         let output = buffer(pixel_bytes, U::STORAGE | U::COPY_SRC, "center hits");
+        let requests_ahead = buffer(
+            request_bytes.max(8),
+            U::STORAGE | U::COPY_SRC | U::COPY_DST,
+            "speculative requests",
+        );
+        let offsets = buffer(
+            if resume { pixel_bytes } else { 8 },
+            U::STORAGE,
+            "certified ray prefixes",
+        );
         let readback = buffer(
-            pixel_bytes + 16,
+            pixel_bytes + 16 + request_bytes,
             U::MAP_READ | U::COPY_DST,
             "hits and timestamps",
         );
@@ -114,28 +147,69 @@ impl Gpu {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("exact terrain"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("trace.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(super::TRACE_SHADER.into()),
+        });
+        let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("exact visibility bindings"),
+            entries: &std::array::from_fn::<_, 6, _>(|i| wgpu::BindGroupLayoutEntry {
+                binding: i as u32,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: if i == 0 {
+                        wgpu::BufferBindingType::Uniform
+                    } else {
+                        wgpu::BufferBindingType::Storage { read_only: i < 3 }
+                    },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("exact visibility layout"),
+            bind_group_layouts: &[&bindings],
+            push_constant_ranges: &[],
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("exact ground visibility"),
-            layout: None,
+            layout: Some(&layout),
             module: &shader,
-            entry_point: Some("visibility"),
+            entry_point: Some(if vertical > 0 {
+                "vertical_visibility"
+            } else {
+                "visibility"
+            }),
             compilation_options: wgpu::PipelineCompilationOptions {
-                constants: &std::collections::HashMap::from([(
-                    "STACKLESS".into(),
-                    f64::from(stackless),
-                )]),
+                constants: &if vertical > 0 {
+                    std::collections::HashMap::from([("VERTICAL".into(), f64::from(vertical))])
+                } else {
+                    std::collections::HashMap::from([
+                        ("STACKLESS".into(), f64::from(stackless)),
+                        ("BEAMS".into(), f64::from(beams)),
+                        ("RESUME".into(), f64::from(resume)),
+                        ("SPARSE".into(), f64::from(sparse_blocks)),
+                        ("LOOKAHEAD".into(), f64::from(lookahead)),
+                    ])
+                },
                 ..Default::default()
             },
             cache: None,
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("exact ground"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &std::array::from_fn::<_, 4, _>(|i| wgpu::BindGroupEntry {
+            layout: &bindings,
+            entries: &std::array::from_fn::<_, 6, _>(|i| wgpu::BindGroupEntry {
                 binding: i as u32,
-                resource: [&uniform, &nodes, &heights, &output][i].as_entire_binding(),
+                resource: [
+                    &uniform,
+                    &nodes,
+                    &heights,
+                    &output,
+                    &requests_ahead,
+                    &offsets,
+                ][i]
+                    .as_entire_binding(),
             }),
         });
         let display = if let (Some(window), Some(surface)) = (window, surface) {
@@ -155,10 +229,16 @@ impl Gpu {
             nodes,
             heights,
             output,
+            requests_ahead,
             readback,
             queries,
             query_resolve,
             pixel_bytes,
+            request_bytes,
+            lookahead,
+            vertical,
+            patches,
+            bound_patches,
             display,
         })
     }
@@ -174,13 +254,44 @@ impl Gpu {
             self.queue
                 .write_buffer(&self.heights, begin, bytemuck::cast_slice(&upload.columns));
         }
+        if !upload.patches.is_empty() {
+            self.patches
+                .as_ref()
+                .expect("sparse block patch pipeline")
+                .apply(&self.device, &self.queue, &upload.patches);
+        }
+        if let Some(patcher) = &self.bound_patches {
+            if upload.bound_patches.len() <= 262144 {
+                if upload.first_node < cache.nodes.len() {
+                    let offset = upload.first_node * std::mem::size_of::<Node>();
+                    self.queue.write_buffer(
+                        &self.nodes,
+                        offset as u64,
+                        bytemuck::cast_slice(&cache.nodes[upload.first_node..]),
+                    );
+                }
+                if !upload.bound_patches.is_empty() {
+                    patcher.apply(&self.device, &self.queue, &upload.bound_patches);
+                }
+                return;
+            }
+        }
         self.bounds(cache);
     }
 
-    pub fn render(&self, view: &View) -> Result<(Vec<[u32; 2]>, f64)> {
+    pub fn render(
+        &self,
+        mut view: View,
+        resume: bool,
+    ) -> Result<(Vec<[u32; 2]>, Vec<[u32; 2]>, f64)> {
+        view.camera_cell[2] = i32::from(resume);
+        view.camera_cell[3] = self.lookahead as i32;
         self.queue
-            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(view));
+            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&view));
         let mut e = self.device.create_command_encoder(&Default::default());
+        if self.request_bytes > 0 {
+            e.clear_buffer(&self.requests_ahead, 0, None);
+        }
         {
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
@@ -192,11 +303,28 @@ impl Gpu {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.group, &[]);
-            pass.dispatch_workgroups(view.size[0].div_ceil(8), view.size[1].div_ceil(8), 1);
+            if self.vertical > 0 {
+                pass.dispatch_workgroups(
+                    view.size[0].div_ceil(16),
+                    view.size[1].div_ceil(4 * self.vertical),
+                    1,
+                );
+            } else {
+                pass.dispatch_workgroups(view.size[0].div_ceil(8), view.size[1].div_ceil(8), 1);
+            }
         }
         e.resolve_query_set(&self.queries, 0..2, &self.query_resolve, 0);
         e.copy_buffer_to_buffer(&self.output, 0, &self.readback, 0, self.pixel_bytes);
         e.copy_buffer_to_buffer(&self.query_resolve, 0, &self.readback, self.pixel_bytes, 16);
+        if self.request_bytes > 0 {
+            e.copy_buffer_to_buffer(
+                &self.requests_ahead,
+                0,
+                &self.readback,
+                self.pixel_bytes + 16,
+                self.request_bytes,
+            );
+        }
         self.queue.submit([e.finish()]);
         let slice = self.readback.slice(..);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -207,13 +335,81 @@ impl Gpu {
         rx.recv()??;
         let bytes = slice.get_mapped_range();
         let pixels = bytemuck::cast_slice(&bytes[..self.pixel_bytes as usize]).to_vec();
-        let stamps: &[u64] = bytemuck::cast_slice(&bytes[self.pixel_bytes as usize..]);
+        let end = (self.pixel_bytes + 16) as usize;
+        let stamps: &[u64] = bytemuck::cast_slice(&bytes[self.pixel_bytes as usize..end]);
+        let hints = bytemuck::cast_slice(&bytes[end..]).to_vec();
         let ms = stamps[1].saturating_sub(stamps[0]) as f64
             * f64::from(self.queue.get_timestamp_period())
             * 1e-6;
         drop(bytes);
         self.readback.unmap();
-        Ok((pixels, ms))
+        Ok((pixels, hints, ms))
+    }
+}
+
+struct Patches {
+    entries: wgpu::Buffer,
+    count: wgpu::Buffer,
+    pipeline: wgpu::ComputePipeline,
+    bindings: wgpu::BindGroup,
+}
+impl Patches {
+    fn new(device: &wgpu::Device, heights: &wgpu::Buffer, batch: usize) -> Self {
+        use wgpu::BufferUsages as U;
+        let entries = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sparse block patch entries"),
+            size: 8 * batch as u64,
+            usage: U::STORAGE | U::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let count = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sparse block patch count"),
+            size: 4,
+            usage: U::UNIFORM | U::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sparse block patch shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("patches.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("sparse block patch pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("update_tables"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sparse block patch bindings"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[&entries, heights, &count]
+                .into_iter()
+                .enumerate()
+                .map(|(i, buffer)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: buffer.as_entire_binding(),
+                })
+                .collect::<Vec<_>>(),
+        });
+        Self {
+            entries,
+            count,
+            pipeline,
+            bindings,
+        }
+    }
+    fn apply(&self, device: &wgpu::Device, queue: &wgpu::Queue, patches: &[[u32; 2]]) {
+        queue.write_buffer(&self.entries, 0, bytemuck::cast_slice(patches));
+        queue.write_buffer(&self.count, 0, bytemuck::bytes_of(&(patches.len() as u32)));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bindings, &[]);
+            pass.dispatch_workgroups((patches.len() as u32).div_ceil(64), 1, 1);
+        }
+        queue.submit([encoder.finish()]);
     }
 }
 

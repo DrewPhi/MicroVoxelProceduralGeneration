@@ -1021,6 +1021,35 @@ pub fn bound_eroded_ground_ceiling(
     region: ColumnBox,
     budget: BoundBudget,
 ) -> Option<f64> {
+    eroded_ground_ceiling(terrain, region, budget, false, false)
+}
+
+/// Box-clipped interval variant of the opaque-ground proof.
+pub fn bound_eroded_ground_interval(
+    terrain: &FbmTerrain,
+    region: ColumnBox,
+    budget: BoundBudget,
+) -> Option<f64> {
+    eroded_ground_ceiling(terrain, region, budget, true, false)
+}
+
+/// Also enclose the weighted primary watershed bed. Secondary tributaries
+/// can only excavate that bed, so the result still bounds the opaque voxels.
+pub fn bound_eroded_ground_drainage(
+    terrain: &FbmTerrain,
+    region: ColumnBox,
+    budget: BoundBudget,
+) -> Option<f64> {
+    eroded_ground_ceiling(terrain, region, budget, true, true)
+}
+
+fn eroded_ground_ceiling(
+    terrain: &FbmTerrain,
+    region: ColumnBox,
+    budget: BoundBudget,
+    clip_cells: bool,
+    drainage: bool,
+) -> Option<f64> {
     let p = terrain.params();
     if p.recipe != FbmRecipe::Eroded
         || terrain.dirt_runway().is_some()
@@ -1035,24 +1064,34 @@ pub fn bound_eroded_ground_ceiling(
     let x = Aa { c: center[0], a: [radius[0], 0.], r: metres * 0.5 };
     let z = Aa { c: center[1], a: [0., radius[1]], r: metres * 0.5 };
     let mut context = Context { budget, cells: 0, fallbacks: 0 };
-    let range = seeded_land_elevation(terrain, x, z, &mut context, true).range();
-    let top = range.hi.min(crate::terrain::seeded_world::global_height_range(p)[1]);
+    let range = if clip_cells {
+        seeded_land_elevation(terrain, x.range(), z.range(), &mut context, true)
+    } else {
+        seeded_land_elevation(terrain, x, z, &mut context, true).range()
+    };
+    let roof = if drainage {
+        primary_surface(Aa::interval(range.lo, range.hi), terrain, x, z, true).range().hi
+    } else {
+        range.hi
+    };
+    let top = range.hi.min(roof).min(crate::terrain::seeded_world::global_height_range(p)[1]);
     // Reserve rounding for the difference in scalar ordering and the
     // positive-weighted average of river profiles.
     top.is_finite().then_some((top + fp_pad(1e5 * (1. + top.abs()))).next_up())
 }
 
-fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: bool) -> Aa {
+fn seeded_land_elevation<F: eroded::RangeField>(t: &FbmTerrain, x: F, z: F, c: &mut Context, tight: bool) -> F {
+    let noise = |x: F, z: F, seed, c: &mut Context| x.noise(z, seed, c);
     let p = t.params();
     let sx = x.scale(1800.).div_scalar(p.horizontal_scale);
     let sz = z.scale(1800.).div_scalar(p.horizontal_scale);
     let mut band = |wavelength: f64, count: u32, gain: f64, salt: u64| {
         let (mut weight, mut frequency, mut sum, mut norm) =
-            (1., 1. / wavelength, Aa::point(0.), 0.);
+            (1., 1. / wavelength, F::point(0.), 0.);
         for octave in 0..count {
             let n = noise(
-                sx.scale(frequency).add(Aa::point(13.7)),
-                sz.scale(frequency).sub(Aa::point(8.3)),
+                sx.scale(frequency).add(F::point(13.7)),
+                sz.scale(frequency).sub(F::point(8.3)),
                 t.seed() ^ salt.wrapping_add(octave as u64 * 0x9e3779b9),
                 c,
             );
@@ -1065,9 +1104,9 @@ fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: b
     };
     let continent = band(48_000., 3, 0.45, 0x5101);
     let province = band(22_000., 3, 0.45, 0x5102);
-    let m = province.add(Aa::point(0.08)).div_scalar(0.48).clamp(0., 1.);
-    let mountain = m.mul(m).mul(Aa::point(3.).sub(m.scale(2.)));
-    let ridge = Aa::point(1.).sub(band(3600., 4, 0.48, 0x5105).abs());
+    let m = province.add(F::point(0.08)).div_scalar(0.48).clamp01();
+    let mountain = m.smooth_unit();
+    let ridge = F::point(1.).sub(band(3600., 4, 0.48, 0x5105).absolute());
     let hills = band(1800., 3, 0.45, 0x5106);
     let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
     let authored = if p.recipe.has_watershed_drainage() {
@@ -1095,7 +1134,7 @@ fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: b
                         BEDROCK_HEIGHT_BOUND, PROVINCE_HEIGHT_BOUND,
                     };
                     let bound = BEDROCK_HEIGHT_BOUND + PROVINCE_HEIGHT_BOUND;
-                    rock.add(Aa::interval(-bound, bound))
+                    rock.add(F::lift(I {lo:-bound,hi:bound}))
                 } else {
                     rock
                 }
@@ -1108,7 +1147,7 @@ fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: b
     } else {
         continent
             .scale(400.)
-            .add(Aa::point(65.))
+            .add(F::point(65.))
             .add(mountain.mul(mountain).mul(ridge.mul(ridge)).scale(1150.))
             .add(hills.scale(45.))
             .add(fine.scale(3.))
@@ -1117,8 +1156,12 @@ fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: b
 }
 
 fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
-    let p = t.params();
     let base = seeded_land_elevation(t, x, z, c, false);
+    primary_surface(base, t, x, z, false)
+}
+
+fn primary_surface(base: Aa, t: &FbmTerrain, x: Aa, z: Aa, ground_only: bool) -> Aa {
+    let p = t.params();
     let rx = x.range();
     let rz = z.range();
     let spacing = 2400. * p.horizontal_scale / 1800.;
@@ -1266,7 +1309,7 @@ fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa
         };
         contributions.push((weight, profile));
 
-        if r.wet && d.lo < width.hi {
+        if !ground_only && r.wet && d.lo < width.hi {
             stage_upper = stage_upper.max(stage.hi);
             if r.lake {
                 possible_lake_lower = possible_lake_lower.min(stage.lo);
@@ -1279,7 +1322,10 @@ fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa
             }
         }
     }
-    if only_sea_reaches && base_range.hi < 0. {
+    if ground_only && contributions.is_empty() {
+        return base;
+    }
+    if !ground_only && only_sea_reaches && base_range.hi < 0. {
         return Aa::point(0.);
     }
     if contributions.is_empty() {
@@ -1327,6 +1373,9 @@ fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa
     let roundoff = fp_pad(64. * (contributions.len() + 1) as f64 * magnitude);
     ground.lo = (ground.lo.max(hull.lo) - roundoff).next_down();
     ground.hi = (ground.hi.min(hull.hi) + roundoff).next_up();
+    if ground_only {
+        return Aa::interval(ground.lo, ground.hi);
+    }
     let bounded_stage = |stage: I, ground: I| {
         if !p.recipe.has_watershed_drainage() {
             return stage;

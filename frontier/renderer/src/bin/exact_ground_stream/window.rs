@@ -173,23 +173,25 @@ fn render_loop(
             ..Default::default()
         },
     )?;
-    let workers = Workers::new(&terrain, o.workers, o.page_side, o.land_bound);
+    let workers = Workers::new(
+        &terrain,
+        o.workers,
+        o.page_side,
+        o.land_bound,
+        o.interval_bounds,
+        o.drainage_bounds,
+        o.refine_roofs,
+        o.block_packing,
+    );
     let capacity = o.cache_mib * 1024 * 256;
     let mut cache = Cache::new(o.eye.to_array(), o.page_side, capacity, o.node_limit);
-    let mut gpu = pollster::block_on(Gpu::new(
-        o.width,
-        o.height,
-        o.node_limit,
-        capacity,
-        o.software,
-        o.stackless,
-        Some(window),
-    ))?;
+    let mut gpu = pollster::block_on(Gpu::new(&o, Some(window)))?;
     gpu.bounds(&cache);
     let mut shown = false;
     while receive.recv().is_ok() {
         let start = Instant::now();
         let mut pose = *current.lock().unwrap();
+        let mut previous = None;
         for round in 0..o.rounds {
             if receive.try_recv().is_ok() {
                 pose = *current.lock().unwrap();
@@ -202,12 +204,14 @@ fn render_loop(
             if !cache.cover(eye.to_array(), o.far) {
                 cache = Cache::new(eye.to_array(), o.page_side, capacity, o.node_limit);
                 gpu.bounds(&cache);
+                previous = None;
             }
             let forward = pose.forward();
             let right = forward.cross(DVec3::Y).normalize();
             let view = o.view_from_pose(&cache, (eye, forward, right, right.cross(forward)));
-            let (pixels, time) = gpu.render(&view)?;
-            let (requests, pending, failed) = classify(&pixels, &cache)?;
+            let (pixels, hints, time) = gpu.render(view, previous == Some(view))?;
+            previous = Some(view);
+            let (requests, pending, failed) = classify(&pixels, &hints, &cache)?;
             if pending == 0 && failed == 0 {
                 gpu.present()?;
                 if !shown {
@@ -231,7 +235,13 @@ fn render_loop(
                     "Frontier exact ground · streaming {pending} pixels"
                 )));
             }
-            let data = cache.fill(&workers, &requests, o.batch.min(1024), o.prefetch);
+            let data = cache.fill(
+                &workers,
+                &requests,
+                o.batch.min(1024),
+                o.prefetch,
+                o.certificates,
+            );
             if data.jobs == 0 || round + 1 == o.rounds {
                 let _ = status.send_event(Status::Loading(format!(
                     "Frontier exact ground · {pending} pixels awaiting pages"

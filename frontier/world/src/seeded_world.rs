@@ -87,7 +87,7 @@ pub(crate) fn landscape_relief<V: Value>(
 ) -> V {
     let ramp = |v: V, low: f64, high: f64| {
         let t = v.add(V::point(-low)).scale(1. / (high - low)).clamp01();
-        t.mul(t).mul(V::point(3.).add(t.scale(-2.)))
+        t.smooth_unit()
     };
     let upland = mountain.mul(mountain);
     let shoulders = ramp(ridge, 0.52, 0.88);
@@ -116,7 +116,7 @@ pub(crate) fn landscape_relief<V: Value>(
 pub(crate) fn jointed_relief<V: Value>(ridge: V, upland: V, strata: V, joints: V, debris: V) -> V {
     let ramp = |x: V, start: f64, width: f64| {
         let t = x.add(V::point(-start)).scale(1. / width).clamp01();
-        t.mul(t).mul(V::point(3.).add(t.scale(-2.)))
+        t.smooth_unit()
     };
     let exposure = ramp(ridge, 0.45, 0.38).mul(ramp(strata, -0.38, 0.63));
     let fracture = joints.add(debris.scale(0.24));

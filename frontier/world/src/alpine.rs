@@ -14,6 +14,9 @@ pub(crate) trait Value: Copy {
     fn scale(self, k: f64) -> Self;
     fn mul(self, b: Self) -> Self;
     fn clamp01(self) -> Self;
+    fn smooth_unit(self) -> Self {
+        self.mul(self).mul(Self::point(3.).add(self.scale(-2.)))
+    }
     /// Prove that every represented value misses a closed support interval.
     fn outside(self, lo: f64, hi: f64) -> bool;
     /// A constant zero with zero derivatives or remainder.
