@@ -1011,7 +1011,38 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     }
 }
 
-fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
+mod eroded;
+
+/// A ceiling for the opaque, unedited Eroded ground. The watershed profiles
+/// are capped by the uncut land and secondary incision only removes ground.
+/// The uncut land is sufficient for rejecting a ray without building columns.
+pub fn bound_eroded_ground_ceiling(
+    terrain: &FbmTerrain,
+    region: ColumnBox,
+    budget: BoundBudget,
+) -> Option<f64> {
+    let p = terrain.params();
+    if p.recipe != FbmRecipe::Eroded
+        || terrain.dirt_runway().is_some()
+        || region.size_cells.contains(&0)
+        || region.min.iter().any(|v| v.unsigned_abs() > 1 << 30)
+    {
+        return None;
+    }
+    let metres = voxel_size();
+    let center = [0, 1].map(|i| (region.min[i] as f64 + f64::from(region.size_cells[i]) / 2.) * metres);
+    let radius = region.size_cells.map(|size| f64::from(size) * metres * 0.5);
+    let x = Aa { c: center[0], a: [radius[0], 0.], r: metres * 0.5 };
+    let z = Aa { c: center[1], a: [0., radius[1]], r: metres * 0.5 };
+    let mut context = Context { budget, cells: 0, fallbacks: 0 };
+    let range = seeded_land_elevation(terrain, x, z, &mut context, true).range();
+    let top = range.hi.min(crate::terrain::seeded_world::global_height_range(p)[1]);
+    // Reserve rounding for the difference in scalar ordering and the
+    // positive-weighted average of river profiles.
+    top.is_finite().then_some((top + fp_pad(1e5 * (1. + top.abs()))).next_up())
+}
+
+fn seeded_land_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context, tight: bool) -> Aa {
     let p = t.params();
     let sx = x.scale(1800.).div_scalar(p.horizontal_scale);
     let sz = z.scale(1800.).div_scalar(p.horizontal_scale);
@@ -1057,7 +1088,9 @@ fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa
                 );
                 let debris = noise(sx.div_scalar(3.1), sz.div_scalar(3.1), t.seed() ^ 0x5141, c);
                 let rock = base.add(jointed_relief(ridge, mountain, strata, joints, debris));
-                if p.recipe == FbmRecipe::Eroded && rock.range().hi > 1. {
+                if p.recipe == FbmRecipe::Eroded && tight {
+                    eroded::land(t.seed(), sx, sz, rock, mountain, strata, moisture, c)
+                } else if p.recipe == FbmRecipe::Eroded && rock.range().hi > 1. {
                     use crate::terrain::seeded_world::eroded_relief::{
                         BEDROCK_HEIGHT_BOUND, PROVINCE_HEIGHT_BOUND,
                     };
@@ -1080,7 +1113,12 @@ fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa
             .add(hills.scale(45.))
             .add(fine.scale(3.))
     };
-    let base = authored.scale(p.amplitude / 1000.);
+    authored.scale(p.amplitude / 1000.)
+}
+
+fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
+    let p = t.params();
+    let base = seeded_land_elevation(t, x, z, c, false);
     let rx = x.range();
     let rz = z.range();
     let spacing = 2400. * p.horizontal_scale / 1800.;
