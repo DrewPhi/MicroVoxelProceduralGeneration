@@ -1622,11 +1622,7 @@ impl Experiment {
         let origin = DVec3::from_array(a.bounds[0]);
         let matrix = camera.matrix(origin, width as f32 / height as f32);
         let s = gpu.visual_settings.clone().unwrap_or_default();
-        let sun = if s.beauty {
-            crate::atmosphere::sun_direction(s.sun_elevation, s.sun_azimuth)
-        } else {
-            glam::Vec3::new(-0.5, 0.8, -0.3).normalize()
-        };
+        let sun = s.terrain_light_direction();
         let aspect = width as f32 / height as f32;
         let basis = ray_basis(camera, aspect);
         gpu.queue.write_buffer(
@@ -2034,14 +2030,25 @@ pub(crate) fn mesh_traversal_constants() -> std::collections::HashMap<String, f6
 fn primary_shader(rolling_water: bool) -> String {
     if rolling_water {
         format!(
-            "{SHADER}\n{}\n{}",
+            "{SHADER}\nconst ROLLING_NATIVE_LIGHT:bool=true;\n{}\n{}\n{}\n{}\n{}",
+            include_str!("../terrain_horizon_sample.wgsl"),
             include_str!("../rolling_water_bed.wgsl"),
-            include_str!("rolling_water.wgsl")
+            include_str!("rolling_water.wgsl"),
+            include_str!("../aircraft_shadow.wgsl"),
+            include_str!("../rolling_woodland_shadow.wgsl")
         )
     } else {
         format!(
             "{SHADER}\n{}",
-            r#"fn naadf_water_optics(surface:vec3f,normal:vec3f,d:vec3f,distance:f32)->WaterOptics {
+            r#"const ROLLING_NATIVE_LIGHT:bool=false;
+fn aircraft_sun_visibility(relative:vec3f)->f32 {return 1.;}
+fn formation_sun_visibility(relative:vec3f)->f32 {return 1.;}
+fn woodland_shadow_active()->bool {return false;}
+fn woodland_sun_visibility(relative:vec3f)->f32 {return 1.;}
+fn naadf_terrain_lighting_normal(hit:vec3f,face:vec3f,ray:vec3f)->vec3f {return face;}
+fn naadf_gray_enabled() -> bool {return false;}
+fn naadf_terrain_irradiance(hit:vec3f)->vec2f {return vec2f(1.);}
+fn naadf_water_optics(surface:vec3f,normal:vec3f,d:vec3f,distance:f32)->WaterOptics {
     let ripple=water_ripple(water_phase_position(surface),normal,naadf.water.z,.023*(1.-smoothstep(22.,78.,distance)));
     return WaterOptics(select(normal,ripple,dot(d,ripple)<-.002),water_deep(),1.);
 }"#
@@ -2197,6 +2204,7 @@ fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
         position: DVec3::ZERO,
         yaw: 0.,
         pitch: 0.,
+        roll: 0.,
         fov_y: 60.,
         far: 300.,
     };
@@ -2215,7 +2223,7 @@ fn scissor_covers_visible_box_and_uses_full_view_when_inside() {
 
 fn ray_basis(camera: Camera, aspect: f32) -> [[f32; 4]; 4] {
     let forward = camera.direction().normalize();
-    let right = forward.cross(glam::Vec3::Y).normalize();
+    let right = forward.cross(camera.view_up()).normalize();
     let up = right.cross(forward);
     let p = glam::Mat4::perspective_rh(camera.fov_y.to_radians(), aspect, 0.025, camera.far);
     [

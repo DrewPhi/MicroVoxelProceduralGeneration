@@ -24,6 +24,7 @@ pub use grid::{
 pub mod moving_water;
 pub mod physical_fluid;
 pub mod procedural_water;
+pub mod rock_formation;
 #[cfg(test)]
 mod seeded_bounds_tests;
 pub mod summary;
@@ -32,7 +33,7 @@ pub mod vegetation;
 pub mod visual_source;
 pub mod volume_summary;
 pub use terrain::{
-    FbmError, FbmParams, FbmRecipe, FbmTerrain, ALPINE_APPEARANCE_VERSION,
+    DirtRunway, FbmError, FbmParams, FbmRecipe, FbmTerrain, ALPINE_APPEARANCE_VERSION,
     ALPINE_FBM_SOURCE_VERSION, FBM_SOURCE_VERSION, REGIONAL_APPEARANCE_VERSION,
     REGIONAL_FBM_SOURCE_VERSION,
 };
@@ -163,6 +164,7 @@ pub struct World {
     terrain: Option<FbmTerrain>,
     vegetation: Option<Arc<vegetation::TileCache>>,
     topology_base: Option<i64>,
+    rock_formations: Arc<[rock_formation::RockFormation]>,
     edits: Arc<BTreeMap<Cell, Material>>,
     fluid: Arc<BTreeMap<Cell, bool>>,
     revision: u64,
@@ -249,6 +251,7 @@ impl World {
             terrain: None,
             vegetation: None,
             topology_base: None,
+            rock_formations: Arc::default(),
             edits: Arc::default(),
             fluid: Arc::default(),
             revision: 0,
@@ -260,11 +263,16 @@ impl World {
     }
     /// Procedural heightfield source. No fixture cave or bridge is added.
     pub fn fbm(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
-        let terrain = FbmTerrain::new(seed, params)?;
-        Ok(Self {
+        Ok(Self::from_fbm_terrain(FbmTerrain::new(seed, params)?))
+    }
+
+    /// Construct the world from an immutable source, including any authored grade.
+    pub fn from_fbm_terrain(terrain: FbmTerrain) -> Self {
+        let seed = terrain.seed();
+        Self {
             terrain: Some(terrain),
             ..Self::new(seed)
-        })
+        }
     }
     /// Bounded ownership smoke fixture on the same FBM landscape. The source
     /// height remains the unedited page generator; this explicit volume owns
@@ -274,6 +282,32 @@ impl World {
         world.topology_base = Some(world.height_cells(-48, 0));
         Ok(world)
     }
+    pub fn with_formation_site(mut self, site: [f64; 2]) -> Self {
+        if let Some(terrain) = self.fbm_terrain() {
+            self.rock_formations = Arc::from(rock_formation::RockFormation::site(terrain, site));
+        }
+        self
+    }
+
+    /// Snapshot for consumers with a separate, exact formation surface owner.
+    /// Canonical collision and edits still use the full world.
+    pub fn terrain_render_snapshot(&self) -> Self {
+        Self {
+            rock_formations: Arc::default(),
+            ..self.clone()
+        }
+    }
+
+    pub fn rock_formations(&self) -> &[rock_formation::RockFormation] {
+        &self.rock_formations
+    }
+
+    pub fn formations_intersect_columns(&self, min: [i64; 2], max: [i64; 2]) -> bool {
+        self.rock_formations
+            .iter()
+            .any(|f| f.intersects_columns(min, max))
+    }
+
     pub fn topology_base_cells(&self) -> Option<i64> {
         self.topology_base
     }
@@ -619,6 +653,13 @@ impl World {
         h: i64,
         column: Option<terrain::TerrainColumn>,
     ) -> Material {
+        if self
+            .rock_formations
+            .iter()
+            .any(|formation| formation.contains(c))
+        {
+            return Material::Stone;
+        }
         let mut h = h;
         if let Some(base) = self.topology_base.filter(|_| self.volume_owned(c)) {
             // An open excavation reveals a tunnel mouth; a second trench runs

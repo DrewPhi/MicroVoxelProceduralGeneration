@@ -67,7 +67,7 @@ fn terrain_tint(cell:vec3<u32>, grain:f32) -> vec3<f32> {
                      1.+broad*0.15+local*0.08+speckle,
                      1.+broad*0.07+local*0.06+speckle);
 }
-struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32> };
+struct Camera { view_projection: mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32>, formation_sun:vec4f };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
@@ -86,7 +86,14 @@ struct VertexOut {
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Identical material/light transfer to terrain, per fragment so the collar's
     // interpolated endpoint normals share the terrain page's exact lighting.
-    let light = terrain_lighting(in.normal);
+    var light = terrain_lighting(in.normal);
+    if camera.formation_sun.w>0. {
+        let sun = camera.formation_sun.xyz;
+        let sky = .5+.5*in.normal.y;
+        let ambient = mix(vec3f(.12,.145,.075),vec3f(.25,.33,.43),sky);
+        let direct = mix(vec3f(2.12,1.44,.83),vec3f(2.,1.78,1.46),smoothstep(.06,.64,sun.y));
+        light = ambient+direct*max(0.,dot(in.normal,sun));
+    }
     var tint=vec3<f32>(1.);
     if camera.eye.w>0. {
         let local_cell=vec3<i32>(floor(in.local*VOXELS_PER_METER-in.normal*0.01));

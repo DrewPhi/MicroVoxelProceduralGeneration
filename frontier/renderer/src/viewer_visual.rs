@@ -9,16 +9,30 @@ impl Viewer {
         let Some(ui) = &mut self.settings_ui else {
             return false;
         };
-        let was_open = ui.menu_open();
+        let was_open = ui.owns_cursor();
         let consumed = ui.handle_event(self.window.as_ref().unwrap(), event);
-        let open = ui.menu_open();
+        let open = ui.owns_cursor();
         if open != was_open {
             self.keys.clear();
             self.grab(!open);
         }
         consumed
     }
-    pub(super) fn update_visual_ui(&mut self, frame_ms: f64) -> Result<()> {
+    pub(super) fn update_visual_ui(
+        &mut self,
+        frame_ms: f64,
+        frame: Option<&world_weather::Frame>,
+        fraction: f32,
+    ) -> Result<()> {
+        let observation = crate::weather_panel::Observation {
+            achieved: self.weather_clock.achieved,
+            frame,
+            fraction,
+            seconds: self.weather_clock.seconds,
+            solar_day: self.weather_clock.solar_day(),
+            camera: self.display_camera(),
+            aspect: self.width as f32 / self.height.max(1) as f32,
+        };
         let (Some(ui), Some(gpu), Some(window)) = (&mut self.settings_ui, &self.gpu, &self.window)
         else {
             return Ok(());
@@ -29,6 +43,18 @@ impl Viewer {
             self.display_frame_ms * 0.9 + frame_ms * 0.1
         };
         let mut stats = SettingsStats {
+            can_board: self.parked_aircraft.as_ref().is_some_and(|(_, pose)| {
+                aircraft::Aircraft::can_board(&self.world, *pose, self.camera.position)
+            }),
+            flight: self
+                .aircraft
+                .as_ref()
+                .map(|plane| plane.instruments(plane.exterior_pose().unwrap_or(self.camera))),
+            flight_audio: self.flight_audio.enabled,
+            flight_camera_motion: self
+                .aircraft
+                .as_ref()
+                .is_some_and(|p| p.feedback.camera_motion),
             frame_ms: self.display_frame_ms,
             process_mib: self.resource_process_mib,
             available_mib: self.resource_available_mib,
@@ -66,7 +92,7 @@ impl Viewer {
             .vegetation
             .as_ref()
             .map_or(0., |p| p.stats().resident_bytes as f64 / 1048576.);
-        let was_open = ui.menu_open();
+        let was_open = ui.owns_cursor();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let changes = ui.prepare(
             window,
@@ -75,13 +101,17 @@ impl Viewer {
             &mut encoder,
             &stats,
             [self.width, self.height],
+            &observation,
         );
         gpu.queue.submit(Some(encoder.finish()));
-        let now_open = ui.menu_open();
-        let settings = ui.settings().clone();
-        if was_open && !now_open {
+        let now_open = ui.owns_cursor();
+        let mut settings = ui.settings().clone();
+        if was_open != now_open {
             self.keys.clear();
-            self.grab(true);
+            self.grab(!now_open);
+        }
+        if settings.day_night {
+            settings.atmosphere = true;
         }
         if self.world.vegetation_enabled() != settings.vegetation {
             if settings.vegetation {
@@ -93,6 +123,14 @@ impl Viewer {
                 .with_vegetation_enabled(settings.vegetation);
         }
         if self.visual_settings.walking != settings.walking {
+            if settings.walking {
+                if self.aircraft.is_some() && !self.leave_aircraft() {
+                    settings.walking = false;
+                    if let Some(ui) = &mut self.settings_ui {
+                        ui.set_walking(false);
+                    }
+                }
+            }
             self.walking.reset();
         }
         let previous = self.visual_settings.clone();
@@ -105,11 +143,23 @@ impl Viewer {
                 }
             }
         }
+        if changes.toggle_airflow {
+            if let Some(plane) = &mut self.aircraft {
+                plane.toggle_airflow();
+            }
+        }
+        if changes.toggle_flight_audio {
+            self.flight_audio.enabled = !self.flight_audio.enabled;
+        }
+        if changes.toggle_flight_camera_motion {
+            if let Some(plane) = &mut self.aircraft {
+                plane.toggle_camera_motion(&mut self.camera, &self.world);
+            }
+        }
         if let Some(gpu) = &mut self.gpu {
             if changes.naadf_rebuild {
                 gpu.naadf_serial = gpu.naadf_serial.wrapping_add(1);
             }
-            gpu.visual_settings = Some(self.visual_settings.clone());
         }
         Ok(())
     }
@@ -193,10 +243,16 @@ impl Viewer {
         if gpu
             .rolling
             .as_ref()
-            .is_some_and(|rolling| self.sample_count != s.msaa || !rolling.fits_naadf_radius(s))
+            .is_some_and(|rolling| self.sample_count != s.msaa || !rolling.fits_settings(s))
         {
             let mut replacement = rolling_terrain::RollingTerrain::new(gpu, &self.world, s)?;
-            replacement.update(&gpu.device, &gpu.queue, &self.world, self.camera)?;
+            replacement.update(
+                &gpu.device,
+                &gpu.queue,
+                &self.world,
+                self.camera,
+                &s.terrain_lod_curve,
+            )?;
             gpu.rolling = Some(replacement);
         }
         self.camera.far = s.view_distance;
@@ -233,7 +289,7 @@ impl Gpu {
         self.terrain_shadow_appearance = self.alpine_appearance
             || world
                 .fbm_terrain()
-                .is_some_and(|s| s.params().recipe == frontier_world::FbmRecipe::Watershed);
+                .is_some_and(|s| s.params().recipe.has_watershed_drainage());
         self.regional_appearance = world
             .fbm_terrain()
             .is_some_and(|s| s.params().recipe != frontier_world::FbmRecipe::Legacy);

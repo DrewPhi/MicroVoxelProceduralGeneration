@@ -1,7 +1,8 @@
 //! Matched capture of the playable renderer through the normal scene draw path.
 use crate::{mesh, settings::VisualSettings, walking, Camera, Gpu, Result};
+use frontier_runtime::routes::Route;
 use frontier_world::{terrain::alpine_path_center_m, Cell, World};
-use glam::{DVec3, Vec3};
+use glam::DVec3;
 use std::{io::Write, path::Path};
 
 pub(super) fn capture(
@@ -13,7 +14,7 @@ pub(super) fn capture(
     frames: u64,
     step: f64,
     speed: f64,
-    fly: bool,
+    route: Route,
     directory: &Path,
 ) -> Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -33,14 +34,18 @@ pub(super) fn capture(
         false,
     ))?;
     let mut walker = walking::WalkingCamera::default();
-    if !fly {
+    let fly = matches!(route, Route::Fly | Route::BankReturn);
+    let trail = !fly && !route.grounded();
+    if route.grounded() {
+        camera.position.y =
+            world.height_m(camera.position.x, camera.position.z) + walking::EYE_HEIGHT;
+    } else if trail {
         camera.position.x = alpine_path_center_m(camera.position.z);
         camera.position.y =
             world.height_m(camera.position.x, camera.position.z) + walking::EYE_HEIGHT;
         update_heading(&mut camera);
     }
-    let origin = camera.position;
-    let heading = camera.direction().as_dvec3().normalize();
+    let origin = camera;
     gpu.configure_visuals(world, visual);
     gpu.init_rolling(world, camera)?;
     gpu.settle_naadf(world, camera)?;
@@ -48,7 +53,7 @@ pub(super) fn capture(
     let frame_dir = directory.join("frames");
     std::fs::create_dir_all(&frame_dir)?;
     let mut poses = std::io::BufWriter::new(std::fs::File::create(directory.join("poses.csv"))?);
-    writeln!(poses, "frame,x,y,z,yaw,pitch,naadf_drawable")?;
+    writeln!(poses, "frame,x,y,z,yaw,pitch,roll,naadf_drawable")?;
     let mut probes = if fly {
         std::fs::create_dir_all(directory.join("ownership"))?;
         let mut out = std::io::BufWriter::new(std::fs::File::create(directory.join("probe.csv"))?);
@@ -58,8 +63,37 @@ pub(super) fn capture(
         None
     };
     for frame in 0..frames {
-        if fly {
-            camera.position = origin + heading * (frame as f64 * step * speed);
+        let t = frame as f64 * step;
+        if fly || route.grounded() {
+            let sample = |time| {
+                route.pose_at(
+                    time,
+                    origin.position.to_array(),
+                    f64::from(origin.yaw),
+                    f64::from(origin.pitch),
+                    speed,
+                )
+            };
+            let pose = sample(t);
+            if fly {
+                camera.position = DVec3::from_array(pose.position);
+            } else if frame > 0 {
+                let previous = sample(t - step);
+                camera.position = DVec3::from_array(walker.advance_presented(
+                    world,
+                    camera.position.to_array(),
+                    [
+                        (pose.position[0] - previous.position[0]) / step,
+                        (pose.position[2] - previous.position[2]) / step,
+                    ],
+                    false,
+                    step,
+                    visual.step_smoothing,
+                ));
+            }
+            camera.yaw = pose.yaw as f32;
+            camera.pitch = pose.pitch as f32;
+            camera.roll = pose.roll as f32;
         } else if frame > 0 {
             let z = camera.position.z + speed * step;
             let target = alpine_path_center_m(z);
@@ -84,8 +118,8 @@ pub(super) fn capture(
         let [x, y, z] = camera.position.to_array();
         writeln!(
             poses,
-            "{frame},{x},{y},{z},{},{},{naadf_drawable}",
-            camera.yaw, camera.pitch
+            "{frame},{x},{y},{z},{},{},{},{naadf_drawable}",
+            camera.yaw, camera.pitch, camera.roll
         )?;
         gpu.capture_frame(
             world,
@@ -143,7 +177,7 @@ fn update_heading(camera: &mut Camera) {
 
 fn centre_ray(camera: Camera, width: u32, height: u32) -> DVec3 {
     let forward = camera.direction();
-    let right = forward.cross(Vec3::Y).normalize();
+    let right = forward.cross(camera.view_up()).normalize();
     let up = right.cross(forward).normalize();
     let tan = (camera.fov_y.to_radians() * 0.5).tan();
     let uv = |n: u32| (n / 2) as f32 * 2. / n as f32 + 1. / n as f32 - 1.;

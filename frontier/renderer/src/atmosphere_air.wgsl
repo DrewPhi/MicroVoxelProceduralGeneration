@@ -6,6 +6,10 @@ struct AtmosphereUniform {
     lighting: vec4<f32>, // shafts, streaming haze, region count, reserved
     far_shadow: mat4x4<f32>,
     haze_regions: array<vec4<f32>,8>,
+    storm_origin:vec4f,storm_extent:vec4f,storm_low:vec4f,storm_high:vec4f,
+    celestial:vec4f,moon:vec4f,
+    regional_origin:vec4f,regional_extent:vec4f,
+    cloud_phase:vec4f,
 };
 @group(0) @binding(0) var<uniform> atmosphere:AtmosphereUniform;
 // DEPTH_BINDING

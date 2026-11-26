@@ -227,6 +227,7 @@ fn frozen_native_gpu_parity() {
                 1,
                 &camera_layout,
                 mode,
+                super::VegetationGpuInputs::default(),
             );
             plants.set_indirect_supported(
                 adapter

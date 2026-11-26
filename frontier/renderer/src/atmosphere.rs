@@ -4,17 +4,46 @@ use crate::{settings::VisualSettings, Camera};
 use glam::{DVec3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-const SKY_SHADER: &str = include_str!("atmosphere_sky.wgsl");
-const SHADER: &str = include_str!("atmosphere.wgsl");
+const SKY_SHADER: &str = concat!(
+    include_str!("atmosphere_sky.wgsl"),
+    include_str!("atmosphere_cloud_density.wgsl"),
+);
+const SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    include_str!("atmosphere_cloud_density.wgsl"),
+);
 const BLIT: &str = r#"
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var image_sampler: sampler;
+@group(0) @binding(2) var<uniform> filter_settings: vec4f;
 struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs_main(@builtin(vertex_index) i:u32)->Output {
  var p=array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
  var o:Output; o.position=vec4(p[i],0.0,1.0); o.uv=vec2(p[i].x*0.5+0.5,0.5-p[i].y*0.5); return o;
 }
-@fragment fn fs_main(i:Output)->@location(0) vec4<f32> { return textureSample(image,image_sampler,i.uv); }
+fn luminance(c:vec3f)->f32 {return sqrt(max(0.,dot(c,vec3f(.2126,.7152,.0722))));}
+@fragment fn fs_main(i:Output)->@location(0) vec4<f32> {
+    let center=textureSample(image,image_sampler,i.uv);
+    if filter_settings.x<=0. {return center;}
+    let size=vec2i(textureDimensions(image));
+    let pixel=vec2i(i.uv*vec2f(size));
+    let n=textureLoad(image,clamp(pixel-vec2i(0,1),vec2i(0),size-1),0).rgb;
+    let s=textureLoad(image,clamp(pixel+vec2i(0,1),vec2i(0),size-1),0).rgb;
+    let e=textureLoad(image,clamp(pixel+vec2i(1,0),vec2i(0),size-1),0).rgb;
+    let w=textureLoad(image,clamp(pixel-vec2i(1,0),vec2i(0),size-1),0).rgb;
+    let lum=luminance(center.rgb);
+    let outer=vec4f(luminance(n),luminance(s),luminance(e),luminance(w));
+    let low=min(lum,min(min(outer.x,outer.y),min(outer.z,outer.w)));
+    let high=max(lum,max(max(outer.x,outer.y),max(outer.z,outer.w)));
+    let contrast=high-low;
+    if contrast<max(.037,high*.16) {return center;}
+    let vertical=abs(outer.x-outer.y);
+    let horizontal=abs(outer.z-outer.w);
+    let neighbor=mix(.5*(e+w),.5*(n+s),smoothstep(-.025,.025,vertical-horizontal));
+    let isolation=clamp(abs(luminance(neighbor)-lum)/contrast,0.,1.);
+    // Filter small isolated steps once on the final composited image.
+    return vec4f(mix(center.rgb,neighbor,.32*filter_settings.x*isolation*isolation),center.a);
+}
 "#;
 
 #[repr(C)]
@@ -31,6 +60,15 @@ struct Uniform {
     lighting: [f32; 4],
     far_shadow: [[f32; 4]; 4],
     haze_regions: [[f32; 4]; crate::streaming_haze::REGIONS],
+    storm_origin: [f32; 4],
+    storm_extent: [f32; 4],
+    storm_low: [f32; 4],
+    storm_high: [f32; 4],
+    celestial: [f32; 4],
+    moon: [f32; 4],
+    regional_origin: [f32; 4],
+    regional_extent: [f32; 4],
+    cloud_phase: [f32; 4],
 }
 
 /// Opt-in shader diagnostics; default presentation and legacy profile are unchanged.
@@ -67,22 +105,37 @@ struct LightingContext {
 }
 
 pub(crate) struct Atmosphere {
+    moon_volume: wgpu::Texture,
+    moon_ready: std::cell::Cell<bool>,
     scene: wgpu::TextureView,
     depth: wgpu::TextureView,
     msaa: Option<wgpu::TextureView>,
     composite: wgpu::TextureView,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    storm_composite: wgpu::BindGroup,
     blit_group: wgpu::BindGroup,
     clear_air_group: wgpu::BindGroup,
     effects_enabled: std::cell::Cell<bool>,
     pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
+    blit_settings: wgpu::Buffer,
     format: wgpu::TextureFormat,
     scene_format: wgpu::TextureFormat,
     sky: wgpu::TextureView,
+    storm_sky: wgpu::TextureView,
+    compact_storm: std::cell::Cell<bool>,
     sky_bind: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
+    cloud_shape: wgpu::Texture,
+    cloud_shape_ready: std::cell::Cell<bool>,
+    storm_volumes: [wgpu::Texture; 2],
+    regional_volumes: [wgpu::Texture; 2],
+    regional_stamp: std::cell::Cell<Option<f64>>,
+    regional: std::cell::Cell<[[f32; 4]; 2]>,
+    storm_stamp: std::cell::Cell<Option<(f64, DVec3)>>,
+    storm_phase: std::cell::Cell<Option<f32>>,
+    storm: std::cell::Cell<[[f32; 4]; 4]>,
     air: wgpu::TextureView,
     air_bind: wgpu::BindGroup,
     air_pipeline: wgpu::RenderPipeline,
@@ -189,25 +242,43 @@ pub(crate) fn post_aa_strength() -> f32 {
     })
 }
 
+fn cloud_thermal_shader(source: String) -> String {
+    if crate::woodland_volume::render_option("FRONTIER_THERMAL_CLOUD_DETAIL", true) {
+        source.replace(
+            "THERMAL_CLOUD_DETAIL:bool=false",
+            "THERMAL_CLOUD_DETAIL:bool=true",
+        )
+    } else {
+        source
+    }
+}
+
 fn shader_source(samples: u32) -> String {
-    shader_source_with_post_aa(samples, post_aa_strength() > 0.)
+    cloud_thermal_shader(shader_source_with_post_aa(samples, post_aa_strength() > 0.))
 }
 fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
     let (bindings, body) = if samples > 1 {
         ("@group(0) @binding(1) var scene: texture_multisampled_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_multisampled_2d;",
-         "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) >= 1.0;\nif all_sky { return vec4(composite(vec3(0.0),1.0,in.uv),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i).rgb,textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(color*0.25,1.0);")
+         "if atmosphere.beauty.x > 0.5 && atmosphere.fog.w > 0.5 {\nlet all_sky = min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3))) >= 1.0;\nif all_sky { return vec4(smooth_horizon(pixel,in.uv,composite(vec4(0.0),1.0,in.uv)),1.0); }\n}\nvar color=vec3<f32>(0.0);\nfor (var i=0i;i<4i;i+=1i) { color+=composite(textureLoad(scene,pixel,i),textureLoad(depth,pixel,i),in.uv); }\nreturn vec4(smooth_horizon(pixel,in.uv,color*0.25),1.0);")
     } else {
         ("@group(0) @binding(1) var scene: texture_2d<f32>;\n@group(0) @binding(2) var depth: texture_depth_2d;",
-         "return vec4(composite(textureLoad(scene,pixel,0).rgb,textureLoad(depth,pixel,0),in.uv),1.0);")
+         "return vec4(smooth_horizon(pixel,in.uv,composite(textureLoad(scene,pixel,0),textureLoad(depth,pixel,0),in.uv)),1.0);")
     };
     let mut source = SHADER.replace("// SCENE_BINDINGS", bindings);
+    if !post_aa {
+        // Representative depth is sufficient for the distant rolling pass,
+        // which currently shades at the pixel centre even with MSAA enabled.
+        source.push_str("\nfn horizon_depth(p:vec2i)->f32 {return textureLoad(depth,p,0); }\nfn horizon_color(p:vec2i)->vec4f {return textureLoad(scene,p,0); }\n");
+        source.push_str(include_str!("horizon_aa.wgsl"));
+    }
+
     if post_aa {
         // Composite per sample before spatial filtering, matching the ordinary
         // MSAA resolve and preserving fog/depth at each neighboring location.
         let load = if samples > 1 {
-            "var color=vec3<f32>(0.); for(var s=0i;s<4i;s+=1i) { color+=composite(textureLoad(scene,p,s).rgb,textureLoad(depth,p,s),uv); } return color*.25;"
+            "var color=vec3<f32>(0.); for(var s=0i;s<4i;s+=1i) { color+=composite(textureLoad(scene,p,s),textureLoad(depth,p,s),uv); } return color*.25;"
         } else {
-            "return composite(textureLoad(scene,p,0).rgb,textureLoad(depth,p,0),uv);"
+            "return composite(textureLoad(scene,p,0),textureLoad(depth,p,0),uv);"
         };
         source.push_str(&format!("\nfn aa_color(p:vec2<i32>)->vec3<f32> {{ let uv=(vec2<f32>(p)+.5)/vec2<f32>(textureDimensions(scene)); {load} }}\n"));
         source = source.replace(
@@ -220,6 +291,23 @@ fn shader_source_with_post_aa(samples: u32, post_aa: bool) -> String {
         source.replace("// SAMPLE_COMPOSITE", body)
     }
 }
+fn sky_shader_source(samples: u32) -> String {
+    let (binding, load) = if samples > 1 {
+        ("@group(0) @binding(1) var scene_depth:texture_depth_multisampled_2d;",
+         "min(min(textureLoad(scene_depth,pixel,0),textureLoad(scene_depth,pixel,1)),min(textureLoad(scene_depth,pixel,2),textureLoad(scene_depth,pixel,3)))")
+    } else {
+        (
+            "@group(0) @binding(1) var scene_depth:texture_depth_2d;",
+            "textureLoad(scene_depth,pixel,0)",
+        )
+    };
+    cloud_thermal_shader(
+        SKY_SHADER
+            .replace("// STORM_DEPTH_BINDING", binding)
+            .replace("STORM_DEPTH_LOAD", load),
+    )
+}
+
 fn air_shader_source(samples: u32) -> String {
     let (binding, load) = if samples > 1 {
         ("@group(0) @binding(2) var depth:texture_depth_multisampled_2d;","min(min(textureLoad(depth,pixel,0),textureLoad(depth,pixel,1)),min(textureLoad(depth,pixel,2),textureLoad(depth,pixel,3)))")
@@ -290,6 +378,14 @@ impl Atmosphere {
             height.div_ceil(2),
             1,
         );
+        let storm_sky = texture(
+            device,
+            "quarter resolution simulated weather",
+            wgpu::TextureFormat::Rgba16Float,
+            width.div_ceil(4),
+            height.div_ceil(4),
+            1,
+        );
         let air = texture(
             device,
             "quarter resolution shadowed world air",
@@ -304,6 +400,119 @@ impl Atmosphere {
             contents: bytemuck::bytes_of(&Uniform::zeroed()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear atmosphere sampling"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let moon_size = crate::celestial::MOON_SIZE;
+        let moon_volume = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lunar surface voxels"),
+            size: wgpu::Extent3d {
+                width: moon_size,
+                height: moon_size,
+                depth_or_array_layers: moon_size,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let moon_view = moon_volume.create_view(&Default::default());
+        let weather_size = frontier_runtime::weather::SIZE;
+        let storm_volumes = std::array::from_fn(|_| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("simulated cloud condensate and precipitation"),
+                size: wgpu::Extent3d {
+                    width: weather_size[0] as u32,
+                    height: weather_size[1] as u32,
+                    depth_or_array_layers: weather_size[2] as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rg8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let storm_views = storm_volumes
+            .each_ref()
+            .map(|volume| volume.create_view(&Default::default()));
+        let regional_size = frontier_runtime::weather::regional::SIZE;
+        let regional_volumes = std::array::from_fn(|_| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("regional cloud condensate and precipitation"),
+                size: wgpu::Extent3d {
+                    width: regional_size[0] as u32,
+                    height: regional_size[1] as u32,
+                    depth_or_array_layers: regional_size[2] as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rg8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let regional_views = regional_volumes
+            .each_ref()
+            .map(|volume| volume.create_view(&Default::default()));
+        let volumetric_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            count: None,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+        };
+        let shape_side = crate::cloud_shape::SIDE;
+        let cloud_shape = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("periodic cloud density detail"),
+            size: wgpu::Extent3d {
+                width: shape_side,
+                height: shape_side,
+                depth_or_array_layers: shape_side,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let cloud_shape_view = cloud_shape.create_view(&Default::default());
+        let cloud_shape_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("periodic cloud density sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let shape_sampler_layout = wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            count: None,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        };
+        let shape_bindings = [
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&cloud_shape_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::Sampler(&cloud_shape_sampler),
+            },
+        ];
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("atmosphere"),
             entries: &[
@@ -351,17 +560,134 @@ impl Atmosphere {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                volumetric_entry(7),
+                volumetric_entry(8),
+                volumetric_entry(9),
+                volumetric_entry(10),
+                volumetric_entry(11),
+                shape_sampler_layout,
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atmosphere"),
-            layout: &layout,
+        let compose = |clouds: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("atmosphere"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            msaa.as_ref().unwrap_or(&scene),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&air),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(clouds),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&moon_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&storm_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&storm_views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(&regional_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&regional_views[1]),
+                    },
+                    shape_bindings[0].clone(),
+                    shape_bindings[1].clone(),
+                ],
+            })
+        };
+        let bind_group = compose(&sky);
+        let storm_composite = compose(&storm_sky);
+        let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky inputs"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    count: None,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    count: None,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: sample_count > 1,
+                    },
+                },
+                volumetric_entry(2),
+                volumetric_entry(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    count: None,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                },
+                volumetric_entry(5),
+                volumetric_entry(6),
+                volumetric_entry(11),
+                shape_sampler_layout,
+            ],
+        });
+        let sky_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky inputs"),
+            layout: &sky_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -369,48 +695,37 @@ impl Atmosphere {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(msaa.as_ref().unwrap_or(&scene)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
                     resource: wgpu::BindingResource::TextureView(&depth),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&storm_views[0]),
+                },
+                wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&air),
+                    resource: wgpu::BindingResource::TextureView(&storm_views[1]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&sky),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&regional_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&regional_views[1]),
+                },
+                shape_bindings[0].clone(),
+                shape_bindings[1].clone(),
             ],
-        });
-        let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sky inputs"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let sky_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sky inputs"),
-            layout: &sky_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
         });
         let sky_pipeline = make_pipeline(
             device,
             "half resolution volumetric clouds",
             &sky_layout,
-            SKY_SHADER,
+            &sky_shader_source(sample_count),
             wgpu::TextureFormat::Rgba16Float,
         );
         let air_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -463,6 +778,11 @@ impl Atmosphere {
             wgpu::TextureFormat::Rgba16Float,
             "fs_main",
         );
+        let blit_settings = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport edge filter strength"),
+            contents: bytemuck::bytes_of(&[0f32; 4]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene upscale"),
             entries: &[
@@ -482,13 +802,17 @@ impl Atmosphere {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
             ],
-        });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("scene upscale"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
         });
         let blit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene upscale"),
@@ -501,6 +825,10 @@ impl Atmosphere {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: blit_settings.as_entire_binding(),
                 },
             ],
         });
@@ -516,6 +844,10 @@ impl Atmosphere {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: blit_settings.as_entire_binding(),
+                },
             ],
         });
         let pipeline = make_pipeline(
@@ -527,9 +859,23 @@ impl Atmosphere {
         );
         let blit_pipeline = make_pipeline(device, "scene upscale", &blit_layout, BLIT, format);
         Self {
+            moon_volume,
+            moon_ready: std::cell::Cell::new(false),
             sky,
+            storm_sky,
+            compact_storm: Default::default(),
+            storm_composite,
             sky_bind,
             sky_pipeline,
+            cloud_shape,
+            cloud_shape_ready: Default::default(),
+            storm_volumes,
+            regional_volumes,
+            regional_stamp: Default::default(),
+            regional: Default::default(),
+            storm_stamp: Default::default(),
+            storm_phase: Default::default(),
+            storm: Default::default(),
             air,
             air_bind,
             air_pipeline,
@@ -551,6 +897,7 @@ impl Atmosphere {
             effects_enabled: std::cell::Cell::new(true),
             pipeline,
             blit_pipeline,
+            blit_settings,
             format,
             width,
             height,
@@ -614,8 +961,17 @@ impl Atmosphere {
         let scene_samples = 1 + if self.msaa.is_some() { samples } else { 0 };
         pixels * (scene_bpp * scene_samples + 4 * samples + composite_bpp)
             + half_pixels * 8
-            + u64::from(self.width.div_ceil(4)) * u64::from(self.height.div_ceil(4)) * 8
+            + u64::from(self.width.div_ceil(4)) * u64::from(self.height.div_ceil(4)) * 16
+            + frontier_runtime::weather::SIZE
+                .into_iter()
+                .product::<usize>() as u64
+                * 4
+            + frontier_runtime::weather::regional::SIZE
+                .into_iter()
+                .product::<usize>() as u64
+                * 4
             + 4
+            + crate::cloud_shape::BYTES
     }
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -656,6 +1012,142 @@ impl Atmosphere {
         self.peak_haze_regions.get()
     }
 
+    pub(crate) fn set_world_weather(
+        &self,
+        queue: &wgpu::Queue,
+        frame: Option<&crate::world_weather::Frame>,
+        eye: DVec3,
+        fraction: f32,
+        compact: bool,
+    ) {
+        self.regional.set([[0.; 4]; 2]);
+        let Some(frame) = frame else {
+            self.compact_storm.set(false);
+            self.storm.set([[0.; 4]; 4]);
+            self.storm_phase.set(None);
+            return;
+        };
+        // Cloud-top relief benefits from the half-resolution target when
+        // seen from the air. Keep quarter resolution for ground and in-cloud
+        // views, and retain the current target across small altitude changes.
+        let top = f64::from(
+            frame
+                .current
+                .metrics
+                .cloud_top_m
+                .max(frame.previous.metrics.cloud_top_m),
+        );
+        let altitude_ratio = if self.compact_storm.get() { 0.92 } else { 0.84 };
+        let view_of_deck = frame.current.regional.is_some()
+            && top > 0.
+            && eye.y >= (top * altitude_ratio).max(2000.)
+            && eye.y <= top + 5000.;
+        self.compact_storm.set(compact && !view_of_deck);
+        let seconds =
+            frame.previous.time + (frame.current.time - frame.previous.time) * f64::from(fraction);
+        self.storm_phase
+            .set(Some((seconds * 1.55).rem_euclid(1024.) as f32));
+        use frontier_runtime::weather::{EXTENT, SIZE};
+        let stamp = (frame.current.time, frame.current.origin);
+        if self.storm_stamp.get() != Some(stamp) {
+            let extent = wgpu::Extent3d {
+                width: SIZE[0] as u32,
+                height: SIZE[1] as u32,
+                depth_or_array_layers: SIZE[2] as u32,
+            };
+            for (volume, weather) in self.storm_volumes.iter().zip(&frame.packed_volume) {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: volume,
+                        mip_level: 0,
+                        origin: Default::default(),
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(weather),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(extent.width * 2),
+                        rows_per_image: Some(extent.height),
+                    },
+                    extent,
+                );
+            }
+            self.storm_stamp.set(Some(stamp));
+        }
+        if let Some(regional) = &frame.current.regional {
+            use frontier_runtime::weather::regional;
+            let extent = wgpu::Extent3d {
+                width: regional::SIZE[0] as u32,
+                height: regional::SIZE[1] as u32,
+                depth_or_array_layers: regional::SIZE[2] as u32,
+            };
+            let visible = regional.current.weather_visible(eye, 120_000.)
+                || regional.previous.weather_visible(eye, 120_000.);
+            if visible && self.regional_stamp.get() != Some(regional.current.time) {
+                let states = [&regional.previous, &regional.current];
+                for (volume, state) in self.regional_volumes.iter().zip(states) {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: volume,
+                            mip_level: 0,
+                            origin: Default::default(),
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytemuck::cast_slice(state.volume()),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(extent.width * 2),
+                            rows_per_image: Some(extent.height),
+                        },
+                        extent,
+                    );
+                }
+                self.regional_stamp.set(Some(regional.current.time));
+            }
+            self.regional.set([
+                regional
+                    .current
+                    .origin
+                    .as_vec3()
+                    .extend(regional.fraction(seconds))
+                    .to_array(),
+                [
+                    extent.width as f32 * regional::SPACING,
+                    extent.height as f32 * regional::LAYER,
+                    extent.depth_or_array_layers as f32 * regional::SPACING,
+                    if visible { 2. } else { 1. },
+                ],
+            ]);
+        }
+        let bounds = match (frame.previous.wet_bounds, frame.current.wet_bounds) {
+            (Some((a, b)), Some((c, d))) => Some((
+                Vec3::from(a).min(Vec3::from(c)),
+                Vec3::from(b).max(Vec3::from(d)),
+            )),
+            (Some((a, b)), None) | (None, Some((a, b))) => Some((a.into(), b.into())),
+            _ => None,
+        };
+        let (min, max, wet) = bounds.map_or((Vec3::ZERO, Vec3::ZERO, 0.), |(lo, hi)| (lo, hi, 1.));
+        let local_rain = frame.previous.sample(eye).rain_rate_mm_h() * (1. - fraction)
+            + frame.current.sample(eye).rain_rate_mm_h() * fraction;
+        self.storm.set([
+            frame
+                .current
+                .origin
+                .as_vec3()
+                .extend(if compact && view_of_deck {
+                    3.
+                } else if compact {
+                    2.
+                } else {
+                    1.
+                })
+                .to_array(),
+            EXTENT.extend(local_rain).to_array(),
+            min.extend(fraction).to_array(),
+            max.extend(wet).to_array(),
+        ]);
+    }
     pub(crate) fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -664,6 +1156,7 @@ impl Atmosphere {
         world_eye: DVec3,
         settings: &VisualSettings,
         time_seconds: f32,
+        rolling_horizon: f32,
     ) {
         self.effects_enabled.set(
             settings.atmosphere
@@ -671,16 +1164,63 @@ impl Atmosphere {
                 || self.scene_format != self.format
                 || post_aa_strength() > 0.,
         );
-        self.beauty_enabled
-            .set(settings.beauty && settings.atmosphere);
-        let sun = sun_direction(settings.sun_elevation, settings.sun_azimuth);
+        let [storm_origin, storm_extent, storm_low, storm_high] = self.storm.get();
+        let [regional_origin, regional_extent] = self.regional.get();
+        let physical_weather = storm_origin[3] > 0.5;
+        let beauty = (settings.beauty || physical_weather || settings.celestial.is_some())
+            && settings.atmosphere;
+        self.beauty_enabled.set(beauty);
+        let shaped_clouds =
+            settings.natural_terrain_light || (physical_weather && regional_extent[3] > 0.5);
+        if beauty && shaped_clouds && !self.cloud_shape_ready.replace(true) {
+            let side = crate::cloud_shape::SIDE;
+            queue.write_texture(
+                self.cloud_shape.as_image_copy(),
+                crate::cloud_shape::samples(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * side),
+                    rows_per_image: Some(side),
+                },
+                self.cloud_shape.size(),
+            );
+        }
+        let sun = settings.celestial.map_or_else(
+            || sun_direction(settings.sun_elevation, settings.sun_azimuth),
+            |light| light.sun,
+        );
+        let (celestial, moon) = settings
+            .celestial
+            .map_or(([1., 0., 0., 0.], [0.; 4]), |light| {
+                if !self.moon_ready.replace(true) {
+                    let size = crate::celestial::MOON_SIZE;
+                    queue.write_texture(
+                        self.moon_volume.as_image_copy(),
+                        crate::celestial::moon_voxels(),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(size),
+                            rows_per_image: Some(size),
+                        },
+                        self.moon_volume.size(),
+                    );
+                }
+                (
+                    [light.daylight, light.twilight, light.moonlight, 1.],
+                    light.moon.extend(0.0175).to_array(),
+                )
+            });
         let context = self.lighting_context.get();
         let beams = settings.beauty
             && settings.atmosphere
             && settings.terrain_shadows
             && !settings.visibility_benchmark
             && settings.fog_density > 0.
-            && settings.sun_elevation > 0.
+            && if settings.celestial.is_some() {
+                sun.y > 0.05
+            } else {
+                settings.sun_elevation > 0.
+            }
             && context.shadow_active
             && !context.submerged
             && atmosphere_debug() != 3
@@ -701,12 +1241,18 @@ impl Atmosphere {
         }
         let uniform = Uniform {
             inverse_view_projection: inverse_view_projection.to_cols_array_2d(),
-            relative_eye: relative_eye.extend(0.0).to_array(),
+            relative_eye: relative_eye
+                .extend(f32::from(
+                    rolling_horizon > 0. && settings.terrain_shadows && !context.submerged,
+                ))
+                .to_array(),
             world_eye: world_eye
                 .as_vec3()
                 .extend(self.medium_ground_height.get())
                 .to_array(),
-            sun: sun.extend(0.0).to_array(),
+            sun: sun
+                .extend(f32::from(settings.natural_terrain_light))
+                .to_array(),
             fog: [
                 settings.fog_density.max(0.0),
                 settings.fog_height_falloff.max(0.0),
@@ -716,11 +1262,15 @@ impl Atmosphere {
             weather: [
                 settings.cloud_coverage.clamp(0.0, 1.0),
                 settings.cloud_speed,
-                settings.overcast.clamp(0.0, 1.0),
-                time_seconds,
+                if physical_weather {
+                    (storm_extent[3] / 28.).min(0.75)
+                } else {
+                    settings.overcast.clamp(0.0, 1.0)
+                },
+                self.storm_phase.get().unwrap_or(time_seconds),
             ],
             beauty: [
-                if settings.beauty { 1.0 } else { 0.0 },
+                f32::from(beauty),
                 if beams { 1. } else { 0. },
                 atmosphere_debug() as f32,
                 post_aa_strength(),
@@ -729,12 +1279,34 @@ impl Atmosphere {
                 settings.sunbeams,
                 haze_strength,
                 context.region_count as f32,
-                0.,
+                if settings.atmosphere
+                    && settings.fog_density > 0.
+                    && !settings.visibility_benchmark
+                    && !context.submerged
+                {
+                    rolling_horizon
+                } else {
+                    0.
+                },
             ],
             far_shadow: context.shadow_projection,
             haze_regions: context.regions,
+            storm_origin,
+            storm_extent,
+            storm_low,
+            storm_high,
+            celestial,
+            moon,
+            regional_origin,
+            regional_extent,
+            cloud_phase: settings.cloud_phase,
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        queue.write_buffer(
+            &self.blit_settings,
+            0,
+            bytemuck::bytes_of(&[settings.edge_aa, 0., 0., 0.]),
+        );
     }
     pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
         self.encode_with_shadows(encoder, output, None);
@@ -750,7 +1322,11 @@ impl Atmosphere {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("half resolution volumetric clouds"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.sky,
+                        view: if self.compact_storm.get() {
+                            &self.storm_sky
+                        } else {
+                            &self.sky
+                        },
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -791,7 +1367,11 @@ impl Atmosphere {
             (
                 &self.composite,
                 &self.pipeline,
-                &self.bind_group,
+                if self.compact_storm.get() {
+                    &self.storm_composite
+                } else {
+                    &self.bind_group
+                },
                 "atmosphere",
             ),
             (
@@ -848,7 +1428,7 @@ mod tests {
     }
     #[test]
     fn atmosphere_uniform_contract() {
-        assert_eq!(std::mem::size_of::<super::Uniform>(), 368);
+        assert_eq!(std::mem::size_of::<super::Uniform>(), 512);
         assert_eq!(std::mem::offset_of!(super::Uniform, beauty), 144);
         let module =
             naga::front::wgsl::parse_str(&crate::voxel_shader(super::shader_source(1))).unwrap();
@@ -863,7 +1443,7 @@ mod tests {
         assert_eq!(*span as usize, std::mem::size_of::<super::Uniform>());
         assert_eq!(
             members.last().unwrap().offset as usize,
-            std::mem::offset_of!(super::Uniform, haze_regions)
+            std::mem::offset_of!(super::Uniform, cloud_phase)
         );
     }
 
@@ -877,7 +1457,8 @@ mod tests {
             super::BLIT.to_owned(),
             super::air_shader_source(1),
             super::air_shader_source(4),
-            super::SKY_SHADER.to_owned(),
+            super::sky_shader_source(1),
+            super::sky_shader_source(4),
         ] {
             let source = crate::voxel_shader(source);
             let module = naga::front::wgsl::parse_str(&source)

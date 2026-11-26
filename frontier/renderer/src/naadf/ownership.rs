@@ -2,7 +2,7 @@
 //! screen visibility. A one-chunk apron protects exposed walls at tile edges.
 use crate::adaptive_geometry::TileKey;
 use frontier_world::{
-    vegetation::{PlantRecord, Species, MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS},
+    vegetation::{living_flora, PlantRecord},
     voxel_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,11 +100,7 @@ impl Ownership {
         self.contains(Self::plant_bounds(p))
     }
     pub fn plant_bounds(p: &PlantRecord) -> [[f64; 3]; 2] {
-        let (r, h) = if p.species == Species::Rowan {
-            (MAX_PLANT_RADIUS_CELLS, MAX_PLANT_HEIGHT_CELLS)
-        } else {
-            (8, 12)
-        };
+        let (r, h) = p.extent_cells();
         [
             [
                 p.root.x as f64 * voxel_size() - r as f64 * voxel_size(),
@@ -130,7 +126,7 @@ impl Ownership {
             ],
             [
                 ((x + 1) * 128 + 8) as f64 * voxel_size(),
-                (high + 13) as f64 * voxel_size(),
+                (high + living_flora::GROUND_HEIGHT + 1) as f64 * voxel_size(),
                 ((z + 1) * 128 + 8) as f64 * voxel_size(),
             ],
         ]

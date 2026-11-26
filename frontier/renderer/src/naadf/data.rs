@@ -550,6 +550,17 @@ fn build_region_options(
         edit_blocked_chunks: 0,
     };
     let mut pigments = HashMap::new();
+    let living_woods = vegetation::uses_living_woodland(world);
+    let plant_priority = !compact_overlay && overlay::priority_enabled(living_woods);
+    let clip_plants = overlay::clip_enabled(living_woods);
+    let region = frontier_world::volume_summary::CellBounds {
+        min,
+        max: Cell {
+            x: min.x + nx as i64 * 16,
+            y: min.y + ny as i64 * 16,
+            z: min.z + nz as i64 * 16,
+        },
+    };
     let mut overlay = overlay::Overlay::new(compact_overlay);
     stage.store(1, Ordering::Relaxed);
     profile.end(Stage::Initialization, phase);
@@ -559,8 +570,9 @@ fn build_region_options(
         [min.x - pad, min.z - pad],
         [min.x + nx as i64 * 16 + pad, min.z + nz as i64 * 16 + pad],
     );
-    // For intersections between models below, ask the canonical lookup rather
-    // than infer precedence from this enumeration's ordering.
+    // Root enumeration for each species preserves the tile and in-tile order
+    // used by World::vegetation_voxel. A stable species sort preserves that
+    // precedence when assigning an explicit priority.
     records.sort_by_key(|p| {
         (
             match p.species {
@@ -568,26 +580,17 @@ fn build_region_options(
                 Species::Grass => 1,
                 Species::Edelweiss => 2,
             },
-            p.root.x,
-            p.root.z,
-            p.seed,
+            if plant_priority { 0 } else { p.root.x },
+            if plant_priority { 0 } else { p.root.z },
+            if plant_priority { 0 } else { p.seed },
         )
     });
     profile.end(Stage::VegetationEnumeration, phase);
-    for record in records {
+    for (priority, record) in records.into_iter().enumerate() {
         if cancel() {
             return Err("NAADF build superseded".into());
         }
-        let radius = if record.species == Species::Rowan {
-            vegetation::MAX_PLANT_RADIUS_CELLS
-        } else {
-            8
-        };
-        let height = if record.species == Species::Rowan {
-            vegetation::MAX_PLANT_HEIGHT_CELLS
-        } else {
-            12
-        };
+        let (radius, height) = record.extent_cells();
         if record.root.x + radius < min.x
             || record.root.x - radius >= min.x + nx as i64 * 16
             || record.root.z + radius < min.z
@@ -598,15 +601,27 @@ fn build_region_options(
             continue;
         }
         let phase = profile.start();
-        let Some(model) = vegetation::model_for_cancellable(&record, &cancel) else {
-            return Err("NAADF build superseded".into());
+        let clipped = clip_plants
+            .then(|| vegetation::clipped_woodland_voxels(&record, region, &cancel))
+            .flatten();
+        let model;
+        let voxels = if let Some(ref voxels) = clipped {
+            voxels
+        } else {
+            model = vegetation::model_for_cancellable(&record, &cancel)
+                .ok_or("NAADF build superseded")?;
+            &model.voxels
         };
         profile.end(Stage::VegetationModels, phase);
         let phase = profile.start();
-        for v in &model.voxels {
+        for v in voxels {
             if let Some(a) = address(record.world_cell(v.cell), min, dims) {
                 let ty = pigment(&mut out.palette, &mut pigments, v.color, v.material)?;
-                overlay.push(a, ty);
+                if plant_priority {
+                    overlay.push_priority(a, ty, priority as u32);
+                } else {
+                    overlay.push(a, ty);
+                }
             }
         }
         profile.workspace(budget(
@@ -628,16 +643,20 @@ fn build_region_options(
             limit,
         )?);
     }
-    overlay.resolve_ordered(
-        |a| {
-            let v = world
-                .vegetation_voxel(cell_at(a, min, dims))
-                .ok_or("canonical plant overlap lookup failed")?;
-            pigment(&mut out.palette, &mut pigments, v.color, v.material)
-        },
-        &cancel,
-        chunk_local_overlay,
-    )?;
+    if plant_priority {
+        overlay.resolve_priority(&cancel, chunk_local_overlay)?;
+    } else {
+        overlay.resolve_ordered(
+            |a| {
+                let v = world
+                    .vegetation_voxel(cell_at(a, min, dims))
+                    .ok_or("canonical plant overlap lookup failed")?;
+                pigment(&mut out.palette, &mut pigments, v.color, v.material)
+            },
+            &cancel,
+            chunk_local_overlay,
+        )?;
+    }
     out.plant_cells = overlay.len();
     // Canonical overlap resolution may introduce a previously unseen wide
     // pigment. Account for exact promotion's temporary old+new payload peak.
@@ -727,7 +746,10 @@ fn build_region_options(
             // Streaming summaries describe world-aligned metre columns. A
             // nonaligned extraction crosses their boundaries and cannot reuse
             // one column's extrema as a proof for its shifted native tile.
-            let summary = if min.x.rem_euclid(16) == 0 && min.z.rem_euclid(16) == 0 {
+            let column_min = [min.x + (cx * 16) as i64, min.z + (cz * 16) as i64];
+            let formation =
+                world.formations_intersect_columns(column_min, column_min.map(|v| v + 16));
+            let summary = if !formation && min.x.rem_euclid(16) == 0 && min.z.rem_euclid(16) == 0 {
                 cached.and_then(|f| f(min.x / 16 + cx as i64, min.z / 16 + cz as i64))
             } else {
                 None
@@ -748,7 +770,7 @@ fn build_region_options(
                     continue;
                 }
             }
-            let source_fast = world.fbm_terrain().is_some()
+            let source_fast = !formation && world.fbm_terrain().is_some()
                 // The fixture's ownership boundary is metre aligned. A shifted
                 // native tile can straddle it despite an unowned origin, so
                 // retain exact column queries for all nonaligned extractions.

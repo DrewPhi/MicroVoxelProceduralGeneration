@@ -16,6 +16,7 @@ pub(super) struct Samples {
 // x/z are exact native-cell origins, including non-meter-aligned test regions.
 struct Key {
     source: [u64; 9],
+    runway: Option<frontier_world::DirtRunway>,
     x: i64,
     z: i64,
 }
@@ -35,6 +36,7 @@ impl Key {
                 u64::from(t.source_version()),
                 u64::from(t.appearance_version()),
             ],
+            runway: t.dirt_runway(),
             x,
             z,
         })

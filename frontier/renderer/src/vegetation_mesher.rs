@@ -249,6 +249,16 @@ pub(crate) fn mesh_cells_scaled(
     vertical_stride: u8,
     cancel: impl Fn() -> bool,
 ) -> VegetationMesh {
+    mesh_colored_cells(cells, stride, vertical_stride, voxel_size() as f32, cancel)
+}
+
+pub(crate) fn mesh_colored_cells(
+    cells: impl Iterator<Item = (Cell, u8, [f32; 3])>,
+    stride: u8,
+    vertical_stride: u8,
+    cell_size: f32,
+    cancel: impl Fn() -> bool,
+) -> VegetationMesh {
     let step = i64::from(stride.max(1));
     let steps = [step, i64::from(vertical_stride.max(1)), step];
     let mut lookup = Map::default();
@@ -377,9 +387,9 @@ pub(crate) fn mesh_cells_scaled(
             normal[d] = sign as f32;
             for [a, b] in [[0, 0], [w, 0], [w, h], [0, h]] {
                 let mut p = [0.; 3];
-                p[d] = (plane * steps[d]) as f32 * voxel_size() as f32;
-                p[u] = ((start[0] + a) * steps[u]) as f32 * voxel_size() as f32;
-                p[v] = ((start[1] + b) * steps[v]) as f32 * voxel_size() as f32;
+                p[d] = (plane * steps[d]) as f32 * cell_size;
+                p[u] = ((start[0] + a) * steps[u]) as f32 * cell_size;
+                p[v] = ((start[1] + b) * steps[v]) as f32 * cell_size;
                 mesh.vertices.push(VegetationVertex {
                     position: p,
                     normal,

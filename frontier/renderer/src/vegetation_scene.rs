@@ -39,6 +39,11 @@ impl Gpu {
         {
             return;
         }
+        let terrain_snapshot = self
+            .formation_mesh
+            .revision
+            .map(|_| world.terrain_render_snapshot());
+        let world = terrain_snapshot.as_ref().unwrap_or(world);
         let mut experiment = self.naadf.take().unwrap_or_default();
         experiment.poll(
             self,
@@ -72,9 +77,10 @@ impl Gpu {
             return Ok(());
         }
         if self.vegetation_stream.is_none() {
-            self.vegetation_stream = Some(vegetation::VegetationStream::new(
+            self.vegetation_stream = Some(vegetation::VegetationStream::for_renderer(
                 world.clone(),
                 Default::default(),
+                self.rolling.is_some(),
             ));
             self.vegetation_revision = world.revision();
         } else if self.vegetation_revision != world.revision() {
@@ -96,6 +102,7 @@ impl Gpu {
         }
         if let Some(settings) = &self.visual_settings {
             let stream = self.vegetation_stream.as_mut().unwrap();
+            stream.set_lod_curve(&settings.vegetation_lod_curve);
             stream.set_visibility_benchmark(
                 settings.visibility_benchmark,
                 f64::from(
@@ -122,23 +129,37 @@ impl Gpu {
             .as_mut()
             .unwrap()
             .set_background_paused(self.vegetation_background_paused);
-        let frame = self.vegetation_stream.as_mut().unwrap().update_view(
-            camera.position.to_array(),
+        let frame = self.vegetation_stream.as_mut().unwrap().update_camera_view(
+            camera,
             height,
-            camera.fov_y.to_radians(),
             world.revision(),
-            camera.direction().as_dvec3().to_array(),
             width as f32 / height.max(1) as f32,
         );
         self.vegetation_stats = frame.stats;
         self.vegetation_inspection
             .clone_from(&frame.shadow_inspection);
-        if self.vegetation.is_none() || self.vegetation_samples != self.sample_count {
+        let needs_gpu = self.vegetation.is_none() || self.vegetation_samples != self.sample_count;
+        if needs_gpu {
             self.vegetation = Some(vegetation_gpu::VegetationGpu::new(
                 &self.device,
                 self.scene_format,
                 self.sample_count,
                 &self.native_layout,
+                vegetation_gpu::VegetationGpuInputs {
+                    horizon: self
+                        .rolling
+                        .as_ref()
+                        .and_then(|rolling| rolling.terrain_horizon_resources()),
+                    woodland: self
+                        .rolling
+                        .as_ref()
+                        .map(|rolling| &rolling.woodland_shadow().receiver),
+                    crowns: self.vegetation_stream.as_ref().unwrap().crown_display(),
+                    aerial_shadows: self
+                        .rolling
+                        .as_ref()
+                        .is_some_and(|r| r.canopy_ground_shade().is_enabled()),
+                },
             ));
             self.vegetation
                 .as_mut()
@@ -153,7 +174,20 @@ impl Gpu {
                 .to_cols_array_2d(),
         );
         if let Some(settings) = &self.visual_settings {
-            plants.set_visual_lighting(&self.queue, settings, self.regional_appearance);
+            let horizon = self
+                .rolling
+                .as_ref()
+                .map_or([0.; 4], |rolling| rolling.terrain_horizon_grid());
+            plants.set_visual_lighting(
+                &self.queue,
+                settings,
+                self.regional_appearance,
+                horizon,
+                self.origin.as_vec3(),
+            );
+        }
+        if frame.stats.cached_exact_view && !needs_gpu {
+            return Ok(());
         }
         let origin = self
             .origin
@@ -220,8 +254,8 @@ impl Gpu {
             .map(|v| v.stats())
             .unwrap_or_default();
         let native_voxel_m = voxel_size();
-        let mut json = format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"instance_units\":\"ground_tiles_and_individual_trees\",\"model_generation\":\"native_near_recipe_proxy_far\",\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":28,\"flower_radius_m\":56,\"tree_radius_m\":{},\"shadow_casters\":{},\"shadow_instances\":{},\"shadow_triangles\":{},\"reference_mode\":{},\"reference_budget_exceeded\":{},\"cpu_geometry_budget_bytes\":{},\"gpu_budget_bytes\":{},\"gpu_actual_budget_bytes\":{},\"shadow_only_instances\":{},\"shadow_only_triangles\":{},\"retained_ground_detail\":{},\"canonical_voxel_m\":{native_voxel_m}}}",
-            self.vegetation.is_some(),frontier_world::vegetation::source_version(),s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,s.tree_radius_m,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded,s.mesh_budget_bytes,s.gpu_budget_bytes,g.cache_budget_bytes,s.shadow_only_instances,s.shadow_only_triangles,s.retained_ground_detail);
+        let mut json = format!("\"vegetation\":{{\"enabled\":{},\"source_version\":{},\"instance_units\":\"ground_tiles_and_individual_trees\",\"model_generation\":\"native_near_recipe_proxy_far\",\"resident_tiles\":{},\"resident_templates\":{},\"pending_jobs\":{},\"missing_tiles\":{},\"missing_templates\":{},\"selected_instances\":{},\"triangles\":{},\"budget_rejected\":{},\"culled_instances\":{},\"culled_tree_tiles\":{},\"coverage_fallbacks\":{},\"coverage_unresolved\":{},\"selected_by_species\":{:?},\"triangles_by_species\":{:?},\"rejected_by_species\":{:?},\"draw_calls\":{},\"gpu_bytes\":{},\"uploaded_bytes_last_update\":{},\"grass_radius_m\":{},\"flower_radius_m\":{},\"tree_radius_m\":{},\"shadow_casters\":{},\"shadow_instances\":{},\"shadow_triangles\":{},\"reference_mode\":{},\"reference_budget_exceeded\":{},\"cpu_geometry_budget_bytes\":{},\"gpu_budget_bytes\":{},\"gpu_actual_budget_bytes\":{},\"shadow_only_instances\":{},\"shadow_only_triangles\":{},\"retained_ground_detail\":{},\"canonical_voxel_m\":{native_voxel_m}}}",
+            self.vegetation.is_some(),frontier_world::vegetation::source_version(),s.resident_tiles,s.resident_meshes,s.pending_jobs,s.missing_tiles,s.missing_meshes,s.selected_instances,s.triangles,s.budget_rejected,s.culled_instances,s.culled_tree_tiles,s.coverage_fallbacks,s.coverage_unresolved,s.selected_by_species,s.triangles_by_species,s.rejected_by_species,g.draw_calls,g.resident_bytes,g.uploaded_bytes,s.grass_radius_m,s.flower_radius_m,s.tree_radius_m,self.adaptive.as_ref().is_some_and(|a|a.near_shadows_active()),g.shadow_instances,g.shadow_triangles,self.vegetation_stream.as_ref().is_some_and(|s|s.config.reference),s.reference_budget_exceeded,s.mesh_budget_bytes,s.gpu_budget_bytes,g.cache_budget_bytes,s.shadow_only_instances,s.shadow_only_triangles,s.retained_ground_detail);
         json.pop();
         json.push_str(&format!(
             ",\"naadf_omitted_groups\":{},\"requested_native_unresolved\":{},\"naadf_retire_unresolved\":{}}}",

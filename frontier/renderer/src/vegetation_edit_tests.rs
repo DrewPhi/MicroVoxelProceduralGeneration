@@ -56,23 +56,42 @@ fn local_edit_id_ignores_distant_edits_revision_and_tracks_negative_tile_edges()
         },
         ..p
     };
-    let edge = Cell {
-        x: tree.root.x + vegetation::MAX_PLANT_RADIUS_CELLS,
-        y: tree.root.y + vegetation::MAX_PLANT_HEIGHT_CELLS,
-        z: tree.root.z,
-    };
-    assert_ne!(plant_edit_id(&tree, &[edge], 1), 0);
-    assert_eq!(
-        plant_edit_id(
-            &tree,
-            &[Cell {
-                x: edge.x + 1,
-                ..edge
-            }],
-            1
-        ),
-        0
-    );
+    for variant in [
+        0,
+        vegetation::living_flora::CONIFER,
+        vegetation::living_flora::SHRUB,
+    ] {
+        let tree = PlantRecord { variant, ..tree };
+        let (radius, height) = tree.extent_cells();
+        let edge = Cell {
+            x: tree.root.x + radius,
+            y: tree.root.y + height,
+            z: tree.root.z,
+        };
+        assert_ne!(plant_edit_id(&tree, &[edge], 1), 0);
+        assert_eq!(
+            plant_edit_id(
+                &tree,
+                &[Cell {
+                    x: edge.x + 1,
+                    ..edge
+                }],
+                1
+            ),
+            0
+        );
+        assert_eq!(
+            plant_edit_id(
+                &tree,
+                &[Cell {
+                    y: edge.y + 1,
+                    ..edge
+                }],
+                1
+            ),
+            0
+        );
+    }
 }
 
 #[test]
@@ -109,7 +128,9 @@ fn local_edit_snapshot_retains_placement_templates_jobs_and_hysteresis() {
         x: -1,
         z: -1,
     };
-    stream.tiles.insert(tile, (vec![ground(-128, -128)], 12));
+    stream
+        .tiles
+        .insert(tile, PlacedPlants::new(vec![ground(-128, -128)], 12, false));
     stream.pending_tiles.insert(Tile {
         species: 2,
         x: 9,
@@ -201,6 +222,7 @@ fn queued_local_edit_results_reject_changed_keys_and_reuse_unaffected_content() 
     let (send, rx) = mpsc::sync_channel(2);
     stream.rx = rx;
     let mesh = Arc::new(VegetationMesh {
+        woodland_volume: None,
         vertices: vec![],
         indices: vec![0; 3],
     });
@@ -273,6 +295,7 @@ fn aba_edit_undo_redo_reuses_matching_content_and_rejects_obsolete_completion() 
     let (send, rx) = mpsc::sync_channel(3);
     stream.rx = rx;
     let edited_mesh = Arc::new(VegetationMesh {
+        woodland_volume: None,
         vertices: vec![],
         indices: vec![0; 3],
     });
@@ -297,6 +320,7 @@ fn aba_edit_undo_redo_reuses_matching_content_and_rejects_obsolete_completion() 
     stream.pending_meshes.insert(edited_key);
     stream.mesh_sources.insert(edited_key, p);
     let base_mesh = Arc::new(VegetationMesh {
+        woodland_volume: None,
         vertices: vec![],
         indices: vec![0; 6],
     });

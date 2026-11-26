@@ -22,24 +22,42 @@ fn light(normal:vec3<f32>,visibility:f32)->vec3<f32>{
     let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky)*(1.+naadf.sky.x*0.3);
     let direct=outdoor_sun_color(sun.y)*max(dot(normal,sun),0.)*(1.-0.72*naadf.sky.x);
     if naadf.sun.w>0.5{return ambient+direct*visibility;}
-    return mix(vec3(0.12,0.105,0.085),vec3(0.28,0.33,0.40),sky)+vec3(0.78,0.70,0.58)*max(dot(normal,sun),0.);
+    return mix(vec3(0.12,0.105,0.085),vec3(0.28,0.33,0.40),sky)+vec3(0.78,0.70,0.58)*max(dot(normal,sun),0.)*visibility;
 }
 fn bounce_at(position:vec3<f32>,normal:vec3<f32>,visibility:f32)->vec3<f32> {
     if naadf.sun.w<0.5 {return vec3(0.);}
     return ground_irradiance(position-naadf.eye.xyz,normal,naadf.sun.xyz,
         outdoor_sun_color(naadf.sun.y),naadf.sky.x,visibility);
 }
-fn shade_voxel(hit:vec3<f32>,h:VoxelHit)->vec3<f32> {
-    var visibility=1.;
-    if naadf.sun.w>0.5 && dot(h.normal,naadf.sun.xyz)>0. {
-        if naadf.shadow.y<0.5{visibility=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
-        if visibility>0.5{visibility*=distant_sun_visibility(hit,naadf.sun.xyz);}
+fn shade_voxel(hit:vec3<f32>,h:VoxelHit,normal:vec3f,pigment:Pigment)->vec3<f32> {
+    let sky=naadf_terrain_irradiance(hit);
+    var visibility=sky.x;
+    if !ROLLING_NATIVE_LIGHT && naadf.sun.w>0.5 && dot(normal,naadf.sun.xyz)>0. {
+        if naadf.shadow.y<0.5{visibility*=naadf_sun_visibility(hit-naadf.eye.xyz,h.normal,naadf.sun.xyz);}
+        if visibility>0.5 { visibility*=distant_sun_visibility(hit,naadf.sun.xyz); }
     }
-    if naadf.sun.w<0.5 || ground_light.origin_strength.z<=0. {return palette[h.pigment].rgb*light(h.normal,visibility);}
+    let leaf=select(select(0.,.35,pigment.material==6u),1.,pigment.material==5u);
+    let woodland=woodland_shadow_active();
+    if woodland && (leaf>0. || dot(normal,naadf.sun.xyz)>0.) {
+        // Rolling uses its own terrain horizon and local caster map.
+        // A receiver inside the native region still sees nearby trunks.
+        visibility*=woodland_sun_visibility(hit-naadf.eye.xyz+h.normal*.04);
+    }
+    visibility*=aircraft_sun_visibility(hit-naadf.eye.xyz)*formation_sun_visibility(hit-naadf.eye.xyz);
+    let shade=light(normal,visibility);
+    let ambient=light(normal,0.);
+    if naadf.sun.w<0.5 || ground_light.origin_strength.z<=0. {
+        return pigment.rgb*(shade+ambient*(sky.y-1.));
+    }
     let contact=voxel_contact(hit,h.normal);
     // Contact occlusion affects indirect light; the direct sun uses visibility.
-    let indirect=light(h.normal,0.)+bounce_at(hit,h.normal,visibility);
-    return palette[h.pigment].rgb*(light(h.normal,visibility)-light(h.normal,0.)+indirect*contact);
+    var indirect=ambient*sky.y+bounce_at(hit,normal,visibility);
+    if woodland && leaf>0. && dot(normal,naadf.sun.xyz)<0. {
+        let sunlight=outdoor_sun_color(naadf.sun.y)*(1.-.72*naadf.sky.x);
+        indirect+=leaf_transmitted_light(normalize(hit-naadf.eye.xyz),normal,naadf.sun.xyz,
+            sunlight,leaf,visibility,sky.y);
+    }
+    return pigment.rgb*(shade-ambient+indirect*contact);
 }
 
 // Exact occupancy lookup in the published native snapshot. Skip proofs encode
@@ -251,5 +269,10 @@ fn shade_submerged(o:vec3<f32>,d:vec3<f32>,cosine:f32)->Fragment {
     if pigment.material==7u {
         return Fragment(vec4(shade_water(hit,h.normal,d,h.t*NATIVE_VOXEL_METERS),1.),depth);
     }
-    return Fragment(vec4(shade_voxel(hit,h),1.),depth);
+    var normal = h.normal;
+    if pigment.material<=3u || pigment.material>=8u {
+        normal=naadf_terrain_lighting_normal(hit,h.normal,d);
+    }
+    if naadf_gray_enabled() {return Fragment(vec4f(vec3f(.38)*light(normal,1.),1.),depth);}
+    return Fragment(vec4(shade_voxel(hit,h,normal,pigment),1.),depth);
 }

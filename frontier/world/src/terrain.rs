@@ -1,6 +1,9 @@
 //! CPU-canonical, seeded mountain heightfield, independent of renderer spacing.
 //! Greenfield gradient noise/FBM composition; no external implementation copied.
 use crate::{voxel_size, Cell, Material};
+#[path = "runway.rs"]
+mod runway;
+pub use runway::DirtRunway;
 #[path = "seeded_world.rs"]
 pub(crate) mod seeded_world;
 pub use seeded_world::{
@@ -63,10 +66,34 @@ pub enum FbmRecipe {
     SeededWorld,
     /// Accumulated watershed drainage, varied relief and biome cover.
     Watershed,
+    /// Watershed drainage with branching ridges and climate-conditioned landforms.
+    Landscapes,
+    /// Seeded ridges with native rock shoulders, crevices and scree.
+    Landforms,
+    /// Layered bedrock and bounded runoff erosion within the primary watersheds.
+    Eroded,
 }
 impl FbmRecipe {
     pub fn has_static_water(self) -> bool {
-        matches!(self, Self::SeededWorld | Self::Watershed)
+        matches!(
+            self,
+            Self::SeededWorld | Self::Watershed | Self::Landscapes | Self::Landforms | Self::Eroded
+        )
+    }
+
+    pub fn has_landscape_relief(self) -> bool {
+        matches!(self, Self::Landscapes | Self::Landforms | Self::Eroded)
+    }
+
+    pub fn has_watershed_drainage(self) -> bool {
+        matches!(
+            self,
+            Self::Watershed | Self::Landscapes | Self::Landforms | Self::Eroded
+        )
+    }
+
+    pub(crate) fn has_jointed_relief(self) -> bool {
+        matches!(self, Self::Landforms | Self::Eroded)
     }
 }
 
@@ -135,12 +162,26 @@ impl FbmParams {
 pub struct FbmTerrain {
     seed: u64,
     params: FbmParams,
+    runway: Option<DirtRunway>,
 }
 impl FbmTerrain {
     pub fn new(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
         params.validate()?;
-        Ok(Self { seed, params })
+        Ok(Self {
+            seed,
+            params,
+            runway: None,
+        })
     }
+    pub fn with_dirt_runway(mut self, runway: DirtRunway) -> Self {
+        self.runway = Some(runway);
+        self
+    }
+
+    pub fn dirt_runway(&self) -> Option<DirtRunway> {
+        self.runway
+    }
+
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -153,7 +194,8 @@ impl FbmTerrain {
     pub fn source_version(&self) -> u32 {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
-            FbmRecipe::Watershed => 1,
+            FbmRecipe::Watershed | FbmRecipe::Landscapes | FbmRecipe::Landforms => 1,
+            FbmRecipe::Eroded => 8,
             FbmRecipe::Legacy => FBM_SOURCE_VERSION,
             FbmRecipe::Alpine => ALPINE_FBM_SOURCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_FBM_SOURCE_VERSION,
@@ -163,6 +205,8 @@ impl FbmTerrain {
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_APPEARANCE_VERSION,
             FbmRecipe::Watershed => 2,
+            FbmRecipe::Landscapes | FbmRecipe::Landforms => 1,
+            FbmRecipe::Eroded => 5,
             FbmRecipe::Legacy => 0,
             FbmRecipe::Alpine => ALPINE_APPEARANCE_VERSION,
             FbmRecipe::Regional | FbmRecipe::RegionalUnwarped => REGIONAL_APPEARANCE_VERSION,
@@ -178,16 +222,24 @@ impl FbmTerrain {
         self.height_cells(c.x, c.z) as f64 * voxel_size()
     }
     pub fn height_cells(&self, x: i64, z: i64) -> i64 {
-        if self.params.recipe.has_static_water() {
+        if self.params.recipe.has_static_water() || self.runway.is_some() {
             return self.column_cells(x, z).visible_top;
         }
+        self.base_dry_height_cells(x, z)
+    }
+
+    fn base_dry_height_cells(&self, x: i64, z: i64) -> i64 {
         let x = (x as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
         let z = (z as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
         (self.elevation(x, z) / voxel_size()).floor() as i64
     }
     fn elevation(&self, x: f64, z: f64) -> f64 {
         match self.params.recipe {
-            FbmRecipe::SeededWorld | FbmRecipe::Watershed => {
+            FbmRecipe::SeededWorld
+            | FbmRecipe::Watershed
+            | FbmRecipe::Landscapes
+            | FbmRecipe::Landforms
+            | FbmRecipe::Eroded => {
                 seeded_world::fields(
                     self.seed,
                     self.params,
@@ -226,7 +278,7 @@ impl FbmTerrain {
     /// B1 experiment only. Keep the warp, broad band and full-source denominator;
     /// dropping octaves must never renormalize the retained terrain into a new world.
     pub(crate) fn visual_legacy_height(&self, cell: [i64; 2], retained: u32) -> f64 {
-        if retained == self.params.octaves {
+        if retained == self.params.octaves || self.runway.is_some() {
             return self.height_cells(cell[0], cell[1]) as f64 * voxel_size();
         }
         let x = (cell[0] as f64 + 0.5) * voxel_size() / self.params.horizontal_scale;
@@ -404,6 +456,9 @@ impl FbmTerrain {
     /// and continuous moisture, never a display normal or an independent patch map.
     /// Every face of a voxel retains that voxel's one canonical material.
     pub fn surface_material(&self, x: f64, z: f64, height: f64) -> Material {
+        if self.runway.is_some_and(|r| r.weight([x, z]) == 1.) {
+            return Material::Soil;
+        }
         if self.params.recipe.has_static_water() {
             let c = Cell::from_meters([x, 0.0, z]);
             return self.column_cells(c.x, c.z).top_material();
@@ -487,7 +542,7 @@ impl FbmTerrain {
         self.seeded_reaches(min, max)
             .into_iter()
             .filter_map(|r| {
-                if r.a.stage.max(r.b.stage) < 0. {
+                if !r.wet || r.a.stage.max(r.b.stage) < 0. {
                     return None;
                 }
                 let pad = 1e-8 * (1. + min[0].abs() + min[1].abs() + max[0].abs() + max[1].abs());
@@ -546,36 +601,130 @@ impl FbmTerrain {
     /// endpoints. Certified callers must use outward-rounded interval arithmetic.
     /// Quantized tops also need a native voxel of downward rounding allowance.
     pub fn seeded_height_bounds(&self, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
-        seeded_world::height_bounds(self.seed, self.params, min, max)
+        let mut range = seeded_world::height_bounds(self.seed, self.params, min, max);
+        if let Some(runway) = self.runway.filter(|r| r.intersects(min, max)) {
+            let h = runway.height_m();
+            range = [range[0].min(h), range[1].max(h)];
+        }
+        range
     }
     /// Sample physical climate and landforms for diagnostics (seeded-world recipe).
     pub fn sample_fields(&self, x: f64, z: f64) -> SeededFields {
-        seeded_world::fields(self.seed, self.params, x, z)
+        let mut fields = seeded_world::fields(self.seed, self.params, x, z);
+        if let Some(runway) = self.runway {
+            let weight = runway.weight([x, z]);
+            let change = (runway.height_m() - fields.ground_height_m) * weight;
+            fields.temperature -= 0.00019 * change;
+            fields.ground_height_m += change;
+            fields.water_height_m = fields
+                .water_height_m
+                .filter(|&h| weight < 1. && h > fields.ground_height_m);
+        }
+        fields
+    }
+    /// Coarse elevation and climate normals without the local drainage graph.
+    pub fn sample_climate_surface(&self, x: f64, z: f64) -> [f64; 3] {
+        seeded_world::climate_surface(self.seed, self.params, x, z)
     }
     pub fn ground_height_m(&self, x: f64, z: f64) -> f64 {
         let c = Cell::from_meters([x, 0.0, z]);
         self.column_cells(c.x, c.z).ground_top as f64 * voxel_size()
     }
     pub fn column_cells(&self, x: i64, z: i64) -> TerrainColumn {
+        self.column_and_cover(x, z, false).0
+    }
+
+    /// The canonical column and a display-only expected grove density.
+    pub fn column_with_tree_cover(&self, x: i64, z: i64) -> (TerrainColumn, f64) {
+        self.column_and_cover(x, z, self.params.recipe.has_landscape_relief())
+    }
+
+    pub(crate) fn eroded_plant_site(
+        &self,
+        x: i64,
+        z: i64,
+        overstory: bool,
+    ) -> Option<(TerrainColumn, f64, SeededFields)> {
+        let [xm, _, zm] = Cell { x, y: 0, z }.center_m();
+        if self
+            .runway
+            .is_some_and(|runway| runway.weight([xm, zm]) > 0.)
+        {
+            return None;
+        }
+        Some(seeded_world::eroded_column(
+            self.seed,
+            self.params,
+            xm,
+            zm,
+            overstory,
+        ))
+    }
+
+    fn column_and_cover(&self, x: i64, z: i64, sample_cover: bool) -> (TerrainColumn, f64) {
         let xm = (x as f64 + 0.5) * voxel_size();
         let zm = (z as f64 + 0.5) * voxel_size();
-        if self.params.recipe.has_static_water() {
-            return seeded_world::column(self.seed, self.params, xm, zm);
+        let weight = self.runway.map_or(0., |r| r.weight([xm, zm]));
+        if weight == 1. {
+            let top = self.runway.unwrap().top_cells();
+            return (
+                TerrainColumn {
+                    ground_top: top,
+                    visible_top: top,
+                    ground_surface: Material::Soil,
+                    ground_subsurface: Material::Soil,
+                },
+                0.,
+            );
         }
-        let top = self.height_cells(x, z);
-        let ground_surface = self.surface_material(xm, zm, top as f64 * voxel_size());
-        TerrainColumn {
-            ground_top: top,
-            visible_top: top,
-            ground_surface,
-            ground_subsurface: if self.params.recipe == FbmRecipe::Alpine
-                && ground_surface == Material::Stone
-            {
-                Material::Stone
+        let mut cover = 0.;
+        let mut column = if self.params.recipe == FbmRecipe::Eroded {
+            let (column, density, _) = seeded_world::eroded_column(
+                self.seed,
+                self.params,
+                xm,
+                zm,
+                sample_cover && weight == 0.,
+            );
+            cover = density;
+            column
+        } else if sample_cover {
+            let f = seeded_world::fields(self.seed, self.params, xm, zm);
+            let column = seeded_world::column_from_fields(self.seed, self.params, xm, zm, f);
+            if weight == 0. && column.ground_surface == Material::Grass {
+                cover = seeded_world::landscape_tree_likelihood(self.seed, f, xm, zm);
+            }
+            column
+        } else if self.params.recipe.has_static_water() {
+            seeded_world::column(self.seed, self.params, xm, zm)
+        } else {
+            let top = self.base_dry_height_cells(x, z);
+            let ground_surface = self.surface_material(xm, zm, top as f64 * voxel_size());
+            TerrainColumn {
+                ground_top: top,
+                visible_top: top,
+                ground_surface,
+                ground_subsurface: if self.params.recipe == FbmRecipe::Alpine
+                    && ground_surface == Material::Stone
+                {
+                    Material::Stone
+                } else {
+                    Material::Soil
+                },
+            }
+        };
+        if weight > 0. {
+            let wet = column.visible_top > column.ground_top;
+            let base = column.ground_top as f64;
+            let top = self.runway.unwrap().top_cells() as f64;
+            column.ground_top = ((top - base).mul_add(weight, base)).floor() as i64;
+            column.visible_top = if wet {
+                column.visible_top.max(column.ground_top)
             } else {
-                Material::Soil
-            },
+                column.ground_top
+            };
         }
+        (column, cover)
     }
     pub fn surface_color(&self, x: f64, z: f64, height: f64) -> [f32; 3] {
         self.surface_material(x, z, height).color()
@@ -720,7 +869,7 @@ impl Field {
 }
 
 /// Derivative of the same clamped gradient noise used by canonical height.
-fn noise_gradient(x: f64, z: f64, seed: u64) -> [f64; 3] {
+pub(crate) fn noise_gradient(x: f64, z: f64, seed: u64) -> [f64; 3] {
     let (ix, iz) = (x.floor() as i64, z.floor() as i64);
     let u = Field {
         v: x - x.floor(),

@@ -1,5 +1,13 @@
 //! Playable integration of the cached-heightfield experiment.
-use crate::{settings::VisualSettings, Camera, Gpu, Result};
+use crate::foreground_depth::{self, ForegroundDepth};
+use crate::rolling_woodland_shadow::{self, CanopyGroundShade, WoodlandShadow};
+use crate::terrain_horizon::{self, TerrainHorizon};
+use crate::{
+    aircraft_shadow::AircraftShadow,
+    formation_shadow::{self, FormationShadow},
+    settings::VisualSettings,
+    Camera, Gpu, Result,
+};
 use bytemuck::{Pod, Zeroable};
 use frontier_world::{voxel_grid, voxel_size, FbmParams, FbmRecipe, FbmTerrain, Material, World};
 use glam::{DVec2, DVec3, IVec2, Vec3};
@@ -18,14 +26,19 @@ mod stream;
 
 const OUTER: u32 = 2048;
 const INNER: u32 = 512;
+const PROJECTED_MID_SIDE: u32 = 1024;
 const MIN_NATIVE_SIDE: usize = 512;
 pub(crate) const DEFAULT_NAADF_RADIUS: u32 = 128;
 pub(crate) const MAX_NAADF_RADIUS: u32 = 512;
-pub(crate) const MAX_FAR: f32 = 6000.;
+// Both outer caches cover this radius even immediately before a recenter.
+pub(crate) const MAX_FAR: f32 = 9000.;
 const SOURCE: &str = concat!(include_str!("bin/cached_heightfield.wgsl"),
     "\nfn outdoor_sun_color(elevation:f32)->vec3f {return mix(vec3f(2.12,1.44,.83),vec3f(2.,1.78,1.46),smoothstep(.06,.64,elevation));}\n",
     include_str!("water.wgsl"), "\nconst ROLLING_WATER_GROUP = 0u;\n",
+    include_str!("terrain_horizon_sample.wgsl"),
     include_str!("rolling_water_bed.wgsl"),
+    include_str!("aircraft_shadow.wgsl"),
+    include_str!("rolling_woodland_shadow.wgsl"),
     include_str!("rolling_terrain.wgsl"));
 
 #[repr(C)]
@@ -53,8 +66,25 @@ struct NativeView {
     voxel: [f32; 4],
     water: [f32; 4],
     source: [u32; 4],
+    horizon_grid: [f32; 4],
+    world_eye: [f32; 4],
     palette: [[f32; 4]; 10],
 }
+use crate::lod_curve::{LodCurve, TERRAIN_DISTANCES};
+
+const CURVE_PROFILE_VECTORS: usize = 56;
+const CURVE_NEAR_PITCH: f64 = 0.5;
+const CURVE_NEAR_SIDE: u32 = 1024;
+
+fn terrain_curve_samples(curve: &LodCurve) -> [[f32; 4]; CURVE_PROFILE_VECTORS] {
+    std::array::from_fn(|row| {
+        std::array::from_fn(|column| {
+            let index = (4 * row + column) as f32;
+            curve.in_profile((index * 0.25).powi(2), &TERRAIN_DISTANCES)
+        })
+    })
+}
+
 fn elapsed(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
 }
@@ -127,6 +157,19 @@ fn upload<T: Pod>(queue: &wgpu::Queue, texture: &wgpu::Texture, mip: u32, side: 
         },
     );
 }
+fn reduce_maxima(side: usize, data: &[f32]) -> Vec<f32> {
+    let next = side / 2;
+    (0..next * next)
+        .map(|i| {
+            let a = 2 * (i / next) * side + 2 * (i % next);
+            data[a]
+                .max(data[a + 1])
+                .max(data[a + side])
+                .max(data[a + side + 1])
+        })
+        .collect()
+}
+
 fn upload_maxima(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
@@ -138,17 +181,8 @@ fn upload_maxima(
         if side == 1 {
             break;
         }
-        let next = side / 2;
-        data = (0..next * next)
-            .map(|i| {
-                let a = 2 * (i / next) * side + 2 * (i % next);
-                data[a]
-                    .max(data[a + 1])
-                    .max(data[a + side])
-                    .max(data[a + side + 1])
-            })
-            .collect();
-        side = next;
+        data = reduce_maxima(side, &data);
+        side /= 2;
     }
 }
 
@@ -243,7 +277,10 @@ impl Layer {
             self.base.x,
             self.base.y,
             self.side.ilog2() as i32,
-            i32::from(matches!(self.source, Source::Sampled(_))),
+            match &self.source {
+                Source::Sampled(layer) => 1 + i32::from(layer.strip_uploads),
+                Source::Alpine(_) => 0,
+            },
         ]
     }
 }
@@ -296,16 +333,54 @@ impl BaseColumns {
     }
 }
 
+struct PreparedColumns {
+    datum: i64,
+    columns: Vec<[i32; 4]>,
+    maxima: Vec<Vec<f32>>,
+}
+
+impl PreparedColumns {
+    fn sample(base: &BaseColumns, datum: i64, side: usize, size: f64) -> Option<Self> {
+        let local = |y: i64| i32::try_from(y.checked_sub(datum)?).ok();
+        let columns = base
+            .columns
+            .iter()
+            .map(|c| Some([local(c.top)?, c.paint, local(c.visible_top)?, 0]))
+            .collect::<Option<Vec<_>>>()?;
+        let mut maxima = vec![columns
+            .iter()
+            .map(|c| (f64::from(c[2]) * size) as f32)
+            .collect::<Vec<_>>()];
+        for mip in 0..side.ilog2() {
+            maxima.push(reduce_maxima(side >> mip, maxima.last().unwrap()));
+        }
+        Some(Self {
+            datum,
+            columns,
+            maxima,
+        })
+    }
+}
+
+struct PendingColumns {
+    base: BaseColumns,
+    upload: Option<PreparedColumns>,
+}
+
 struct ExactColumns {
     base: [i64; 2],
     datum: i64,
     side: usize,
     revision: Option<u64>,
     sampled: Option<Arc<BaseColumns>>,
-    pending: Option<JoinHandle<BaseColumns>>,
+    pending: Option<JoinHandle<PendingColumns>>,
+    prepare_upload: bool,
     columns: wgpu::Texture,
     maxima: wgpu::Texture,
     runs: wgpu::Buffer,
+    last_eye: Option<[i64; 2]>,
+    publications: u64,
+    proxy_fallback_updates: u64,
 }
 fn runs_buffer(device: &wgpu::Device, runs: &[[i32; 4]]) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -318,9 +393,9 @@ impl ExactColumns {
     fn side_for(radius_voxels: u32) -> usize {
         MIN_NATIVE_SIDE.max((4 * radius_voxels as usize).next_power_of_two())
     }
-    fn new(device: &wgpu::Device, radius_voxels: u32) -> Self {
+    fn new(device: &wgpu::Device, radius_voxels: u32, detail: bool) -> Self {
         // The 2D fallback surrounds the volume through an entire origin shift.
-        let side = Self::side_for(radius_voxels);
+        let side = Self::side_for(radius_voxels).max(if detail { 1024 } else { 512 });
         let n = side as u32;
         Self {
             base: [0; 2],
@@ -329,6 +404,7 @@ impl ExactColumns {
             revision: None,
             sampled: None,
             pending: None,
+            prepare_upload: detail,
             columns: texture(device, n, 1, wgpu::TextureFormat::Rgba32Sint, false),
             maxima: texture(
                 device,
@@ -338,6 +414,9 @@ impl ExactColumns {
                 false,
             ),
             runs: runs_buffer(device, &[[0; 4]]),
+            last_eye: None,
+            publications: 0,
+            proxy_fallback_updates: 0,
         }
     }
     fn update(
@@ -361,53 +440,95 @@ impl ExactColumns {
                 .ok_or("native rolling window crosses the voxel coordinate limit")?;
             Ok(base)
         };
-        let target = [axis(cell.x)?, axis(cell.z)?];
-        let datum = cell.y.div_euclid(256) * 256;
-        let needs_window = self.sampled.is_none()
-            || [cell.x, cell.z]
-                .into_iter()
-                .zip(self.base)
-                .any(|(value, base)| {
-                    !(base + snap / 2..base + side as i64 - snap / 2).contains(&value)
-                });
+        let eye = [cell.x, cell.z];
+        let centered = [axis(cell.x)?, axis(cell.z)?];
+        let previous_eye = self.last_eye.replace(eye).unwrap_or(eye);
+        let shift = [0, 1].map(|i| eye[i].saturating_sub(previous_eye[i]));
+        let teleported = shift.iter().any(|v| v.unsigned_abs() > side as u64 / 2);
+        let margin = |origin: [i64; 2]| {
+            (0..2)
+                .map(|i| {
+                    let offset = eye[i].saturating_sub(origin[i]);
+                    offset.min((side as i64 - 1).saturating_sub(offset))
+                })
+                .min()
+                .unwrap()
+        };
+        // Keep the voxel-plane datum until it has moved far enough to matter
+        // for f32 precision. Descents do not repack the cache every 16 metres.
+        let datum = if self.sampled.is_none() || cell.y.abs_diff(self.datum) > 2048 {
+            cell.y.div_euclid(256) * 256
+        } else {
+            self.datum
+        };
         let terrain = world.fbm_terrain().expect("rolling cache source");
-        if (needs_window || self.pending.as_ref().is_some_and(JoinHandle::is_finished))
-            && self.pending.is_some()
-        {
+        // Ordinary flight can render the coherent sampled terrain while the
+        // exact window catches up. Edits and teleports require exact coverage.
+        let synchronous = self.sampled.is_none()
+            || (margin(self.base) < snap / 8 && (teleported || world.revision() != 0));
+        let mut prepared = None;
+        if self.pending.as_ref().is_some_and(JoinHandle::is_finished) {
             let ready = self
                 .pending
                 .take()
                 .unwrap()
                 .join()
                 .map_err(|_| "rolling voxel worker panicked")?;
-            if ready.origin == target {
-                self.sampled = Some(Arc::new(ready));
+            if ready.base.origin == centered || margin(ready.base.origin) > margin(self.base) {
+                self.sampled = Some(Arc::new(ready.base));
+                prepared = ready.upload;
             }
         }
-        if needs_window
+        if synchronous
             && self
                 .sampled
                 .as_ref()
-                .is_none_or(|columns| columns.origin != target)
+                .is_none_or(|columns| columns.origin != centered)
         {
+            prepared = None;
             self.sampled = Some(Arc::new(BaseColumns::sample(
                 terrain,
                 side,
-                target,
+                centered,
                 self.sampled.as_deref(),
             )));
         }
         let sampled = self.sampled.as_ref().unwrap();
         let origin = sampled.origin;
-        if origin != target && self.pending.is_none() {
-            let previous = Arc::clone(sampled);
-            let terrain = terrain.clone();
-            self.pending = Some(std::thread::spawn(move || {
-                BaseColumns::sample(&terrain, side, target, Some(&previous))
-            }));
+        if self.pending.is_none() {
+            // Lead fast flight by at most one strip. Completion still checks
+            // coverage against the camera's actual position and direction.
+            let eroded = terrain.params().recipe == FbmRecipe::Eroded;
+            let frames = if eroded { 10 } else { 3 };
+            let distance = if eroded { snap } else { snap / 2 };
+            let ahead = [0, 1].map(|i| {
+                eye[i].saturating_add(shift[i].saturating_mul(frames).clamp(-distance, distance))
+            });
+            let target = [axis(ahead[0])?, axis(ahead[1])?];
+            if origin != target {
+                let previous = Arc::clone(sampled);
+                let terrain = terrain.clone();
+                let prepare_upload = self.prepare_upload && world.revision() == 0;
+                self.pending = Some(std::thread::spawn(move || {
+                    let base = BaseColumns::sample(&terrain, side, target, Some(&previous));
+                    let upload = prepare_upload
+                        .then(|| PreparedColumns::sample(&base, datum, side, size))
+                        .flatten();
+                    PendingColumns { base, upload }
+                }));
+            }
         }
+        self.proxy_fallback_updates += u64::from(margin(origin) < 0);
         if self.base == origin && self.datum == datum && self.revision == Some(world.revision()) {
             return Ok(false);
+        }
+        if let Some(prepared) = prepared.filter(|p| p.datum == datum && world.revision() == 0) {
+            upload(queue, &self.columns, 0, side as u32, &prepared.columns);
+            for (mip, data) in prepared.maxima.iter().enumerate() {
+                upload(queue, &self.maxima, mip as u32, (side >> mip) as u32, data);
+            }
+            self.publish(origin, datum, world.revision());
+            return Ok(true);
         }
         let mut edited: BTreeMap<[i64; 2], Vec<i64>> = BTreeMap::new();
         for cell in world.edit_cells_in_columns(origin, origin.map(|v| v + side as i64)) {
@@ -464,37 +585,90 @@ impl ExactColumns {
         self.runs = runs_buffer(device, &runs);
         upload(queue, &self.columns, 0, side as u32, &columns);
         upload_maxima(queue, &self.maxima, side, maxima);
+        self.publish(origin, datum, world.revision());
+        Ok(true)
+    }
+
+    fn publish(&mut self, origin: [i64; 2], datum: i64, revision: u64) {
         self.base = origin;
         self.datum = datum;
-        self.revision = Some(world.revision());
-        Ok(true)
+        self.revision = Some(revision);
+        self.publications += 1;
     }
 }
 
 pub(crate) struct RollingTerrain {
     outer: Layer,
     inner: Layer,
+    detail: Option<Layer>,
+    profile_detail: Option<Layer>,
+    profile_detail_requested: bool,
+    profile_detail_ready_at: Option<Instant>,
+    terrain_curve: LodCurve,
+    curve_signs: [f32; 2],
+    curve_negative_start: f32,
+    curve_uniform: wgpu::Buffer,
     exact: ExactColumns,
     view: wgpu::Buffer,
     native_view: wgpu::Buffer,
     water_layout: wgpu::BindGroupLayout,
     water_bind: wgpu::BindGroup,
+    aircraft_shadow: AircraftShadow,
+    formation_shadow: FormationShadow,
+    woodland_shadow: WoodlandShadow,
+    canopy_ground_shade: CanopyGroundShade,
+    horizon: Option<TerrainHorizon>,
+    horizon_sampler: wgpu::Sampler,
+    pub foreground: Option<ForegroundDepth>,
+    landscapes: bool,
     pipeline: wgpu::RenderPipeline,
     source: [u32; 4],
     bind: Option<wgpu::BindGroup>,
 }
+
+fn horizon_bindings<'a>(
+    outer: &'a Layer,
+    horizon: Option<&'a TerrainHorizon>,
+    sampler: &'a wgpu::Sampler,
+) -> [wgpu::BindGroupEntry<'a>; 2] {
+    [
+        wgpu::BindGroupEntry {
+            binding: terrain_horizon::BINDING,
+            resource: wgpu::BindingResource::TextureView(
+                horizon.map_or(&outer.pigments, |h| &h.view),
+            ),
+        },
+        wgpu::BindGroupEntry {
+            binding: terrain_horizon::SAMPLER_BINDING,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+    ]
+}
+
 impl RollingTerrain {
     pub fn new(gpu: &Gpu, world: &World, settings: &VisualSettings) -> Result<Self> {
         let device = &gpu.device;
         let terrain = world
             .fbm_terrain()
             .ok_or("rolling terrain requires a procedural terrain source")?;
-        let alpine = terrain.params()
-            == (FbmParams {
-                recipe: FbmRecipe::Alpine,
-                ..Default::default()
-            })
+        let landscapes = terrain.params().recipe.has_landscape_relief();
+        let living_woods = frontier_world::vegetation::uses_living_woodland(world);
+        let close_pitch = settings
+            .terrain_near_spacing
+            .map_or(4. * voxel_size(), f64::from);
+        let alpine = terrain.dirt_runway().is_none()
+            && terrain.params()
+                == (FbmParams {
+                    recipe: FbmRecipe::Alpine,
+                    ..Default::default()
+                })
             && device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let inner_pitch = if alpine {
+            0.5
+        } else {
+            f64::from(settings.terrain_mid_spacing)
+        };
+        let detail = settings.terrain_detail && (voxel_size()..inner_pitch).contains(&close_pitch);
         if !alpine
             && terrain.params().recipe == FbmRecipe::Alpine
             && !device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -503,16 +677,24 @@ impl RollingTerrain {
                 "rolling terrain: GPU strip timing unavailable, using canonical CPU sampling"
             );
         }
+        let foreground = settings
+            .terrain_depth_occlusion
+            .then(|| ForegroundDepth::new(device, settings.msaa));
+        let foreground_source = if foreground.is_some() {
+            foreground_depth::SAMPLE
+        } else {
+            "fn foreground_at(pixel:vec2u)->f32 {return 1.;}"
+        };
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rolling terrain composition"),
-            source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{SOURCE}\n{foreground_source}").into()),
         });
-        let bindings =
-            [0, 1, 2, 6, 7, 9, 10, 11, 12, 13, 14].map(|binding| wgpu::BindGroupLayoutEntry {
+        let bindings = [0, 1, 2, 6, 7, 9, 10, 11, 12, 13, 14, 18, 19, 31].map(|binding| {
+            wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 count: None,
-                ty: if matches!(binding, 1 | 2 | 6 | 7 | 10 | 11 | 13 | 14) {
+                ty: if matches!(binding, 1 | 2 | 6 | 7 | 10 | 11 | 13 | 14 | 18 | 19) {
                     wgpu::BindingType::Texture {
                         sample_type: if binding == 11 {
                             wgpu::TextureSampleType::Sint
@@ -533,14 +715,46 @@ impl RollingTerrain {
                         min_binding_size: None,
                     }
                 },
-            });
+            }
+        });
+        let horizon_layout = [
+            wgpu::BindGroupLayoutEntry {
+                binding: terrain_horizon::BINDING,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: terrain_horizon::SAMPLER_BINDING,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ];
+        let shadow_layout = AircraftShadow::layout_entries();
+        let mut rolling_layout = bindings.to_vec();
+        rolling_layout.extend(shadow_layout);
+        rolling_layout.extend(AircraftShadow::layout_entries_at(formation_shadow::BINDING));
+        rolling_layout.extend(AircraftShadow::layout_entries_at(
+            rolling_woodland_shadow::BINDING,
+        ));
+        rolling_layout.extend(horizon_layout);
+        rolling_layout.extend(CanopyGroundShade::read_entries());
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rolling terrain layout"),
-            entries: &bindings,
+            entries: &rolling_layout,
         });
+        let mut groups = vec![&bind_layout];
+        if let Some(depth) = &foreground {
+            groups.push(&depth.read_layout);
+        }
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bind_layout],
+            bind_group_layouts: &groups,
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -557,11 +771,52 @@ impl RollingTerrain {
                 entry_point: Some("rolling_fragment"),
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &HashMap::from([
-                        ("METHOD".into(), 2.),
+                        (
+                            "METHOD".into(),
+                            if settings.terrain_mid_boundary_ascent {
+                                1.
+                            } else {
+                                2.
+                            },
+                        ),
                         ("BILINEAR".into(), 1.),
                         ("STREAM".into(), f64::from(u8::from(alpine))),
                         ("CANONICAL_PIGMENT".into(), f64::from(u8::from(!alpine))),
                         ("NESTED".into(), 1.),
+                        ("LANDSCAPES".into(), f64::from(u8::from(landscapes))),
+                        (
+                            "FOREST_AERIAL_LIGHT".into(),
+                            f64::from(u8::from(
+                                settings.natural_terrain_light
+                                    && !alpine
+                                    && crate::woodland_volume::render_option(
+                                        "FRONTIER_WOODLAND_AERIAL_LIGHT",
+                                        living_woods,
+                                    ),
+                            )),
+                        ),
+                        (
+                            "NATURAL_TERRAIN_LIGHT".into(),
+                            f64::from(u8::from(settings.natural_terrain_light && !alpine)),
+                        ),
+                        ("PROJECTED_DETAIL".into(), f64::from(u8::from(detail))),
+                        (
+                            "PROJECTED_MID".into(),
+                            f64::from(u8::from(settings.terrain_mid_detail)),
+                        ),
+                        ("DISTANCE_LOD_CURVE".into(), 1.),
+                        (
+                            "SCROLLED_OUTER".into(),
+                            f64::from(u8::from(settings.terrain_far_detail)),
+                        ),
+                        (
+                            "REFINE_MID".into(),
+                            f64::from(u8::from(settings.terrain_mid_error_px > 0.)),
+                        ),
+                        (
+                            "CAPTURE_DISTANCE".into(),
+                            f64::from(u8::from(settings.capture_terrain_distance)),
+                        ),
                     ]),
                     ..Default::default()
                 },
@@ -596,46 +851,157 @@ impl RollingTerrain {
             } else {
                 0
             },
+            detail
+                && (settings.terrain_near_spacing.is_none() || settings.terrain_near_cells > 512),
         );
         let native_view = uniform(bytemuck::bytes_of(&NativeView::zeroed()));
+        let aircraft_shadow = AircraftShadow::new(device);
+        let formation_center = world
+            .rock_formations()
+            .get(1)
+            .map(|rock| DVec3::from_array(rock.center_m()));
+        let formation_shadow = FormationShadow::new(device, formation_center);
+        let woodland_shadow = WoodlandShadow::new(device, living_woods);
+        let canopy_ground_shade = CanopyGroundShade::new(
+            device,
+            crate::woodland_volume::render_option("FRONTIER_WOODLAND_WIDE_SHADOWS", living_woods),
+        );
+        let mut water_entries = vec![bindings[5], bindings[7]];
+        water_entries.extend(shadow_layout);
+        water_entries.extend(AircraftShadow::layout_entries_at(formation_shadow::BINDING));
+        water_entries.extend(AircraftShadow::layout_entries_at(
+            rolling_woodland_shadow::BINDING,
+        ));
+        water_entries.extend(horizon_layout);
         let water_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("rolling water bed for NAADF"),
-            entries: &[bindings[5], bindings[7]],
+            label: Some("rolling water bed and aircraft shadow for NAADF"),
+            entries: &water_entries,
         });
+        let columns = exact.columns.create_view(&Default::default());
+        let mut water_resources = vec![
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: native_view.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&columns),
+            },
+        ];
+        water_resources.extend(aircraft_shadow.bindings());
+        water_resources.extend(
+            formation_shadow
+                .receiver
+                .bindings_at(formation_shadow::BINDING),
+        );
+        water_resources.extend(
+            woodland_shadow
+                .receiver
+                .bindings_at(rolling_woodland_shadow::BINDING),
+        );
+        let mut inner = Layer::new(
+            device,
+            settings.terrain_mid_cells.unwrap_or(
+                match (settings.terrain_mid_detail, settings.terrain_mid_spacing) {
+                    (true, 0.75) => PROJECTED_MID_SIDE * 2,
+                    (true, 1.0 | 1.5) => PROJECTED_MID_SIDE,
+                    _ => INNER,
+                },
+            ),
+            inner_pitch,
+            terrain,
+            alpine,
+        );
+        if let Source::Sampled(layer) = &mut inner.source {
+            layer.strip_uploads = settings.terrain_mid_strips;
+            layer.error_bounds = settings.terrain_mid_error_px > 0.;
+            layer.tile_error_m = settings.terrain_mid_tile_error_m;
+        }
+        if settings.terrain_mid_error_px > 0. {
+            inner.cache_textures[1] = texture(
+                device,
+                inner.side,
+                inner.side.ilog2() + 1,
+                wgpu::TextureFormat::Rg32Float,
+                false,
+            );
+            inner.maxima = inner.cache_textures[1].create_view(&Default::default());
+        }
+        let mut outer = if alpine {
+            Layer::new(device, OUTER, 10., terrain, true)
+        } else {
+            Layer::new(
+                device,
+                if settings.terrain_far_detail {
+                    2048
+                } else {
+                    1024
+                },
+                if settings.terrain_far_detail && settings.view_distance <= 6500. {
+                    8.
+                } else if settings.terrain_far_detail {
+                    11.
+                } else if landscapes && settings.view_distance <= 6500. {
+                    16.
+                } else if landscapes {
+                    22.
+                } else {
+                    24.
+                },
+                terrain,
+                false,
+            )
+        };
+        if let Source::Sampled(layer) = &mut outer.source {
+            layer.outer_coverage = true;
+            layer.strip_uploads = settings.terrain_far_detail;
+        }
+        let horizon = (settings.natural_terrain_light && !alpine)
+            .then(|| TerrainHorizon::new(device, &outer.heights));
+        let horizon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain horizon interpolation"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        water_resources.extend(horizon_bindings(&outer, horizon.as_ref(), &horizon_sampler));
         let water_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rolling water bed for NAADF"),
+            label: Some("rolling columns, water and light for NAADF"),
             layout: &water_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: native_view.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::TextureView(
-                        &exact.columns.create_view(&Default::default()),
-                    ),
-                },
-            ],
+            entries: &water_resources,
         });
         Ok(Self {
-            outer: if alpine {
-                Layer::new(device, OUTER, 8., terrain, true)
-            } else {
-                Layer::new(device, 1024, 24., terrain, false)
-            },
-            inner: Layer::new(
-                device,
-                INNER,
-                if alpine { 0.5 } else { 1.5 },
-                terrain,
-                alpine,
-            ),
+            outer,
+            inner,
+            detail: detail.then(|| {
+                Layer::new(
+                    device,
+                    settings.terrain_near_cells,
+                    close_pitch,
+                    terrain,
+                    false,
+                )
+            }),
+            profile_detail: None,
+            profile_detail_requested: false,
+            profile_detail_ready_at: None,
+            terrain_curve: LodCurve::default(),
+            curve_signs: [0.; 2],
+            curve_negative_start: 0.,
+            curve_uniform: uniform(bytemuck::cast_slice(&[[0_f32; 4]; CURVE_PROFILE_VECTORS])),
             exact,
             view: uniform(bytemuck::bytes_of(&View::zeroed())),
             native_view,
             water_layout,
             water_bind,
+            aircraft_shadow,
+            formation_shadow,
+            woodland_shadow,
+            canopy_ground_shade,
+            horizon,
+            horizon_sampler,
+            foreground,
+            landscapes,
             pipeline,
             source: [world.seed() as u32, (world.seed() >> 32) as u32, 0, 0],
             bind: None,
@@ -647,62 +1013,139 @@ impl RollingTerrain {
         queue: &wgpu::Queue,
         world: &World,
         camera: Camera,
+        curve: &LodCurve,
     ) -> Result<()> {
         let eye = DVec2::new(camera.position.x, camera.position.z);
         self.outer.update(device, queue, eye)?;
         self.inner.update(device, queue, eye)?;
+        if let Some(detail) = &mut self.detail {
+            detail.update(device, queue, eye)?;
+        }
+        if &self.terrain_curve != curve {
+            self.terrain_curve = curve.clone();
+            let samples = terrain_curve_samples(curve);
+            let values = samples.iter().flatten().copied();
+            let first_negative = values.clone().position(|v| v < 0.);
+            self.curve_negative_start =
+                first_negative.map_or(0., |i| (i.saturating_sub(1) as f32 * 0.25).powi(2));
+            self.curve_signs = [
+                f32::from(values.clone().any(|v| v > 0.)),
+                f32::from(first_negative.is_some()),
+            ];
+            self.profile_detail_requested = self.detail.is_none()
+                && self.inner.pitch > CURVE_NEAR_PITCH
+                && values.take(64).any(|v| v > 0.);
+            queue.write_buffer(&self.curve_uniform, 0, bytemuck::cast_slice(&samples));
+        }
+        if self.profile_detail_requested {
+            if self.profile_detail.is_none() {
+                let terrain = world.fbm_terrain().expect("rolling procedural terrain");
+                let mut detail =
+                    Layer::new(device, CURVE_NEAR_SIDE, CURVE_NEAR_PITCH, terrain, false);
+                if let Source::Sampled(source) = &mut detail.source {
+                    source.defer_initial = true;
+                }
+                self.profile_detail = Some(detail);
+                self.bind = None;
+            }
+            let detail = self.profile_detail.as_mut().unwrap();
+            detail.update(device, queue, eye)?;
+            if matches!(&detail.source, Source::Sampled(source) if source.ready()) {
+                self.profile_detail_ready_at
+                    .get_or_insert_with(Instant::now);
+            }
+        } else {
+            self.profile_detail_ready_at = None;
+        }
         if self.exact.update(device, queue, world, camera.position)? || self.bind.is_none() {
             let maxima = self.exact.maxima.create_view(&Default::default());
             let columns = self.exact.columns.create_view(&Default::default());
+            let mut resources = vec![
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.view.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.outer.maxima),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.outer.heights),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.inner.maxima),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.inner.heights),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.native_view.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&maxima),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&columns),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.exact.runs.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&self.outer.pigments),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&self.inner.pigments),
+                },
+            ];
+            let detail = self
+                .detail
+                .as_ref()
+                .or(self.profile_detail.as_ref())
+                .unwrap_or(&self.inner);
+            resources.extend([
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&detail.maxima),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&detail.heights),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 31,
+                    resource: self.curve_uniform.as_entire_binding(),
+                },
+            ]);
+            resources.extend(self.aircraft_shadow.bindings());
+            resources.extend(
+                self.formation_shadow
+                    .receiver
+                    .bindings_at(formation_shadow::BINDING),
+            );
+            resources.extend(
+                self.woodland_shadow
+                    .receiver
+                    .bindings_at(rolling_woodland_shadow::BINDING),
+            );
+            resources.extend(horizon_bindings(
+                &self.outer,
+                self.horizon.as_ref(),
+                &self.horizon_sampler,
+            ));
+            resources.extend(self.canopy_ground_shade.bindings());
             self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rolling terrain resources"),
                 layout: &self.pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.view.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.outer.maxima),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.outer.heights),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(&self.inner.maxima),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&self.inner.heights),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: self.native_view.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: wgpu::BindingResource::TextureView(&maxima),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: wgpu::BindingResource::TextureView(&columns),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: self.exact.runs.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: wgpu::BindingResource::TextureView(&self.outer.pigments),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 14,
-                        resource: wgpu::BindingResource::TextureView(&self.inner.pigments),
-                    },
-                ],
+                entries: &resources,
             }));
         }
         Ok(())
@@ -718,9 +1161,39 @@ impl RollingTerrain {
     pub fn revision(&self) -> Option<u64> {
         self.exact.revision
     }
-    pub fn fits_naadf_radius(&self, settings: &VisualSettings) -> bool {
-        !settings.naadf_enabled
-            || self.exact.side >= ExactColumns::side_for(settings.naadf_radius_voxels)
+    pub fn coverage_ready(&self) -> bool {
+        self.bind.is_some()
+    }
+    pub fn fits_settings(&self, settings: &VisualSettings) -> bool {
+        (!matches!(self.outer.pitch, 8. | 16.) || settings.view_distance <= 6500.)
+            && (!settings.naadf_enabled
+                || self.exact.side >= ExactColumns::side_for(settings.naadf_radius_voxels))
+    }
+
+    pub fn cache_report(&self) -> String {
+        let layer = |l: &Layer| {
+            let publishing = match &l.source {
+                Source::Sampled(cache) => cache.publish_report(),
+                Source::Alpine(_) => "null".to_owned(),
+            };
+            format!(
+                r#"{{"side":{},"pitch_m":{},"cpu_cache":{}}}"#,
+                l.side, l.pitch, publishing
+            )
+        };
+        format!(
+            r#"{{"gpu_bytes":{},"outer":{},"inner":{},"near":{},"exact_publications":{},"exact_proxy_fallback_updates":{},"horizon_builds":{}}}"#,
+            self.gpu_bytes(),
+            layer(&self.outer),
+            layer(&self.inner),
+            self.detail
+                .as_ref()
+                .or(self.profile_detail.as_ref())
+                .map_or_else(|| "null".to_owned(), layer),
+            self.exact.publications,
+            self.exact.proxy_fallback_updates,
+            self.horizon.as_ref().map_or(0, TerrainHorizon::builds)
+        )
     }
     pub fn gpu_bytes(&self) -> usize {
         let layer_bytes = |layer: &Layer| {
@@ -732,7 +1205,11 @@ impl RollingTerrain {
                         .map(|mip| {
                             ((texture.width() >> mip).max(1) as usize)
                                 * ((texture.height() >> mip).max(1) as usize)
-                                * 4
+                                * if texture.format() == wgpu::TextureFormat::Rg32Float {
+                                    8
+                                } else {
+                                    4
+                                }
                         })
                         .sum::<usize>()
                 })
@@ -741,9 +1218,63 @@ impl RollingTerrain {
         let exact_side = self.exact.side;
         layer_bytes(&self.outer)
             + layer_bytes(&self.inner)
+            + self.detail.as_ref().map_or(0, layer_bytes)
+            + self.profile_detail.as_ref().map_or(0, layer_bytes)
             + exact_side * exact_side * 16
             + (exact_side * exact_side * 4 / 3) * 4
             + self.exact.runs.size() as usize
+            + AircraftShadow::BYTES
+            + self.formation_shadow.gpu_bytes()
+            + self.woodland_shadow.gpu_bytes()
+            + self.canopy_ground_shade.bytes()
+            + usize::from(self.horizon.is_some()) * terrain_horizon::GPU_BYTES
+            + self.foreground.as_ref().map_or(0, ForegroundDepth::bytes)
+    }
+    pub fn formation_shadow(&self) -> &FormationShadow {
+        &self.formation_shadow
+    }
+
+    pub fn woodland_shadow(&self) -> &WoodlandShadow {
+        &self.woodland_shadow
+    }
+
+    pub(crate) fn canopy_ground_shade(&self) -> &CanopyGroundShade {
+        &self.canopy_ground_shade
+    }
+
+    pub fn encode_terrain_horizon(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        settings: &VisualSettings,
+    ) {
+        if let Some(horizon) = self
+            .horizon
+            .as_ref()
+            .filter(|_| settings.beauty && settings.terrain_shadows && !settings.terrain_gray)
+        {
+            horizon.encode(
+                queue,
+                encoder,
+                self.outer.grid(),
+                self.outer.offset(),
+                settings.terrain_light_direction(),
+            );
+        }
+    }
+
+    pub fn terrain_horizon_resources(&self) -> Option<(&wgpu::TextureView, &wgpu::Sampler)> {
+        self.horizon
+            .as_ref()
+            .map(|field| (&field.view, &self.horizon_sampler))
+    }
+
+    pub fn terrain_horizon_grid(&self) -> [f32; 4] {
+        self.horizon.as_ref().map_or([0.; 4], |_| self.outer.grid())
+    }
+
+    pub fn aircraft_shadow(&self) -> &AircraftShadow {
+        &self.aircraft_shadow
     }
     pub fn water_layout(&self) -> &wgpu::BindGroupLayout {
         &self.water_layout
@@ -761,34 +1292,65 @@ impl RollingTerrain {
         settings: &VisualSettings,
         water_time: f32,
         ownership_probe: bool,
+        tree_radius: f64,
     ) {
         let forward = camera.direction();
         let scale = (camera.fov_y.to_radians() * 0.5).tan();
-        let right = forward.cross(Vec3::Y).normalize();
+        let right = forward.cross(camera.view_up()).normalize();
         let up = right.cross(forward).normalize();
         let view = View {
             eye: camera.position.as_vec3().extend(camera.far).to_array(),
-            forward: forward.extend(0.).to_array(),
+            forward: forward
+                .extend(f32::from(
+                    settings.atmosphere && settings.fog_density > 0. && !ownership_probe,
+                ))
+                .to_array(),
             right: (right * scale * width as f32 / height as f32)
                 .extend(0.)
                 .to_array(),
-            up: (up * scale).extend(0.).to_array(),
+            up: (up * scale)
+                .extend(2. * scale / height.max(1) as f32)
+                .to_array(),
             grid: self.outer.grid(),
             cache: self.outer.offset(),
-            size: [width, height, self.outer.side.ilog2(), 0],
+            size: [
+                width,
+                height,
+                self.outer.side.ilog2(),
+                u32::from(
+                    voxel_grid()
+                        .checked_cell(camera.position.to_array())
+                        .is_some_and(|c| self.owns_column(c)),
+                ),
+            ],
             inner: self.inner.grid(),
             inner_cache: self.inner.offset(),
-            unused_history: [[0.; 4]; 4],
+            unused_history: [
+                self.detail
+                    .as_ref()
+                    .or(self.profile_detail.as_ref())
+                    .map_or([0.; 4], Layer::grid),
+                [
+                    settings.terrain_mid_error_px,
+                    f32::from(self.outer.pitch % self.inner.pitch == 0.),
+                    self.curve_signs[0],
+                    self.curve_signs[1],
+                ],
+                [
+                    self.profile_detail_ready_at
+                        .map_or(0., |ready| (ready.elapsed().as_secs_f32() / 0.35).min(1.)),
+                    self.curve_negative_start,
+                    0.,
+                    0.,
+                ],
+                [0.; 4],
+            ],
         };
         queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&view));
         let [lo, hi] = owner
             .unwrap_or([[0.; 3]; 2])
             .map(|v| glam::DVec3::from_array(v).as_vec3());
-        let sun = if settings.beauty {
-            crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth)
-        } else {
-            Vec3::new(-0.5, 0.8, -0.3).normalize()
-        };
+        let sun = settings.terrain_light_direction();
         let size = voxel_size();
         let eye_y = camera.position.y - self.exact.datum as f64 * size;
         let native = NativeView {
@@ -799,7 +1361,7 @@ impl RollingTerrain {
                 self.exact.side as f32,
             ],
             owner_min: lo.extend(if owner.is_some() { 1. } else { 0. }).to_array(),
-            owner_max: hi.extend(0.).to_array(),
+            owner_max: hi.extend(f32::from(settings.vegetation)).to_array(),
             sun: sun.extend(if settings.beauty { 1. } else { 0. }).to_array(),
             sky: [
                 settings.overcast,
@@ -818,8 +1380,18 @@ impl RollingTerrain {
                 self.source[0],
                 self.source[1],
                 u32::from(settings.beauty && settings.terrain_shadows),
-                u32::from(ownership_probe),
+                u32::from(ownership_probe)
+                    | (u32::from(
+                        self.landscapes && settings.voxel_filter && self.exact.revision == Some(0),
+                    ) << 1)
+                    | (u32::from(settings.terrain_gray) << 2),
             ],
+            horizon_grid: self.terrain_horizon_grid(),
+            world_eye: camera
+                .position
+                .as_vec3()
+                .extend(tree_radius as f32)
+                .to_array(),
             palette: [
                 Material::Air,
                 Material::Grass,
@@ -836,10 +1408,13 @@ impl RollingTerrain {
         };
         queue.write_buffer(&self.native_view, 0, bytemuck::bytes_of(&native));
     }
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, visibility: Option<&wgpu::BindGroup>) {
         if let Some(bind) = &self.bind {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, bind, &[]);
+            if let Some(foreground) = &self.foreground {
+                pass.set_bind_group(1, visibility.unwrap_or_else(|| foreground.fallback()), &[]);
+            }
             pass.draw(0..3, 0..1);
         }
     }
@@ -854,17 +1429,33 @@ impl Gpu {
             self.scene_format,
             self.sample_count,
         ));
-        self.rolling = Some(RollingTerrain::new(
-            self,
-            world,
-            self.visual_settings.as_ref().unwrap(),
-        )?);
+        let rolling = RollingTerrain::new(self, world, self.visual_settings.as_ref().unwrap())?;
+        self.vegetation = None; // The plant pipeline samples resources owned by this rolling cache.
+        self.rolling = Some(rolling);
         self.update_rolling(world, camera)
     }
 
     pub(super) fn update_rolling(&mut self, world: &World, camera: Camera) -> Result<()> {
         if let Some(rolling) = &mut self.rolling {
-            rolling.update(&self.device, &self.queue, world, camera)?;
+            let settings = self
+                .visual_settings
+                .as_ref()
+                .expect("rolling visual settings");
+            rolling.update(
+                &self.device,
+                &self.queue,
+                world,
+                camera,
+                &settings.terrain_lod_curve,
+            )?;
+        }
+        let gray = self
+            .visual_settings
+            .as_ref()
+            .is_some_and(|s| s.terrain_gray);
+        if let Some(mesh) = self.formation_mesh.update(world, gray)? {
+            eprintln!("Voxel formation mesh: {} triangles", mesh.indices.len() / 3);
+            self.replace_mesh(&mesh);
         }
         Ok(())
     }

@@ -120,9 +120,15 @@ impl Cull {
 
 const SHADER: &str = concat!(
     "const NAADF_GROUP:u32=2u;const NAADF_BASE:u32=3u;\n",
+    "const ROLLING_WATER_GROUP:u32=1u;\n",
     include_str!("naadf/trace.wgsl"),
     include_str!("ground_light.wgsl"),
-    include_str!("vegetation.wgsl")
+    include_str!("terrain_horizon_sample.wgsl"),
+    include_str!("rolling_woodland_shadow.wgsl"),
+    include_str!("vegetation.wgsl"),
+    include_str!("woodland_volume.wgsl"),
+    include_str!("woodland_atlas_angles.wgsl"),
+    include_str!("woodland_impostor.wgsl")
 );
 
 #[repr(C)]
@@ -146,7 +152,7 @@ fn pack(instance: &VegetationInstance, origin: [i64; 3]) -> Instance {
     }
     Instance {
         root,
-        turn: instance.quarter_turn & 3,
+        turn: instance.quarter_turn & 0xffff_ff13,
         fade: instance.fade.clamp(0., 1.),
         seed,
         shadow_progress: 1.,
@@ -326,6 +332,7 @@ enum Geometry {
 }
 struct Template {
     geometry: Geometry,
+    volume: Option<wgpu::BindGroup>,
     vertex_count: u32,
     instances: wgpu::Buffer,
     instance_capacity: u64,
@@ -341,6 +348,73 @@ impl Template {
     fn bytes(&self) -> u64 {
         self.geometry_bytes + self.instance_capacity
     }
+}
+
+fn crown_volume_bind(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    data: &crate::woodland_volume::WoodlandVolume,
+    sampler: Option<&wgpu::Sampler>,
+) -> wgpu::BindGroup {
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("sampled woodland occupancy"),
+        contents: bytemuck::cast_slice(&data.words),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 1,
+        resource: buffer.as_entire_binding(),
+    }];
+    let views = data.atlas.as_ref().map(|atlas| {
+        let size = wgpu::Extent3d {
+            width: crate::woodland_impostor::WIDTH,
+            height: crate::woodland_impostor::HEIGHT,
+            depth_or_array_layers: atlas.layers,
+        };
+        [&atlas.color, &atlas.surface].map(|source| {
+            device
+                .create_texture_with_data(
+                    queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("precomputed woodland depth views"),
+                        size,
+                        mip_level_count: atlas.mip_levels,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    source,
+                )
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                })
+        })
+    });
+    if let Some(views) = views.as_ref() {
+        entries.extend(
+            [2, 3]
+                .into_iter()
+                .zip(views)
+                .map(|(binding, view)| wgpu::BindGroupEntry {
+                    binding,
+                    resource: wgpu::BindingResource::TextureView(view),
+                }),
+        );
+        entries.push(wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::Sampler(sampler.unwrap()),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sampled woodland occupancy"),
+        layout,
+        entries: &entries,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -410,6 +484,9 @@ pub struct VegetationGpu {
     cull: Cull,
     pools: Option<Pools>,
     pipeline: wgpu::RenderPipeline,
+    volume: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
+    crown_ground_pipeline: Option<wgpu::RenderPipeline>,
+    crown_sampler: Option<wgpu::Sampler>,
     expanded: bool,
     compact_indexed: bool,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -424,15 +501,24 @@ pub struct VegetationGpu {
     scratch: Vec<Instance>,
     stats: VegetationGpuStats,
 }
+#[derive(Clone, Copy, Default)]
+pub(crate) struct VegetationGpuInputs<'a> {
+    pub(crate) horizon: Option<(&'a wgpu::TextureView, &'a wgpu::Sampler)>,
+    pub(crate) woodland: Option<&'a crate::aircraft_shadow::AircraftShadow>,
+    pub(crate) crowns: crate::woodland_volume::CrownDisplay,
+    pub(crate) aerial_shadows: bool,
+}
+
 impl VegetationGpu {
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         sample_count: u32,
         camera_layout: &wgpu::BindGroupLayout,
+        inputs: VegetationGpuInputs<'_>,
     ) -> Self {
         let mode = std::env::var("FRONTIER_VEGETATION_GPU").unwrap_or_default();
-        Self::new_with_mode(device, format, sample_count, camera_layout, &mode)
+        Self::new_with_mode(device, format, sample_count, camera_layout, &mode, inputs)
     }
     fn new_with_mode(
         device: &wgpu::Device,
@@ -440,10 +526,48 @@ impl VegetationGpu {
         sample_count: u32,
         camera_layout: &wgpu::BindGroupLayout,
         mode: &str,
+        inputs: VegetationGpuInputs<'_>,
     ) -> Self {
-        let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vegetation lighting"),
-            entries: &[wgpu::BindGroupLayoutEntry {
+        let VegetationGpuInputs {
+            horizon,
+            woodland,
+            crowns,
+            aerial_shadows,
+        } = inputs;
+        let rolling = woodland.is_some();
+        let fallback_texture = horizon.is_none().then(|| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("optional vegetation terrain horizon"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        });
+        let fallback_sampler = horizon.is_none().then(|| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            })
+        });
+        let (horizon, horizon_sampler) = horizon.unwrap_or_else(|| {
+            (
+                fallback_texture.as_ref().unwrap(),
+                fallback_sampler.as_ref().unwrap(),
+            )
+        });
+        let mut lighting_entries = vec![
+            wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
@@ -452,20 +576,59 @@ impl VegetationGpu {
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ];
+        lighting_entries.extend(crate::aircraft_shadow::AircraftShadow::layout_entries_at(
+            crate::rolling_woodland_shadow::BINDING,
+        ));
+        let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vegetation lighting"),
+            entries: &lighting_entries,
         });
         let lighting_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vegetation lighting"),
-            contents: bytemuck::cast_slice(&[0f32; 8]),
+            contents: bytemuck::cast_slice(&[0f32; 16]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let mut lighting_resources = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lighting_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(horizon),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(horizon_sampler),
+            },
+        ];
+        let fallback_woodland = woodland
+            .is_none()
+            .then(|| crate::aircraft_shadow::AircraftShadow::with_size(device, 1));
+        let woodland = woodland.or(fallback_woodland.as_ref()).unwrap();
+        lighting_resources.extend(woodland.bindings_at(crate::rolling_woodland_shadow::BINDING));
         let lighting_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vegetation lighting"),
             layout: &lighting_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lighting_uniform.as_entire_binding(),
-            }],
+            entries: &lighting_resources,
         });
         // A/B switch retains the identical expanded content and shading path.
         let expanded = mode == "expanded";
@@ -501,7 +664,12 @@ impl VegetationGpu {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &instance_attributes,
         });
-        let naadf_constants = crate::naadf::mesh_traversal_constants();
+        let mut naadf_constants = crate::naadf::mesh_traversal_constants();
+        if rolling {
+            // The rolling path shades receivers with its own directional
+            // depth map. Its NAADF uniform has always disabled caster rays.
+            naadf_constants.insert("traversal_mesh_sun".into(), 0.);
+        }
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("instanced voxel vegetation"),
             layout: Some(&layout),
@@ -547,6 +715,170 @@ impl VegetationGpu {
             },
             multiview: None,
             cache: None,
+        });
+        let atlas = crowns.atlas();
+        let impostor = atlas.is_some();
+        let volume = crowns.step().map(|_| {
+            let mut entries = vec![wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }];
+            if impostor {
+                entries.extend([2, 3].map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                }));
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                });
+            }
+            let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sampled woodland crown"),
+                entries: &entries,
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sampled woodland crown"),
+                bind_group_layouts: &[
+                    camera_layout,
+                    &lighting_layout,
+                    &sampling_layout,
+                    &bind_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+            let mut crown_constants = naadf_constants.clone();
+            if let Some(atlas) = atlas {
+                crown_constants.insert(
+                    "CROWN_ATLAS_FILTER".into(),
+                    f64::from(u8::from(atlas.mip_levels > 1)),
+                );
+                crown_constants.insert(
+                    "CROWN_ATLAS_PROJECTED_FOOTPRINT".into(),
+                    f64::from(u8::from(atlas.projected_footprint)),
+                );
+                crown_constants.insert(
+                    "CROWN_ATLAS_TRIANGLE".into(),
+                    f64::from(u8::from(atlas.triangular)),
+                );
+                crown_constants.insert(
+                    "CROWN_ATLAS_ZENITH".into(),
+                    f64::from(u8::from(atlas.zenith)),
+                );
+            }
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sampled woodland crown"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(if impostor {
+                        "vs_crown_atlas"
+                    } else {
+                        "vs_crown_volume"
+                    }),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Instance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &instance_attributes,
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(if impostor {
+                        "fs_crown_atlas"
+                    } else {
+                        "fs_crown_volume"
+                    }),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &crown_constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(format.into())],
+                }),
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
+                multiview: None,
+                cache: None,
+            });
+            (pipeline, bind_layout)
+        });
+        let crown_ground_pipeline = (rolling && impostor && aerial_shadows).then(|| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("aerial forest canopy projection"),
+                source: wgpu::ShaderSource::Wgsl(crate::voxel_shader(concat!(
+                    include_str!("woodland_atlas_angles.wgsl"),
+                    include_str!("woodland_ground_shadow.wgsl"),
+                ))),
+            });
+            let ground_layout =
+                crate::rolling_woodland_shadow::CanopyGroundShade::draw_layout(device);
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aerial forest canopy projection"),
+                bind_group_layouts: &[camera_layout, &volume.as_ref().unwrap().1, &ground_layout],
+                push_constant_ranges: &[],
+            });
+            let maximum = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Max,
+            };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("aerial forest canopy projection"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Instance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &instance_attributes,
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R8Unorm,
+                        blend: Some(wgpu::BlendState {
+                            color: maximum,
+                            alpha: maximum,
+                        }),
+                        write_mask: wgpu::ColorWrites::RED,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
         });
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("instanced plant shadow depth"),
@@ -612,6 +944,17 @@ impl VegetationGpu {
             compact_indexed,
             shadow_enabled: false,
             pipeline,
+            volume,
+            crown_ground_pipeline,
+            crown_sampler: impostor.then(|| {
+                device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("woodland silhouette filter"),
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::FilterMode::Linear,
+                    ..Default::default()
+                })
+            }),
             lighting_uniform,
             lighting_bind,
             quad_layout,
@@ -629,9 +972,11 @@ impl VegetationGpu {
         queue: &wgpu::Queue,
         settings: &crate::settings::VisualSettings,
         regional: bool,
+        horizon: [f32; 4],
+        origin: glam::Vec3,
     ) {
         self.shadow_enabled = settings.beauty && settings.terrain_shadows;
-        let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
+        let sun = settings.light_direction();
         let lighting = [
             sun.x,
             sun.y,
@@ -640,6 +985,14 @@ impl VegetationGpu {
             settings.overcast,
             if settings.beauty { 1. } else { 0. },
             0.,
+            0.,
+            horizon[0],
+            horizon[1],
+            horizon[2],
+            if self.shadow_enabled { horizon[3] } else { 0. },
+            origin.x,
+            origin.y,
+            origin.z,
             0.,
         ];
         queue.write_buffer(&self.lighting_uniform, 0, bytemuck::cast_slice(&lighting));
@@ -731,17 +1084,23 @@ impl VegetationGpu {
             {
                 return Err("vegetation draw exceeds u32 counts".into());
             }
-            let geometry = if self.expanded {
-                (batch.mesh.vertices.len() * std::mem::size_of::<VegetationVertex>()
-                    + batch.mesh.indices.len() * 4) as u64
-            } else {
-                (batch.mesh.vertices.len() / 4 * std::mem::size_of::<Quad>()
-                    + if self.compact_indexed {
-                        batch.mesh.indices.len() * 4
-                    } else {
-                        0
-                    }) as u64
-            };
+            let volume_bytes = batch
+                .mesh
+                .woodland_volume
+                .as_ref()
+                .map_or(0, |v| v.bytes() as u64);
+            let geometry = volume_bytes
+                + if self.expanded {
+                    (batch.mesh.vertices.len() * std::mem::size_of::<VegetationVertex>()
+                        + batch.mesh.indices.len() * 4) as u64
+                } else {
+                    ((batch.mesh.vertices.len() / 4) * std::mem::size_of::<Quad>()
+                        + if self.compact_indexed {
+                            batch.mesh.indices.len() * 4
+                        } else {
+                            0
+                        }) as u64
+                };
             if !self.expanded && !self.templates.contains_key(&batch.key) {
                 let detail = ground_detail::is_detail(batch.key);
                 let voxel_m = if detail {
@@ -767,9 +1126,10 @@ impl VegetationGpu {
                     t.geometry_bytes + t.instance_capacity.max(instances)
                 });
             if (!self.expanded
-                && (batch.mesh.vertices.len() / 4 * std::mem::size_of::<Quad>()) as u64
+                && ((batch.mesh.vertices.len() / 4) * std::mem::size_of::<Quad>()) as u64
                     > device.limits().max_storage_buffer_binding_size as u64)
                 || geometry > device.limits().max_buffer_size
+                || volume_bytes > device.limits().max_storage_buffer_binding_size as u64
                 || instances > device.limits().max_buffer_size
             {
                 return Err("vegetation exceeds device buffer limit".into());
@@ -865,13 +1225,8 @@ impl VegetationGpu {
             let shadow_count = self.scratch.len() as u32;
             for (index, instance) in batch.instances.iter().enumerate() {
                 if !shadow_selection.contains(&(batch_index, index)) {
-                    self.scratch.push(pack_shadow(
-                        instance,
-                        origin,
-                        batch.key,
-                        &frame.shadow_transitions,
-                        &frame.shadow_coverage,
-                    ));
+                    self.scratch
+                        .push(pack_shadow(instance, origin, batch.key, &[], &[]));
                 }
             }
             let bytes = bytemuck::cast_slice(&self.scratch);
@@ -980,10 +1335,34 @@ impl VegetationGpu {
                             },
                     )
                 };
+                let volume = batch
+                    .mesh
+                    .woodland_volume
+                    .as_ref()
+                    .zip(self.volume.as_ref())
+                    .map(|(data, (_, layout))| {
+                        crown_volume_bind(device, queue, layout, data, self.crown_sampler.as_ref())
+                    });
+                let geometry_bytes = geometry_bytes
+                    + batch
+                        .mesh
+                        .woodland_volume
+                        .as_ref()
+                        .map_or(0, |v| v.bytes() as u64);
                 self.stats.uploaded_bytes += geometry_bytes;
                 Template {
                     geometry,
-                    vertex_count: batch.mesh.indices.len() as u32,
+                    volume,
+                    vertex_count: if batch
+                        .mesh
+                        .woodland_volume
+                        .as_ref()
+                        .is_some_and(|v| v.atlas.is_some())
+                    {
+                        6
+                    } else {
+                        batch.mesh.indices.len() as u32
+                    },
                     instances: self.pools.as_ref().map_or_else(
                         || instance_buffer(device, capacity),
                         |p| p.instances.clone(),
@@ -1027,17 +1406,26 @@ impl VegetationGpu {
             template.shadow_count = shadow_count;
             self.stats.shadow_instances += shadow_count as usize;
             self.stats.shadow_triangles = shadow_triangles;
+            // The stream already conservatively culls each distant
+            // atlas instance. Their shared batch bounds usually span the
+            // whole horizon and provide no further rejection.
+            let atlas = batch
+                .mesh
+                .woodland_volume
+                .as_ref()
+                .is_some_and(|volume| volume.atlas.is_some());
             let color_visible = entry.color
-                && self.color_view_projection.is_none_or(|matrix| {
-                    cluster_visible(
-                        &cluster_bounds(
-                            template.local_bounds,
-                            &self.scratch,
-                            template.vertex_count,
-                        ),
-                        matrix,
-                    )
-                });
+                && (atlas
+                    || self.color_view_projection.is_none_or(|matrix| {
+                        cluster_visible(
+                            &cluster_bounds(
+                                template.local_bounds,
+                                &self.scratch,
+                                template.vertex_count,
+                            ),
+                            matrix,
+                        )
+                    }));
             if color_visible {
                 self.stats.instances += self.scratch.len();
                 self.active.push(batch.key);
@@ -1108,7 +1496,18 @@ impl VegetationGpu {
     /// Exact shadow-prefix bytes include root rebases, rotation, complementary
     /// replacement progress and independent entry/exit coverage metadata.
     pub fn shadow_depth_signature(&self) -> Vec<(MeshKey, Vec<u8>)> {
-        let mut keys = self.shadow_active.clone();
+        self.shadow_depth_signature_filtered(false)
+    }
+    pub(crate) fn tree_shadow_depth_signature(&self) -> Vec<(MeshKey, Vec<u8>)> {
+        self.shadow_depth_signature_filtered(true)
+    }
+    fn shadow_depth_signature_filtered(&self, trees_only: bool) -> Vec<(MeshKey, Vec<u8>)> {
+        let mut keys: Vec<_> = self
+            .shadow_active
+            .iter()
+            .copied()
+            .filter(|key| !trees_only || key.species == 2)
+            .collect();
         keys.sort_unstable();
         keys.into_iter()
             .map(|key| {
@@ -1178,25 +1577,46 @@ impl VegetationGpu {
         if self.cull.encoded.get() {
             for (index, draw) in self.color_draws.iter().enumerate() {
                 let t = &self.templates[&draw.key];
-                if let Geometry::Compact { bind, .. } = &t.geometry {
-                    pass.set_bind_group(3, bind, &[]);
-                    let start = t.instance_slot.unwrap().offset
-                        + draw.first_instance as u64 * std::mem::size_of::<Instance>() as u64;
-                    pass.set_vertex_buffer(
-                        0,
-                        t.instances.slice(
-                            start
-                                ..start
-                                    + draw.count as u64 * std::mem::size_of::<Instance>() as u64,
-                        ),
-                    );
-                    pass.draw_indirect(&self.cull.output, (index * 16) as u64);
-                }
+                let bind = if let Some(bind) = &t.volume {
+                    pass.set_pipeline(&self.volume.as_ref().unwrap().0);
+                    bind
+                } else if let Geometry::Compact { bind, .. } = &t.geometry {
+                    pass.set_pipeline(&self.pipeline);
+                    bind
+                } else {
+                    continue;
+                };
+                pass.set_bind_group(3, bind, &[]);
+                let start = t.instance_slot.unwrap().offset
+                    + draw.first_instance as u64 * std::mem::size_of::<Instance>() as u64;
+                pass.set_vertex_buffer(
+                    0,
+                    t.instances.slice(
+                        start..start + draw.count as u64 * std::mem::size_of::<Instance>() as u64,
+                    ),
+                );
+                pass.draw_indirect(&self.cull.output, (index * 16) as u64);
             }
             return;
         }
         for key in &self.active {
             let template = &self.templates[key];
+            if let Some(bind) = &template.volume {
+                pass.set_pipeline(&self.volume.as_ref().unwrap().0);
+                pass.set_bind_group(3, bind, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    template.instances.slice(
+                        template.instance_slot.map_or(0, |s| s.offset)
+                            ..template
+                                .instance_slot
+                                .map_or(template.instance_capacity, |s| s.offset + s.size),
+                    ),
+                );
+                pass.draw(0..template.vertex_count, 0..template.instance_count);
+                pass.set_pipeline(&self.pipeline);
+                continue;
+            }
             match &template.geometry {
                 Geometry::Compact { bind, indices, .. } => {
                     pass.set_bind_group(3, bind, &[]);
@@ -1233,6 +1653,50 @@ impl VegetationGpu {
             }
         }
     }
+    pub(crate) fn draw_canopy_ground_shade(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        camera: &wgpu::BindGroup,
+        view: &wgpu::TextureView,
+        ground: &wgpu::BindGroup,
+    ) -> bool {
+        let Some(pipeline) = &self.crown_ground_pipeline else {
+            return false;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("projected distant crown shadow"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, camera, &[]);
+        pass.set_bind_group(2, ground, &[]);
+        for key in &self.active {
+            let template = &self.templates[key];
+            let Some(crown) = &template.volume else {
+                continue;
+            };
+            let range = template
+                .instance_slot
+                .map_or(0..template.instance_capacity, |slot| {
+                    slot.offset..slot.offset + slot.size
+                });
+            pass.set_bind_group(1, crown, &[]);
+            pass.set_vertex_buffer(0, template.instances.slice(range));
+            pass.draw(0..6, 0..template.instance_count);
+        }
+        true
+    }
+
     pub(crate) fn draw_shadows(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1259,6 +1723,15 @@ impl VegetationGpu {
         depth_bind: &wgpu::BindGroup,
     ) {
         self.draw_shadow_pass(encoder, camera, view, depth_bind, true, true);
+    }
+    pub(crate) fn draw_rolling_tree_shadows(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        camera: &wgpu::BindGroup,
+        view: &wgpu::TextureView,
+        depth_bind: &wgpu::BindGroup,
+    ) {
+        self.draw_shadow_pass(encoder, camera, view, depth_bind, true, false);
     }
     fn draw_shadow_pass(
         &self,
@@ -1385,25 +1858,43 @@ fn cluster_bounds(bounds: [[f32; 3]; 2], instances: &[Instance], vertices: u32) 
     let mut low = [f32::INFINITY; 4];
     let mut high = [f32::NEG_INFINITY; 4];
     for instance in instances {
-        for corner in 0..8 {
-            let p = std::array::from_fn::<_, 3, _>(|axis| bounds[(corner >> axis) & 1][axis]);
-            let x = p[0] - 0.03125;
-            let z = p[2] - 0.03125;
-            let (x, z) = match instance.turn & 3 {
-                1 => (-z, x),
-                2 => (-x, -z),
-                3 => (z, -x),
-                _ => (x, z),
+        let pivot = 0.5
+            * if instance.turn & 8 != 0 {
+                ground_detail::DETAIL_VOXEL_M
+            } else {
+                frontier_world::voxel_size() as f32
             };
-            let p = [
-                instance.root[0] + 0.03125 + x,
-                instance.root[1] + p[1],
-                instance.root[2] + 0.03125 + z,
-            ];
-            for axis in 0..3 {
-                low[axis] = low[axis].min(p[axis] - 0.001);
-                high[axis] = high[axis].max(p[axis] + 0.001);
-            }
+        let [minimum, maximum] = bounds;
+        let (x0, z0) = (minimum[0] - pivot, minimum[2] - pivot);
+        let (x1, z1) = (maximum[0] - pivot, maximum[2] - pivot);
+        let (x0, z0, x1, z1) = match instance.turn & 3 {
+            1 => (-z1, x0, -z0, x1),
+            2 => (-x1, -z1, -x0, -z0),
+            3 => (z0, -x1, z1, -x0),
+            _ => (x0, z0, x1, z1),
+        };
+        let packed = if instance.turn & 16 == 0 {
+            instance.turn >> 8
+        } else {
+            0
+        };
+        let height_scale = if packed == 0 {
+            1.
+        } else {
+            packed as f32 / 16384.
+        };
+        let translation = [
+            instance.root[0] + pivot,
+            instance.root[1],
+            instance.root[2] + pivot,
+        ];
+        let corners = [
+            [x0, minimum[1] * height_scale, z0],
+            [x1, maximum[1] * height_scale, z1],
+        ];
+        for axis in 0..3 {
+            low[axis] = low[axis].min(translation[axis] + corners[0][axis] - 0.001);
+            high[axis] = high[axis].max(translation[axis] + corners[1][axis] + 0.001);
         }
     }
     low[3] = 0.;
@@ -1514,7 +2005,10 @@ fn select_shadow_casters_stable(
     for entry in frame_batches(frame) {
         let batch = entry.batch;
         let batch_index = entry.index;
-        if ground_detail::is_detail(batch.key) || batch.mesh.indices.is_empty() {
+        if ground_detail::is_detail(batch.key)
+            || batch.mesh.indices.is_empty()
+            || batch.mesh.woodland_volume.is_some()
+        {
             continue;
         }
         for (index, instance) in batch.instances.iter().enumerate() {
@@ -1650,6 +2144,7 @@ mod tests {
                 tile: [0; 2],
             },
             mesh: std::sync::Arc::new(VegetationMesh {
+                woodland_volume: None,
                 vertices: vec![],
                 indices: vec![0; triangles * 3],
             }),

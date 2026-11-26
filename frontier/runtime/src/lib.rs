@@ -11,7 +11,9 @@ pub mod benchmark;
 pub mod occlusion;
 pub mod representation;
 pub mod routes;
+pub mod structure;
 pub mod travel;
+pub mod weather;
 
 /// Identifies generated content. Camera state is intentionally absent.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

@@ -12,3 +12,15 @@ fn naadf_water_optics(surface:vec3f,face:vec3f,ray:vec3f,distance:f32)->WaterOpt
     optics.detail=smoothstep(apron,max(apron+.01,width),margin);
     return optics;
 }
+
+
+fn naadf_terrain_lighting_normal(hit: vec3f, face: vec3f, ray: vec3f) -> vec3f {
+    let filtered = rolling_surface_filter(hit-naadf.eye.xyz,face,ray);
+    return normalize(mix(face,filtered.xyz,filtered.w));
+}
+
+fn naadf_gray_enabled() -> bool {return (native_view.source.w&4u)!=0u;}
+
+fn naadf_terrain_irradiance(hit:vec3f)->vec2f {
+    return terrain_irradiance(native_view.world_eye.xyz+hit-naadf.eye.xyz);
+}

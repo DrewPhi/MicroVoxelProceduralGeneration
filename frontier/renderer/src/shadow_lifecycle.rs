@@ -271,6 +271,7 @@ mod tests {
                 edit_id: 0,
             },
             mesh: Arc::new(VegetationMesh {
+                woodland_volume: None,
                 vertices: vec![],
                 indices: vec![0; triangles * 3],
             }),

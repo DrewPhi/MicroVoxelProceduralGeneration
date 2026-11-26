@@ -1,6 +1,8 @@
 //! Seeded native vegetation. Placement reads only the immutable terrain source;
 //! camera demand, edits and tile request order never influence plant identity.
 use crate::{Cell, Material, World};
+#[path = "living_flora.rs"]
+pub mod living_flora;
 #[path = "plant_recipe.rs"]
 pub mod plant_recipe;
 #[cfg(test)]
@@ -10,9 +12,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-// Version 3: per-record seeded growth, low spreading ground cover and habitat cohorts.
-// This intentionally changes canonical plant records/voxels; display AO does not.
-pub const VEGETATION_SOURCE_VERSION: u32 = 3;
+// Eroded living habitats include seed-grown trees and succession layers.
+// Lower cohort numbers keep their previous recipes for other terrain sources.
+pub const VEGETATION_SOURCE_VERSION: u32 = 10;
 
 /// Coarse terrain uses decorative ground plants outside the native lattice.
 pub fn uses_decorative_ground_cover() -> bool {
@@ -24,7 +26,7 @@ pub fn source_version() -> u32 {
 }
 pub const TILE_SIZE_CELLS: i64 = 256;
 pub const MAX_PLANT_RADIUS_CELLS: i64 = 96;
-pub const MAX_PLANT_HEIGHT_CELLS: i64 = 176;
+pub const MAX_PLANT_HEIGHT_CELLS: i64 = living_flora::WOODY_HEIGHT;
 pub const fn variant_count(species: Species) -> u8 {
     match species {
         Species::Grass | Species::Rowan => 8,
@@ -59,14 +61,40 @@ pub struct PlantModel {
     pub min: Cell,
     /// Exclusive upper bound.
     pub max: Cell,
-    index: BTreeMap<Cell, usize>,
 }
 impl PlantModel {
     pub fn voxel(&self, cell: Cell) -> Option<PlantVoxel> {
-        self.index.get(&cell).map(|&i| self.voxels[i])
+        let index = self
+            .voxels
+            .binary_search_by_key(&cell, |voxel| voxel.cell)
+            .ok()?;
+        Some(self.voxels[index])
     }
 }
 impl PlantRecord {
+    /// Conservative local horizontal radius and height in canonical cells.
+    pub fn extent_cells(&self) -> (i64, i64) {
+        match self.species {
+            Species::Rowan if living_flora::is_shrub(self.variant) => (48, 48),
+            Species::Rowan if living_flora::is_sapling(self.variant) => (56, 192),
+            Species::Rowan if living_flora::uses_growth_recipe(self.species, self.variant) => {
+                (MAX_PLANT_RADIUS_CELLS, living_flora::WOODY_HEIGHT)
+            }
+            Species::Rowan => (MAX_PLANT_RADIUS_CELLS, 176),
+            _ if living_flora::uses_growth_recipe(self.species, self.variant) => {
+                (8, living_flora::GROUND_HEIGHT)
+            }
+            _ => (8, 12),
+        }
+    }
+
+    pub fn is_shrub(&self) -> bool {
+        self.species == Species::Rowan && living_flora::is_shrub(self.variant)
+    }
+    pub fn is_sapling(&self) -> bool {
+        self.species == Species::Rowan && living_flora::is_sapling(self.variant)
+    }
+
     pub fn world_cell(&self, c: Cell) -> Cell {
         let (x, z) = rotate(c.x, c.z, self.rotation);
         Cell {
@@ -263,6 +291,17 @@ fn rooted_component_reference(cells: &Cells) -> Vec<bool> {
     }
     cells.keys().map(|c| seen.contains(c)).collect()
 }
+fn pigmented_voxel(cell: Cell, material: Material, rgb: [u8; 3], seed: u64) -> PlantVoxel {
+    // Broad pigment variation follows the plant, with only a quiet native-cell grain.
+    let patch = patch_field(seed, cell.x + cell.y / 2, cell.z, 6) as f32;
+    let grain = (hash(seed, cell.x ^ cell.y.rotate_left(13), cell.z) % 101) as f32 / 100.;
+    let variation = 0.94 + 0.09 * patch + 0.025 * grain;
+    PlantVoxel {
+        cell,
+        material,
+        color: rgb.map(|c| srgb_to_linear((c as f32 / 255. * variation).min(1.))),
+    }
+}
 fn model(cells: Cells, seed: u64) -> PlantModel {
     // Retain only the rooted face-connected component after voxel rasterization.
     let cells: Vec<_> = cells.into_iter().collect();
@@ -274,6 +313,17 @@ fn model(cells: Cells, seed: u64) -> PlantModel {
         connected,
         rooted_component_reference(&cells.iter().copied().collect())
     );
+    let rooted = cells
+        .into_iter()
+        .zip(connected)
+        .filter_map(|(paint, keep)| keep.then_some(paint));
+    model_from_connected_cells(rooted, seed)
+}
+
+fn model_from_connected_cells(
+    cells: impl Iterator<Item = (Cell, (Material, [u8; 3]))>,
+    seed: u64,
+) -> PlantModel {
     let mut min = Cell {
         x: i64::MAX,
         y: i64::MAX,
@@ -284,45 +334,31 @@ fn model(cells: Cells, seed: u64) -> PlantModel {
         y: i64::MIN,
         z: i64::MIN,
     };
-    let voxels: Vec<_> = cells
-        .into_iter()
-        .zip(connected)
-        .filter(|(_, keep)| *keep)
-        .map(|((cell, (material, rgb)), _)| {
+    let voxels = cells
+        .map(|(cell, (material, rgb))| {
             min.x = min.x.min(cell.x);
             min.y = min.y.min(cell.y);
             min.z = min.z.min(cell.z);
             max.x = max.x.max(cell.x + 1);
             max.y = max.y.max(cell.y + 1);
             max.z = max.z.max(cell.z + 1);
-            // Broad pigment variation follows the plant, with only a quiet native-cell grain.
-            let patch = patch_field(seed, cell.x + cell.y / 2, cell.z, 6) as f32;
-            let grain = (hash(seed, cell.x ^ cell.y.rotate_left(13), cell.z) % 101) as f32 / 100.;
-            let variation = 0.94 + 0.09 * patch + 0.025 * grain;
-            PlantVoxel {
-                cell,
-                material,
-                color: rgb.map(|c| srgb_to_linear((c as f32 / 255. * variation).min(1.))),
-            }
+            pigmented_voxel(cell, material, rgb, seed)
         })
         .collect();
-    let index = voxels
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (v.cell, i))
-        .collect();
-    PlantModel {
-        voxels,
-        min,
-        max,
-        index,
-    }
+    PlantModel { voxels, min, max }
 }
 /// Pure bounded native model generation; no authored arrangements or asset files.
 pub fn generate_grass(seed: u64, variant: u8) -> PlantModel {
-    plant_recipe::grass_recipe(seed, variant).materialize()
+    if living_flora::uses_growth_recipe(Species::Grass, variant) {
+        living_flora::grass(seed, variant)
+    } else {
+        plant_recipe::grass_recipe(seed, variant).materialize()
+    }
 }
 pub fn generate_edelweiss(seed: u64, variant: u8) -> PlantModel {
+    if living_flora::uses_growth_recipe(Species::Edelweiss, variant) {
+        return living_flora::flower(seed, variant);
+    }
     let mut rng = Rng(seed);
     let mut v = Cells::new();
     for k in 0..6 {
@@ -575,24 +611,30 @@ const WOOD_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const WOOD_CACHE_ENTRIES: usize = 256;
 type WoodKey = (u8, u64);
 struct WoodOccupancy {
-    // Local canonical bounds are < 200 cells; six bytes per occupied wood cell
+    // Six bytes per occupied wood cell
     // retain exact identity without pigments, soft foliage or a tree-map index.
     cells: Box<[[i16; 3]]>,
 }
 impl WoodOccupancy {
-    fn from_model(model: &PlantModel) -> Self {
-        let cells = model
-            .voxels
-            .iter()
-            .filter(|v| v.material == Material::Wood)
-            .map(|v| {
-                [v.cell.x, v.cell.y, v.cell.z]
-                    .map(|c| i16::try_from(c).expect("bounded local rowan cell"))
+    fn from_cells(iter: impl Iterator<Item = Cell>) -> Self {
+        let cells = iter
+            .map(|cell| {
+                [cell.x, cell.y, cell.z]
+                    .map(|c| i16::try_from(c).expect("bounded local woody cell"))
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        // PlantModel's canonical BTreeMap traversal already orders x,y,z.
         Self { cells }
+    }
+
+    fn from_model(model: &PlantModel) -> Self {
+        Self::from_cells(
+            model
+                .voxels
+                .iter()
+                .filter(|v| v.material == Material::Wood)
+                .map(|v| v.cell),
+        )
     }
     fn contains(&self, c: Cell) -> bool {
         let (Ok(x), Ok(y), Ok(z)) = (i16::try_from(c.x), i16::try_from(c.y), i16::try_from(c.z))
@@ -654,12 +696,16 @@ fn wood_for_with(
     record: &PlantRecord,
     generate: impl FnOnce() -> Arc<PlantModel>,
 ) -> Arc<WoodOccupancy> {
-    let key = (record.variant % variant_count(Species::Rowan), record.seed);
+    let key = (growth_variant(record.species, record.variant), record.seed);
     if let Some(wood) = wood_cache().lock().unwrap().get(key) {
         return wood;
     }
-    // First-ever cold queries still construct canonical growth. Display growth
-    // populates this much smaller cache before its full foliage model can evict.
+    if let Some(recipe) = living_flora::woody_recipe(record.seed, key.0) {
+        let mut cells = Cells::new();
+        recipe.rasterize_wood(&mut cells);
+        let wood = Arc::new(WoodOccupancy::from_cells(cells.into_keys()));
+        return wood_cache().lock().unwrap().insert(key, wood);
+    }
     cache_wood_model(key, &generate())
 }
 fn wood_for(record: &PlantRecord) -> Arc<WoodOccupancy> {
@@ -688,6 +734,50 @@ fn model_cache(species: Species) -> &'static Mutex<ModelCache> {
 pub fn model_for(record: &PlantRecord) -> Arc<PlantModel> {
     model_for_cancellable(record, || false).unwrap()
 }
+/// Exact regional materialization when the growth recipe can prove that the
+/// full plant is connected. The caller can fall back to the full model on None.
+/// Coordinates in the returned voxels are local to the plant record.
+pub fn clipped_woodland_voxels(
+    record: &PlantRecord,
+    region: crate::volume_summary::CellBounds,
+    cancel: &impl Fn() -> bool,
+) -> Option<Vec<PlantVoxel>> {
+    let (radius, height) = record.extent_cells();
+    if record.species != Species::Rowan || cancel() {
+        return None;
+    }
+    let a = record.local_cell(region.min);
+    let b = record.local_cell(Cell {
+        x: region.max.x - 1,
+        y: region.max.y - 1,
+        z: region.max.z - 1,
+    });
+    let min = [a.x.min(b.x), a.y, a.z.min(b.z)];
+    let max = [a.x.max(b.x) + 1, b.y + 1, a.z.max(b.z) + 1];
+    // A fully covered short plant is useful in the ordinary shared cache.
+    if min[0] <= -radius
+        && min[1] <= 0
+        && min[2] <= -radius
+        && max[0] >= radius
+        && max[1] >= height
+        && max[2] >= radius
+    {
+        return None;
+    }
+    living_flora::woody_recipe(record.seed, record.variant)?.materialize_clipped(
+        record.seed,
+        min,
+        max,
+        cancel,
+    )
+}
+fn growth_variant(species: Species, variant: u8) -> u8 {
+    if living_flora::uses_growth_recipe(species, variant) {
+        variant
+    } else {
+        variant % variant_count(species)
+    }
+}
 pub fn model_for_cancellable(
     record: &PlantRecord,
     cancel: impl Fn() -> bool,
@@ -697,7 +787,7 @@ pub fn model_for_cancellable(
     }
     let key = (
         record.species,
-        record.variant % variant_count(record.species),
+        growth_variant(record.species, record.variant),
         record.seed,
     );
     {
@@ -713,15 +803,22 @@ pub fn model_for_cancellable(
     let generated = match key.0 {
         Species::Grass => generate_grass(key.2, key.1),
         Species::Edelweiss => generate_edelweiss(key.2, key.1),
-        Species::Rowan => grow_rowan(key.2, key.1, &cancel)?,
+        Species::Rowan => {
+            if let Some(recipe) = living_flora::woody_recipe(key.2, key.1) {
+                let model = recipe.materialize(key.2, &cancel)?;
+                cache_wood_model((key.1, key.2), &model);
+                model
+            } else {
+                grow_rowan(key.2, key.1, &cancel)?
+            }
+        }
     };
     if cancel() {
         return None;
     }
     let generated = Arc::new(generated);
-    // Includes conservative BTreeMap allocation overhead, not just voxel payload.
     let bytes = generated.voxels.capacity() * std::mem::size_of::<PlantVoxel>()
-        + generated.voxels.len() * 96;
+        + std::mem::size_of::<PlantModel>();
     let mut cache = model_cache(record.species).lock().unwrap();
     let budget = if record.species == Species::Rowan {
         MODEL_CACHE_BYTES
@@ -827,18 +924,56 @@ fn tree_allowed(seed: u64, x: i64, z: i64) -> bool {
     }
     true
 }
+
+fn woodland_candidate(seed: u64, x: i64, z: i64) -> (i64, i64, u64) {
+    let h = hash(seed ^ 0x626f7265616c, x, z);
+    (
+        x * 128 + 14 + (h % 100) as i64,
+        z * 128 + 14 + ((h >> 16) % 100) as i64,
+        h,
+    )
+}
+
+fn woodland_spacing(seed: u64, x: i64, z: i64, candidate: (i64, i64, u64)) -> bool {
+    let (px, pz, h) = candidate;
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let (qx, qz, prior) = woodland_candidate(seed, x + dx, z + dz);
+            if prior < h && (px - qx).pow(2) + (pz - qz).pow(2) < 88 * 88 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn eroded_woodlands(world: &World) -> bool {
+    world
+        .fbm_terrain()
+        .is_some_and(|terrain| terrain.params().recipe == crate::FbmRecipe::Eroded)
+}
+
 fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
     use crate::terrain::SeededBiome;
     let Some(terrain) = world
         .fbm_terrain()
-        .filter(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+        .filter(|t| t.params().recipe.has_watershed_drainage())
     else {
         return true;
     };
+    let acceptance = (mix(seed ^ 0x7761746572736864) >> 11) as f64 / ((1u64 << 53) as f64);
+    if terrain.params().recipe == crate::FbmRecipe::Eroded {
+        return acceptance < terrain.column_with_tree_cover(x, z).1;
+    }
     let [x, _, z] = (Cell { x, y: 0, z }).center_m();
     let fields = terrain.sample_fields(x, z);
     if fields.water_height_m.is_some() {
         return false;
+    }
+    if terrain.params().recipe.has_landscape_relief() {
+        let density =
+            crate::terrain::seeded_world::landscape_tree_likelihood(world.seed, fields, x, z);
+        return acceptance < density;
     }
     let density = match fields.biome {
         SeededBiome::Woodland => 1.,
@@ -848,34 +983,55 @@ fn biome_allows_tree(world: &World, x: i64, z: i64, seed: u64) -> bool {
         SeededBiome::Steppe => 0.035,
         _ => 0.,
     };
-    (mix(seed ^ 0x7761746572736864) >> 11) as f64 / ((1u64 << 53) as f64) < density
+    acceptance < density
 }
+
+fn ground_surface(w: &World, x: i64, z: i64) -> (i64, Material) {
+    let column = w
+        .fbm_terrain()
+        .filter(|terrain| terrain.params().recipe.has_static_water())
+        .map(|terrain| terrain.column_cells(x, z));
+    let h = column.map_or_else(|| w.height_cells(x, z), |column| column.visible_top);
+    (h, w.source_with_column(Cell { x, y: h - 1, z }, h, column))
+}
+
 fn supported(w: &World, x: i64, z: i64, radius: i64, max_grade: i64) -> Option<i64> {
-    let h = w.height_cells(x, z);
-    if w.source(Cell { x, y: h - 1, z }) != Material::Grass {
-        return None;
-    }
-    for (dx, dz) in [(radius, 0), (-radius, 0), (0, radius), (0, -radius)] {
-        let y = w.height_cells(x + dx, z + dz);
-        if (y - h).abs() > max_grade
-            || w.source(Cell {
-                x: x + dx,
-                y: y - 1,
-                z: z + dz,
-            }) != Material::Grass
-            || w.volume_owned(Cell {
-                x: x + dx,
-                y,
-                z: z + dz,
-            })
-        {
+    if let Some(runway) = w.fbm_terrain().and_then(|t| t.dirt_runway()) {
+        let [x, _, z] = Cell { x, y: 0, z }.center_m();
+        if runway.intersects([x, z], [x, z]) {
             return None;
         }
-    } // Terrain paths/rock and explicit topology ownership are excluded.
-    if w.volume_owned(Cell { x, y: h, z }) {
+    }
+    let (h, surface) = ground_surface(w, x, z);
+    if surface != Material::Grass {
         return None;
     }
-    Some(h)
+    ground_neighbors_support(w, Cell { x, y: h, z }, radius, max_grade, Material::Grass)
+        .then_some(h)
+}
+
+fn ground_neighbors_support(
+    world: &World,
+    root: Cell,
+    radius: i64,
+    max_grade: i64,
+    substrate: Material,
+) -> bool {
+    if world.volume_owned(root) {
+        return false;
+    }
+    for (dx, dz) in [(radius, 0), (-radius, 0), (0, radius), (0, -radius)] {
+        let x = root.x + dx;
+        let z = root.z + dz;
+        let (y, surface) = ground_surface(world, x, z);
+        if y.abs_diff(root.y) > max_grade as u64
+            || !matches!(surface, Material::Grass) && surface != substrate
+            || world.volume_owned(Cell { x, y, z })
+        {
+            return false;
+        }
+    }
+    true
 }
 // Globally addressed value noise, smooth across tiles and the negative origin.
 fn patch_field(seed: u64, x: i64, z: i64, scale: i64) -> f64 {
@@ -896,13 +1052,28 @@ pub fn flower_birth_probability(world_seed: u64, x: i64, z: i64) -> f64 {
     let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 64);
     0.001 + 0.30 * ((colony - 0.65) / 0.35).max(0.).powi(2)
 }
+#[cfg(test)]
 fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option<Species>) {
+    ground_candidate_in_habitat(world_seed, gx, gz, false)
+}
+fn ground_candidate_in_habitat(
+    world_seed: u64,
+    gx: i64,
+    gz: i64,
+    living_meadow: bool,
+) -> (i64, i64, u64, Option<Species>) {
     let seed = hash(world_seed ^ 0x6d6561646f77, gx, gz);
     let x = gx * 8 + 2 + (seed % 4) as i64;
     let z = gz * 8 + 2 + ((seed >> 16) % 4) as i64;
     let meadow = patch_field(world_seed ^ 0x7061746368, x, z, 192);
     let tuft = patch_field(world_seed ^ 0x74756674, x, z, 48);
-    let bloom_probability = flower_birth_probability(world_seed, x, z);
+    let bloom_probability = if living_meadow {
+        let colony = patch_field(world_seed ^ 0x666c6f776572, x, z, 96);
+        let t = ((colony - 0.53) / 0.41).clamp(0., 1.);
+        0.004 + 0.46 * (t * t * (3. - 2. * t)).powi(2)
+    } else {
+        flower_birth_probability(world_seed, x, z)
+    };
     let roll = |salt| (mix(seed ^ salt) >> 11) as f64 / ((1u64 << 53) as f64);
     let species = if roll(0x626c6f6f6d) < bloom_probability {
         Some(Species::Edelweiss)
@@ -916,7 +1087,7 @@ fn ground_candidate(world_seed: u64, gx: i64, gz: i64) -> (i64, i64, u64, Option
 fn tree_supported(w: &World, x: i64, z: i64) -> Option<i64> {
     let max_grade = if w
         .fbm_terrain()
-        .is_some_and(|t| t.params().recipe == crate::FbmRecipe::Watershed)
+        .is_some_and(|t| t.params().recipe.has_watershed_drainage())
     {
         4
     } else {
@@ -928,20 +1099,242 @@ fn tree_supported(w: &World, x: i64, z: i64) -> Option<i64> {
             if dx * dx + dz * dz > 36 {
                 continue;
             }
-            let y = w.height_cells(x + dx, z + dz);
-            if (y - h).abs() > max_grade
-                || w.source(Cell {
-                    x: x + dx,
-                    y: y - 1,
-                    z: z + dz,
-                }) != Material::Grass
-            {
+            let (y, surface) = ground_surface(w, x + dx, z + dz);
+            if (y - h).abs() > max_grade || surface != Material::Grass {
                 return None;
             }
         }
     }
     Some(h)
 }
+
+pub fn uses_living_woodland(w: &World) -> bool {
+    eroded_woodlands(w) && !uses_decorative_ground_cover()
+}
+
+fn wooded_site_support(w: &World, root: Cell, radius: i64, grade: i64) -> bool {
+    !w.volume_owned(root)
+        && [(radius, 0), (0, radius), (-radius, 0), (0, -radius)]
+            .into_iter()
+            .all(|(dx, dz)| {
+                let x = root.x + dx;
+                let z = root.z + dz;
+                let (height, surface) = ground_surface(w, x, z);
+                height.abs_diff(root.y) <= grade as u64
+                    && (surface == Material::Grass || surface == Material::Soil)
+                    && !w.volume_owned(Cell { x, y: height, z })
+            })
+}
+
+fn roll_seed(seed: u64, salt: u64) -> f64 {
+    (mix(seed ^ salt) >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+fn living_woods(w: &World, tx: i64, tz: i64) -> Vec<PlantRecord> {
+    let terrain = w.fbm_terrain().unwrap();
+    let roll = |seed: u64| (seed >> 11) as f64 / ((1u64 << 53) as f64);
+    let supported_overstory = |gx, gz| {
+        let site = woodland_candidate(w.seed, gx, gz);
+        if !woodland_spacing(w.seed, gx, gz, site) {
+            return None;
+        }
+        let (x, z, seed) = site;
+        let Some((column, cover, climate)) = terrain.eroded_plant_site(x, z, true) else {
+            return None;
+        };
+        if roll(mix(seed ^ 0x7761746572736864)) >= cover {
+            return None;
+        }
+        let root = Cell {
+            x,
+            y: column.ground_top,
+            z,
+        };
+        if !wooded_site_support(w, root, 5, 5) {
+            return None;
+        }
+        let age = patch_field(w.seed ^ 0x6d6174757265, x, z, 2048);
+        let offset = roll(mix(seed ^ 0x636f686f7274));
+        let conifer_probability =
+            (1.30 - 1.90 * climate.temperature + 0.36 * climate.mountain).clamp(0.16, 0.94);
+        let variant = if roll(mix(seed ^ 0x6172626f72)) < conifer_probability {
+            let pine = climate.moisture < 0.44
+                || (climate.temperature > 0.44 && roll(mix(seed ^ 0x70696e65)) < 0.54);
+            living_flora::CONIFER
+                + u8::from(pine) * 4
+                + ((age * 3. + offset * 1.85).floor() as u8).min(3)
+        } else {
+            let cohort = ((age * 3. + offset * 1.85).floor() as u8).min(3);
+            if climate.moisture > 0.56 && roll(mix(seed ^ 0x616c646572)) < 0.72 {
+                living_flora::ALDER + cohort
+            } else if climate.temperature > 0.34 && roll(mix(seed ^ 0x617370656e)) < 0.68 {
+                living_flora::ASPEN + cohort
+            } else {
+                ((age * 6. + offset * 2.4).floor() as u8).min(7)
+            }
+        };
+        Some(PlantRecord {
+            species: Species::Rowan,
+            seed,
+            root: Cell {
+                y: root.y - 2,
+                ..root
+            },
+            variant,
+            rotation: ((seed >> 8) & 3) as u8,
+        })
+    };
+    // Shrub sites repeatedly test the same mature roots, including rejections.
+    // A 16 m page plus the largest recruitment radius covers this 6×6
+    // neighborhood of mature candidate cells. Keep the memo local to the page
+    // so it can never reuse results across different world sources.
+    let start = [tx * 2 - 2, tz * 2 - 2];
+    let mut resolved = [[None::<Option<PlantRecord>>; 6]; 6];
+    let mut overstory = |gx: i64, gz: i64| {
+        let ix = (gx - start[0]) as usize;
+        let iz = (gz - start[1]) as usize;
+        *resolved[iz][ix].get_or_insert_with(|| supported_overstory(gx, gz))
+    };
+    let mut records = Vec::new();
+    for dz in 0..2 {
+        for dx in 0..2 {
+            records.extend(overstory(tx * 2 + dx, tz * 2 + dz));
+        }
+    }
+    // Understory roots use a finer spatial field and independent recruitment
+    // rolls. Shrubs concentrate around forest margins, scrub and wet ground.
+    let mature_count = records.len();
+    for dz in 0..4 {
+        for dx in 0..4 {
+            let gx = tx * 4 + dx;
+            let gz = tz * 4 + dz;
+            let seed = hash(w.seed ^ 0x7363727562, gx, gz);
+            let x = gx * 64 + 8 + (seed % 48) as i64;
+            let z = gz * 64 + 8 + ((seed >> 8) % 48) as i64;
+            let patch = patch_field(w.seed ^ 0x756e64657273746f, x, z, 590);
+            let recruitment = roll(mix(seed ^ 0x72656372756974));
+            if recruitment >= 0.085 + 0.34 * patch * patch {
+                continue;
+            }
+            let distance2 = |rx: i64, rz: i64| (rx - x).pow(2) + (rz - z).pow(2);
+            let mut nearest = records[..mature_count]
+                .iter()
+                .map(|r| distance2(r.root.x, r.root.z))
+                .min()
+                .unwrap_or(i64::MAX);
+            // Include mature roots across placement boundaries. Test the
+            // cheap candidate positions first, then resolve actual habitat.
+            for row in (z - 138).div_euclid(128)..=(z + 138).div_euclid(128) {
+                for col in (x - 138).div_euclid(128)..=(x + 138).div_euclid(128) {
+                    if col.div_euclid(2) == tx && row.div_euclid(2) == tz {
+                        continue;
+                    }
+                    let (rx, rz, _) = woodland_candidate(w.seed, col, row);
+                    let d = distance2(rx, rz);
+                    if d < nearest && d < 138 * 138 && overstory(col, row).is_some() {
+                        nearest = d;
+                    }
+                }
+            }
+            if nearest < 27 * 27 {
+                continue;
+            }
+            let Some((column, cover, climate)) = terrain.eroded_plant_site(x, z, true) else {
+                continue;
+            };
+            if column.ground_top != column.visible_top
+                || !matches!(column.ground_surface, Material::Grass | Material::Soil)
+            {
+                continue;
+            }
+            let edge = 4. * cover * (1. - cover);
+            let moisture = ((climate.moisture - 0.24) / 0.30).clamp(0., 1.);
+            if recruitment
+                >= (0.085 + 0.34 * patch * patch) * (0.35 + 0.27 * edge + 0.38 * moisture)
+            {
+                continue;
+            }
+            let root = Cell {
+                x,
+                y: column.ground_top,
+                z,
+            };
+            if !wooded_site_support(w, root, 3, 4) {
+                continue;
+            }
+            let habit = if climate.moisture < 0.40 {
+                2
+            } else if climate.temperature < 0.36 {
+                0
+            } else if cover > 0.36 {
+                3
+            } else {
+                1
+            };
+            let seedling = (43 * 43..138 * 138).contains(&nearest)
+                && cover > 0.38
+                && climate.moisture > 0.42
+                && roll(mix(seed ^ 0x736565646c696e67)) < 0.34;
+            records.push(PlantRecord {
+                species: Species::Rowan,
+                seed,
+                root: Cell {
+                    y: root.y - 1,
+                    ..root
+                },
+                variant: if seedling {
+                    living_flora::SAPLING + ((seed >> 26) & 3) as u8
+                } else {
+                    living_flora::SHRUB + 2 * habit + (seed & 1) as u8
+                },
+                rotation: ((seed >> 18) & 3) as u8,
+            });
+        }
+    }
+    records.sort_unstable_by_key(|r| (r.root.x, r.root.z));
+    records
+}
+
+fn place_trees(w: &World, tx: i64, tz: i64) -> Vec<PlantRecord> {
+    if uses_living_woodland(w) {
+        return living_woods(w, tx, tz);
+    }
+    let dense = eroded_woodlands(w);
+    let side = if dense { 2 } else { 1 };
+    let mut records = Vec::new();
+    for dz in 0..side {
+        for dx in 0..side {
+            let [gx, gz] = [tx * side + dx, tz * side + dz];
+            let (x, z, seed) = if dense {
+                let candidate = woodland_candidate(w.seed, gx, gz);
+                if !woodland_spacing(w.seed, gx, gz, candidate) {
+                    continue;
+                }
+                candidate
+            } else {
+                if !tree_allowed(w.seed, gx, gz) {
+                    continue;
+                }
+                tree_candidate(w.seed, gx, gz)
+            };
+            if !biome_allows_tree(w, x, z, seed) {
+                continue;
+            }
+            if let Some(y) = tree_supported(w, x, z) {
+                let maturity = patch_field(w.seed ^ 0x6d6174757265, x, z, 512);
+                records.push(PlantRecord {
+                    species: Species::Rowan,
+                    seed,
+                    root: Cell { x, y: y - 2, z },
+                    variant: ((maturity * 6. + (mix(seed ^ 77) % 3) as f64).floor() as u8).min(7),
+                    rotation: ((seed >> 8) % 4) as u8,
+                });
+            }
+        }
+    }
+    records
+}
+
 fn place_tile(w: &World, tx: i64, tz: i64, species: Species) -> Vec<PlantRecord> {
     place_tile_region(w, tx, tz, species, None)
 }
@@ -954,27 +1347,10 @@ fn place_tile_region(
     species: Species,
     bounds: Option<([i64; 2], [i64; 2])>,
 ) -> Vec<PlantRecord> {
-    let mut records = Vec::new();
-    let (x, z, seed) = tree_candidate(w.seed, tx, tz);
-    if species == Species::Rowan && tree_allowed(w.seed, tx, tz) && biome_allows_tree(w, x, z, seed)
-    {
-        if let Some(y) = tree_supported(w, x, z) {
-            records.push(PlantRecord {
-                species: Species::Rowan,
-                seed,
-                root: Cell { x, y: y - 2, z },
-                // Broad resource availability sets maturity; local seed varies individuals.
-                variant: ((patch_field(w.seed ^ 0x6d6174757265, x, z, 512) * 6.
-                    + (mix(seed ^ 77) % 3) as f64)
-                    .floor() as u8)
-                    .min(7),
-                rotation: ((seed >> 8) % 4) as u8,
-            });
-        }
-    }
     if species == Species::Rowan {
-        return records;
+        return place_trees(w, tx, tz);
     }
+    let mut records = Vec::new();
     // Resolve supported neighbors once per tile: unsupported candidates cannot
     // cast ecological shade or clear a phantom hole in the meadow.
     let mut trees = Vec::new();
@@ -990,13 +1366,11 @@ fn place_tile_region(
                         .map(|r| (r.root.x, r.root.z)),
                 );
             } else {
-                let (a, b, seed) = tree_candidate(w.seed, tx + dx, tz + dz);
-                if tree_allowed(w.seed, tx + dx, tz + dz)
-                    && biome_allows_tree(w, a, b, seed)
-                    && tree_supported(w, a, b).is_some()
-                {
-                    trees.push((a, b));
-                }
+                trees.extend(
+                    place_trees(w, tx + dx, tz + dz)
+                        .into_iter()
+                        .map(|r| (r.root.x, r.root.z)),
+                );
             }
         }
     }
@@ -1012,9 +1386,11 @@ fn place_tile_region(
     };
     let (x0, x1) = grid(0, tx);
     let (z0, z1) = grid(1, tz);
+    let native_woodland = uses_living_woodland(w);
     for gx in x0..x1 {
         for gz in z0..z1 {
-            let (x, z, seed, chosen) = ground_candidate(w.seed, tx * 32 + gx, tz * 32 + gz);
+            let (x, z, seed, chosen) =
+                ground_candidate_in_habitat(w.seed, tx * 32 + gx, tz * 32 + gz, native_woodland);
             if chosen != Some(species) {
                 continue;
             }
@@ -1041,23 +1417,88 @@ fn place_tile_region(
             if (mix(seed ^ 0x7368616465) >> 11) as f64 / ((1u64 << 53) as f64) > canopy_keep {
                 continue;
             }
-            if let Some(y) = supported(w, x, z, 3, 2) {
-                records.push(PlantRecord {
-                    species,
-                    seed,
-                    root: Cell { x, y, z },
-                    variant: if species == Species::Grass {
-                        // Height cohorts follow the same ecological field, so short
-                        // meadow mats and taller clumps coexist without a lattice.
-                        let tall = patch_field(w.seed ^ 0x686569676874, x, z, 64) > 0.63
-                            && mix(seed ^ 0x74616c6c) % 5 == 0;
-                        ((seed >> 24) % 4) as u8 + if tall { 4 } else { 0 }
+            let (y, climate, substrate) = if native_woodland {
+                let Some((column, _, local_climate)) =
+                    w.fbm_terrain().unwrap().eroded_plant_site(x, z, false)
+                else {
+                    continue;
+                };
+                let h = column.visible_top;
+                let substrate = w.source_with_column(Cell { x, y: h - 1, z }, h, Some(column));
+                let scrub = species == Species::Grass
+                    && local_climate.moisture < 0.46
+                    && matches!(substrate, Material::Sand | Material::Soil)
+                    && roll_seed(seed, 0x6472795f736f696c)
+                        < (0.055
+                            + 0.23 * patch_field(w.seed ^ 0x747573736f636b, x, z, 128).powi(2));
+                if (substrate != Material::Grass && !scrub)
+                    || !ground_neighbors_support(w, Cell { x, y: h, z }, 3, 2, substrate)
+                {
+                    continue;
+                }
+                (h, Some(local_climate), substrate)
+            } else {
+                let Some(y) = supported(w, x, z, 3, 2) else {
+                    continue;
+                };
+                (y, None, Material::Grass)
+            };
+            records.push(PlantRecord {
+                species,
+                seed,
+                root: Cell { x, y, z },
+                variant: if let Some(climate) = climate {
+                    if species == Species::Grass {
+                        let patch = patch_field(w.seed ^ 0x67726173736874, x, z, 112);
+                        let clump = roll_seed(seed, 0x626c616465);
+                        let open = ((shade - 16.) / 58.).clamp(0., 1.);
+                        let form = roll_seed(seed, 0x666c6f72615f666d);
+                        let age = ((seed >> 23) & 3) as u8;
+                        let dry = ((0.49 - climate.moisture) / 0.19).clamp(0., 1.);
+                        let cold = ((0.43 - climate.temperature) / 0.15).clamp(0., 1.);
+                        let wet = ((climate.moisture - 0.55) / 0.22).clamp(0., 1.);
+                        if substrate != Material::Grass || form < dry * 0.77 {
+                            living_flora::TUSSOCK + age
+                        } else if form > 1. - cold * 0.68 {
+                            living_flora::CUSHION + age
+                        } else if shade < 47. && patch > 0.54 && clump < 0.11 {
+                            living_flora::MOSS + age
+                        } else if shade > 18. && shade < 55. && patch > 0.43 && clump < 0.28 {
+                            living_flora::FERN + age
+                        } else if climate.biome == crate::terrain::SeededBiome::Wetland
+                            && open > 0.3
+                            && clump < wet * patch
+                        {
+                            living_flora::RUSH + age
+                        } else {
+                            living_flora::GRASS
+                                + ((7. * (0.66 * patch + 0.25 * clump + 0.09 * open)).round() as u8)
+                                    .min(7)
+                        }
                     } else {
-                        ((seed >> 24) % variant_count(species) as u64) as u8
-                    },
-                    rotation: ((seed >> 32) % 4) as u8,
-                });
-            }
+                        let colony = patch_field(w.seed ^ 0x706574616c73, x, z, 112);
+                        let form = if climate.temperature < 0.34 {
+                            3
+                        } else if climate.moisture > 0.50 && colony > 0.43 {
+                            1
+                        } else if colony > 0.61 {
+                            2
+                        } else {
+                            0
+                        };
+                        living_flora::FLOWER + 4 * form + ((seed >> 24) & 3) as u8
+                    }
+                } else if species == Species::Grass {
+                    // Height cohorts follow the same ecological field, so short
+                    // meadow mats and taller clumps coexist without a lattice.
+                    let tall = patch_field(w.seed ^ 0x686569676874, x, z, 64) > 0.63
+                        && mix(seed ^ 0x74616c6c) % 5 == 0;
+                    ((seed >> 24) % 4) as u8 + if tall { 4 } else { 0 }
+                } else {
+                    ((seed >> 24) % variant_count(species) as u64) as u8
+                },
+                rotation: ((seed >> 32) % 4) as u8,
+            });
         }
     }
     records.sort_by_key(|r| r.root.x);
@@ -1172,8 +1613,9 @@ impl World {
                     .take_while(|r| r.root.x <= c.x + radius + 10)
                 {
                     let local = r.local_cell(c);
+                    let (radius, height) = r.extent_cells();
                     if local.y < 0
-                        || local.y > MAX_PLANT_HEIGHT_CELLS
+                        || local.y > height
                         || local.x.abs() > radius
                         || local.z.abs() > radius
                     {
@@ -1205,8 +1647,9 @@ impl World {
             for tz in (c.z - radius).div_euclid(256)..=(c.z + radius).div_euclid(256) {
                 for record in cache.tile(self, tx, tz, Species::Rowan).iter() {
                     let local = record.local_cell(c);
+                    let (radius, height) = record.extent_cells();
                     if local.y < 0
-                        || local.y > MAX_PLANT_HEIGHT_CELLS
+                        || local.y > height
                         || local.x.abs() > radius
                         || local.z.abs() > radius
                     {
@@ -1224,6 +1667,127 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eroded_models_stay_in_bounds_and_wood_queries_match_the_native_raster() {
+        use super::*;
+        for (species, variants) in [
+            (
+                Species::Rowan,
+                living_flora::CONIFER..living_flora::SAPLING + 4,
+            ),
+            (Species::Grass, living_flora::GRASS..living_flora::RUSH + 4),
+            (
+                Species::Edelweiss,
+                living_flora::FLOWER..living_flora::FLOWER + 16,
+            ),
+        ] {
+            for variant in variants {
+                let plant = PlantRecord {
+                    species,
+                    seed: mix(u64::from(variant) ^ 0x4552_4f44_4544),
+                    root: Cell {
+                        x: -183,
+                        y: 200,
+                        z: 77,
+                    },
+                    variant,
+                    rotation: variant & 3,
+                };
+                let (radius, height) = plant.extent_cells();
+                let direct = (species == Species::Rowan).then(|| {
+                    wood_for_with(&plant, || {
+                        panic!("woody collision generated leaves");
+                    })
+                });
+                let model = model_for(&plant);
+                assert!(!model.voxels.is_empty());
+                assert!(model.voxel(Cell::default()).is_some());
+                assert!(model.min.x >= -radius && model.min.z >= -radius);
+                assert!(model.max.x <= radius + 1 && model.max.z <= radius + 1);
+                assert!(model.min.y == 0 && model.max.y <= height + 1);
+                if let Some(direct) = direct {
+                    assert_eq!(
+                        &*direct.cells,
+                        &*WoodOccupancy::from_model(&model).cells,
+                        "collision and model disagree for cohort {variant}",
+                    );
+                    assert!(model.voxels.iter().any(|v| v.material == Material::Leaf));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn living_growth_recipes_fit_the_streaming_and_native_crop_bounds() {
+        use super::*;
+        for variant in living_flora::CONIFER..living_flora::SAPLING + 4 {
+            for i in 0..1024 {
+                let seed = mix(i ^ u64::from(variant).rotate_left(18));
+                let recipe = living_flora::woody_recipe(seed, variant).unwrap();
+                let (radius, height) = PlantRecord {
+                    seed,
+                    variant,
+                    ..record(Species::Rowan, variant)
+                }
+                .extent_cells();
+                let check = |center: [i16; 3], padding: [i64; 3]| {
+                    let q = center.map(i64::from);
+                    assert!(
+                        q[0].abs() + padding[0] <= radius
+                            && q[2].abs() + padding[2] <= radius
+                            && q[1] + padding[1] <= height,
+                        "cohort {variant} seed {seed}: {q:?} + {padding:?} outside ({radius}, {height})",
+                    );
+                };
+                for limb in &recipe.wood {
+                    let r = i64::from(limb.radius);
+                    check(limb.from, [r, 0, r]);
+                    check(limb.to, [r, 0, r]);
+                }
+                for patch in &recipe.foliage {
+                    check(patch.center, patch.radius.map(|r| r.floor() as i64));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_woodland_matches_exact_cells_pigments_and_rotations() {
+        use super::*;
+        use crate::volume_summary::CellBounds;
+        let region = CellBounds {
+            min: Cell {
+                x: -28,
+                y: 47,
+                z: -285,
+            },
+            max: Cell {
+                x: 16,
+                y: 92,
+                z: -241,
+            },
+        };
+        for variant in living_flora::CONIFER..living_flora::SAPLING + 4 {
+            for rotation in 0..4 {
+                let plant = PlantRecord {
+                    seed: mix(u64::from(variant) + u64::from(rotation) * 16),
+                    rotation,
+                    ..record(Species::Rowan, variant)
+                };
+                let voxels = clipped_woodland_voxels(&plant, region, &|| false).unwrap();
+                let model = model_for(&plant);
+                let expected: Vec<_> = model
+                    .voxels
+                    .iter()
+                    .copied()
+                    .filter(|v| region.contains(plant.world_cell(v.cell)))
+                    .collect();
+                assert_eq!(voxels, expected, "cohort {variant}, rotation {rotation}");
+                assert!(clipped_woodland_voxels(&plant, region, &|| true).is_none());
+            }
+        }
+    }
+
     #[test]
     fn rooted_component_preserves_sparse_disconnected_and_absent_roots() {
         for cells in [

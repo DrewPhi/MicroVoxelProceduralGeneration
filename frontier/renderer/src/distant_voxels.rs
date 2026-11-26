@@ -244,7 +244,13 @@ pub(crate) fn vertical_pitch_divisor(world: &World) -> u32 {
         )
         .unwrap_or_else(
             || match world.fbm_terrain().map(|terrain| terrain.params().recipe) {
-                Some(FbmRecipe::Alpine | FbmRecipe::Watershed) => 4,
+                Some(
+                    FbmRecipe::Alpine
+                    | FbmRecipe::Watershed
+                    | FbmRecipe::Landscapes
+                    | FbmRecipe::Landforms
+                    | FbmRecipe::Eroded,
+                ) => 4,
                 _ => 1,
             },
         )

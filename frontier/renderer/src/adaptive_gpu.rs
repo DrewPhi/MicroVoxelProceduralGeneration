@@ -1029,7 +1029,7 @@ impl AdaptiveGpu {
         self.near_beauty = near_beauty;
         self.near_detail = near_detail;
         self.visible_vertical_bound = visible_vertical_bound;
-        let sun = crate::atmosphere::sun_direction(settings.sun_elevation, settings.sun_azimuth);
+        let sun = settings.light_direction();
         let value = [
             sun.x,
             sun.y,

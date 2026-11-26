@@ -323,7 +323,7 @@ impl DrawMesh {
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chunk camera"),
-            size: 96,
+            size: crate::NATIVE_CAMERA_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

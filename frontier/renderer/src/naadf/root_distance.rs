@@ -995,6 +995,7 @@ mod tests {
             position: DVec3::new(-5., -5., -5.),
             yaw: 0.,
             pitch: 0.,
+            roll: 0.,
             far: 128.,
             fov_y: 60.,
         };

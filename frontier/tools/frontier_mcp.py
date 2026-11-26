@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local MCP sidecar for file-free, live Frontier frame capture on X11."""
+"""Local MCP tools for Frontier gameplay capture and reproducible aircraft inspection."""
 import base64
 from fractions import Fraction
 import json
@@ -56,6 +56,119 @@ TOOL = {
     ),
     "inputSchema": {"type": "object", "properties": PROPERTIES, "additionalProperties": False},
 }
+
+
+PREVIEW_NAME = "render_aircraft_preview"
+INSPECT_NAME = "inspect_aircraft_model"
+AIRCRAFT_ONLY = "--aircraft-only" in sys.argv[1:]
+VIEWS = ["orbit", "front", "side", "rear", "top", "underside", "pilot", "rear-seat"]
+PREVIEW_NUMBERS = {
+    "yaw": (-360, 360), "pitch": (-89, 89), "distance": (0.55, 80),
+    "light": (-180, 180), "door": (0, 1), "left_door": (0, 1), "right_door": (0, 1),
+    "aileron": (-1, 1), "elevator": (-1, 1), "rudder": (-1, 1), "flaps": (0, 1),
+    "power": (0, 1), "wheel": (0, 360), "compression": (0, 0.13),
+}
+PREVIEW_FLAGS = ("orthographic", "no_glass", "engine")
+PREVIEW_PROPERTIES = {
+    "views": {"type": "array", "items": {"type": "string", "enum": VIEWS},
+              "minItems": 1, "maxItems": 6, "default": ["orbit"]},
+    "width": {"type": "integer", "minimum": 320, "maximum": 1920, "default": 960},
+    "height": {"type": "integer", "minimum": 180, "maximum": 1080, "default": 600},
+    "isolate": {"type": "string", "description": "Part name returned by inspect_aircraft_model."},
+    "cutaway": {"type": "string", "enum": ["left", "right"]},
+    "target": {"type": "array", "items": {"type": "number", "minimum": -16, "maximum": 16},
+               "minItems": 3, "maxItems": 3, "description": "Orbit target in model-local metres. With interior views, this is an eye offset."},
+    **{name: {"type": "number", "minimum": low, "maximum": high}
+       for name, (low, high) in PREVIEW_NUMBERS.items()},
+    **{name: {"type": "boolean", "default": False} for name in PREVIEW_FLAGS},
+}
+PREVIEW_TOOL = {
+    "name": PREVIEW_NAME,
+    "description": (
+        "Render up to six repeatable, antialiased images of the real in-engine aircraft without a game world or window. "
+        "Use orthographic views for proportions or custom yaw, pitch, distance and target for close-ups. "
+        "Pose each door, ailerons, elevator, rudder, flaps, wheels, struts and propeller, change the light, "
+        "or use a cutaway and named part isolation to inspect the cabin and model joints."
+    ),
+    "inputSchema": {"type": "object", "properties": PREVIEW_PROPERTIES, "additionalProperties": False},
+}
+INSPECT_TOOL = {
+    "name": INSPECT_NAME,
+    "description": "Get the current aircraft scale and coordinate system, part names, native voxel counts, triangle counts and rest-pose bounds.",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+
+def aircraft_binary(*args):
+    if not BINARY.is_file() or not os.access(BINARY, os.X_OK):
+        raise RuntimeError(f"Build the Frontier release binary first. Expected {BINARY}.")
+    result = subprocess.run([str(BINARY), "--model-preview", *args], cwd=ROOT,
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=45)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip()[-3000:] or f"Aircraft studio exited with status {result.returncode}.")
+    return result.stdout
+
+
+def inspect_aircraft(arguments):
+    if arguments != {}:
+        raise ValueError("inspect_aircraft_model takes no arguments.")
+    aircraft = json.loads(aircraft_binary("--inspect"))
+    return {"content": [{"type": "text", "text": json.dumps(aircraft)}], "structuredContent": aircraft}
+
+
+def render_aircraft(arguments):
+    if not isinstance(arguments, dict):
+        raise ValueError("Tool arguments must be an object.")
+    if unknown := arguments.keys() - PREVIEW_PROPERTIES.keys():
+        raise ValueError(f"Unknown arguments: {', '.join(sorted(unknown))}")
+    views = arguments.get("views", ["orbit"])
+    if type(views) is not list or not 1 <= len(views) <= 6 or any(v not in VIEWS for v in views):
+        raise ValueError("Provide 1 to 6 supported view names.")
+    args = []
+    dimensions = {name: arguments.get(name, PREVIEW_PROPERTIES[name]["default"]) for name in ("width", "height")}
+    for name, value in dimensions.items():
+        spec = PREVIEW_PROPERTIES[name]
+        if type(value) is not int or not spec["minimum"] <= value <= spec["maximum"]:
+            raise ValueError(f"{name} must be an integer in {spec['minimum']}..{spec['maximum']}.")
+        args.extend([f"--{name}", str(value)])
+    for name, (low, high) in PREVIEW_NUMBERS.items():
+        if name in arguments:
+            value = arguments[name]
+            if type(value) not in (int, float) or not low <= value <= high:
+                raise ValueError(f"{name} must be a number in {low}..{high}.")
+            args.extend(["--" + name.replace("_", "-"), str(value)])
+    for name in PREVIEW_FLAGS:
+        value = arguments.get(name, False)
+        if type(value) is not bool:
+            raise ValueError(f"{name} must be a boolean.")
+        if value:
+            args.append("--" + name.replace("_", "-"))
+    if "target" in arguments:
+        value = arguments["target"]
+        if type(value) is not list or len(value) != 3 or any(type(v) not in (int, float) or not -16 <= v <= 16 for v in value):
+            raise ValueError("target must contain three numbers in -16..16.")
+        args.extend(["--target", ",".join(str(v) for v in value)])
+    for name in ("cutaway", "isolate"):
+        if name in arguments:
+            value = arguments[name]
+            if type(value) is not str or not re.fullmatch(r"[a-z][a-z-]{0,31}", value):
+                raise ValueError(f"{name} must be a valid name.")
+            if name == "cutaway" and value not in ("left", "right"):
+                raise ValueError("cutaway must be left or right.")
+            args.extend([f"--{name}", value])
+    with tempfile.TemporaryDirectory(prefix="frontier-aircraft-") as directory:
+        path = Path(directory) / "preview.png"
+        content = []
+        for index, view in enumerate(views, 1):
+            aircraft_binary("--view", view, *args, "--capture", str(path))
+            image = path.read_bytes()
+            if not image.startswith(PNG_HEADER):
+                raise RuntimeError("The aircraft studio produced an invalid image.")
+            content.extend([
+                {"type": "text", "text": f"{index}. {view}"},
+                {"type": "image", "mimeType": "image/png", "data": base64.b64encode(image).decode("ascii")},
+            ])
+    return {"content": content, "structuredContent": {"views": views, **dimensions, "options": arguments}}
 
 
 def validated(arguments):
@@ -212,17 +325,23 @@ def respond(request):
         return {"result": {
             "protocolVersion": requested if requested in PROTOCOLS else PROTOCOLS[0],
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "frontier", "version": "0.1.0"},
+            "serverInfo": {"name": "frontier", "version": "0.2.0"},
         }}
     if method == "ping":
         return {"result": {}}
     if method == "tools/list":
-        return {"result": {"tools": [TOOL]}}
+        published = [PREVIEW_TOOL, INSPECT_TOOL] if AIRCRAFT_ONLY else [TOOL, PREVIEW_TOOL, INSPECT_TOOL]
+        return {"result": {"tools": published}}
     if method == "tools/call":
-        if params.get("name") != TOOL_NAME:
+        handlers = {TOOL_NAME: capture, PREVIEW_NAME: render_aircraft, INSPECT_NAME: inspect_aircraft}
+        name = params.get("name")
+        if not isinstance(name, str) or (AIRCRAFT_ONLY and name == TOOL_NAME):
+            name = ""
+        handler = handlers.get(name)
+        if handler is None:
             return {"error": {"code": -32602, "message": "Unknown Frontier tool."}}
         try:
-            return {"result": capture(params.get("arguments", {}))}
+            return {"result": handler(params.get("arguments", {}))}
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
             return {"result": {"isError": True, "content": [{"type": "text", "text": str(error)}]}}
     return {"error": {"code": -32601, "message": "Method not found."}}

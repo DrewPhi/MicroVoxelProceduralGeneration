@@ -1,4 +1,5 @@
 //! Small egui overlay composited at output resolution after the terrain scene.
+use crate::lod_curve::{distance_at, LodCurve, DISTANCES, LAST_KNOT, TERRAIN_DISTANCES};
 use crate::settings::{ResourceProfile, SettingsChanges, SettingsStats, VisualSettings};
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use winit::{
@@ -6,6 +7,122 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LodEditor {
+    Vegetation,
+    Terrain,
+}
+
+fn distance_curve_editor(
+    ui: &mut egui::Ui,
+    curve: &mut LodCurve,
+    drag: &mut Option<(f32, LodCurve)>,
+    distances: &[f32; DISTANCES.len()],
+) {
+    let (outer, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 245.),
+        egui::Sense::click_and_drag(),
+    );
+    let plot = egui::Rect::from_min_max(
+        outer.min + egui::vec2(102., 13.),
+        outer.max - egui::vec2(22., 33.),
+    );
+    let knot_at = |x: f32| ((x - plot.left()) / plot.width()).clamp(0., 1.) * LAST_KNOT;
+    let value_at = |y: f32| ((plot.center().y - y) / (0.5 * plot.height())).clamp(-1., 1.);
+    let point_at = |knot: f32, value: f32| {
+        egui::pos2(
+            plot.left() + plot.width() * knot / LAST_KNOT,
+            plot.center().y - 0.5 * plot.height() * value,
+        )
+    };
+    if response.drag_started() {
+        if let Some(origin) = ui
+            .input(|input| input.pointer.press_origin())
+            .filter(|p| plot.contains(*p))
+        {
+            *drag = Some((knot_at(origin.x), curve.clone()));
+        }
+    }
+    if response.dragged() || response.drag_stopped() {
+        if let (Some((knot, start)), Some(pointer)) =
+            (drag.as_ref(), response.interact_pointer_pos())
+        {
+            *curve = start.clone();
+            curve.bend(*knot, value_at(pointer.y));
+        }
+    } else if response.clicked() {
+        if let Some(pointer) = response
+            .interact_pointer_pos()
+            .filter(|p| plot.contains(*p))
+        {
+            curve.bend(knot_at(pointer.x), value_at(pointer.y));
+        }
+    }
+    if response.drag_stopped() {
+        *drag = None;
+    }
+
+    let painter = ui.painter();
+    let accent = egui::Color32::from_rgb(125, 220, 178);
+    let grid = ui.visuals().widgets.noninteractive.bg_stroke;
+    let font = egui::FontId::proportional(12.);
+    let label = ui.visuals().text_color();
+    painter.rect_filled(plot, 3., ui.visuals().extreme_bg_color);
+    for (value, text) in [(1., "Max visible"), (0., "Automatic"), (-1., "Coarsest")] {
+        let left = point_at(0., value);
+        painter.line_segment([left, point_at(LAST_KNOT, value)], grid);
+        painter.text(
+            left - egui::vec2(8., 0.),
+            egui::Align2::RIGHT_CENTER,
+            text,
+            font.clone(),
+            label,
+        );
+    }
+    for knot in [0., 5., 10., 14., 19., 22., LAST_KNOT] {
+        let bottom = point_at(knot, -1.);
+        painter.line_segment([bottom, point_at(knot, 1.)], grid);
+        painter.text(
+            bottom + egui::vec2(0., 8.),
+            egui::Align2::CENTER_TOP,
+            format!("{:.0} m", distance_at(knot, distances)),
+            font.clone(),
+            label,
+        );
+    }
+    let line = (0..=156)
+        .map(|i| {
+            let knot = i as f32 * LAST_KNOT / 156.;
+            point_at(knot, curve.sample(knot))
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(2.5_f32, accent)));
+
+    let active = drag.as_ref().map(|(knot, _)| *knot).or_else(|| {
+        response
+            .hover_pos()
+            .filter(|p| plot.contains(*p))
+            .map(|p| knot_at(p.x))
+    });
+    if let Some(knot) = active {
+        let point = point_at(knot, curve.sample(knot));
+        painter.line_segment([point_at(knot, 1.), point_at(knot, -1.)], grid);
+        painter.circle_filled(point, 5., accent);
+        let right = point.x < plot.right() - 75.;
+        painter.text(
+            egui::pos2(point.x + if right { 8. } else { -8. }, plot.top() + 7.),
+            if right {
+                egui::Align2::LEFT_TOP
+            } else {
+                egui::Align2::RIGHT_TOP
+            },
+            format!("{:.0} m", distance_at(knot, distances)),
+            font,
+            accent,
+        );
+    }
+}
 
 pub struct SettingsUi {
     context: egui::Context,
@@ -15,12 +132,15 @@ pub struct SettingsUi {
     rolling: bool,
     loading_draft: VisualSettings,
     open: bool,
+    lod_editor: Option<LodEditor>,
+    lod_curve_drag: Option<(f32, LodCurve)>,
     paint_jobs: Vec<egui::ClippedPrimitive>,
     free_textures: Vec<egui::TextureId>,
     screen: ScreenDescriptor,
     started: std::time::Instant,
     settings_error: Option<String>,
     player_overlay: crate::player_edit::Overlay,
+    radar: crate::weather_panel::Panel,
 }
 
 impl SettingsUi {
@@ -51,6 +171,7 @@ impl SettingsUi {
             started: std::time::Instant::now(),
             settings_error: None,
             player_overlay: Default::default(),
+            radar: Default::default(),
             context,
             input,
             renderer: Renderer::new(device, format, None, 1, false),
@@ -58,6 +179,8 @@ impl SettingsUi {
             settings,
             rolling,
             open: false,
+            lod_editor: None,
+            lod_curve_drag: None,
             paint_jobs: Vec::new(),
             free_textures: Vec::new(),
             screen: ScreenDescriptor {
@@ -80,6 +203,14 @@ impl SettingsUi {
         self.open
     }
 
+    pub fn radar_open(&self) -> bool {
+        self.radar.open
+    }
+
+    pub fn owns_cursor(&self) -> bool {
+        self.open || self.radar.open
+    }
+
     pub fn set_walking(&mut self, walking: bool) {
         self.settings.walking = walking;
         self.loading_draft.walking = walking;
@@ -93,15 +224,35 @@ impl SettingsUi {
     /// close, focus and redraw events, and releases cursor grab while open.
     pub fn handle_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
         if let WindowEvent::KeyboardInput { event, .. } = event {
+            if event.physical_key == PhysicalKey::Code(KeyCode::F4) {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.radar.open = !self.radar.open;
+                }
+                return true;
+            }
             if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                 if event.state == ElementState::Pressed && !event.repeat {
-                    self.open = !self.open;
+                    if self.lod_editor.take().is_some() {
+                        self.lod_curve_drag = None;
+                    } else if self.radar.open && !self.open {
+                        self.radar.open = false;
+                    } else {
+                        self.open = !self.open;
+                    }
                 }
                 return true;
             }
         }
         let response = self.input.on_window_event(window, event);
-        self.open
+        if response.consumed
+            && matches!(
+                event,
+                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+            )
+        {
+            return true;
+        }
+        self.owns_cursor()
             && (response.consumed
                 || matches!(
                     event,
@@ -123,6 +274,7 @@ impl SettingsUi {
         encoder: &mut wgpu::CommandEncoder,
         stats: &SettingsStats,
         dimensions: [u32; 2],
+        observation: &crate::weather_panel::Observation<'_>,
     ) -> SettingsChanges {
         let previous = self.settings.clone();
         let mut changes = SettingsChanges::default();
@@ -141,6 +293,9 @@ impl SettingsUi {
             .native_pixels_per_point = Some(native_scale);
         let input = raw.take();
         let output = self.context.run(input, |ctx| {
+            if let Some(flight) = stats.flight.filter(|_| !self.open) {
+                crate::flight_instruments::show(ctx, flight);
+            }
             if !self.player_overlay.text.is_empty() && !self.open {
                 egui::Area::new(egui::Id::new("player inventory"))
                     .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {
@@ -174,6 +329,7 @@ impl SettingsUi {
                             ))
                             .strong(),
                         );
+                        if stats.can_board && !self.open { ui.label("V · Board aircraft"); }
                         ui.horizontal(|ui| {
                             if let Some(ms) = stats.gpu_full_ms {
                                 ui.label(format!("Render GPU {ms:.1} ms  ·"));
@@ -208,6 +364,20 @@ impl SettingsUi {
                         }
                     });
                 });
+            if observation.frame.is_some() || self.settings.day_night {
+                egui::Area::new(egui::Id::new("world clock"))
+                    .anchor(egui::Align2::RIGHT_TOP, [-14., 12.]).show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(observation.clock_label());
+                                if observation.frame.is_some() && ui.button("Weather radar · F4").clicked() {
+                                    self.radar.open = !self.radar.open;
+                                }
+                            });
+                        });
+                    });
+            }
+            self.radar.show(ctx, observation, &mut self.settings);
             if !self.open {
                 return;
             }
@@ -216,6 +386,47 @@ impl SettingsUi {
                 egui::Id::new("settings dim"),
             ))
             .rect_filled(ctx.screen_rect(), 0., egui::Color32::from_black_alpha(105));
+            if let Some(editor) = self.lod_editor {
+                let (title, distances, curve, current) = match editor {
+                    LodEditor::Vegetation => (
+                        "Vegetation LOD by distance", &DISTANCES,
+                        &mut self.loading_draft.vegetation_lod_curve,
+                        &mut self.settings.vegetation_lod_curve,
+                    ),
+                    LodEditor::Terrain => (
+                        "Terrain LOD by distance", &TERRAIN_DISTANCES,
+                        &mut self.loading_draft.terrain_lod_curve,
+                        &mut self.settings.terrain_lod_curve,
+                    ),
+                };
+                let mut open = true;
+                egui::Window::new(title)
+                    .open(&mut open)
+                    .anchor(egui::Align2::CENTER_CENTER, [0., 0.])
+                    .collapsible(false)
+                    .default_width(620.)
+                    .show(ctx, |ui| {
+                        distance_curve_editor(ui, curve, &mut self.lod_curve_drag, distances);
+                        ui.small("Drag vertically to blend between automatic, finer and coarser detail.");
+                        ui.small(match editor {
+                            LodEditor::Vegetation => "Native vegetation radius takes priority nearby. Plant draw ranges and rendering budgets still apply.",
+                            LodEditor::Terrain => "Terrain detail follows the screen projection and available cache layers. Exact voxels and NAADF keep their own settings.",
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Reset to automatic").clicked() {
+                                *curve = LodCurve::default();
+                            }
+                            if ui.add_enabled(curve != current, egui::Button::new("Apply")).clicked() {
+                                *current = curve.clone();
+                            }
+                        });
+                    });
+                if !open {
+                    self.lod_editor = None;
+                    self.lod_curve_drag = None;
+                }
+                return;
+            }
             let available = ctx.screen_rect().height() - 50.;
             egui::Window::new("Frontier · visual settings")
                 .collapsible(false)
@@ -226,16 +437,39 @@ impl SettingsUi {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Atmosphere changes are live.");
+                        if ui.button("Vegetation LOD curve").clicked() {
+                            self.loading_draft.vegetation_lod_curve =
+                                self.settings.vegetation_lod_curve.clone();
+                            self.lod_editor = Some(LodEditor::Vegetation);
+                        }
+                        if self.rolling && ui.button("Terrain LOD curve").clicked() {
+                            self.loading_draft.terrain_lod_curve =
+                                self.settings.terrain_lod_curve.clone();
+                            self.lod_editor = Some(LodEditor::Terrain);
+                        }
                         if ui.button("Resume · Esc").clicked() {
                             self.open = false;
                         }
                     });
+                    if let Some(flight) = stats.flight {
+                        ui.horizontal(|ui| {
+                            changes.toggle_airflow = ui.selectable_label(flight.show_airflow, "Show airflow · Y").clicked();
+                            changes.toggle_flight_audio = ui.selectable_label(stats.flight_audio, "Flight sound").clicked();
+                            changes.toggle_flight_camera_motion = ui.selectable_label(stats.flight_camera_motion, "Camera inertia · J").clicked();
+                        });
+                    }
                     if let Some(message) = &self.settings_error {
                         ui.colored_label(egui::Color32::YELLOW, format!("Settings were not applied: {message}"));
                     }
                     egui::ScrollArea::vertical()
                         .max_height((available - 80.).max(80.))
                         .show(ui, |ui| {
+                            ui.heading("World time");
+                            crate::weather_panel::time_controls(ui, &mut self.settings);
+                            if observation.frame.is_some() && ui.button("Open weather radar").clicked() {
+                                self.radar.open = true;
+                                self.open = false;
+                            }
                             ui.heading("Image quality");
                             if !self.rolling {
                                 ui.add(
@@ -286,7 +520,7 @@ impl SettingsUi {
                             ui.separator();
                             ui.heading("Light & atmosphere");
                             ui.checkbox(&mut self.settings.beauty, "Meadow lighting, foliage occlusion and sky");
-                            ui.checkbox(&mut self.settings.terrain_shadows, "Bounded Alpine terrain shadows");
+                            ui.checkbox(&mut self.settings.terrain_shadows, "Terrain shadows");
                             let mut clear_air = !self.settings.atmosphere;
                             if ui
                                 .checkbox(&mut clear_air, "Clear air · disable atmosphere")
@@ -375,6 +609,14 @@ impl SettingsUi {
                                 changes.loading_applied=true;
                             }
                             ui.separator();
+                            ui.heading("Vegetation");
+                            if ui.add(egui::Slider::new(
+                                &mut self.loading_draft.vegetation_near_m, 0.0..=128.0,
+                            ).text("Native vegetation radius (m)")).changed() {
+                                self.loading_draft.resource_profile = ResourceProfile::Custom;
+                            }
+                            ui.small("Inside this radius, use full-detail plant geometry when the budget allows. 0 uses projected detail alone.");
+                            ui.separator();
                             ui.heading("Performance & memory");
                             ui.label("Development targets smooth 30–60 FPS. Budgets grow lazily as content is needed.");
                             let profile_before = self.loading_draft.resource_profile;
@@ -401,7 +643,6 @@ impl SettingsUi {
                             ui.add(egui::Slider::new(&mut self.loading_draft.refinements, 1..=32).text("Refinements / batch"));
                             ui.add(egui::Slider::new(&mut self.loading_draft.native_radius_m, 0.0..=64.0).text("Minimum native radius (m)"));
                             ui.small(format!("Native voxel edge: {} cm. Larger radii need more memory.", frontier_world::voxel_size() * 100.));
-                            ui.add(egui::Slider::new(&mut self.loading_draft.vegetation_near_m, 0.0..=128.0).text("Near plant detail (m)"));
                             let max_mib = memory.working_mib().max(2048);
                             for (field, label) in [
                                 (&mut self.loading_draft.cache_mib, "Terrain CPU cache (MiB)"),

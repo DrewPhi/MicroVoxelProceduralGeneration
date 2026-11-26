@@ -3,14 +3,16 @@
 //! upstream halo, jittered drainage nodes and valley profiles shaped by incision.
 //! Cached regions are an acceleration structure. Each has 256 candidate bins
 //! and cache order never changes the world-space descriptors.
-use super::{noise, FbmParams, FbmRecipe, TerrainColumn};
+use super::{noise, noise_gradient, FbmParams, FbmRecipe, TerrainColumn};
 use crate::alpine::Value;
 use crate::{voxel_size, Material};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    rc::Rc,
 };
+#[path = "eroded_relief.rs"]
+pub(crate) mod eroded_relief;
 pub const SEEDED_WORLD_SOURCE_VERSION: u32 = 8;
 pub const SEEDED_WORLD_APPEARANCE_VERSION: u32 = 2;
 
@@ -22,7 +24,7 @@ pub(crate) const WATERSHED_MAX_WATER_DEPTH: f64 = 9.;
 pub(crate) const WATERSHED_WATER_ABOVE_LAND: f64 = 0.7;
 
 pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.has_watershed_drainage() {
         3.
     } else {
         8.
@@ -30,7 +32,7 @@ pub(crate) fn minimum_radius(p: FbmParams) -> f64 {
 }
 
 pub(crate) fn maximum_lake_radius(p: FbmParams) -> f64 {
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.has_watershed_drainage() {
         140.
     } else {
         100.
@@ -38,7 +40,13 @@ pub(crate) fn maximum_lake_radius(p: FbmParams) -> f64 {
 }
 
 pub(crate) fn global_height_range(p: FbmParams) -> [f64; 2] {
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let authored = if p.recipe == FbmRecipe::Eroded {
+        [-938., 2863.]
+    } else if p.recipe == FbmRecipe::Landforms {
+        [-750., 2680.]
+    } else if p.recipe.has_landscape_relief() {
+        [-730., 2660.]
+    } else if p.recipe.has_watershed_drainage() {
         [-600., 2320.]
     } else {
         [-402., 1663.]
@@ -64,6 +72,61 @@ pub(crate) fn watershed_relief<V: Value>(
         .add(highlands)
         .add(hills.mul(V::point(50.).add(strata.scale(30.))))
         .add(fine.scale(5.))
+}
+
+/// Shared by the canonical height function and its conservative bounds. All
+/// bands are in [-1, 1]. Relief is added before the drainage graph conditions it.
+pub(crate) fn landscape_relief<V: Value>(
+    base: V,
+    mountain: V,
+    ridge: V,
+    strata: V,
+    moisture: V,
+    ribs: V,
+    cuts: V,
+) -> V {
+    let ramp = |v: V, low: f64, high: f64| {
+        let t = v.add(V::point(-low)).scale(1. / (high - low)).clamp01();
+        t.mul(t).mul(V::point(3.).add(t.scale(-2.)))
+    };
+    let upland = mountain.mul(mountain);
+    let shoulders = ramp(ridge, 0.52, 0.88);
+    // A warped ribs field and a narrower cut put ravines inside the shoulders
+    // of the parent range. Quiet valley floors keep their broad relief.
+    let flutes = ribs.add(cuts.scale(0.30));
+    let ravine = ramp(flutes, 0.13, 0.52);
+    let crest = ramp(ribs.add(strata.scale(0.32)), 0.03, 0.47);
+    let alpine = shoulders.mul(crest.scale(94.).add(ravine.scale(-108.)));
+    // In dry provinces, steep ledges and long aprons survive even outside the
+    // mountains. Transition continuously into fluvial grasslands.
+    let dry = ramp(moisture.scale(-1.), 0.06, 0.36);
+    let platform = strata.add(ribs.scale(0.22));
+    let bench = ramp(platform, -0.12, 0.04)
+        .scale(37.)
+        .add(ramp(platform, 0.26, 0.40).scale(27.))
+        .add(platform.scale(-14.));
+    let banks = ramp(cuts.add(strata.scale(0.26)), 0.10, 0.45);
+    base.add(upland.mul(alpine))
+        .add(dry.mul(bench))
+        .add(V::point(1.).add(upland.scale(-1.)).mul(banks).scale(-10.))
+}
+
+/// Canonical meter-scale relief. The two rotated noise coordinates stretch
+/// rock joints along strike, and the smaller band breaks up their edges.
+pub(crate) fn jointed_relief<V: Value>(ridge: V, upland: V, strata: V, joints: V, debris: V) -> V {
+    let ramp = |x: V, start: f64, width: f64| {
+        let t = x.add(V::point(-start)).scale(1. / width).clamp01();
+        t.mul(t).mul(V::point(3.).add(t.scale(-2.)))
+    };
+    let exposure = ramp(ridge, 0.45, 0.38).mul(ramp(strata, -0.38, 0.63));
+    let fracture = joints.add(debris.scale(0.24));
+    let ledges = ramp(fracture, -0.23, 0.20)
+        .scale(2.8)
+        .add(ramp(fracture, 0.21, 0.19).scale(4.2))
+        .add(V::point(-3.5));
+    let talus = debris.mul(debris).scale(0.85);
+    let strength = exposure.mul(upland.mul(upland).scale(0.80).add(V::point(0.20)));
+    strength.mul(ledges.add(talus)).add(debris.scale(0.24))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -93,24 +156,43 @@ fn smooth(t: f64) -> f64 {
     t * t * (3. - 2. * t)
 }
 fn fbm(seed: u64, x: f64, z: f64, wavelength: f64, count: u32, gain: f64, salt: u64) -> f64 {
+    fbm_sample::<false>(seed, x, z, wavelength, count, gain, salt)[0]
+}
+fn fbm_sample<const GRADIENT: bool>(
+    seed: u64,
+    x: f64,
+    z: f64,
+    wavelength: f64,
+    count: u32,
+    gain: f64,
+    salt: u64,
+) -> [f64; 3] {
     let (mut a, mut f, mut sum, mut norm) = (1., 1. / wavelength, 0., 0.);
+    let mut grade = [0.; 2];
     for i in 0..count {
-        sum += a * noise(
-            x * f + 13.7,
-            z * f - 8.3,
-            seed ^ salt.wrapping_add(i as u64 * 0x9e3779b9),
-        );
+        let octave_seed = seed ^ salt.wrapping_add(i as u64 * 0x9e3779b9);
+        let (u, v) = (x * f + 13.7, z * f - 8.3);
+        if GRADIENT {
+            let [value, du, dv] = noise_gradient(u, v, octave_seed);
+            sum += a * value;
+            grade[0] += a * du * f;
+            grade[1] += a * dv * f;
+        } else {
+            sum += a * noise(u, v, octave_seed);
+        }
         norm += a;
         a *= gain;
         f *= 2.;
     }
-    sum / norm
+    [sum / norm, grade[0] / norm, grade[1] / norm]
 }
 #[derive(Clone, Copy)]
 struct Land {
     h: f64,
     continental: f64,
     mountain: f64,
+    outcrop: f64,
+    parent_grade: [f64; 2],
 }
 fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
     // World scale changes wavelengths alone; amplitude changes meters of relief.
@@ -119,12 +201,58 @@ fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
     let continental = fbm(seed, x, z, 48000., 3, 0.45, 0x5101);
     let province = fbm(seed, x, z, 22000., 3, 0.45, 0x5102);
     let mountain = smooth((province + 0.08) / 0.48);
-    let ridge = 1. - fbm(seed, x, z, 3600., 4, 0.48, 0x5105).abs();
-    let foothill = fbm(seed, x, z, 1800., 3, 0.45, 0x5106);
+    let [ridge_noise, ridge_dx, ridge_dz] = if p.recipe == FbmRecipe::Eroded {
+        fbm_sample::<true>(seed, x, z, 3600., 4, 0.48, 0x5105)
+    } else {
+        [fbm(seed, x, z, 3600., 4, 0.48, 0x5105), 0., 0.]
+    };
+    let ridge = 1. - ridge_noise.abs();
+    let [foothill, hill_dx, hill_dz] = if p.recipe == FbmRecipe::Eroded {
+        fbm_sample::<true>(seed, x, z, 1800., 3, 0.45, 0x5106)
+    } else {
+        [fbm(seed, x, z, 1800., 3, 0.45, 0x5106), 0., 0.]
+    };
+    // The parent ridge controls slope and aspect across snowfields. Metre-
+    // scale rock joints and the sub-voxel profile would fragment the snowline
+    // if their full gradient were used as the support slope.
+    let ridge_scale = -ridge_noise.signum() * 4560. * (mountain * ridge).powi(2);
+    let grade_scale = (p.amplitude / 1000.) * (1800. / p.horizontal_scale);
+    let parent_grade = [
+        grade_scale * (ridge_scale * ridge_dx + 50. * hill_dx),
+        grade_scale * (ridge_scale * ridge_dz + 50. * hill_dz),
+    ];
     let fine = fbm(seed, x, z, 90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let mut outcrop = 0.;
+    let authored = if p.recipe.has_watershed_drainage() {
         let strata = fbm(seed, x, z, 1050., 3, 0.45, 0x5121);
-        watershed_relief(continental, mountain, ridge, foothill, fine, strata)
+        let base = watershed_relief(continental, mountain, ridge, foothill, fine, strata);
+        if p.recipe.has_landscape_relief() {
+            let moisture = fbm(seed, x, z, 27000., 3, 0.5, 0x5104);
+            let ribs = fbm(seed, x, z, 620., 2, 0.47, 0x5130);
+            let cuts = fbm(seed, x, z, 180., 2, 0.40, 0x5131);
+            let base = landscape_relief(base, mountain, ridge, strata, moisture, ribs, cuts);
+            if p.recipe.has_jointed_relief() {
+                let joints = noise(x / 23. + z / 30., z / 8.5 - x / 11., seed ^ 0x5140);
+                let debris = noise(x / 3.1, z / 3.1, seed ^ 0x5141);
+                let rock = base + jointed_relief(ridge, mountain, strata, joints, debris);
+                if p.recipe == FbmRecipe::Eroded {
+                    let rock = rock
+                        + eroded_relief::province_relief(
+                            seed, x, z, rock, mountain, strata, moisture,
+                        );
+                    let (displacement, exposure) =
+                        eroded_relief::bedrock(seed, x, z, rock, mountain, strata, moisture);
+                    outcrop = exposure;
+                    rock + displacement
+                } else {
+                    rock
+                }
+            } else {
+                base
+            }
+        } else {
+            base
+        }
     } else {
         400. * continental
             + 65.
@@ -137,6 +265,8 @@ fn land(seed: u64, p: FbmParams, x: f64, z: f64) -> Land {
         h,
         continental,
         mountain,
+        outcrop,
+        parent_grade,
     }
 }
 // Climate is a smooth, globally anchored 512m field. Fine native columns reuse
@@ -219,7 +349,7 @@ fn node(seed: u64, p: FbmParams, ix: i64, iz: i64) -> Node {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let mut x = ix as f64 * spacing;
     let mut z = iz as f64 * spacing;
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.has_watershed_drainage() {
         let unit = |salt| (super::hash(ix, iz, seed ^ salt) >> 11) as f64 / (1u64 << 53) as f64;
         x += (unit(0x5131) - 0.5) * 0.32 * spacing;
         z += (unit(0x5132) - 0.5) * 0.32 * spacing;
@@ -232,14 +362,14 @@ fn node(seed: u64, p: FbmParams, ix: i64, iz: i64) -> Node {
         potential: l.h - 12. * p.amplitude / 1000.,
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Node {
     pub(crate) x: f64,
     pub(crate) z: f64,
     pub(crate) stage: f64,
     potential: f64,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Reach {
     pub(crate) a: Node,
     pub(crate) b: Node,
@@ -248,6 +378,7 @@ pub(crate) struct Reach {
     pub(crate) depth: f64,
     valley_radius: f64,
     pub(crate) lake: bool,
+    pub(crate) wet: bool,
     pub(crate) owner: [i64; 2],
     pub(crate) segment: u8,
 }
@@ -280,6 +411,7 @@ impl Region {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
     seed: u64,
+    recipe: FbmRecipe,
     scale: u64,
     amplitude: u64,
     octaves: u32,
@@ -287,9 +419,14 @@ struct Key {
     x: i64,
     z: i64,
 }
+struct RegionCache {
+    last: Option<(Key, Rc<Region>)>,
+    recent: VecDeque<(Key, Rc<Region>)>,
+}
+
 thread_local! {
-    static REGIONS: RefCell<VecDeque<(Key, Arc<Region>)>> = const {
-        RefCell::new(VecDeque::new())
+    static REGIONS: RefCell<RegionCache> = const {
+        RefCell::new(RegionCache { last: None, recent: VecDeque::new() })
     };
 }
 
@@ -340,12 +477,13 @@ fn downstream(nodes: &[Node], side: usize, i: usize) -> usize {
     best
 }
 
-fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
+fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Rc<Region> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     let rx = (x / (spacing * 4.)).floor() as i64;
     let rz = (z / (spacing * 4.)).floor() as i64;
     let key = Key {
         seed,
+        recipe: p.recipe,
         scale: p.horizontal_scale.to_bits(),
         amplitude: p.amplitude.to_bits(),
         octaves: p.octaves,
@@ -354,20 +492,36 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
         z: rz,
     };
     if let Some(hit) = REGIONS.with(|cache| {
-        cache
-            .borrow()
+        let mut cache = cache.borrow_mut();
+        if let Some((k, value)) = &cache.last {
+            if *k == key {
+                return Some(Rc::clone(value));
+            }
+        }
+        let hit = cache
+            .recent
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, v)| Arc::clone(v))
+            .map(|(_, value)| Rc::clone(value))?;
+        cache.last = Some((key, Rc::clone(&hit)));
+        Some(hit)
     }) {
         return hit;
     }
     // Build outside the cache borrow. A one-node halo includes every incident
     // edge affecting this region, including diagonals and negative boundaries.
-    let watershed = p.recipe == FbmRecipe::Watershed;
+    let watershed = p.recipe.has_watershed_drainage();
     // The row just outside the accumulated halo is needed to choose the
     // downstream link of its outermost contributors.
-    let halo = if watershed { RUNOFF_HOPS + 1 } else { 0 };
+    // A node two cells outside can drain to a jittered node near the side;
+    // the reach's shoulders can then cross it. Include those contributors and
+    // leave the same runoff halo around this enlarged descriptor set.
+    let extra = usize::from(p.recipe.has_landscape_relief());
+    let halo = if watershed {
+        RUNOFF_HOPS + 1 + extra
+    } else {
+        0
+    };
     let side = 8 + 2 * halo;
     let base = [rx * 4 - 2 - halo as i64, rz * 4 - 2 - halo as i64];
     let mut nodes = Vec::with_capacity(side * side);
@@ -389,8 +543,8 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
         authored * p.horizontal_scale / 1800.
     };
     let mut reaches = Vec::new();
-    for j in halo + 1..halo + 7 {
-        for i in halo + 1..halo + 7 {
+    for j in halo + 1 - extra..halo + 7 + extra {
+        for i in halo + 1 - extra..halo + 7 + extra {
             let index = j * side + i;
             let a = nodes[index];
             if a.potential <= 0. {
@@ -399,6 +553,11 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
             let next = downstream(&nodes, side, index);
             let b = nodes[next];
             let lake = next == index;
+            // The river network carves drainage even where discharge is too
+            // low for perennial water. This decision is shared by all
+            // segments of a reach, independent of render resolution.
+            let wet = !p.recipe.has_landscape_relief()
+                || flow.as_ref().is_some_and(|runoff| runoff[index] >= 0.30);
             let width = if lake {
                 let radius = flow.as_ref().map_or(100., |flow| {
                     (38. + 21. * flow[index].sqrt()).min(maximum_lake_radius(p))
@@ -444,6 +603,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                     depth,
                     valley_radius: 3. * width,
                     lake,
+                    wet,
                     owner,
                     segment: 0,
                 });
@@ -464,6 +624,30 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                 };
                 let phase1 = phase(0x5191);
                 let phase2 = phase(0x5192);
+                let signal = |t: f64| {
+                    0.75 * (std::f64::consts::TAU * t + phase1).sin()
+                        + 0.25 * (2. * std::f64::consts::TAU * t + phase2).sin()
+                };
+                let fitted = (p.recipe == FbmRecipe::Eroded).then(|| {
+                    let metres = p.amplitude / 1000.;
+                    let gradient = (a.stage - b.stage).abs() * (p.horizontal_scale / 1800.)
+                        / (length * metres).max(1e-9);
+                    let migration = if wet {
+                        1. - smooth((gradient - 0.006) / 0.033)
+                    } else {
+                        0.
+                    };
+                    eroded_relief::river_offsets(
+                        spacing,
+                        [a.x, a.z],
+                        [b.x, b.z],
+                        [a.stage, b.stage],
+                        metres,
+                        migration,
+                        |t| ((0.68 + 0.55 * migration) * signal(t)).clamp(-1., 1.),
+                        |x, z| land(seed, p, x, z).h,
+                    )
+                });
                 let point = |index: u8| {
                     if index == 0 {
                         return a;
@@ -475,9 +659,10 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                     let px = a.x + t * dx;
                     let pz = a.z + t * dz;
                     let bend = (std::f64::consts::PI * t).sin().powi(2);
-                    let signal = 0.75 * (std::f64::consts::TAU * t + phase1).sin()
-                        + 0.25 * (2. * std::f64::consts::TAU * t + phase2).sin();
-                    let offset = 0.16 * spacing * bend * signal;
+                    let offset = fitted.as_ref().map_or_else(
+                        || 0.16 * spacing * bend * signal(t),
+                        |offsets| offsets[usize::from(index)],
+                    );
                     Node {
                         x: px - dz / length * offset,
                         z: pz + dx / length * offset,
@@ -534,6 +719,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
                         valley_radius: valley_radius
                             .map_or(18. * widest, |radius| radius.max(14. * widest)),
                         lake,
+                        wet,
                         owner,
                         segment,
                     });
@@ -556,7 +742,7 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
             }
         }
     }
-    let value = Arc::new(Region {
+    let value = Rc::new(Region {
         reaches,
         bins,
         origin,
@@ -565,10 +751,11 @@ fn region(seed: u64, p: FbmParams, x: f64, z: f64) -> Arc<Region> {
     REGIONS.with(|cache| {
         let mut c = cache.borrow_mut();
         let capacity = if watershed { 20 } else { REGION_CACHE_CAPACITY };
-        while c.len() >= capacity {
-            c.pop_front();
+        while c.recent.len() >= capacity {
+            c.recent.pop_front();
         }
-        c.push_back((key, Arc::clone(&value)));
+        c.recent.push_back((key, Rc::clone(&value)));
+        c.last = Some((key, Rc::clone(&value)));
     });
     value
 }
@@ -591,11 +778,32 @@ fn project(r: Reach, x: f64, z: f64) -> (f64, f64) {
         r.a.stage + t * (r.b.stage - r.a.stage),
     )
 }
+pub(super) fn climate_surface(seed: u64, p: FbmParams, x: f64, z: f64) -> [f64; 3] {
+    let [temperature, moisture] = climate(seed, p, x, z);
+    [land(seed, p, x, z).h, temperature, moisture]
+}
+
 pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
+    fields_with_relief(seed, p, x, z, true)
+}
+
+fn fields_with_relief(seed: u64, p: FbmParams, x: f64, z: f64, secondary: bool) -> SeededFields {
+    evaluate(seed, p, x, z, secondary).fields
+}
+
+struct TerrainState {
+    fields: SeededFields,
+    outcrop: f64,
+    cut: f64,
+    floodplain: f64,
+    parent_grade: [f64; 2],
+}
+
+fn evaluate(seed: u64, p: FbmParams, x: f64, z: f64, secondary: bool) -> TerrainState {
     let l = land(seed, p, x, z);
     let mut ground = l.h;
     let mut water = if ground < 0. { Some(0.) } else { None };
-    let watershed = p.recipe == FbmRecipe::Watershed;
+    let watershed = p.recipe.has_watershed_drainage();
     let relief = p.amplitude / 1000.;
     let land_water_ceiling = (l.h + WATERSHED_WATER_ABOVE_LAND * relief).max(0.);
     let mut nearest_bank: Option<(f64, f64)> = None;
@@ -619,12 +827,20 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             let profile = if d <= width {
                 stage - depth + (depth + bank_height) * smooth(d / width)
             } else {
-                stage
-                    + bank_height
-                    + (l.h - stage - bank_height) * smooth((d - width) / (outer - width))
+                let t = (d - width) / (outer - width);
+                let shoulder = if p.recipe == FbmRecipe::Eroded {
+                    // Low flood terraces and a higher valley shoulder form
+                    // from the same continuous transverse profile as the bed.
+                    0.56 * smooth(t)
+                        + 0.19 * smooth((t - 0.10) / 0.14)
+                        + 0.25 * smooth((t - 0.57) / 0.36)
+                } else {
+                    smooth(t)
+                };
+                stage + bank_height + (l.h - stage - bank_height) * shoulder
             };
             // Sea-level reach caps may cut the seabed, never raise a ring.
-            let profile = if p.recipe == FbmRecipe::Watershed || (stage == 0. && l.h < 0.) {
+            let profile = if p.recipe.has_watershed_drainage() || (stage == 0. && l.h < 0.) {
                 profile.min(l.h)
             } else {
                 profile
@@ -633,7 +849,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
             let weight = outer * outer / (d * d).max(width * width * 1e-8) * taper * taper;
             weighted_ground += weight * profile;
             total_weight += weight;
-            if watershed && stage > 0. {
+            if watershed && r.wet && stage > 0. {
                 // Use the locally capped water level and a channel-scaled floodplain.
                 // Compare the final combined bed against this stage after blending.
                 let bank_width = (width * 4.5).max(28. * p.horizontal_scale / 1800.);
@@ -642,7 +858,7 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                     nearest_bank = Some((distance, stage.min(land_water_ceiling)));
                 }
             }
-            if d < width {
+            if r.wet && d < width {
                 if r.lake && profile < stage {
                     lake_stage = Some(lake_stage.map_or(stage, |old| old.min(stage)));
                 }
@@ -671,6 +887,20 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
                 .min((ground + WATERSHED_MAX_WATER_DEPTH * relief).max(0.))
         });
     }
+    let mut incision = 0.;
+    if secondary && p.recipe == FbmRecipe::Eroded && relief > 0. && water.is_none() {
+        // Primary channels already have continuous riverbed profiles. Blend
+        // a tributary into the floodplain while preserving the wet stage.
+        let floodplain = nearest_bank.map_or(1., |(distance, _)| smooth((distance - 0.30) / 0.65));
+        let exposure = smooth((ground / relief - 3.) / 14.);
+        if floodplain * exposure > 0. {
+            let cut = eroded_relief::incision(seed, p, x, z, |a, b| {
+                fields_with_relief(seed, p, a, b, false)
+            });
+            incision = floodplain * exposure * cut;
+            ground -= incision;
+        }
+    }
     let [temperature, moisture] = climate(seed, p, x, z);
     let effective_temperature = temperature - 0.00019 * ground.max(0.);
     let riparian = nearest_bank.is_some_and(|(_, stage)| {
@@ -688,25 +918,160 @@ pub(super) fn fields(seed: u64, p: FbmParams, x: f64, z: f64) -> SeededFields {
         SeededBiome::Mountains
     } else if moisture < 0.39 && effective_temperature > 0.48 {
         SeededBiome::Desert
-    } else if p.recipe == FbmRecipe::Watershed && moisture >= 0.56 {
+    } else if p.recipe.has_watershed_drainage() && moisture >= 0.56 {
         SeededBiome::Woodland
-    } else if p.recipe == FbmRecipe::Watershed && moisture < 0.44 {
+    } else if p.recipe.has_watershed_drainage() && moisture < 0.44 {
         SeededBiome::Steppe
     } else {
         SeededBiome::Plains
     };
-    SeededFields {
-        continentalness: l.continental,
-        temperature: effective_temperature,
-        moisture,
-        mountain: l.mountain,
-        biome,
-        ground_height_m: ground,
-        water_height_m: water.filter(|w| *w > ground),
+    let floodplain = nearest_bank.map_or(0., |(distance, stage)| {
+        (1. - smooth(distance))
+            * (1. - smooth(((ground - stage).abs() - 1.5 * relief) / (11. * relief).max(0.01)))
+    });
+    TerrainState {
+        fields: SeededFields {
+            continentalness: l.continental,
+            temperature: effective_temperature,
+            moisture,
+            mountain: l.mountain,
+            biome,
+            ground_height_m: ground,
+            water_height_m: water.filter(|w| *w > ground),
+        },
+        outcrop: l.outcrop,
+        cut: incision / relief.max(0.001),
+        floodplain,
+        parent_grade: l.parent_grade,
     }
 }
+/// Shared canopy probability for native tree candidates and distant cover.
+pub(crate) fn landscape_tree_likelihood(seed: u64, f: SeededFields, x: f64, z: f64) -> f64 {
+    if f.water_height_m.is_some()
+        || matches!(
+            f.biome,
+            SeededBiome::Ocean | SeededBiome::Coast | SeededBiome::Desert
+        )
+    {
+        return 0.;
+    }
+    let groves = noise(x / 260., z / 260., seed ^ 0x5134);
+    let edges = noise(x / 74., z / 74., seed ^ 0x5135);
+    let shelter = groves + 0.46 * edges + 0.7 * (f.moisture - 0.5);
+    let treeline = smooth((f.temperature - 0.26) / 0.14);
+    let moisture = smooth((f.moisture - 0.34) / 0.24);
+    let riparian = if f.biome == SeededBiome::Wetland {
+        0.22
+    } else {
+        0.
+    };
+    treeline * (riparian + (1. - riparian) * moisture * smooth((shelter + 0.15) / 0.50))
+}
+
 pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
-    let f = fields(seed, p, x, z);
+    column_from_fields(seed, p, x, z, fields(seed, p, x, z))
+}
+
+pub(super) fn eroded_column(
+    seed: u64,
+    p: FbmParams,
+    x: f64,
+    z: f64,
+    sample_cover: bool,
+) -> (TerrainColumn, f64, SeededFields) {
+    let state = evaluate(seed, p, x, z, true);
+    let f = state.fields;
+    let ground_top = (f.ground_height_m / voxel_size()).floor() as i64;
+    let visible_top = f
+        .water_height_m
+        .map_or(ground_top, |w| (w / voxel_size()).floor() as i64)
+        .max(ground_top);
+    let nx = x * 1800. / p.horizontal_scale;
+    let nz = z * 1800. / p.horizontal_scale;
+    // Connected patches model differences in soil retention and exposure.
+    // The larger controls come from drainage, bedrock and lapse temperature.
+    let soil = 0.68 * noise(nx / 164., nz / 164., seed ^ 0x5173)
+        + 0.32 * noise(nx / 39., nz / 39., seed ^ 0x5174);
+    let [dx, dz] = state.parent_grade;
+    let parent_grade = dx.hypot(dz);
+    let grade = parent_grade * (1. - 0.85 * state.floodplain);
+    let bare_grade = smooth((grade - 0.67) / 0.78);
+    // The canonical midlatitude snowpack lasts longer on poleward slopes.
+    // Weight the aspect by slope so plains have no preferred exposure.
+    let snow_shelter = -dz / (0.42 + parent_grade);
+    let rock = state.outcrop + 0.62 * smooth((state.cut - 3.5) / 12.) + 0.65 * bare_grade;
+    let cold_retention = 0.10 * (1. - smooth((f.temperature - 0.29) / 0.23));
+    let local_moisture = f.moisture + 0.12 * soil + 0.28 * state.floodplain + cold_retention;
+    let snow_line = 0.218 + 0.143 * smooth((f.moisture - 0.33) / 0.34) + 0.050 * soil
+        - 0.096 * smooth(state.outcrop)
+        - 0.245 * bare_grade
+        + 0.065 * snow_shelter;
+    let highland = smooth((f.mountain - 0.43) / 0.41)
+        * smooth((f.ground_height_m / (p.amplitude / 1000.).max(0.001) - 200.) / 570.);
+    let sand_line = 0.263 + 0.094 * smooth((f.temperature - 0.48) / 0.27);
+    let surface = if visible_top > ground_top {
+        if matches!(
+            f.biome,
+            SeededBiome::Ocean | SeededBiome::Coast | SeededBiome::Desert
+        ) {
+            Material::Sand
+        } else {
+            Material::Soil
+        }
+    } else if f.temperature < snow_line {
+        Material::Snow
+    } else if rock + highland * (0.45 - 0.29 * soil)
+        > 0.42 + 0.34 * smooth((local_moisture - 0.27) / 0.43)
+    {
+        Material::Stone
+    } else if f.ground_height_m < 6. + 7. * soil && f.biome == SeededBiome::Coast
+        || f.temperature > 0.43 && local_moisture < sand_line
+    {
+        Material::Sand
+    } else if local_moisture < 0.267 + 0.082 * highland || rock > 0.47 + 0.17 * soil {
+        Material::Soil
+    } else {
+        Material::Grass
+    };
+    let cover = if sample_cover && surface == Material::Grass && visible_top == ground_top {
+        let broad = noise(nx / 415., nz / 440., seed ^ 0x5134);
+        let edge = noise(nx / 95., nz / 110., seed ^ 0x5135);
+        let climate = smooth((local_moisture - 0.29) / 0.31);
+        let warmth = smooth((f.temperature - 0.245) / 0.14);
+        let canopy = smooth((0.76 * broad + 0.33 * edge + climate * 0.45 + 0.2) / 0.72);
+        let refuge = smooth((local_moisture - 0.29) / 0.24);
+        let shelter = (1. - smooth((rock - 0.18) / 0.52)) * refuge;
+        (shelter * warmth * (1.42 * canopy + 0.56 * state.floodplain)).min(0.95)
+    } else {
+        0.
+    };
+    let ground_subsurface = match surface {
+        Material::Sand | Material::Stone => surface,
+        _ if rock > 0.51 => Material::Stone,
+        _ => Material::Soil,
+    };
+    (
+        TerrainColumn {
+            ground_top,
+            visible_top,
+            ground_surface: surface,
+            ground_subsurface,
+        },
+        cover,
+        SeededFields {
+            moisture: local_moisture,
+            ..f
+        },
+    )
+}
+
+pub(super) fn column_from_fields(
+    seed: u64,
+    p: FbmParams,
+    x: f64,
+    z: f64,
+    f: SeededFields,
+) -> TerrainColumn {
     let ground_top = (f.ground_height_m / voxel_size()).floor() as i64;
     let visible_top = f
         .water_height_m
@@ -740,7 +1105,7 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
         SeededBiome::Mountains => {
             if f.temperature < 0.36 {
                 Material::Snow
-            } else if p.recipe == FbmRecipe::Watershed && f.moisture >= 0.46 {
+            } else if p.recipe.has_watershed_drainage() && f.moisture >= 0.46 {
                 let x = x * 1800. / p.horizontal_scale;
                 let z = z * 1800. / p.horizontal_scale;
                 let patch = noise(x / 190., z / 190., seed ^ 0x5124);
@@ -772,6 +1137,38 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
             }
         }
     };
+    if p.recipe.has_landscape_relief() && visible_top == ground_top {
+        let sx = x * 1800. / p.horizontal_scale;
+        let sz = z * 1800. / p.horizontal_scale;
+        if matches!(
+            f.biome,
+            SeededBiome::Desert | SeededBiome::Mountains | SeededBiome::Tundra
+        ) {
+            let seam = noise(
+                sx / 115. + f.ground_height_m * 0.017,
+                sz / 142.,
+                seed ^ 0x5133,
+            );
+            if f.biome == SeededBiome::Desert {
+                let strata = fbm(seed, sx, sz, 1050., 3, 0.45, 0x5121);
+                if strata + 0.14 * seam > 0.22 {
+                    surface = Material::Stone;
+                }
+            } else {
+                // Snow collects unevenly, and the lower slopes can carry
+                // connected turf even within the mountain province.
+                let warmth = f.temperature - 0.15 * seam;
+                let grass_line = 0.34 - 0.36 * (f.moisture - 0.47).clamp(-0.22, 0.26);
+                surface = if warmth < 0.256 {
+                    Material::Snow
+                } else if warmth > grass_line && (f.moisture > 0.31 || seam < -0.35) {
+                    Material::Grass
+                } else {
+                    Material::Stone
+                };
+            }
+        }
+    }
     if visible_top > ground_top {
         surface = if matches!(
             f.biome,
@@ -802,7 +1199,7 @@ pub(super) fn column(seed: u64, p: FbmParams, x: f64, z: f64) -> TerrainColumn {
 pub(super) fn height_bounds(seed: u64, p: FbmParams, min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
     let a = p.amplitude / 1000.;
     let global = global_height_range(p);
-    if p.recipe == FbmRecipe::Watershed {
+    if p.recipe.has_watershed_drainage() {
         // The affine path supplies the local conservative bounds for this recipe.
         return global;
     }
@@ -1396,6 +1793,134 @@ mod tests {
         }
     }
     #[test]
+    fn slope_sampling_preserves_ridge_values() {
+        for seed in [19, 83, 70231, u64::MAX] {
+            for i in -40..40 {
+                for j in -32..32 {
+                    let x = f64::from(i) * 137.862;
+                    let z = f64::from(j) * 289.119;
+                    for (wavelength, octaves, gain, salt) in
+                        [(3600., 4, 0.48, 0x5105), (1800., 3, 0.45, 0x5106)]
+                    {
+                        let scalar = fbm(seed, x, z, wavelength, octaves, gain, salt);
+                        let [differentiated, _, _] =
+                            fbm_sample::<true>(seed, x, z, wavelength, octaves, gain, salt);
+                        assert_eq!(scalar.to_bits(), differentiated.to_bits());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn landscapes_bounds_and_cover_are_consistent_across_seeds_and_recipes() {
+        use crate::affine_bounds::{bound_native_height, BoundBudget, ColumnBox};
+
+        let cases = [
+            FbmRecipe::Landscapes,
+            FbmRecipe::Landforms,
+            FbmRecipe::Eroded,
+        ]
+        .into_iter()
+        .flat_map(|recipe| [19, 83, 70231].map(|seed| (recipe, seed)));
+        for (recipe, seed) in cases {
+            let p = FbmParams { recipe, ..params() };
+            let baseline = FbmParams {
+                recipe: FbmRecipe::SeededWorld,
+                ..p
+            };
+            let terrain = FbmTerrain::new(seed, p).unwrap();
+            for x in [-9600., -27., 0., 1011.5, 7028., 9612.] {
+                for z in [-9601., -1., 805., 9601.] {
+                    let cell = crate::Cell::from_meters([x, 0., z]);
+                    if z == -9601. {
+                        let a = fields(seed, p, x, -9600. - 0.00001);
+                        let b = fields(seed, p, x, -9600. + 0.00001);
+                        assert!(
+                            (a.ground_height_m - b.ground_height_m).abs() < 0.0002,
+                            "discontinuous ground at a drainage cache boundary: {a:?} {b:?}"
+                        );
+                    }
+                    let first = fields(seed, p, x, z);
+                    // A cache queried by several recipes must not reuse an
+                    // incompatible graph just because seed and location match.
+                    let sampled_regions = region(seed, p, x, z);
+                    let other_regions = region(seed, baseline, x, z);
+                    assert!(!Rc::ptr_eq(&sampled_regions, &other_regions));
+                    assert_eq!(first, fields(seed, p, x, z));
+
+                    let box_ = ColumnBox {
+                        min: [cell.x, cell.z],
+                        size_cells: [32, 32],
+                    };
+                    let bound =
+                        bound_native_height(&terrain, box_, BoundBudget::default()).unwrap();
+                    for dx in [0, 16, 31] {
+                        for dz in [0, 16, 31] {
+                            let x = cell.x + dx;
+                            let z = cell.z + dz;
+                            let (column, cover) = terrain.column_with_tree_cover(x, z);
+                            assert_eq!(column, terrain.column_cells(x, z));
+                            assert!((0. ..=1.).contains(&cover));
+                            if column.visible_top > column.ground_top
+                                || column.ground_surface != Material::Grass
+                            {
+                                assert_eq!(cover, 0.);
+                            }
+                            let top = column.visible_top as f64 * voxel_size();
+                            let [xm, _, zm] = crate::Cell { x, y: 0, z }.center_m();
+                            assert!(
+                                (bound.height_range[0]..=bound.height_range[1]).contains(&top),
+                                "seed {seed} {xm} {zm} {bound:?} missed {top}; land {} fields {:?}",
+                                land(seed, p, xm, zm).h,
+                                fields(seed, p, xm, zm)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn secondary_drainage_cuts_dry_ground_and_crosses_cache_edges() {
+        let p = FbmParams {
+            recipe: FbmRecipe::Eroded,
+            ..params()
+        };
+        let mut substantial_cuts = 0;
+        for seed in [19, 83, 997, 70231] {
+            for i in -6..6 {
+                let x = f64::from(i) * 417.;
+                for seam in [-5280., 0., 5280.] {
+                    let d = 0.00001;
+                    let a = fields(seed, p, x, seam - d);
+                    let b = fields(seed, p, x, seam + d);
+                    assert!(
+                        (a.ground_height_m - b.ground_height_m).abs() < 0.004,
+                        "seed {seed}, seam {x}, {seam}: {a:?} {b:?}"
+                    );
+                }
+            }
+            for z in (-240..2400).step_by(61) {
+                for x in (-180..2300).step_by(67) {
+                    let (x, z) = (f64::from(x), f64::from(z));
+                    let primary = fields_with_relief(seed, p, x, z, false);
+                    let final_fields = fields(seed, p, x, z);
+                    let cut = primary.ground_height_m - final_fields.ground_height_m;
+                    assert!((0. ..=eroded_relief::INCISION_HEIGHT_BOUND).contains(&cut));
+                    assert_eq!(primary.water_height_m, final_fields.water_height_m);
+                    substantial_cuts += usize::from(cut > 3.);
+                }
+            }
+        }
+        assert!(
+            substantial_cuts > 30,
+            "observed {substantial_cuts} substantial cuts"
+        );
+    }
+
+    #[test]
     fn horizontal_scale_preserves_physical_amplitude() {
         let p = params();
         let scaled = FbmParams {
@@ -1418,19 +1943,30 @@ pub(crate) fn reaches_intersecting(
     min: [f64; 2],
     max: [f64; 2],
 ) -> Vec<Reach> {
+    reaches_with_coverage(seed, p, min, max)
+        .into_iter()
+        .map(|(reach, _)| reach)
+        .collect()
+}
+
+/// The flag states that this exact descriptor is defined in every region
+/// covered by the query. A union member can still be a possible contributor.
+pub(crate) fn reaches_with_coverage(
+    seed: u64,
+    p: FbmParams,
+    min: [f64; 2],
+    max: [f64; 2],
+) -> Vec<(Reach, bool)> {
     let spacing = 2400. * p.horizontal_scale / 1800.;
     if max[0] - min[0] > spacing * 4. || max[1] - min[1] > spacing * 4. {
         return Vec::new();
     }
-    let mut out: Vec<Reach> = Vec::new();
+    let mut out: Vec<(Reach, u8)> = Vec::new();
     let mut visited = Vec::with_capacity(4);
     for x in [min[0], max[0]] {
         for z in [min[1], max[1]] {
             let region = region(seed, p, x, z);
-            if visited
-                .iter()
-                .any(|previous| Arc::ptr_eq(previous, &region))
-            {
+            if visited.iter().any(|previous| Rc::ptr_eq(previous, &region)) {
                 continue;
             }
             for &r in &region.reaches {
@@ -1442,17 +1978,18 @@ pub(crate) fn reaches_intersecting(
                 {
                     continue;
                 }
-                if !out
-                    .iter()
-                    .any(|old| old.owner == r.owner && old.segment == r.segment)
-                {
-                    out.push(r);
+                if let Some((_, count)) = out.iter_mut().find(|(old, _)| *old == r) {
+                    *count += 1;
+                } else {
+                    out.push((r, 1));
                 }
             }
             visited.push(region);
         }
     }
-    out
+    out.into_iter()
+        .map(|(reach, count)| (reach, usize::from(count) == visited.len()))
+        .collect()
 }
 
 #[cfg(test)]

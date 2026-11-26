@@ -121,13 +121,19 @@ pub fn generate_visual(world: &World, request: VisualRequest) -> Result<VisualPa
     {
         return Err("edited region requires exact ownership");
     }
-    let retained = if p.recipe == FbmRecipe::Legacy {
+    let retained = if p.recipe == FbmRecipe::Legacy && terrain.dirt_runway().is_none() {
         request.retained_octaves
     } else {
         p.octaves
     };
     let per_sample = match p.recipe {
-        FbmRecipe::SeededWorld | FbmRecipe::Watershed => unreachable!("rejected above"),
+        FbmRecipe::SeededWorld
+        | FbmRecipe::Watershed
+        | FbmRecipe::Landscapes
+        | FbmRecipe::Landforms
+        | FbmRecipe::Eroded => {
+            unreachable!("rejected above")
+        }
         FbmRecipe::Legacy => 3 + retained,
         FbmRecipe::Regional => 11 + p.octaves,
         FbmRecipe::RegionalUnwarped => 9 + p.octaves,

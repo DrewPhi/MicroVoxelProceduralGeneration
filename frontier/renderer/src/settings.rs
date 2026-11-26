@@ -29,15 +29,34 @@ pub struct VisualSettings {
     pub naadf_radius_voxels: u32,
     pub naadf_budget_mib: usize,
     pub vegetation_near_m: f64,
+    pub(crate) vegetation_lod_curve: crate::lod_curve::LodCurve,
+    pub(crate) terrain_lod_curve: crate::lod_curve::LodCurve,
     pub build_mib: usize,
     pub terrain_gpu_mib: usize,
     pub plant_cpu_mib: usize,
     pub plant_gpu_mib: usize,
     pub triangle_budget: usize,
     pub voxel_filter: bool,
+    pub terrain_detail: bool,
+    pub terrain_near_spacing: Option<f32>,
+    pub terrain_near_cells: u32,
+    pub terrain_far_detail: bool,
+    pub terrain_depth_occlusion: bool,
+    pub terrain_mid_detail: bool,
+    pub terrain_mid_spacing: f32,
+    pub terrain_mid_cells: Option<u32>,
+    pub terrain_mid_strips: bool,
+    pub terrain_mid_error_px: f32,
+    pub terrain_mid_tile_error_m: f32,
+    pub terrain_mid_boundary_ascent: bool,
+    pub terrain_gray: bool,
+    pub capture_terrain_distance: bool,
     pub atmosphere: bool,
     /// Bounded directional shadow map; enabled only for the Alpine adaptive scene.
     pub terrain_shadows: bool,
+    pub natural_terrain_light: bool,
+    pub cloud_phase: [f32; 4],
+    pub edge_aa: f32,
     pub fog_density: f32,
     pub ground_bounce: f32,
     pub sunbeams: f32,
@@ -51,6 +70,11 @@ pub struct VisualSettings {
     pub cloud_coverage: f32,
     pub cloud_speed: f32,
     pub overcast: f32,
+    pub day_night: bool,
+    pub clock_start: f64,
+    pub day_length: f64,
+    pub time_speed: f32,
+    pub celestial: Option<crate::celestial::Light>,
 }
 
 impl Default for VisualSettings {
@@ -84,14 +108,33 @@ impl Default for VisualSettings {
             naadf_radius_voxels: 1024,
             naadf_budget_mib: 1024,
             vegetation_near_m: 0.,
+            vegetation_lod_curve: Default::default(),
+            terrain_lod_curve: Default::default(),
             build_mib: 512,
             terrain_gpu_mib: 512,
             plant_cpu_mib: 160,
             plant_gpu_mib: 256,
             triangle_budget: 1_000_000,
             voxel_filter: true,
+            terrain_detail: false,
+            terrain_near_spacing: None,
+            terrain_near_cells: 512,
+            terrain_far_detail: false,
+            terrain_depth_occlusion: false,
+            terrain_mid_detail: false,
+            terrain_mid_spacing: 1.5,
+            terrain_mid_cells: None,
+            terrain_mid_strips: false,
+            terrain_mid_error_px: 0.,
+            terrain_mid_tile_error_m: 0.,
+            terrain_mid_boundary_ascent: false,
+            terrain_gray: false,
+            capture_terrain_distance: false,
             atmosphere: false,
             terrain_shadows: false,
+            natural_terrain_light: false,
+            cloud_phase: [0.; 4],
+            edge_aa: 0.,
             fog_density: 0.000035,
             ground_bounce: 0.65,
             sunbeams: 0.8,
@@ -103,12 +146,21 @@ impl Default for VisualSettings {
             cloud_coverage: 0.48,
             cloud_speed: 0.0015,
             overcast: 0.15,
+            day_night: false,
+            clock_start: 13. * 3600.,
+            day_length: frontier_runtime::weather::SOLAR_DAY_SECONDS,
+            time_speed: 1.,
+            celestial: None,
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SettingsStats {
+    pub can_board: bool,
+    pub flight: Option<crate::aircraft::Instruments>,
+    pub flight_audio: bool,
+    pub flight_camera_motion: bool,
     pub available_mib: Option<usize>,
     pub naadf_status: String,
     pub naadf_gpu_mib: f64,
@@ -132,9 +184,27 @@ pub struct SettingsChanges {
     pub visual_changed: bool,
     pub loading_applied: bool,
     pub naadf_rebuild: bool,
+    pub toggle_airflow: bool,
+    pub toggle_flight_audio: bool,
+    pub toggle_flight_camera_motion: bool,
 }
 
 impl VisualSettings {
+    pub fn light_direction(&self) -> glam::Vec3 {
+        self.celestial.map_or_else(
+            || crate::atmosphere::sun_direction(self.sun_elevation, self.sun_azimuth),
+            crate::celestial::Light::terrain_direction,
+        )
+    }
+
+    pub fn terrain_light_direction(&self) -> glam::Vec3 {
+        if self.beauty || self.celestial.is_some() {
+            self.light_direction()
+        } else {
+            glam::Vec3::new(-0.5, 0.8, -0.3).normalize()
+        }
+    }
+
     /// Reuse the startup/explicit-refresh snapshot: resident engine memory must
     /// not make repeated profile application shrink its own budgets.
     pub fn apply_resource_profile(&mut self, profile: ResourceProfile, alpine: bool) {

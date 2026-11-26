@@ -52,13 +52,8 @@ impl PlantView {
         }
     }
     fn contains(&self, p: &frontier_world::vegetation::PlantRecord) -> bool {
-        use frontier_world::vegetation::{Species, MAX_PLANT_HEIGHT_CELLS, MAX_PLANT_RADIUS_CELLS};
-        let r = if p.species == Species::Rowan {
-            MAX_PLANT_RADIUS_CELLS as f64 * voxel_size()
-        } else {
-            8. * voxel_size()
-        };
-        let h = MAX_PLANT_HEIGHT_CELLS as f64 * voxel_size();
+        let (r, h) = p.extent_cells();
+        let (r, h) = (r as f64 * voxel_size(), h as f64 * voxel_size());
         let center = [
             p.root.x as f64 * voxel_size(),
             p.root.y as f64 * voxel_size() + h * 0.5,
@@ -182,6 +177,9 @@ fn main() -> Result<()> {
     let mut scan = false;
     let mut view_cull = false;
     let mut legacy = false;
+    let mut seed = 7;
+    let mut recipe = FbmRecipe::Alpine;
+    let mut recipe_name = String::from("alpine");
     let mut terrain_cache: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -203,7 +201,7 @@ fn main() -> Result<()> {
                 continue;
             }
             "--help" => {
-                println!("vegetation_reference --output DIR --width 960 --height 540 --spp 16 --threads 8 --extent 512 --center X,Z --eye X,Y,Z --target X,Y,Z --far 200 [--no-vegetation] [--no-shadows] [--scan] [--view-cull] [--cache FILE] [--lighting reference|legacy]");
+                println!("vegetation_reference --output DIR --seed INTEGER --terrain-recipe alpine|landforms|eroded --width 960 --height 540 --spp 16 --threads 8 --extent 512 --center X,Z --eye X,Y,Z --target X,Y,Z --far 200 [--no-vegetation] [--no-shadows] [--scan] [--view-cull] [--cache FILE] [--lighting reference|legacy]");
                 return Ok(());
             }
             _ => {}
@@ -211,6 +209,16 @@ fn main() -> Result<()> {
         let v = args.next().ok_or("missing option value")?;
         match a.as_str() {
             "--output" => out = v.into(),
+            "--seed" => seed = v.parse()?,
+            "--terrain-recipe" => {
+                recipe = match v.as_str() {
+                    "alpine" => FbmRecipe::Alpine,
+                    "landforms" => FbmRecipe::Landforms,
+                    "eroded" => FbmRecipe::Eroded,
+                    _ => return Err("terrain recipe requires alpine, landforms or eroded".into()),
+                };
+                recipe_name = v;
+            }
             "--cache" => terrain_cache = Some(v.into()),
             "--lighting" => {
                 legacy = match v.as_str() {
@@ -247,9 +255,9 @@ fn main() -> Result<()> {
         "reference hemisphere ambient plus directional sun; not matched game beauty"
     };
     let world = World::fbm(
-        7,
+        seed,
         FbmParams {
-            recipe: FbmRecipe::Alpine,
+            recipe,
             ..Default::default()
         },
     )?
@@ -431,7 +439,7 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
         * 1024;
-    std::fs::write(out.join("manifest.json"),format!("{{\"schema\":\"native_vegetation_reference_v1\",\"seed\":7,\"terrain_recipe\":\"alpine\",\"native_voxel_m\":0.0625,\"width\":{width},\"height\":{height},\"spp\":{spp},\"sample_seed\":83,\"threads\":{threads},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":60,\"far\":{far},\"crop_min_cells\":{min:?},\"crop_max_cells\":{max:?},\"view_cull\":{view_cull},\"plant_counts_grass_flower_rowan\":{counts:?},\"plant_voxels\":{voxels},\"snapshot_payload_bytes\":{payload},\"peak_process_rss_bytes\":{peak},\"terrain_build_seconds\":{terrain_seconds},\"plant_build_seconds\":{plant_seconds},\"render_seconds\":{render_seconds},\"vegetation_primary\":{plants},\"shadows\":{shadows},\"shadow_distance_m\":32,\"lighting\":\"{lighting_name}\",\"geometry\":\"actual native terrain columns and native plant cells; no display LOD\",\"scope\":\"bounded exact primary visibility; optional32m local hard shadows, terrain shadows clipped to crop; not full-world lighting or real-time FPS benchmark\"}}\n"))?;
+    std::fs::write(out.join("manifest.json"),format!("{{\"schema\":\"native_vegetation_reference_v1\",\"seed\":{seed},\"terrain_recipe\":\"{recipe_name}\",\"native_voxel_m\":0.0625,\"width\":{width},\"height\":{height},\"spp\":{spp},\"sample_seed\":83,\"threads\":{threads},\"eye\":{eye:?},\"target\":{target:?},\"fov_y_degrees\":60,\"far\":{far},\"crop_min_cells\":{min:?},\"crop_max_cells\":{max:?},\"view_cull\":{view_cull},\"plant_counts_grass_flower_rowan\":{counts:?},\"plant_voxels\":{voxels},\"snapshot_payload_bytes\":{payload},\"peak_process_rss_bytes\":{peak},\"terrain_build_seconds\":{terrain_seconds},\"plant_build_seconds\":{plant_seconds},\"render_seconds\":{render_seconds},\"vegetation_primary\":{plants},\"shadows\":{shadows},\"shadow_distance_m\":32,\"lighting\":\"{lighting_name}\",\"geometry\":\"actual native terrain columns and native plant cells; no display LOD\",\"scope\":\"bounded exact primary visibility; optional32m local hard shadows, terrain shadows clipped to crop; not full-world lighting or real-time FPS benchmark\"}}\n"))?;
     eprintln!(
         "Finished: build {build_seconds:.2}s, render {render_seconds:.2}s, peak RSS {:.1}MiB -> {}",
         peak as f64 / 1048576.,

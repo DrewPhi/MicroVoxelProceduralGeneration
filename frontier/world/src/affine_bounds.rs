@@ -152,6 +152,27 @@ pub fn bound_native_height(
             r: voxel_size() * 0.5,
         })
     };
+    let box_min = std::array::from_fn(|i| center[i] - radius[i] - voxel_size());
+    let box_max = std::array::from_fn(|i| center[i] + radius[i] + voxel_size());
+    let height = if let Some(runway) = terrain
+        .dirt_runway()
+        .filter(|r| r.intersects(box_min, box_max))
+    {
+        let flat = runway.height_m();
+        if runway.covers(box_min, box_max) {
+            Aa::point(flat)
+        } else {
+            let base = height.range();
+            // In the shoulder the native top is a convex combination of
+            // quantized heights, followed by at most one more voxel of floor.
+            Aa::interval(
+                (base.lo.min(flat) - voxel_size()).next_down(),
+                base.hi.max(flat).next_up(),
+            )
+        }
+    } else {
+        height
+    };
     let range = height.range();
     if ![
         height.c,
@@ -979,6 +1000,18 @@ fn segment_distance_lipschitz(x: Aa, z: Aa, a: [f64; 2], b: [f64; 2]) -> I {
 /// materials. Keep this composition paired with the canonical source: the
 /// held-out tests below exercise land, water, banks and cache boundaries.
 fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
+    let base = seeded_primary_elevation(t, x, z, c);
+    if t.params().recipe == FbmRecipe::Eroded {
+        let q = base.range();
+        let incision = crate::terrain::seeded_world::eroded_relief::INCISION_HEIGHT_BOUND
+            * (t.params().amplitude / 1000.);
+        Aa::interval(I::point(q.lo).sub(I::point(incision)).lo, q.hi)
+    } else {
+        base
+    }
+}
+
+fn seeded_primary_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let p = t.params();
     let sx = x.scale(1800.).div_scalar(p.horizontal_scale);
     let sz = z.scale(1800.).div_scalar(p.horizontal_scale);
@@ -1006,11 +1039,39 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let ridge = Aa::point(1.).sub(band(3600., 4, 0.48, 0x5105).abs());
     let hills = band(1800., 3, 0.45, 0x5106);
     let fine = band(90., p.octaves, 0.65 * p.roughness, 0x5107);
-    let authored = if p.recipe == FbmRecipe::Watershed {
+    let authored = if p.recipe.has_watershed_drainage() {
         let strata = band(1050., 3, 0.45, 0x5121);
-        crate::terrain::seeded_world::watershed_relief(
-            continent, mountain, ridge, hills, fine, strata,
-        )
+        use crate::terrain::seeded_world::{jointed_relief, landscape_relief, watershed_relief};
+        let base = watershed_relief(continent, mountain, ridge, hills, fine, strata);
+        if p.recipe.has_landscape_relief() {
+            let moisture = band(27000., 3, 0.5, 0x5104);
+            let ribs = band(620., 2, 0.47, 0x5130);
+            let cuts = band(180., 2, 0.40, 0x5131);
+            let base = landscape_relief(base, mountain, ridge, strata, moisture, ribs, cuts);
+            if p.recipe.has_jointed_relief() {
+                let joints = noise(
+                    sx.div_scalar(23.).add(sz.div_scalar(30.)),
+                    sz.div_scalar(8.5).sub(sx.div_scalar(11.)),
+                    t.seed() ^ 0x5140,
+                    c,
+                );
+                let debris = noise(sx.div_scalar(3.1), sz.div_scalar(3.1), t.seed() ^ 0x5141, c);
+                let rock = base.add(jointed_relief(ridge, mountain, strata, joints, debris));
+                if p.recipe == FbmRecipe::Eroded && rock.range().hi > 1. {
+                    use crate::terrain::seeded_world::eroded_relief::{
+                        BEDROCK_HEIGHT_BOUND, PROVINCE_HEIGHT_BOUND,
+                    };
+                    let bound = BEDROCK_HEIGHT_BOUND + PROVINCE_HEIGHT_BOUND;
+                    rock.add(Aa::interval(-bound, bound))
+                } else {
+                    rock
+                }
+            } else {
+                base
+            }
+        } else {
+            base
+        }
     } else {
         continent
             .scale(400.)
@@ -1029,7 +1090,12 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
         let [lo, hi] = crate::terrain::seeded_world::global_height_range(p);
         return Aa::interval(lo.next_down(), hi.next_up());
     }
-    let reaches = t.seeded_reaches([rx.lo, rz.lo], [rx.hi, rz.hi]);
+    let reaches = crate::terrain::seeded_world::reaches_with_coverage(
+        t.seed(),
+        p,
+        [rx.lo, rz.lo],
+        [rx.hi, rz.hi],
+    );
     let smooth = |v: I| {
         let f = |q: f64| {
             let q = I::point(q.clamp(0., 1.));
@@ -1050,7 +1116,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     let mut possible_lake_lower = f64::INFINITY;
     let mut wet_lakes = Vec::new();
     let mut only_sea_reaches = true;
-    for r in reaches {
+    for (r, full_coverage) in reaches {
         let dx = r.b.x - r.a.x;
         let dz = r.b.z - r.a.z;
         let denom = dx * dx + dz * dz;
@@ -1082,7 +1148,9 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             continue;
         }
         only_sea_reaches &= r.a.stage == 0. && r.b.stage == 0.;
-        let fully_active = stage.lo >= 0. && distance.hi < outer;
+        // Enumeration is a union across cache regions. A candidate found in
+        // one region cannot be required on the opposite side of its edge.
+        let fully_active = full_coverage && stage.lo >= 0. && distance.hi < outer;
         let d = I {
             lo: distance.lo.max(0.),
             hi: distance.hi.min(outer).max(0.),
@@ -1100,7 +1168,15 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
                 .add(I::point(depth).add(bank).mul(smooth(d.div(width))))
         };
         let outer_profile = |d: I| {
-            let q = smooth(d.sub(width).div(I::point(outer).sub(width)));
+            let t = d.sub(width).div(I::point(outer).sub(width));
+            let q = if p.recipe == FbmRecipe::Eroded {
+                smooth(t)
+                    .scale(0.56)
+                    .add(smooth(t.sub(I::point(0.10)).div(I::point(0.14))).scale(0.19))
+                    .add(smooth(t.sub(I::point(0.57)).div(I::point(0.36))).scale(0.25))
+            } else {
+                smooth(t)
+            };
             stage.add(bank).add(base_range.sub(stage).sub(bank).mul(q))
         };
         let mut profile = if d.hi <= width.lo {
@@ -1121,7 +1197,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
                 hi: a.hi.max(b.hi),
             }
         };
-        if p.recipe == FbmRecipe::Watershed {
+        if p.recipe.has_watershed_drainage() {
             profile.lo = profile.lo.min(base_range.lo);
             profile.hi = profile.hi.min(base_range.hi);
         } else if stage.lo == 0. && base_range.lo < 0. {
@@ -1151,7 +1227,8 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
             hi: raw.hi.max(0.),
         };
         contributions.push((weight, profile));
-        if d.lo < width.hi {
+
+        if r.wet && d.lo < width.hi {
             stage_upper = stage_upper.max(stage.hi);
             if r.lake {
                 possible_lake_lower = possible_lake_lower.min(stage.lo);
@@ -1213,7 +1290,7 @@ fn seeded_elevation(t: &FbmTerrain, x: Aa, z: Aa, c: &mut Context) -> Aa {
     ground.lo = (ground.lo.max(hull.lo) - roundoff).next_down();
     ground.hi = (ground.hi.min(hull.hi) + roundoff).next_up();
     let bounded_stage = |stage: I, ground: I| {
-        if p.recipe != FbmRecipe::Watershed {
+        if !p.recipe.has_watershed_drainage() {
             return stage;
         }
         use crate::terrain::seeded_world::{WATERSHED_MAX_WATER_DEPTH, WATERSHED_WATER_ABOVE_LAND};

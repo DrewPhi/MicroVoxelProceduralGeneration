@@ -1,5 +1,216 @@
 # Procedural voxel vegetation
 
+Start a fresh procedural world from `frontier/`.
+
+```sh
+./run.sh --preset eroded --seed random --msaa 1
+```
+
+## Eroded procedural habitats
+
+The Eroded world grows deciduous and conifer forests, saplings, shrubs, and ground
+cover from the same seed as terrain and drainage. The source uses temperature,
+moisture, grade, exposed rock, ground material, and supported neighboring roots.
+Coastal scrub, dry slopes, wetland rushes, alpine cushion plants, and fern and
+moss understory use different bounded growth rules. Forest density and age vary
+across the landscape. Plant silhouettes, branch structure, bloom colors, bark
+markings, and leaf pigments are generated without authored placement lists.
+
+Woody plants grow connected strokes and clusters of occupied native cells.
+A plant record keeps its root, seed, growth cohort, and quarter-turn orientation.
+The default 6.25 cm lattice is shared by terrain and native plants. The source
+checks that branch and leaf geometry remain within its conservative query
+bounds. Wood participates in collision, and the solid-material query can
+assemble woody occupancy without generating leaves. Terrain and fluid readers
+continue to query the underlying terrain column independently of tree height.
+Sparse terrain and plant edits apply through the existing world journal.
+
+Display moves from exact nearby NAADF coverage and native quads to sampled
+branch and crown geometry. The distant crown views store premultiplied linear
+pigment, coverage, normals, and depth projected from sparse sampled voxels of
+the same growth recipe. Trees keep their world-space roots and seed-derived
+heights. Distance templates share a bounded library within each species and
+maturity cohort. Thus individual silhouette and depth are approximations in
+the distant views. Coverage filtering uses the projected pixel footprint.
+Beyond visible individual crowns, terrain uses the cached continuous habitat
+field to blend canopy and forest-floor appearance. This last layer is
+filtered terrain shading.
+
+The growth recipes use original code informed by procedural branching and
+canopy research. Independent native captures use Frontier's CPU vegetation
+oracle. [Weber and Penn](https://doi.org/10.1145/218380.218427)
+[Runions et al.](https://doi.org/10.2312/NPH/NPH07/063-070)
+[Bruneton and Neyret](https://doi.org/10.1111/j.1467-8659.2012.03016.x)
+
+The rolling Eroded preset enables the woodland path automatically at native
+microvoxel sizes. Individual mature trees reach 1,152 m. Ground-cover geometry
+has a 36 m grass window and a 56 m flower window. The outer bands fade by each
+voxel's horizontal distance, with a choice fixed to its canonical cell, so the
+fade can cross geometry tile boundaries. The interactive plant triangle cap
+is 1.5 M. New-world starts use the walking body's exact wood overlap test when
+checking a dry site near a tree. The close shadow map uses actual plant
+geometry. A second grounded projection uses the sampled
+crowns and the current sun direction at aircraft altitude. Its projection
+uses the ground height at the trunk, so shadow position on steep slopes is
+approximate.
+
+### Measured trade-offs
+
+Performance runs used release builds, Vulkan RADV on the integrated Radeon
+760M and Ryzen 5 7640U, 1920 × 1080, one raster sample per pixel, and a 6 km
+terrain clip. GPU spans include rendering, shadow passes, atmosphere and UI.
+Wall-clock frame intervals include CPU preparation and presentation. Data was
+collected in two orders for each performance pair. The ground budget is
+shared between the far silhouettes and near branch and ground refinements.
+
+| Experiment | Before | After |
+| --- | ---: | ---: |
+| Cold stationary woodland, seconds to 90% of 7,969 instances | 19.68–21.67 | 6.05–6.08 |
+| Cold stationary woodland, seconds until all requests were ready | 23.40–25.45 | 14.29–14.54 |
+| Cold stationary woodland, frame p95 (ms) | 21.68–22.31 | 23.04–23.23 |
+| Banked flight, resident crown admission, frame p95 (ms) | 23.03–23.20 | 19.90–20.17 |
+| Woodland walk, selected CPU geometry (MiB), 4 M vs 1.5 M triangle cap | 421–422 | 184–185 |
+| Woodland walk, frame p95 (ms), 4 M vs 1.5 M cap | 19.93–20.97 | 19.54–19.63 |
+
+The final cold comparison kept the 1.5 M triangle cap and changed placement jobs
+from one tile to groups of four. The final view reached the same instance
+count. Cold frame p95 increased modestly while the display filled much sooner.
+Admission and memory measurements are independent comparisons. The lower
+triangle cap preserves the trees admitted but can coarsen individual branches
+and patches. The matched 1.5 M run used the same native terrain and optics and
+finished with 7,931 plant instances, including ground-cover geometry tiles.
+
+In the matched alpine-forest still, the earlier renderer selected 980 trees
+in 139,866 plant triangles. The woodland build selected 5,358 trees in 21,310
+triangles and used about 28 MiB of resident plant GPU data for the sampled
+crowns. These captures compare the delivered images from the same viewpoint
+with changed growth and display rules.
+
+Two cold runs of the final 36 m grass and 1.5 M triangle configuration reached
+7,962 selected plants and tiles. The full-frame p50 was 16.66–16.69 ms,
+p95 was 18.74–19.96 ms, and p99 was 22.53–24.00 ms. GPU p95 was
+15.31–16.77 ms. Ninety percent of the final visible demand arrived in
+5.52–6.09 s, and complete readiness took 11.76–13.19 s in this route.
+Plant resident GPU data was approximately 92 MiB. Whole-process peak RSS
+was 1.30–1.31 GiB, which includes the renderer and startup work.
+The longer 900-frame banked flight measured 16.67–16.69 ms median full-frame
+time, 25.36–26.19 ms at p95, and 16.08–16.09 ms GPU p95. The return leg
+flew lower across the ground and increased demand. The shorter 560-frame
+coherence study measures an earlier part of the route.
+
+The same low flight from a cold application start also ran on the earlier
+build. The renderer selected 2,453 plants or tiles at the end of both earlier
+runs and 6,393–6,396 in the final build. Frame p95 rose from 22.32–22.53 ms to
+27.05–29.03 ms. That pair measures the cost of delivering the richer world.
+
+In the dense forest-floor circuit, full-resolution frame p95 was
+27.90–28.43 ms and GPU p95 was 19.77–20.67 ms. The optional
+`--render-scale .85` reduced GPU p95 to 17.40–17.64 ms and brought median
+frame time from 18.58–19.59 ms to 16.72 ms. Frame p95 stayed at
+27.05–27.28 ms as terrain and vegetation preparation continued during
+movement. This option renders at fewer pixels inside the same 1080p window.
+At the larger 2,190 × 1,435 window confirmed by the capture manifest,
+the ordinary woodland walk measured 24.60–24.98 ms frame p95 and about
+21.0 ms GPU p95. The window system reduced the requested height by five pixels.
+A separate 1,200-frame walk with a 384 MiB CPU plant cache used
+1,023–1,033 MiB peak process RSS, compared with 1,335–1,384 MiB for the
+automatic cache in the same paired runs. Both selected 7,962 plants and tiles.
+Frame p95 was 20.55–20.57 ms with the smaller cache and 19.82–20.44 ms
+with the automatic cache. Set `--plant-cpu-mib 384` to reproduce the smaller
+working-set option.
+Two passes with a 12 m native region measured 21.01–21.52 ms full-frame p95.
+The matched 8 m passes measured 20.12–20.88 ms. The standard radius stays at
+128 cells. At 6.25 cm per cell, `--naadf-radius-voxels 192` selects 12 m.
+
+A level exploration run covered 5 km of seed-83 coastline in 4,200 frames.
+Over 4,175 accepted frame intervals, p95 was 17.17 ms and GPU p95 was 9.28 ms.
+The retained frame-observation window contained up to 7,052 plant candidates
+and reported no unresolved terrain updates. This route stayed at 320 m
+altitude. The lower banked return and dense walking circuit remain heavier.
+The flight, camera and endpoint capture are under
+`output/living-woods/flight-soak-final/`.
+On the 3,600-frame dense ground circuit the player moved about 130 m,
+with a 28.32 ms frame p95 and 20.77 ms GPU p95. The loop completed within the
+1.5 M triangle cap and ended with terrain coverage ready. Whole-process peak
+RSS for that longer circuit was about 1.91 GiB.
+The 384 MiB plant cache repeat used 1.46 GiB peak process RSS and its frame
+p95 was 28.18 ms. Both runs used the same movement inputs. The resulting
+physics positions stayed within 0.52 m of each other throughout.
+
+With the final close vegetation layers enabled, combined native clipping and
+ordered painting brought a fixed 8 m NAADF view to readiness in 0.25 s.
+The unoptimized path took 0.93 s for the same view. Raw color, coverage, and
+depth matched bit for bit. The hardware verification also traced independent
+native first-hit and shadow samples and checked frozen vegetation across all
+four GPU submission modes.
+
+The 9 cm camera-nudge test across 300,490 vegetation-affected pixels used
+2,737 trees entirely in the distant display tier. Per-channel p95 changes
+were 14/255 with point-level sampling, 3/255 with broad filtering and 4/255
+with direction-aware filtering. Against a higher-resolution render of the
+same crown atlas downsampled 2×, point-level and direction-aware p95 were
+22/255, while broad filtering gave 26/255. This measures crown texture
+minification independently of nearby geometry, using a sampled image target.
+The independent native test is a separate bounded visibility reference.
+
+The V9 direct-ray version cost roughly 15–18 ms per foliage pass in dense
+views. Tier boxes were much faster but lost fine canopy depth and silhouette.
+Packing expanded CPU meshes on workers saved roughly 78 MiB of active geometry
+but increased cold stalls. Limiting each frame's result publication delayed
+usable coverage. Preferring new requests in the current heading added little
+coverage during a cold 180-degree turn and delayed completion. The adopted
+placement queue serves all headings. A per-page memo avoids resolving the same
+mature root for multiple shrubs. Across eight seeds and 12,960 placement pages,
+the plant-record fingerprints matched. Root-sampled canopy lighting, two-tap
+near shadows, and near-first plant batches gave no repeatable frame-time gain.
+Sorting only outstanding requests added a resident lookup pass that cost more
+than sorting the entire list. Tests and raw reports are under
+`output/living-woods/`.
+
+The woodland replay uses a fixed world seed and the normal grounded camera.
+Use `--resource-profile development --triangle-budget 1500000` in finite runs
+to reproduce the default interactive triangle cap without changing the
+historical finite-run resource settings.
+
+```sh
+./run.sh --preset eroded --seed 6401777571733596131 \
+  --eye -128,82.5,-128 --target -128.707,82.62,-128.707 \
+  --width 1920 --height 1080 --msaa 1 --capture-far 6000 \
+  --route walk-stop-resume --route-speed 2.5 --route-clock frame \
+  --route-step .0166667 --warmup 24 --frames 1500 \
+  --resource-profile development --triangle-budget 1500000 \
+  --report output/woodland-walk.json
+```
+
+For the 72 m/s banked replay, use seed 83, eye `-4510.648,162.903,1289.008`,
+target `-4400,145.034,1403.2`, and these route settings with the same 1080p
+output and 6 km far plane.
+
+```text
+--walk off --naadf off --rolling-terrain --adaptive-wait-quality
+--route bank-return --route-speed 72 --route-clock frame --route-step .0166667
+--frames 560 --warmup 24
+```
+
+`FRONTIER_VEGETATION_FAR_RADIUS_M=768` selects the shorter crown range for a
+comparison. `FRONTIER_WOODLAND_BATCH_PLACEMENT=0` selects individual placement
+requests. `FRONTIER_WOODLAND_ATLAS_MIPS=0` disables the filtered crown samples.
+
+The final captures under `output/living-woods/` include a matched 1080p
+gallery, four freshly resolved seeds, and camera-matched woodland, meadow,
+and coastal flight videos. The clips use the same frame-indexed camera paths
+and the same 1.5 M vegetation budget. The independent 62 m reference has its
+own lighting and sampling. Its panel is a geometric check of the vegetation
+source at the matching camera position.
+
+The release passed 211 world tests and 605 renderer tests. The explicit
+Radeon vegetation, NAADF and dynamic water parity cases passed as well.
+The final Legacy fixture reproduced the original color, depth and coverage files byte for
+byte. Live Eroded smoke captures covered 1 m voxels, four-sample antialiasing,
+regional evening lighting, and the rainy weather mode.
+
+## Original Alpine checkpoint
+
 Run from `frontier/`:
 
 ```sh

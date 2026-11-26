@@ -44,7 +44,7 @@ impl WalkingCamera {
             world.blocking_material(c)
         })
     }
-    fn advance_presented_sampled(
+    pub(crate) fn advance_presented_sampled(
         &mut self,
         eye: [f64; 3],
         velocity: [f64; 2],

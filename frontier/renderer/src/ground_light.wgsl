@@ -24,6 +24,17 @@ fn outdoor_sun_color(elevation:f32)->vec3<f32> {
     return mix(vec3(2.12,1.44,0.83),vec3(2.,1.78,1.46),smoothstep(.06,.64,elevation));
 }
 
+fn leaf_transmitted_light(
+    ray:vec3f, normal:vec3f, sun:vec3f, sunlight:vec3f,
+    transmission:f32, visibility:f32, ao:f32,
+)->vec3f {
+    let alignment=max(dot(ray,sun),0.);
+    let forward=alignment*alignment*alignment*alignment;
+    let back=max(-dot(normal,sun),0.);
+    return sunlight*vec3f(.88,1.,.44)*.5*transmission
+        *(.25+.75*forward)*back*(.08+.92*visibility)*ao*ao;
+}
+
 // First-bounce approximation for an illuminated ground hemisphere. The same
 // sky/shadow inputs drive all receivers, and only diffuse illumination changes.
 fn ground_irradiance(position:vec3<f32>,normal:vec3<f32>,sun:vec3<f32>,

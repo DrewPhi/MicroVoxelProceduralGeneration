@@ -27,8 +27,7 @@ pub fn immutable_surface_world(world: &World) -> Result<World> {
     let source = world
         .fbm_terrain()
         .ok_or("live water requires FBM terrain")?;
-    Ok(World::fbm(world.seed(), source.params())?
-        .with_vegetation_enabled(world.vegetation_enabled()))
+    Ok(World::from_fbm_terrain(source.clone()).with_vegetation_enabled(world.vegetation_enabled()))
 }
 
 pub struct LiveWater {

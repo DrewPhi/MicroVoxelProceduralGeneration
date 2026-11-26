@@ -585,6 +585,14 @@ fn source_identity_with_config(w: &World, appearance: AppearanceConfig) -> io::R
             put(&mut b, v.to_bits());
         }
         put(&mut b, p.octaves as u64);
+        if let Some(runway) = t.dirt_runway() {
+            put(&mut b, u64::from_le_bytes(*b"DIRTRWY1"));
+            for center in runway.center_m() {
+                put(&mut b, center.to_bits());
+            }
+            put(&mut b, runway.top_cells() as u64);
+            put(&mut b, u64::from(runway.along_x()));
+        }
     } else {
         put(&mut b, 0);
     }

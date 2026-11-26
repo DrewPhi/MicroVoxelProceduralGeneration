@@ -71,12 +71,12 @@ impl TerrainSummary {
 /// Bounds apply to the unedited source only, never arbitrary volume owners.
 pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
     let p = terrain.params();
-    match p.recipe {
+    let range = match p.recipe {
         FbmRecipe::SeededWorld => [
             (-402.0 * p.amplitude / 1000.0).next_down() - voxel_size(),
             (1663.0 * p.amplitude / 1000.0).next_up(),
         ],
-        FbmRecipe::Watershed => {
+        FbmRecipe::Watershed | FbmRecipe::Landscapes | FbmRecipe::Landforms | FbmRecipe::Eroded => {
             let [lo, hi] = crate::terrain::seeded_world::global_height_range(p);
             [lo.next_down() - voxel_size(), hi.next_up()]
         }
@@ -92,7 +92,13 @@ pub fn fbm_height_envelope(terrain: &FbmTerrain) -> [f64; 2] {
             -103.5 * p.amplitude / 1000.0 - voxel_size(),
             423.5 * p.amplitude / 1000.0,
         ],
-    }
+    };
+    terrain.dirt_runway().map_or(range, |r| {
+        [
+            (range[0].min(r.height_m()) - voxel_size()).next_down(),
+            range[1].max(r.height_m()),
+        ]
+    })
 }
 
 fn alpine_microrelief_amplitude() -> f64 {
@@ -105,6 +111,9 @@ fn alpine_microrelief_amplitude() -> f64 {
 /// Each partial <= 1.6(1 + (15/8)2sqrt(2)); Euclidean norm < 16.
 /// Clamping/absolute value preserve these bounds; warp uses the Jacobian norm.
 pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
+    if terrain.dirt_runway().is_some() {
+        return f64::INFINITY;
+    }
     let p = terrain.params();
     let weighted_frequency = |start: f64, count: u32, gain: f64| {
         let (mut sum, mut norm, mut weight, mut f) = (0.0, 0.0, 1.0, start);
@@ -119,7 +128,11 @@ pub fn conservative_fbm_slope(terrain: &FbmTerrain) -> f64 {
     let n = 16.0;
     match p.recipe {
         // Local river banks are bounded through the source-specific affine path.
-        FbmRecipe::SeededWorld | FbmRecipe::Watershed => f64::INFINITY,
+        FbmRecipe::SeededWorld
+        | FbmRecipe::Watershed
+        | FbmRecipe::Landscapes
+        | FbmRecipe::Landforms
+        | FbmRecipe::Eroded => f64::INFINITY,
         FbmRecipe::Alpine => {
             // Work in authored scene meters then scale to physical meters.
             // smooth(1-d²) has |gradient|<=3|gradient d| on its active support.
@@ -219,7 +232,10 @@ pub fn conservative_grid_error_at(
     let p = terrain.params();
     // The older floating-point operation-count certificate predates Alpine's
     // spatial masks. Its affine bounds independently certify Alpine regions.
-    if p.recipe == FbmRecipe::Alpine || p.recipe.has_static_water() {
+    if p.recipe == FbmRecipe::Alpine
+        || p.recipe.has_static_water()
+        || terrain.dirt_runway().is_some()
+    {
         return GeometryError::Uncertified;
     }
     if p.validate().is_err() {

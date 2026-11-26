@@ -3,6 +3,11 @@ mod adaptive_geometry;
 mod adaptive_gpu;
 mod adaptive_stream;
 mod adaptive_view;
+mod aircraft;
+mod aircraft_damage;
+mod aircraft_model;
+mod aircraft_shadow;
+mod airflow_preview;
 mod appearance_hierarchy;
 mod appearance_map;
 mod appearance_method;
@@ -10,12 +15,22 @@ mod appearance_visibility;
 mod atmosphere;
 pub mod brick_ray;
 mod build_memory;
+mod celestial;
+mod cloud_shape;
 mod cold_source_cache;
 pub mod column_mesh;
 mod derived_disk_cache;
 mod derived_disk_writeback;
+mod destruction;
+mod destruction_gpu;
 mod development_resources;
 mod discrete_water_live;
+mod flight_audio;
+mod flight_feedback;
+mod flight_instruments;
+mod foreground_depth;
+mod formation_mesh;
+mod formation_shadow;
 pub mod gpu_ordered_profiles;
 mod gpu_probe;
 pub mod gpu_summary_probe;
@@ -25,7 +40,9 @@ mod hybrid;
 mod hybrid_gpu;
 mod integrated_profiles;
 mod live_water;
+mod lod_curve;
 pub mod mesh;
+mod model_preview;
 mod moving_water_live;
 mod naadf;
 mod native_fbm;
@@ -38,6 +55,7 @@ mod player_edit;
 mod procedural_water_live;
 mod rolling_terrain;
 mod rolling_walk;
+mod rolling_woodland_shadow;
 mod settings;
 mod settings_ui;
 #[cfg(test)]
@@ -47,6 +65,7 @@ mod spatial_appearance;
 mod streaming_haze;
 mod surface_compare;
 mod terrain;
+mod terrain_horizon;
 mod terrain_light;
 mod vegetation;
 mod vegetation_generation_lab;
@@ -57,6 +76,10 @@ mod vegetation_scene;
 mod viewer_visual;
 pub mod volume;
 mod walking;
+mod weather_panel;
+mod woodland_impostor;
+mod woodland_volume;
+mod world_weather;
 
 use frontier_world::{voxel_size, Cell, Material, World};
 use glam::{DVec3, Mat4, Vec3};
@@ -80,6 +103,7 @@ pub const SEED: u64 = 7;
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const SHADER: &str = include_str!("voxel.wgsl");
+const NATIVE_CAMERA_BYTES: u64 = 112;
 /// Specialize the shared cell/meter conversions once per shader module.
 fn voxel_shader<'a>(source: impl Into<std::borrow::Cow<'a, str>>) -> std::borrow::Cow<'a, str> {
     let source = source.into();
@@ -203,6 +227,7 @@ struct Camera {
     position: DVec3,
     yaw: f32,
     pitch: f32,
+    roll: f32,
     far: f32,
     fov_y: f32,
 }
@@ -216,6 +241,7 @@ impl Camera {
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
+            roll: 0.,
         }
     }
     /// Headless comparisons must apply the requested eye before planning coverage.
@@ -237,7 +263,14 @@ impl Camera {
     fn matrix(&self, origin: DVec3, aspect: f32) -> Mat4 {
         let eye = (self.position - origin).as_vec3();
         Mat4::perspective_rh(self.fov_y.to_radians(), aspect, 0.025, self.far)
-            * Mat4::look_to_rh(eye, self.direction(), Vec3::Y)
+            * Mat4::look_to_rh(eye, self.direction(), self.view_up())
+    }
+    fn view_up(&self) -> Vec3 {
+        // Derive the zero-roll frame from heading even with the nose vertical.
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let level_up = Vec3::new(-sin_yaw * sin_pitch, cos_pitch, -cos_yaw * sin_pitch);
+        glam::Quat::from_axis_angle(self.direction().normalize(), self.roll) * level_up
     }
 }
 
@@ -261,6 +294,11 @@ struct BrickCacheMetrics {
 }
 
 struct Gpu {
+    airframe: Option<aircraft_model::Model>,
+    airframe_pose: Option<aircraft::Presentation>,
+    fragments: Option<destruction_gpu::Display>,
+    weather_frame: Option<Arc<world_weather::Frame>>,
+    weather_fraction: f32,
     visual_settings: Option<settings::VisualSettings>,
     regional_appearance: bool,
     alpine_appearance: bool,
@@ -275,6 +313,7 @@ struct Gpu {
     pages: Option<page_terrain::PageGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
     rolling: Option<rolling_terrain::RollingTerrain>,
+    formation_mesh: formation_mesh::FormationMesh,
     rolling_probe_depth: std::cell::Cell<Option<f32>>,
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
@@ -387,7 +426,7 @@ impl Gpu {
         }
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera relative matrix"),
-            size: 96,
+            size: NATIVE_CAMERA_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -538,6 +577,12 @@ impl Gpu {
             pages: None,
             adaptive: None,
             rolling: None,
+            formation_mesh: Default::default(),
+            airframe: None,
+            airframe_pose: None,
+            fragments: None,
+            weather_frame: None,
+            weather_fraction: 0.,
             rolling_probe_depth: std::cell::Cell::new(None),
             vegetation: None,
             vegetation_stream: None,
@@ -719,6 +764,11 @@ impl Gpu {
                 self.format
             },
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if depth {
+                    wgpu::TextureUsages::TEXTURE_BINDING
+                } else {
+                    wgpu::TextureUsages::empty()
+                }
                 | if depth && self.sample_count > 1 {
                     wgpu::TextureUsages::empty()
                 } else {
@@ -746,6 +796,58 @@ impl Gpu {
             view_formats: &[],
         }))
     }
+    fn set_aircraft_pose(
+        &mut self,
+        world: &World,
+        aircraft: Option<&aircraft::Aircraft>,
+        parked: Option<&(aircraft::Aircraft, Camera)>,
+        camera: Camera,
+    ) {
+        self.airframe_pose = aircraft
+            .map(|plane| plane.presentation(camera))
+            .or_else(|| parked.map(|(plane, pose)| plane.presentation(*pose)));
+        if self.airframe_pose.is_some()
+            && self
+                .airframe
+                .as_ref()
+                .is_none_or(|model| model.samples != self.sample_count)
+        {
+            self.airframe = Some(aircraft_model::Model::new(
+                &self.device,
+                self.scene_format,
+                self.sample_count,
+            ));
+        }
+        if let (Some(model), Some(pose)) = (&mut self.airframe, self.airframe_pose) {
+            if let Some(plane) = aircraft.or_else(|| parked.map(|(plane, _)| plane)) {
+                model.set_structure(&self.device, plane.attached());
+            }
+            model.update_airflow(
+                &self.device,
+                &self.queue,
+                aircraft.and_then(aircraft::Aircraft::airflow),
+            );
+            model.update_chart(world, &self.queue, pose.pose.position);
+        }
+    }
+
+    fn update_fragments(&mut self, bodies: &[destruction::Fragment], camera: Camera) {
+        if !bodies.is_empty()
+            && self
+                .fragments
+                .as_ref()
+                .is_none_or(|display| display.samples != self.sample_count)
+        {
+            self.fragments = Some(destruction_gpu::Display::new(
+                &self.device,
+                self.scene_format,
+                self.sample_count,
+            ));
+        }
+        if let Some(display) = &mut self.fragments {
+            display.update(&self.device, &self.queue, bodies, camera);
+        }
+    }
     fn draw(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -764,6 +866,71 @@ impl Gpu {
             Instant::now(),
         );
         self.draw_encode_calls.set(self.draw_encode_calls.get() + 1);
+        if let (Some(model), Some(pose)) = (&self.airframe, self.airframe_pose) {
+            let sun = self
+                .visual_settings
+                .as_ref()
+                .map_or(Vec3::Y, |s| s.light_direction());
+            model.prepare(
+                &self.queue,
+                *camera,
+                pose,
+                width as f32 / height as f32,
+                sun,
+                self.water_time.get(),
+            );
+        }
+        if let (Some(rolling), Some(settings)) = (&self.rolling, &self.visual_settings) {
+            if self.rolling_probe_depth.get().is_none() {
+                rolling.encode_terrain_horizon(&self.queue, encoder, settings);
+            }
+            let caster = self.airframe_pose.filter(|_| {
+                !settings.visibility_benchmark && self.rolling_probe_depth.get().is_none()
+            });
+            let rock_mesh = self
+                .formation_mesh
+                .revision
+                .filter(|_| {
+                    settings.terrain_shadows
+                        && !settings.terrain_gray
+                        && self.rolling_probe_depth.get().is_none()
+                })
+                .map(|revision| {
+                    (
+                        revision,
+                        self.origin,
+                        &self.vertices,
+                        &self.indices,
+                        self.index_count,
+                    )
+                });
+            rolling.formation_shadow().encode(
+                &self.queue,
+                encoder,
+                *camera,
+                settings.terrain_light_direction(),
+                rock_mesh,
+            );
+            let shadow = rolling.aircraft_shadow();
+            if let (Some(model), Some(projection)) = (
+                self.airframe.as_ref(),
+                shadow.prepare(
+                    &self.queue,
+                    *camera,
+                    caster.map(|p| p.pose),
+                    settings.terrain_light_direction(),
+                ),
+            ) {
+                model.draw_shadow(&self.queue, encoder, &shadow.depth, projection);
+            }
+        }
+        if let Some(fragments) = &self.fragments {
+            let sun = self
+                .visual_settings
+                .as_ref()
+                .map_or(Vec3::Y, |s| s.light_direction());
+            fragments.prepare(&self.queue, *camera, width as f32 / height as f32, sun);
+        }
         self.queue.write_buffer(
             &self.uniform,
             0,
@@ -791,6 +958,17 @@ impl Gpu {
         ];
         self.queue
             .write_buffer(&self.uniform, 80, bytemuck::cast_slice(&paint_origin));
+        let formation_light = self.visual_settings.as_ref().map_or([0.; 4], |s| {
+            s.terrain_light_direction()
+                .extend(if self.formation_mesh.revision.is_some() {
+                    1.
+                } else {
+                    0.
+                })
+                .to_array()
+        });
+        self.queue
+            .write_buffer(&self.uniform, 96, bytemuck::cast_slice(&formation_light));
         if let Some(brick) = &self.brick {
             brick.update_camera_mode(
                 &self.queue,
@@ -837,7 +1015,46 @@ impl Gpu {
             if let Some(t) = &plant_timings {
                 t.shadow_start(encoder);
             }
-            if adaptive.near_shadows_active() {
+            if let Some(rolling) = &self.rolling {
+                let shadow = rolling.woodland_shadow();
+                let canopy = rolling.canopy_ground_shade();
+                if let (Some(settings), Some(vegetation)) =
+                    (&self.visual_settings, &self.vegetation)
+                {
+                    if let Some((view, bind)) = canopy.prepare(
+                        &self.queue,
+                        *camera,
+                        f64::from(self.medium_ground_height),
+                        settings,
+                    ) {
+                        if !vegetation.draw_canopy_ground_shade(
+                            encoder,
+                            &self.bind_group,
+                            view,
+                            bind,
+                        ) {
+                            canopy.reset(&self.queue);
+                        }
+                    }
+                    if let Some(bind) = shadow.prepare(
+                        &self.queue,
+                        *camera,
+                        f64::from(self.medium_ground_height),
+                        settings,
+                        || vegetation.tree_shadow_depth_signature(),
+                    ) {
+                        vegetation.draw_rolling_tree_shadows(
+                            encoder,
+                            &self.bind_group,
+                            &shadow.receiver.depth,
+                            bind,
+                        );
+                    }
+                } else {
+                    shadow.receiver.set_receiver(&self.queue, None, 0.);
+                    canopy.reset(&self.queue);
+                }
+            } else if adaptive.near_shadows_active() {
                 if let Some(vegetation) = &self.vegetation {
                     if !adaptive.reuse_near_plant_shadow(
                         camera,
@@ -881,6 +1098,7 @@ impl Gpu {
                 settings,
                 self.water_time.get(),
                 self.rolling_probe_depth.get().is_some(),
+                self.vegetation_stats.tree_radius_m,
             );
         }
         if let Some(adaptive) = &self.adaptive {
@@ -911,11 +1129,41 @@ impl Gpu {
                 }
             }
         }
+        let foreground = self
+            .rolling
+            .as_ref()
+            .and_then(|terrain| terrain.foreground.as_ref())
+            .filter(|_| {
+                capture_layer == naadf::CaptureLayer::Scene
+                    && self.rolling_probe_depth.get().is_none()
+                    && (naadf_bounds.is_some() || self.vegetation_stats.selected_instances > 0)
+            });
+        let (first_timestamps, remaining_timestamps) = if foreground.is_some() {
+            let first = timestamps.as_ref().and_then(|t| {
+                t.beginning_of_pass_write_index
+                    .map(|i| wgpu::RenderPassTimestampWrites {
+                        query_set: t.query_set,
+                        beginning_of_pass_write_index: Some(i),
+                        end_of_pass_write_index: None,
+                    })
+            });
+            let last = timestamps.and_then(|t| {
+                t.end_of_pass_write_index
+                    .map(|i| wgpu::RenderPassTimestampWrites {
+                        query_set: t.query_set,
+                        beginning_of_pass_write_index: None,
+                        end_of_pass_write_index: Some(i),
+                    })
+            });
+            (first, last)
+        } else {
+            (timestamps, None)
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
-                resolve_target: resolve,
+                resolve_target: if foreground.is_some() { None } else { resolve },
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.34,
@@ -934,7 +1182,7 @@ impl Gpu {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: timestamps,
+            timestamp_writes: first_timestamps,
             occlusion_query_set: None,
         });
         if let Some(t) = &plant_timings {
@@ -985,8 +1233,51 @@ impl Gpu {
         if let Some(t) = &plant_timings {
             t.color_end(&mut pass);
         }
+        let mut occlusion = None;
+        if let Some(foreground) = foreground {
+            drop(pass);
+            occlusion = Some(foreground.encode(&self.device, encoder, depth, width, height));
+            pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rolling terrain behind foreground"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: resolve,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: remaining_timestamps,
+                occlusion_query_set: None,
+            });
+        }
         if let Some(rolling) = &self.rolling {
-            rolling.draw(&mut pass);
+            rolling.draw(&mut pass, occlusion.as_ref());
+            if self.formation_mesh.revision.is_some() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vertices.slice(..));
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+            if let Some(fragments) = &self.fragments {
+                fragments.draw(&mut pass);
+            }
+            if let Some(model) = self
+                .airframe
+                .as_ref()
+                .filter(|_| self.airframe_pose.is_some())
+            {
+                model.draw(&mut pass);
+            }
             return;
         }
         if let Some(adaptive) = &self.adaptive {
@@ -1126,6 +1417,7 @@ impl Gpu {
                 && (s.atmosphere
                     || s.exposure != 1.
                     || s.render_scale != 1.
+                    || s.edge_aa > 0.
                     || self.scene_format != self.format)
                 && !floating
         });
@@ -1150,6 +1442,13 @@ impl Gpu {
                 self.camera_submerged.get(),
                 0.,
             );
+            atmosphere.set_world_weather(
+                &self.queue,
+                self.weather_frame.as_deref(),
+                camera.position,
+                self.weather_fraction,
+                false,
+            );
             atmosphere.prepare(
                 &self.queue,
                 camera
@@ -1159,6 +1458,11 @@ impl Gpu {
                 camera.position,
                 settings,
                 0.,
+                if self.rolling.is_some() {
+                    camera.far
+                } else {
+                    0.
+                },
             );
             self.draw(
                 &mut encoder,
@@ -1361,7 +1665,13 @@ impl Gpu {
             }
         }
         std::fs::write(path.with_extension("linear_rgb.f32"), linear)?;
-        let color_encoding = if floating {
+        let color_encoding = if self
+            .visual_settings
+            .as_ref()
+            .is_some_and(|s| s.capture_terrain_distance)
+        {
+            "rolling_ray_distance_metres"
+        } else if floating {
             "linear_rgb_float32_render_target"
         } else {
             "linear_rgb_decoded_from_8bit_target"
@@ -1626,6 +1936,14 @@ impl Default for EditTest {
 
 struct Viewer {
     rolling_terrain: bool,
+    aircraft: Option<aircraft::Aircraft>,
+    parked_aircraft: Option<(aircraft::Aircraft, Camera)>,
+    flight_wind: Vec3,
+    airborne_radar: bool,
+    world_weather: Option<world_weather::Session>,
+    weather_clock: world_weather::Clock,
+    flight_audio: flight_audio::Audio,
+    destruction: destruction::Scene,
     live_water: Option<discrete_water_live::WaterDriver>,
     player_edit: player_edit::PlayerEdit,
     queued_player_action: Option<(frontier_world::edit::EditTransaction, Instant, Camera)>,
@@ -1726,6 +2044,54 @@ struct Viewer {
     terrain_center_lag_end_m: f64,
 }
 impl Viewer {
+    fn set_walking(&mut self, walking: bool) {
+        self.visual_settings.walking = walking;
+        self.walking.reset();
+        if let Some(ui) = &mut self.settings_ui {
+            ui.set_walking(walking);
+        }
+    }
+    fn leave_aircraft(&mut self) -> bool {
+        let Some((pose, walker)) = self
+            .aircraft
+            .as_mut()
+            .and_then(|p| p.step_out(&self.world, self.camera))
+        else {
+            return false;
+        };
+        self.parked_aircraft = self.aircraft.take().map(|p| (p, pose));
+        self.camera = walker;
+        self.set_walking(true);
+        true
+    }
+    fn use_aircraft(&mut self) {
+        if self.aircraft.is_some() {
+            self.leave_aircraft();
+        } else if let Some((_, pose)) = &self.parked_aircraft {
+            if aircraft::Aircraft::can_board(&self.world, *pose, self.camera.position) {
+                let (plane, pose) = self.parked_aircraft.take().unwrap();
+                self.camera = pose;
+                self.aircraft = Some(plane);
+                self.set_walking(false);
+            }
+        } else {
+            let mut pose = self.camera;
+            let mut plane = aircraft::Aircraft::enter(&self.world, &mut pose);
+            plane.enable_damage();
+            plane.set_wind(self.flight_wind);
+            plane.radar.equipped = self.airborne_radar;
+            if !self.visual_settings.walking || plane.on_ground() {
+                self.camera = pose;
+                self.aircraft = Some(plane);
+                self.set_walking(false);
+            }
+        }
+    }
+    fn display_camera(&self) -> Camera {
+        self.aircraft
+            .as_ref()
+            .map_or(self.camera, |plane| plane.display_camera(self.camera))
+    }
     fn begin_teleport(&mut self, destination: [f64; 2]) -> Result<()> {
         self.player_edit.cancel();
         let Some(stream) = &mut self.hybrid_stream else {
@@ -2180,6 +2546,9 @@ impl Viewer {
     fn grab(&mut self, grabbed: bool) {
         if !grabbed {
             self.player_edit.cancel();
+            if let Some(plane) = &mut self.aircraft {
+                plane.set_looking(false);
+            }
         }
         if let Some(window) = &self.window {
             if grabbed {
@@ -2264,61 +2633,212 @@ impl Viewer {
                 ));
             }
         }
-        self.update_visual_ui(interval.as_secs_f64() * 1000.)?;
+        let weather_frame = self.world_weather.as_ref().map(|weather| weather.frame());
+        self.weather_clock.tick(
+            interval.as_secs_f64().min(0.25),
+            self.visual_settings.time_speed,
+            self.visual_settings.day_length,
+            weather_frame.as_ref().map(|frame| frame.current.time),
+        );
+        let weather_fraction = weather_frame
+            .as_ref()
+            .map_or(0., |frame| frame.fraction(self.weather_clock.seconds));
+        self.update_visual_ui(
+            interval.as_secs_f64() * 1000.,
+            weather_frame.as_deref(),
+            weather_fraction,
+        )?;
+        self.visual_settings.celestial = self.visual_settings.day_night.then(|| {
+            weather_frame.as_ref().map_or_else(
+                || celestial::Light::at(self.weather_clock.solar_day()),
+                |frame| frame.sky_light(&self.weather_clock),
+            )
+        });
+        if let (Some(weather), Some(frame)) = (&mut self.world_weather, &weather_frame) {
+            weather.request_step(
+                frame,
+                &self.weather_clock,
+                self.visual_settings.time_speed,
+                self.camera.position,
+            );
+        }
         self.update_resource_throughput(interval.as_secs_f64() * 1000.)?;
-        if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
-            let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
-            let right = forward.cross(Vec3::Y);
-            let mut movement = Vec3::ZERO;
-            for (key, direction) in [
-                (KeyCode::KeyW, forward),
-                (KeyCode::KeyS, -forward),
-                (KeyCode::KeyD, right),
-                (KeyCode::KeyA, -right),
-                (KeyCode::Space, Vec3::Y),
-                (KeyCode::ControlLeft, -Vec3::Y),
-                (KeyCode::ControlRight, -Vec3::Y),
-            ] {
-                if self.keys.contains(&key) {
-                    movement += direction;
-                }
-            }
-            let fast_flight = self.fbm
-                || (!self.visual_settings.walking
-                    && self.world.fbm_terrain().is_some_and(|terrain| {
-                        terrain.params().recipe == frontier_world::FbmRecipe::Watershed
-                    }));
-            let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
-                || self.keys.contains(&KeyCode::ShiftRight)
-            {
-                if fast_flight {
-                    80.
+        let watching_weather = self
+            .settings_ui
+            .as_ref()
+            .is_some_and(|ui| ui.radar_open() && !ui.menu_open());
+        if !self.benchmark_input_lock
+            && (self.grabbed || watching_weather && self.aircraft.is_some())
+            && self.pending_teleport.is_none()
+        {
+            if let Some(plane) = &mut self.aircraft {
+                let axis = |positive, negative| {
+                    f32::from(self.keys.contains(&positive))
+                        - f32::from(self.keys.contains(&negative))
+                };
+                let was_grounded = plane.on_ground();
+                let controls = aircraft::FlightInput {
+                    roll: axis(KeyCode::KeyD, KeyCode::KeyA),
+                    pitch: axis(KeyCode::KeyS, KeyCode::KeyW),
+                    rudder: axis(KeyCode::KeyE, KeyCode::KeyQ),
+                    throttle_rate: f32::from(
+                        self.keys.contains(&KeyCode::ShiftLeft)
+                            || self.keys.contains(&KeyCode::ShiftRight),
+                    ) - f32::from(
+                        self.keys.contains(&KeyCode::ControlLeft)
+                            || self.keys.contains(&KeyCode::ControlRight),
+                    ),
+                    brake: self.keys.contains(&KeyCode::Space),
+                    keyboard: true,
+                };
+                let flying = if let Some(frame) = &weather_frame {
+                    let position = plane.exterior_pose().unwrap_or(self.camera).position;
+                    let density = frame.density_ratio(position, weather_fraction);
+                    plane.advance_in_weather(
+                        &mut self.camera,
+                        &self.world,
+                        controls,
+                        dt,
+                        |position| frame.interpolate_wind(position, weather_fraction),
+                        density,
+                    )
                 } else {
-                    15.
+                    plane.advance(&mut self.camera, &self.world, controls, dt)
+                };
+                if !flying {
+                    eprintln!("Aircraft impact at {:?}", self.camera.position);
+                    self.flight_audio.impact();
+                    let mut plane = self.aircraft.take().unwrap();
+                    plane.wreck(self.camera);
+                    if let Some(damage) = &mut plane.damage {
+                        let view = self.camera;
+                        let wreck = view.position;
+                        let offset = -view.direction().as_dvec3() * 8. + DVec3::Y * 4.;
+                        let back = frontier_world::raycast_solid(
+                            &self.world,
+                            wreck.to_array(),
+                            offset.to_array(),
+                            offset.length(),
+                        )
+                        .map_or(offset.length(), |hit| (hit.distance - 0.15).max(0.));
+                        self.camera.position += offset.normalize() * back;
+                        self.camera.position.y = self.camera.position.y.max(
+                            self.world
+                                .height_m(self.camera.position.x, self.camera.position.z)
+                                + 1.8,
+                        );
+                        if self.camera.position.distance_squared(wreck) > 0.01 {
+                            self.camera.set_explicit_pose(
+                                Some(self.camera.position.to_array()),
+                                Some(wreck.to_array()),
+                            );
+                        }
+                        self.camera.roll = 0.;
+                        self.destruction.receive(&mut self.world, damage);
+                    }
+                    self.set_walking(false);
+                } else if was_grounded != plane.on_ground() {
+                    eprintln!(
+                        "Aircraft {} at {:.0} kt",
+                        if plane.on_ground() {
+                            "touchdown"
+                        } else {
+                            "airborne"
+                        },
+                        plane.airspeed_mps() * 1.94384
+                    );
                 }
             } else {
-                if fast_flight {
-                    35.
-                } else {
-                    3.
+                let forward = Vec3::new(self.camera.yaw.sin(), 0., self.camera.yaw.cos());
+                let right = forward.cross(Vec3::Y);
+                let mut movement = Vec3::ZERO;
+                for (key, direction) in [
+                    (KeyCode::KeyW, forward),
+                    (KeyCode::KeyS, -forward),
+                    (KeyCode::KeyD, right),
+                    (KeyCode::KeyA, -right),
+                    (KeyCode::Space, Vec3::Y),
+                    (KeyCode::ControlLeft, -Vec3::Y),
+                    (KeyCode::ControlRight, -Vec3::Y),
+                ] {
+                    if self.keys.contains(&key) {
+                        movement += direction;
+                    }
                 }
-            };
-            if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
-                let horizontal =
-                    Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
-                self.camera.position = DVec3::from_array(self.walking.advance_presented(
-                    &self.world,
-                    self.camera.position.to_array(),
-                    [horizontal.x as f64, horizontal.z as f64],
-                    self.keys.contains(&KeyCode::Space),
-                    dt as f64,
-                    self.visual_settings.step_smoothing,
-                ));
-            } else {
-                self.camera.position +=
-                    movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+                let fast_flight = self.fbm
+                    || (!self.visual_settings.walking
+                        && self.world.fbm_terrain().is_some_and(|terrain| {
+                            terrain.params().recipe.has_watershed_drainage()
+                        }));
+                let speed: f32 = if self.keys.contains(&KeyCode::ShiftLeft)
+                    || self.keys.contains(&KeyCode::ShiftRight)
+                {
+                    if fast_flight {
+                        80.
+                    } else {
+                        15.
+                    }
+                } else {
+                    if fast_flight {
+                        35.
+                    } else {
+                        3.
+                    }
+                };
+                if self.visual_settings.walking && self.world.fbm_terrain().is_some() {
+                    let horizontal =
+                        Vec3::new(movement.x, 0., movement.z).normalize_or_zero() * speed.min(6.);
+                    let collider = self
+                        .parked_aircraft
+                        .as_ref()
+                        .filter(|(_, pose)| {
+                            self.camera.position.distance_squared(pose.position) < 64.
+                        })
+                        .map(|(_, pose)| (pose.position, aircraft::axes(*pose).transpose()));
+                    self.camera.position =
+                        DVec3::from_array(self.walking.advance_presented_sampled(
+                            self.camera.position.to_array(),
+                            [horizontal.x as f64, horizontal.z as f64],
+                            self.keys.contains(&KeyCode::Space),
+                            dt as f64,
+                            self.visual_settings.step_smoothing,
+                            |cell| {
+                                if let Some((origin, inverse)) = collider {
+                                    let local = inverse
+                                        * (DVec3::from_array(cell.center_m()) - origin).as_vec3();
+                                    if aircraft::parked_solid(local) {
+                                        return frontier_world::Material::Stone;
+                                    }
+                                }
+                                self.world.blocking_material(cell)
+                            },
+                        ));
+                } else {
+                    self.camera.position +=
+                        movement.normalize_or_zero().as_dvec3() * (dt * speed) as f64;
+                }
             }
         }
+        if let Some(damage) = self
+            .aircraft
+            .as_mut()
+            .and_then(|plane| plane.damage.as_mut())
+        {
+            if !damage.impacts.is_empty() {
+                self.flight_audio.impact();
+            }
+            if !damage.fragments.is_empty() {
+                self.flight_audio
+                    .fracture(damage.fragments.iter().map(|body| body.shape.mass).sum());
+            }
+            self.destruction.receive(&mut self.world, damage);
+        }
+        self.destruction
+            .advance(&mut self.world, self.camera.position, dt, |p| {
+                weather_frame.as_ref().map_or(self.flight_wind, |frame| {
+                    frame.interpolate_wind(p, weather_fraction)
+                })
+            });
         let pose = self.route.pose_at(
             if !self.adaptive_route_started {
                 0.
@@ -2376,6 +2896,7 @@ impl Viewer {
             }
             self.camera.yaw = pose.yaw as f32;
             self.camera.pitch = pose.pitch as f32;
+            self.camera.roll = pose.roll as f32;
         }
         if let Some(live) = &mut self.live_water {
             live.observe_camera(self.camera);
@@ -2393,11 +2914,45 @@ impl Viewer {
                 live.wait_for_render();
             }
         }
+        if !self.benchmark_input_lock {
+            let jolt = self
+                .aircraft
+                .as_mut()
+                .map_or_else(flight_feedback::Jolt::default, |plane| {
+                    plane.feedback.take_jolt()
+                });
+            self.flight_audio
+                .update(self.aircraft.as_ref(), self.camera, jolt);
+        }
+        if let (Some(weather), Some(plane)) = (&mut self.world_weather, &self.aircraft) {
+            let pose = plane.exterior_pose().unwrap_or(self.camera);
+            weather.request_instrument(frontier_runtime::weather::radar::Request {
+                position: pose.position,
+                yaw: pose.yaw,
+                controls: plane.radar,
+            });
+        }
         let terrain_started = Instant::now();
         self.poll_terrain();
         let terrain_ms = terrain_started.elapsed().as_secs_f64() * 1000.;
         let plants_started = Instant::now();
+        let display_camera = self.display_camera();
         if let Some(gpu) = &mut self.gpu {
+            gpu.visual_settings = Some(self.visual_settings.clone());
+            gpu.set_aircraft_pose(
+                &self.world,
+                self.aircraft.as_ref(),
+                self.parked_aircraft.as_ref(),
+                self.camera,
+            );
+            gpu.update_fragments(&self.destruction.bodies, display_camera);
+            gpu.weather_fraction = weather_fraction;
+            gpu.weather_frame = weather_frame;
+            if let (Some(model), Some(weather)) = (&mut gpu.airframe, &self.world_weather) {
+                let image = weather.instrument();
+                let time = self.weather_clock.seconds;
+                model.update_weather_radar(&gpu.queue, image, time);
+            }
             gpu.update_rolling(&self.world, self.camera)?;
             let (width, height) = self
                 .atmosphere
@@ -2525,6 +3080,11 @@ impl Viewer {
                     .into());
                 }
             }
+            if self.rolling_terrain && self.route_started.elapsed().as_secs_f64() >= 120. {
+                return Err(
+                    "rolling terrain benchmark did not finish preparing vegetation coverage".into(),
+                );
+            }
         }
         // Finite locked measurements must measure the selected representation,
         // rather than counting its raster fallback while the snapshot builds.
@@ -2566,9 +3126,13 @@ impl Viewer {
                         && g.vegetation_stats.coverage_unresolved == 0
                         && g.vegetation_stats.requested_native_unresolved == 0
                 }))
-            && self.adaptive_view.as_ref().is_some_and(|v| {
+            && (self.adaptive_view.as_ref().is_some_and(|v| {
                 v.coverage_ready && (!self.adaptive_wait_quality || v.refinement_ready)
-            })
+            }) || (self.rolling_terrain
+                && self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|g| g.rolling.as_ref().is_some_and(|r| r.coverage_ready()))))
         {
             self.adaptive_route_started = true;
             self.route_started = Instant::now();
@@ -2680,12 +3244,13 @@ impl Viewer {
         if let (Some(probe), Some(slot)) = (&self.gpu_probe, timing) {
             probe.begin_frame(&mut encoder, slot);
         }
+        let display = self.display_camera();
         gpu.observe_water_camera(
-            &self.camera,
+            &display,
             &self.world,
             self.visual_started.elapsed().as_secs_f32(),
         );
-        gpu.prepare_ground_light(&self.world, self.camera);
+        gpu.prepare_ground_light(&self.world, display);
         let target = frame.texture.create_view(&Default::default());
         let multisample_view = self
             .multisample
@@ -2695,28 +3260,40 @@ impl Viewer {
             let (width, height) = atmosphere.dimensions();
             atmosphere.set_medium_ground_height(gpu.medium_ground_height);
             atmosphere.set_lighting_context(
-                &self.camera,
+                &display,
                 gpu.adaptive.as_ref(),
                 self.adaptive_view.as_ref(),
                 gpu.camera_submerged.get(),
                 self.visual_started.elapsed().as_secs_f32(),
             );
+            atmosphere.set_world_weather(
+                &gpu.queue,
+                gpu.weather_frame.as_deref(),
+                display.position,
+                gpu.weather_fraction,
+                true,
+            );
             atmosphere.prepare(
                 &gpu.queue,
-                self.camera
-                    .matrix(self.camera.position, width as f32 / height as f32)
+                display
+                    .matrix(display.position, width as f32 / height as f32)
                     .inverse(),
                 Vec3::ZERO,
-                self.camera.position,
+                display.position,
                 &self.visual_settings,
                 self.visual_started.elapsed().as_secs_f32(),
+                if gpu.rolling.is_some() {
+                    display.far
+                } else {
+                    0.
+                },
             );
             gpu.draw(
                 &mut encoder,
                 atmosphere.msaa_view().unwrap_or(atmosphere.scene_view()),
                 atmosphere.msaa_view().map(|_| atmosphere.scene_view()),
                 atmosphere.depth_view(),
-                &self.camera,
+                &display,
                 width,
                 height,
                 timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
@@ -2733,7 +3310,7 @@ impl Viewer {
                 multisample_view.as_ref().unwrap_or(&target),
                 multisample_view.as_ref().map(|_| &target),
                 &depth.create_view(&Default::default()),
-                &self.camera,
+                &display,
                 config.width,
                 config.height,
                 timing.and_then(|slot| self.gpu_probe.as_ref().map(|p| p.writes(slot))),
@@ -2892,6 +3469,12 @@ impl ApplicationHandler for Viewer {
                 gpu.install_bricks(&snapshot, brick_skip_mode(&self.renderer))?;
             }
             gpu.configure_visuals(&self.world, &self.visual_settings);
+            gpu.set_aircraft_pose(
+                &self.world,
+                self.aircraft.as_ref(),
+                self.parked_aircraft.as_ref(),
+                self.camera,
+            );
             if self.rolling_terrain {
                 gpu.init_rolling(&self.world, self.camera)?;
                 window.set_title("Frontier — rolling terrain");
@@ -2967,6 +3550,7 @@ impl ApplicationHandler for Viewer {
             if self.visual_menu_enabled
                 || self.visual_settings.atmosphere
                 || self.visual_settings.render_scale != 1.
+                || self.visual_settings.edge_aa > 0.
                 || gpu.scene_format != gpu.format
             {
                 self.atmosphere = Some(atmosphere::Atmosphere::new_with_scene_format(
@@ -3001,8 +3585,13 @@ impl ApplicationHandler for Viewer {
     ) {
         if !self.benchmark_input_lock && self.grabbed && self.pending_teleport.is_none() {
             if let DeviceEvent::MouseMotion { delta } = event {
-                self.camera.yaw -= delta.0 as f32 * 0.002;
-                self.camera.pitch = (self.camera.pitch - delta.1 as f32 * 0.002).clamp(-1.55, 1.55);
+                if let Some(plane) = &mut self.aircraft {
+                    plane.look(delta);
+                } else {
+                    self.camera.yaw -= delta.0 as f32 * 0.002;
+                    self.camera.pitch =
+                        (self.camera.pitch - delta.1 as f32 * 0.002).clamp(-1.55, 1.55);
+                }
             }
         }
     }
@@ -3035,6 +3624,10 @@ impl ApplicationHandler for Viewer {
                 if !self.grabbed {
                     if state == ElementState::Pressed {
                         self.grab(true);
+                    }
+                } else if let Some(plane) = &mut self.aircraft {
+                    if button == MouseButton::Right {
+                        plane.set_looking(state == ElementState::Pressed);
                     }
                 } else if button == MouseButton::Left || button == MouseButton::Right {
                     if self.player_edit.enabled {
@@ -3083,11 +3676,43 @@ impl ApplicationHandler for Viewer {
                                 }
                             }
                         }
+                        if key == KeyCode::KeyC && !event.repeat {
+                            if let Some(plane) = &mut self.aircraft {
+                                plane.toggle_view(&mut self.camera, &self.world);
+                            }
+                        }
+                        if let Some(plane) = &mut self.aircraft {
+                            match key {
+                                KeyCode::KeyO if !event.repeat => plane.toggle_doors(),
+                                KeyCode::KeyH if !event.repeat => plane.toggle_hold(self.camera),
+                                KeyCode::KeyZ if !event.repeat => plane.select_flap(1),
+                                KeyCode::KeyX if !event.repeat => plane.select_flap(-1),
+                                KeyCode::KeyY if !event.repeat => plane.toggle_airflow(),
+                                KeyCode::KeyJ if !event.repeat => {
+                                    plane.toggle_camera_motion(&mut self.camera, &self.world)
+                                }
+                                KeyCode::KeyM if !event.repeat => plane.radar.cycle(),
+                                KeyCode::Comma if !event.repeat => plane.radar.adjust_range(-1),
+                                KeyCode::Period if !event.repeat => plane.radar.adjust_range(1),
+                                KeyCode::Semicolon if !event.repeat => {
+                                    plane.radar.adjust_vertical(-1)
+                                }
+                                KeyCode::Quote if !event.repeat => plane.radar.adjust_vertical(1),
+                                KeyCode::PageUp => plane.adjust_pitch_trim(1.),
+                                KeyCode::PageDown => plane.adjust_pitch_trim(-1.),
+                                KeyCode::BracketLeft => plane.tune_radio(-1),
+                                KeyCode::BracketRight => plane.tune_radio(1),
+                                _ => {}
+                            }
+                        }
+                        if key == KeyCode::KeyV && !event.repeat && self.rolling_terrain {
+                            self.use_aircraft();
+                        }
                         if key == KeyCode::KeyF && !event.repeat {
-                            self.visual_settings.walking = !self.visual_settings.walking;
-                            self.walking.reset();
-                            if let Some(ui) = &mut self.settings_ui {
-                                ui.set_walking(self.visual_settings.walking);
+                            if self.aircraft.is_some() {
+                                self.leave_aircraft();
+                            } else {
+                                self.set_walking(!self.visual_settings.walking);
                             }
                         }
                         if key == KeyCode::KeyT && !event.repeat && self.hybrid_stream.is_some() {
@@ -3116,7 +3741,7 @@ impl ApplicationHandler for Viewer {
                             if let (Some(gpu), Some(config)) = (&self.gpu, &self.config) {
                                 if let Err(error) = gpu.capture(
                                     &self.world,
-                                    &self.camera,
+                                    &self.display_camera(),
                                     &path,
                                     config.width,
                                     config.height,
@@ -3174,6 +3799,7 @@ fn capture_pose(
         camera.position = DVec3::from_array(pose.position);
         camera.yaw = pose.yaw as f32;
         camera.pitch = pose.pitch as f32;
+        camera.roll = pose.roll as f32;
         camera.position.y = camera.position.y.max(
             world.height_m(camera.position.x, camera.position.z) + if hybrid { 1.7 } else { 10. },
         );
@@ -3183,6 +3809,10 @@ fn capture_pose(
 /// Runs the interactive fixture or captures it without a window using `--capture PATH`.
 /// Camera movement never rebuilds geometry; edits rebuild on one bounded background worker.
 pub fn run() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--model-preview") {
+        return model_preview::run(args);
+    }
     appearance_method::initialize_application();
     let Some(options::Options {
         live_water: live_water_enabled,
@@ -3203,7 +3833,16 @@ pub fn run() -> Result<()> {
         capture,
         capture_on_exit,
         rolling_terrain,
+        flight_chase,
+        flight_parked,
+        flight_altitude,
+        flight_heading,
+        flight_wind,
+        world_weather: weather_config,
+        airborne_radar,
+        flight_walkup,
         rolling_walk_frames,
+        formation_site,
         seconds,
         width,
         height,
@@ -3276,6 +3915,9 @@ pub fn run() -> Result<()> {
         visual_settings.atmosphere = false;
         visual_settings.render_scale = 1.;
     }
+    if visual_settings.day_night {
+        visual_settings.atmosphere = true;
+    }
     if visual_settings.beauty
         && params.recipe != frontier_world::FbmRecipe::Legacy
         && !capture_linear
@@ -3283,7 +3925,23 @@ pub fn run() -> Result<()> {
         appearance_method::initialize_meadow_application();
     }
     adaptive_geometry::distant_voxels::Mode::initialize_application();
-    let world = if scene == "hybrid-topology"
+    let graded_source = if rolling_terrain && flight_parked {
+        let terrain = frontier_world::FbmTerrain::new(seed, params)?;
+        let near = eye.map_or(start_xz, |eye| [eye[0], eye[2]]);
+        let runway = aircraft::find_dirt_runway(&terrain, near)
+            .ok_or("no dry aerodrome site near spawn; pick another --start-xz or seed")?;
+        let [x, z] = runway.center_m();
+        eprintln!(
+            "Dirt runway: 520 × 24 m at ({x:.1}, {z:.1}), elevation {:.1} m",
+            runway.height_m()
+        );
+        Some(terrain.with_dirt_runway(runway))
+    } else {
+        None
+    };
+    let world = if let Some(source) = graded_source {
+        World::from_fbm_terrain(source)
+    } else if scene == "hybrid-topology"
         || scene == "adaptive-topology"
         || scene == "pages-topology"
     {
@@ -3292,6 +3950,15 @@ pub fn run() -> Result<()> {
         World::new(seed)
     } else {
         World::fbm(seed, params)?
+    };
+    let world = if let Some(site) = formation_site {
+        let world = world.with_formation_site(site);
+        for rock in world.rock_formations() {
+            eprintln!("Voxel formation {:?} at {:?}", rock.kind(), rock.center_m());
+        }
+        world
+    } else {
+        world
     };
     let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
     let mut live_water = if live_water_enabled {
@@ -3376,7 +4043,7 @@ pub fn run() -> Result<()> {
             camera.pitch = -0.3;
             if let Some(source) = world
                 .fbm_terrain()
-                .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Watershed)
+                .filter(|t| t.params().recipe.has_watershed_drainage())
             {
                 camera.yaw = terrain::seeded_world_heading(source, start_x, start_z).0;
             }
@@ -3473,6 +4140,7 @@ pub fn run() -> Result<()> {
         let direction = (target - position).normalize();
         camera = Camera {
             position,
+            roll: 0.,
             far: 20000.,
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
@@ -3569,6 +4237,7 @@ pub fn run() -> Result<()> {
         let direction = (target - position).normalize();
         camera = Camera {
             position,
+            roll: 0.,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
             far: (terrain::half_extent(view_levels) * 3.) as f32,
@@ -3635,6 +4304,7 @@ pub fn run() -> Result<()> {
         let direction = (DVec3::from_array(target) - position).normalize();
         camera = Camera {
             position,
+            roll: 0.,
             far: 20000.,
             fov_y: 60.,
             yaw: direction.x.atan2(direction.z) as f32,
@@ -3689,6 +4359,90 @@ pub fn run() -> Result<()> {
         camera.far = far;
     }
     camera.set_explicit_pose(eye, explicit_target);
+    let mut parked_aircraft = None;
+    let aircraft = if let Some(chase) = flight_chase {
+        let mut plane = if let Some(runway) = world.fbm_terrain().and_then(|t| t.dirt_runway()) {
+            aircraft::Aircraft::park_on_runway(&world, &mut camera, runway)
+                .ok_or("unable to place aircraft on the graded runway")?
+        } else if flight_parked {
+            aircraft::Aircraft::park(&world, &mut camera)
+                .ok_or("no suitable parking spot near spawn; pick another --start-xz or seed")?
+        } else {
+            if eye.is_none() {
+                camera.position.y += flight_altitude.unwrap_or(320.);
+                if let Some(heading) = flight_heading {
+                    camera.yaw = (180. - heading).to_radians();
+                    camera.pitch = 0.;
+                } else if let Some(source) = world
+                    .fbm_terrain()
+                    .filter(|t| t.params().recipe == frontier_world::FbmRecipe::Eroded)
+                {
+                    // Ground-level screening can pick a ridge that fills the
+                    // airborne view. Judge visibility at the actual altitude.
+                    let (yaw, _, nearby_high) = terrain::seeded_heading_at_height(
+                        source,
+                        camera.position.x,
+                        camera.position.z,
+                        camera.position.y,
+                        true,
+                    );
+                    camera.yaw = yaw;
+                    if flight_altitude.is_none() {
+                        camera.position.y = camera.position.y.max(nearby_high + 65.);
+                    }
+                    camera.pitch = 0.;
+                }
+            }
+            aircraft::Aircraft::enter(&world, &mut camera)
+        };
+        plane.set_wind(flight_wind);
+        if rolling_terrain && capture.is_none() {
+            plane.enable_damage();
+        }
+        plane.radar.equipped = airborne_radar;
+        if flight_walkup {
+            let (pose, walker) = plane
+                .step_out(&world, camera)
+                .ok_or("both cabin doors are obstructed at spawn")?;
+            parked_aircraft = Some((plane, pose));
+            camera = walker;
+            visual_settings.walking = true;
+            None
+        } else {
+            if chase {
+                plane.toggle_view(&mut camera, &world);
+            }
+            Some(plane)
+        }
+    } else {
+        None
+    };
+    let world_weather = weather_config
+        .map(|config| {
+            let [x, z] = config.center.unwrap_or(start_xz);
+            world_weather::Session::new(&world, config, DVec3::new(x, 0., z), capture.is_none())
+        })
+        .transpose()?;
+    let solar = frontier_runtime::weather::SolarClock::new(
+        visual_settings.clock_start,
+        visual_settings.day_length,
+    );
+    let weather_clock = world_weather::Clock::new(
+        world_weather
+            .as_ref()
+            .map_or(visual_settings.clock_start, |weather| {
+                weather.frame().current.time
+            }),
+        world_weather
+            .as_ref()
+            .map_or(solar, |weather| weather.frame().solar),
+    );
+    visual_settings.celestial = visual_settings.day_night.then(|| {
+        world_weather.as_ref().map_or_else(
+            || celestial::Light::at(weather_clock.solar_day()),
+            |weather| weather.frame().sky_light(&weather_clock),
+        )
+    });
     let mut page_stream = None;
     let mut page_initial = None;
     if scene.starts_with("pages") {
@@ -3736,7 +4490,7 @@ pub fn run() -> Result<()> {
             frame_limit.unwrap_or(240),
             route_step,
             route_speed.unwrap_or(1.45),
-            route == frontier_runtime::routes::Route::Fly,
+            route,
             &directory,
         );
     }
@@ -3795,6 +4549,26 @@ pub fn run() -> Result<()> {
             gpu.init_pages(&cover);
         }
         gpu.configure_visuals(&world, &visual_settings);
+        gpu.set_aircraft_pose(&world, aircraft.as_ref(), parked_aircraft.as_ref(), camera);
+        if let Some(weather) = &world_weather {
+            let frame = weather.frame();
+            if let (Some(model), Some(plane)) = (&mut gpu.airframe, &aircraft) {
+                let pose = plane.exterior_pose().unwrap_or(camera);
+                let image = frontier_runtime::weather::radar::render(
+                    Some(&frame.current),
+                    frame.mosaic.as_deref(),
+                    frontier_runtime::weather::radar::Request {
+                        position: pose.position,
+                        yaw: pose.yaw,
+                        controls: plane.radar,
+                    },
+                    flight_wind,
+                );
+                model.update_weather_radar(&gpu.queue, Some(Arc::new(image)), frame.current.time);
+            }
+            gpu.weather_frame = Some(frame);
+            gpu.weather_fraction = 1.;
+        }
         if rolling_terrain {
             gpu.init_rolling(&world, camera)?;
             gpu.settle_naadf(&world, camera)?;
@@ -3818,10 +4592,19 @@ pub fn run() -> Result<()> {
         }
         gpu.settle_vegetation(&world, camera, width, height)?;
         gpu.settle_naadf(&world, camera)?;
-        gpu.capture(&world, &camera, &path, width, height)?;
+        let display = aircraft
+            .as_ref()
+            .map_or(camera, |plane| plane.display_camera(camera));
+        gpu.capture(&world, &display, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;
         metadata.pop(); // capture writes exactly one JSON object.
+        if let Some(session) = &world_weather {
+            metadata.push_str(&format!(
+                ",\"world_weather\":{}",
+                session.frame().report(display.position)
+            ));
+        }
         let bounds = if scene == "fixture" {
             ",\"native_min_cell\":[-128,-32,-128],\"native_size_cells\":[256,224,256]"
         } else {
@@ -3912,9 +4695,18 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
     let now = Instant::now();
-    let adaptive_route_started = adaptive_view.is_none();
+    let adaptive_route_started =
+        adaptive_view.is_none() && !(rolling_terrain && adaptive_wait_quality);
     let mut viewer = Viewer {
         rolling_terrain,
+        aircraft,
+        parked_aircraft,
+        flight_wind,
+        airborne_radar,
+        world_weather,
+        weather_clock,
+        flight_audio: Default::default(),
+        destruction: Default::default(),
         live_water,
         player_edit: player_edit::PlayerEdit::new(player_edit_enabled, hand),
         queued_player_action: None,
@@ -3975,13 +4767,7 @@ pub fn run() -> Result<()> {
         multisample: None,
         sample_count: msaa,
         voxel_filter,
-        initial_camera: Camera {
-            position: camera.position,
-            far: camera.far,
-            fov_y: camera.fov_y,
-            yaw: camera.yaw,
-            pitch: camera.pitch,
-        },
+        initial_camera: camera,
         camera,
         walking: Default::default(),
         frame_trace: Default::default(),
@@ -4050,6 +4836,7 @@ pub fn run() -> Result<()> {
         0.
     };
     if let Some(path) = capture_on_exit {
+        let display = viewer.display_camera();
         if let (Some(gpu), Some(config)) = (&mut viewer.gpu, &viewer.config) {
             if viewer.live_water.is_some() {
                 gpu.settle_naadf(
@@ -4070,13 +4857,7 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            gpu.capture(
-                &viewer.world,
-                &viewer.camera,
-                &path,
-                config.width,
-                config.height,
-            )?;
+            gpu.capture(&viewer.world, &display, &path, config.width, config.height)?;
             if let Some(adaptive) = &viewer.adaptive_view {
                 let metadata_path = path.with_extension("capture.json");
                 let mut metadata = std::fs::read_to_string(&metadata_path)?;
@@ -4339,6 +5120,17 @@ pub fn run() -> Result<()> {
             json.pop();
             json.push_str(&format!(",\"brick_directional_cache\":{{\"builds\":{},\"latest_build_ms\":{},\"total_build_ms\":{},\"gpu_bytes\":{},\"uploaded_bytes\":{},\"latest_scratch_bytes\":{},\"peak_scratch_bytes\":{},\"immutable_revision_publication\":true}}}}", m.builds, m.latest_build_ms, m.total_build_ms, m.latest_gpu_bytes, m.uploaded_bytes, m.latest_scratch_bytes, m.peak_scratch_bytes));
         }
+        if let Some(session) = &viewer.world_weather {
+            json.pop();
+            json.push_str(&format!(
+                ",\"world_weather\":{}}}",
+                session.frame().report(viewer.camera.position)
+            ));
+        }
+        if let Some(rolling) = viewer.gpu.as_ref().and_then(|gpu| gpu.rolling.as_ref()) {
+            json.pop();
+            json.push_str(&format!(",\"rolling_cache\":{}}}", rolling.cache_report()));
+        }
         if let Some(live) = &viewer.live_water {
             json.pop();
             json.push_str(&format!(",\"live_water\":{}}}", live.diagnostics_json()));
@@ -4361,6 +5153,41 @@ pub fn run() -> Result<()> {
             viewer.edit_test.is_some(),viewer.edit_test.as_ref().is_some_and(|t|t.phase==3),
             viewer.edit_published_count,viewer.edit_build_ms,viewer.edit_input_to_publish_ms,
             viewer.world.revision(),viewer.edit_records.join(",")));
+        if let Some((plane, camera)) = viewer
+            .aircraft
+            .as_ref()
+            .map(|p| (p, viewer.camera))
+            .or_else(|| viewer.parked_aircraft.as_ref().map(|(p, c)| (p, *c)))
+        {
+            let state = plane.presentation(camera);
+            let pose = state.pose;
+            let (separation, rates) = plane.aerodynamic_state();
+            json.pop();
+            json.push_str(&format!(
+                ",\"aircraft\":{{\"position_m\":{:?},\"speed_mps\":{},\"roll_degrees\":{},\"pitch_degrees\":{},\"chase_view\":{},\"on_ground\":{},\"occupied\":{},\"throttle\":{},\"door_fraction\":{},\"radio_khz\":{},\"flight_hold\":{},\"angle_of_attack_degrees\":{},\"stall_warning\":{},\"wing_separation_left_right\":{:?},\"angular_velocity_body_rad_s\":{:?},\"cabin_jolts\":{},\"display_roll_degrees\":{},\"head_offset_m\":{:?}}}}}",
+                pose.position.to_array(), plane.airspeed_mps(), pose.roll.to_degrees(), pose.pitch.to_degrees(),
+                plane.exterior_pose().is_some(), plane.on_ground(), viewer.aircraft.is_some(), state.instruments.throttle, state.door, state.radio_khz, state.hold, state.instruments.angle_of_attack, state.instruments.stall_warning, separation, rates,
+                plane.feedback.jolts, plane.display_camera(camera).roll.to_degrees(), plane.feedback.eye().to_array(),
+            ));
+        }
+        json.pop();
+        json.push_str(&format!(
+            ",\"destruction\":{}}}",
+            viewer.destruction.report()
+        ));
+        if let Some(damage) = viewer
+            .aircraft
+            .as_ref()
+            .and_then(|plane| plane.damage.as_ref())
+        {
+            json.pop();
+            json.push_str(&format!(",\"airframe_structure\":{{\"connected_mask\":{},\"peak_utilization\":{},\"wing_deflection_m\":{:?}}}}}", damage.active, damage.peak_seen, damage.flex));
+        }
+        json.pop();
+        json.push_str(&format!(",\"world_clock\":{{\"seconds\":{},\"solar_day\":{},\"day_length_s\":{},\"speed\":{},\"day_night\":{},\"radar_open\":{}}}}}",
+            viewer.weather_clock.seconds, viewer.weather_clock.solar_day(), viewer.visual_settings.day_length,
+            viewer.visual_settings.time_speed, viewer.visual_settings.day_night,
+            viewer.settings_ui.as_ref().is_some_and(|ui| ui.radar_open())));
         std::fs::write(&path, json)?;
         eprintln!("benchmark JSON: {}", path.display());
     }

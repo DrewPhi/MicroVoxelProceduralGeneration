@@ -30,6 +30,11 @@ override MINMAX: bool = false;
 override INSTRUMENT: bool = false;
 override STREAM: bool = false;
 override NESTED: bool = false;
+override PROJECTED_MID: bool = false;
+override SCROLLED_OUTER: bool = false;
+override REFINE_MID: bool = false;
+override DISTANCE_LOD_CURVE: bool = false;
+@group(0) @binding(31) var<uniform> distance_lod_bias: array<vec4f,56>;
 override HISTORY: bool = false;
 override LEVEL_STEP: u32 = 1u;
 const INF: f32 = 1.e20;
@@ -114,18 +119,22 @@ fn parent_level(mip: u32, old: vec2i, next: vec2i) -> u32 {
 }
 fn bounds_at(grid: Grid, cell: vec2i, mip: u32) -> vec2f {
     var address=cell;
-    if STREAM && mip<=6u {
+    if (STREAM && mip<=6u) || (PROJECTED_MID && grid.fine && view.inner_cache.w==2 && mip<=5u)
+        || (SCROLLED_OUTER && !grid.fine && mip<=5u) {
         let side=i32(grid.extent.w)>>mip;
         address=(cell+(grid.offset>>vec2u(mip)))&vec2i(side-1);
     }
     if NESTED && grid.fine { return textureLoad(inner_maxima,address,i32(mip)).rg; }
     return textureLoad(maxima,address,i32(mip)).rg;
 }
+fn scrolled_vertex(grid: Grid, cell: vec2i) -> vec2i {
+    let side=i32(grid.extent.w);
+    return select((cell+grid.offset)&vec2i(side-1),cell,cell==vec2i(side));
+}
 fn raw_sample(grid: Grid, cell: vec2i) -> f32 {
     var address=cell;
-    if STREAM {
-        let side=i32(grid.extent.w);
-        address=select((cell+grid.offset)&vec2i(side-1),cell,cell==vec2i(side));
+    if STREAM || (PROJECTED_MID && grid.fine && view.inner_cache.w==2) || (SCROLLED_OUTER && !grid.fine) {
+        address=scrolled_vertex(grid,cell);
     }
     if NESTED && grid.fine { return textureLoad(inner_samples,address,0).r; }
     return textureLoad(samples,address,0).r;
@@ -138,7 +147,7 @@ fn parent_height(world: vec2f) -> f32 {
     return mix(mix(raw_sample(outer,cell),raw_sample(outer,cell+vec2i(1,0)),uv.x),
                mix(raw_sample(outer,cell+vec2i(0,1)),raw_sample(outer,cell+1),uv.x),uv.y);
 }
-fn fade_limits(grid: Grid) -> vec2f {
+fn resident_fade_end(grid: Grid) -> f32 {
     // Origin snaps in 64-sample increments. The blend is already entirely
     // parent terrain before reaching either edge, at every sub-strip pose.
     var end=(grid.extent.w*.5-66.)/grid.extent.z;
@@ -147,7 +156,43 @@ fn fade_limits(grid: Grid) -> vec2f {
         let border=min(offset,grid.extent.w-offset);
         end=max(0.,min(end,(min(border.x,border.y)-2.)/grid.extent.z));
     }
+    return end;
+}
+fn fade_limits(grid: Grid) -> vec2f {
+    var end=resident_fade_end(grid);
+    if PROJECTED_MID {
+        // Keep the finer surface while its sample spacing is resolvable.
+        // up.w is metres per pixel at one metre of camera depth.
+        end=min(end,1./(grid.extent.z*view.up.w));
+    }
     return vec2f(.55*end,end);
+}
+fn terrain_curve_active() -> bool {
+    return DISTANCE_LOD_CURVE && (view.old_forward.z>0. || view.old_forward.w>0.);
+}
+fn terrain_curve_bias(distance: f32) -> f32 {
+    if !terrain_curve_active() {return 0.;}
+    // A square-root coordinate concentrates samples near the camera.
+    let index=min(sqrt(max(0.,distance))*4.,223.);
+    let a=u32(index);
+    let b=min(a+1u,223u);
+    return mix(distance_lod_bias[a/4u][a%4u],distance_lod_bias[b/4u][b%4u],fract(index));
+}
+fn mid_envelope(grid: Grid) -> vec2f {
+    let automatic=fade_limits(grid);
+    if !terrain_curve_active() {return automatic;}
+    let start=select(automatic.x,min(automatic.x,view.old_right.y),view.old_forward.w>0.);
+    let end=select(automatic.y,min(resident_fade_end(grid),1.30*automatic.y),view.old_forward.z>0.);
+    return vec2f(start,end);
+}
+fn mid_blend_limits(grid: Grid, bias: f32) -> vec2f {
+    let automatic=fade_limits(grid);
+    if bias<=0. {return automatic;}
+    let end=min(resident_fade_end(grid),1.30*automatic.y);
+    return mix(automatic,vec2f(.84*end,end),bias);
+}
+fn coarsen_terrain(weight:f32, bias:f32) -> f32 {
+    return select(weight,mix(weight,1.,-bias),bias<0.);
 }
 fn sample_at(grid: Grid, cell: vec2i) -> f32 {
     let h=raw_sample(grid,cell);
@@ -155,9 +200,20 @@ fn sample_at(grid: Grid, cell: vec2i) -> f32 {
         let world=grid.extent.xy+vec2f(cell)/grid.extent.z;
         let delta=abs(world-view.eye.xz);
         let distance=max(delta.x,delta.y);
-        let limits=fade_limits(grid);
-        if distance>limits.x {
-            return mix(h,parent_height(world),smoothstep(limits.x,limits.y,distance));
+        let envelope=mid_envelope(grid);
+        if distance>envelope.x {
+            let bias=terrain_curve_bias(distance);
+            let limits=mid_blend_limits(grid,bias);
+            if distance<=limits.x && bias>=0. {return h;}
+            let parent=parent_height(world);
+            let fade=smoothstep(limits.x,limits.y,distance);
+            if PROJECTED_MID {
+                let footprint=max(.01,distance*view.up.w);
+                let retain=smoothstep(.6,1.6,abs(h-parent)/footprint);
+                let edge=smoothstep(.82*limits.y,limits.y,distance);
+                return mix(h,parent,coarsen_terrain(mix(fade,edge,retain),bias));
+            }
+            return mix(h,parent,coarsen_terrain(fade,bias));
         }
     }
     return h;
@@ -174,11 +230,14 @@ fn terrain_bounds(grid: Grid, cell: vec2i, mip: u32, stats: ptr<function,vec4u>)
         let lo=grid.extent.xy+vec2f(cell)*size;
         let hi=lo+size;
         let delta=max(abs(lo-view.eye.xz),abs(hi-view.eye.xz));
-        if max(delta.x,delta.y)>fade_limits(grid).x {
+        if max(delta.x,delta.y)>mid_envelope(grid).x {
             let outer=outer_grid();
-            // Fine pitch is 1/16 of parent pitch. The parent rectangles at
-            // this mip are at least as wide as the projected fine cell.
-            let pmip=max(mip,4u)-4u;
+            var pmip=max(mip,4u)-4u;
+            if PROJECTED_MID || terrain_curve_active() {
+                // The blended cell can overlap two parent cells per axis
+                // when the selected parent cell is at least as wide.
+                pmip=u32(clamp(ceil(log2(size*outer.extent.z)),0.,f32(outer.root)));
+            }
             let scale=outer.extent.z/f32(1u<<pmip);
             let last=vec2i((i32(outer.extent.w)>>pmip)-1);
             let a=clamp(vec2i(floor((lo-outer.extent.xy)*scale)),vec2i(0),last);
@@ -222,6 +281,36 @@ fn bilinear_hit(curve: vec3f, slope: f32, lo: f32, hi: f32) -> f32 {
     let root = min(usable.x,usable.y);
     return select(-1.,fma(hi-lo,root,lo),root<INF);
 }
+fn bounded_cached_hit(direction: vec3f, ray: Ray, fine: vec2i, mip: u32, lo: f32, hi: f32, error: f32) -> f32 {
+    let span = i32(1u<<mip);
+    let node = lookup_cell(ray,fine,mip);
+    let cell = node*span;
+    let world = ray.grid.extent.xy+vec2f(cell)/ray.grid.extent.z;
+    let far_edge = world+f32(span)/ray.grid.extent.z;
+    let delta = max(abs(world-view.eye.xz),abs(far_edge-view.eye.xz));
+    // Parent blending changes the surface whose approximation was bounded.
+    if max(delta.x,delta.y)>mid_envelope(ray.grid).x {return -1.;}
+    let budget = max(0.,lo)*view.up.w*view.old_forward.x;
+    if error>2.*budget || budget<.002 {return -1.;}
+
+    let h = vec4f(raw_sample(ray.grid,cell),raw_sample(ray.grid,cell+vec2i(span,0)),
+                 raw_sample(ray.grid,cell+vec2i(0,span)),raw_sample(ray.grid,cell+span));
+    let mirror = clamp((fma(vec2f(lo),ray.velocity,ray.origin)-vec2f((fine>>vec2u(mip))<<vec2u(mip)))/f32(span),
+                      vec2f(0.),vec2f(1.));
+    let uv = select(mirror,1.-mirror,ray.signs<vec2i(0));
+    let step = vec2f(ray.signs)*ray.velocity*((hi-lo)/f32(span));
+    let dx = h.y-h.x;
+    let dz = h.z-h.x;
+    let cross = h.w-h.z-dx;
+    let center = mix(mix(h.x,h.y,uv.x),mix(h.z,h.w,uv.x),uv.y);
+    let curve = vec3f(center,dot(step,vec2f(dx+cross*uv.y,dz+cross*uv.x)),cross*step.x*step.y);
+    let guard = error+.002+.000003*abs(center);
+    let first_possible = bilinear_hit(curve+vec3f(guard,0.,0.),direction.y,lo,hi);
+    if first_possible<0. {return -1.;}
+    let first_certain = bilinear_hit(curve-vec3f(guard,0.,0.),direction.y,lo,hi);
+    if first_certain<first_possible || first_certain-first_possible>budget {return -1.;}
+    return .5*(first_possible+first_certain);
+}
 fn column_hit(height: f32, slope: f32, lo: f32, hi: f32, face: f32) -> vec2f {
     if fma(lo,slope,view.eye.y)<=height { return vec2f(lo,face); }
     if slope<0. && fma(hi,slope,view.eye.y)<=height {
@@ -230,6 +319,10 @@ fn column_hit(height: f32, slope: f32, lo: f32, hi: f32, face: f32) -> vec2f {
     return vec2f(-1.,0.);
 }
 fn trace(direction: vec3f, ray: Ray, stats: ptr<function,vec4u>) -> vec2f {
+    return trace_until(direction,ray,INF,stats);
+}
+
+fn trace_until(direction:vec3f, ray:Ray, stop:f32, stats:ptr<function,vec4u>)->vec2f {
     let root=ray.grid.root;
     if ray.lo>=ray.hi {return vec2f(-1.,0.);}
     var fine = initial_cell(ray);
@@ -240,6 +333,7 @@ fn trace(direction: vec3f, ray: Ray, stats: ptr<function,vec4u>) -> vec2f {
     // Even a full leaf walk visits at most 2*N cells. Reserve a conservative
     // allowance for all ascents and descents, with a reported failure sentinel.
     for (var step=0u;step<u32(ray.grid.extent.w)*8u+64u;step+=1u) {
+        if t>stop {return vec2f(-1.,0.);}
         let edge = cell_edge(fine,mip);
         let exit = exit_times(ray,edge);
         let end = max(t,min(ray.hi,min(exit.x,exit.y)));
@@ -250,6 +344,10 @@ fn trace(direction: vec3f, ray: Ray, stats: ptr<function,vec4u>) -> vec2f {
                 return vec2f(t,entry);
             }
             if mip>0u {
+                if REFINE_MID && ray.grid.fine && mip<=5u {
+                    let bounded = bounded_cached_hit(direction,ray,fine,mip,t,end,bounds.y);
+                    if bounded>=0. {return vec2f(bounded,0.);}
+                }
                 let lower=edge-(1i<<mip);
                 mip-=min(mip,LEVEL_STEP);
                 misses=0u;

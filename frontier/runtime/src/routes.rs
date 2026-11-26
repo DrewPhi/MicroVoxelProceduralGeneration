@@ -6,6 +6,7 @@ pub struct Pose {
     pub position: [f64; 3],
     pub yaw: f64,
     pub pitch: f64,
+    pub roll: f64,
 }
 
 /// Fixed benchmark paths. Sampling is based on absolute elapsed seconds, so
@@ -16,6 +17,8 @@ pub enum Route {
     Fly,
     StopResume,
     TurnReturn,
+    /// An advancing 180-degree turn with a smooth 32-degree bank.
+    BankReturn,
     WalkStopResume,
     WalkTurnReturn,
     /// Sustained square circuit: four 10-second legs, repeated indefinitely.
@@ -69,6 +72,7 @@ impl Route {
             position,
             yaw,
             pitch,
+            roll: 0.,
         };
         let forward = [
             yaw.sin() * pitch.cos(),
@@ -88,8 +92,29 @@ impl Route {
             pose.yaw = yaw + leg as f64 * std::f64::consts::FRAC_PI_2;
             return pose;
         }
+        if self == Route::BankReturn {
+            let yaw0 = yaw;
+            let straight = t.min(2.);
+            let turning = (t - 2.).clamp(0., 6.);
+            let returning = (t - 8.).max(0.);
+            let rate = std::f64::consts::PI / 6.;
+            let yaw1 = yaw0 + turning * rate;
+            let horizontal_speed = speed * pitch.cos();
+            pose.position[0] += horizontal_speed
+                * (yaw0.sin() * straight
+                    + (yaw0.cos() - yaw1.cos()) / rate
+                    + yaw1.sin() * returning);
+            pose.position[2] += horizontal_speed
+                * (yaw0.cos() * straight
+                    + (yaw1.sin() - yaw0.sin()) / rate
+                    + yaw1.cos() * returning);
+            pose.position[1] += speed * pitch.sin() * t;
+            pose.yaw = yaw1;
+            pose.roll = -32_f64.to_radians() * (turning * rate).sin().powi(2);
+            return pose;
+        }
         let distance = match self {
-            Route::Stationary | Route::WalkCircuit => 0.0,
+            Route::Stationary | Route::WalkCircuit | Route::BankReturn => 0.0,
             Route::Fly => speed * t,
             Route::StopResume | Route::WalkStopResume => speed * (t - (t - 2.0).clamp(0.0, 2.0)),
             Route::TurnReturn | Route::WalkTurnReturn => {
@@ -171,6 +196,20 @@ mod tests {
         assert_eq!(corner.position, [2.0, 5.0, 32.0]);
         let moving = Route::WalkCircuit.pose_at(11.0, origin, 0.0, 0.0, 2.5);
         assert!((moving.position[0] - 4.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bank_turn_reverses_heading_and_levels_on_exit() {
+        let origin = [0., 800., 0.];
+        let entry = Route::BankReturn.pose_at(2., origin, 0., 0., 40.);
+        let apex = Route::BankReturn.pose_at(5., origin, 0., 0., 40.);
+        let exit = Route::BankReturn.pose_at(8., origin, 0., 0., 40.);
+        assert_eq!(entry.roll, 0.);
+        assert!((apex.roll.to_degrees() + 32.).abs() < 1e-9);
+        assert!(exit.roll.abs() < 1e-9);
+        assert!((exit.yaw - std::f64::consts::PI).abs() < 1e-9);
+        assert!((exit.position[2] - entry.position[2]).abs() < 1e-9);
+        assert!(exit.position[0] > entry.position[0]);
     }
 
     #[test]

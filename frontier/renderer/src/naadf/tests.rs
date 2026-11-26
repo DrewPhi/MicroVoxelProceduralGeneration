@@ -13,6 +13,7 @@ fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
         position: DVec3::new(-1e9, 300., 1e9),
         yaw: 1.2,
         pitch: -0.3,
+        roll: 0.45,
         fov_y: 60.,
         far: 300.,
     };
@@ -340,6 +341,7 @@ fn gpu_matches_canonical_rays_for_source(
             fov_y: 60.,
             yaw: 0.,
             pitch: 0.,
+            roll: 0.,
         };
         let cpu_root_fallback = gpu_distance && root_distance::cpu_fallback();
         let mut snapshot = data::build_with_root_mode(

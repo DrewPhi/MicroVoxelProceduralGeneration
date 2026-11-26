@@ -42,8 +42,10 @@ fn native_vertex(q:Quad, corner:u32)->NativeVertex {
 // on all six faces; the same directional/hemispherical light as native terrain.
 struct Camera { view_projection:mat4x4<f32>, eye:vec4<f32>, paint_origin:vec4<u32> };
 @group(0) @binding(0) var<uniform> camera:Camera;
-struct Lighting { sun:vec4<f32>, sky:vec4<f32> };
+struct Lighting { sun:vec4<f32>, sky:vec4<f32>, horizon:vec4f, origin:vec4f };
 @group(1) @binding(0) var<uniform> lighting:Lighting;
+@group(1) @binding(1) var plant_horizon:texture_2d<f32>;
+@group(1) @binding(2) var plant_horizon_sampler:sampler;
 
 struct NearShadow { projection:mat4x4<f32>, parameters:vec4<f32>, naadf_lo:vec4<f32>, naadf_hi:vec4<f32> };
 @group(2) @binding(0) var near_shadow_depth:texture_depth_2d;
@@ -78,6 +80,7 @@ struct Out {
     @location(5) ao:f32,
     @location(6) transmission:f32,
     @location(7) @interpolate(flat) decorative:u32,
+    @location(8) @interpolate(flat) ground_fade_radius:f32,
 };
 fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
     switch turn&3u {
@@ -86,6 +89,10 @@ fn rotate(p:vec3<f32>, turn:u32)->vec3<f32> {
         case 3u: { return vec3<f32>(p.z,p.y,-p.x); }
         default: { return p; }
     }
+}
+fn plant_height_scale(turn:u32)->f32 {
+    let scale=select(turn>>8u,0u,(turn&16u)!=0u);
+    return select(1.,f32(scale)/16384.,scale!=0u);
 }
 @vertex fn vs_main(
     @builtin(vertex_index) vertex:u32,
@@ -115,8 +122,10 @@ fn vertex_out(position:vec3<f32>, normal:vec3<f32>, color:vec3<f32>, root:vec3<f
     var out:Out;
     // World cell indices rotate about the root cell center, so q1 maps the
     // native cell index (x,z) to (-z,x), including negative-index cells.
-    let pivot=vec3<f32>(0.03125,0.,0.03125);
-    out.local=root+pivot+rotate(position-pivot,turn);
+    let pivot=vec3<f32>(0.5,0.,0.5)*select(
+        NATIVE_VOXEL_METERS,GROUND_DETAIL_VOXEL_METERS,(turn&8u)!=0u);
+    let scaled=position*vec3f(1.,plant_height_scale(turn),1.);
+    out.local=root+pivot+rotate(scaled-pivot,turn);
     out.position=camera.view_projection*vec4<f32>(out.local,1.);
     out.color=color;
     out.normal=rotate(normal,turn);
@@ -125,6 +134,7 @@ fn vertex_out(position:vec3<f32>, normal:vec3<f32>, color:vec3<f32>, root:vec3<f
     out.ao=ao;
     out.transmission=transmission;
     out.decorative=turn&8u;
+    out.ground_fade_radius=select(0.,f32(turn>>8u)*0.125,(turn&16u)!=0u);
     return out;
 }
 fn terrain_lighting(normal:vec3<f32>,visibility:f32,ao:f32)->vec3<f32> {
@@ -152,14 +162,11 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     let ambient=mix(vec3(0.12,0.145,0.075),vec3(0.25,0.33,0.43),sky);
     let sunlight=outdoor_sun_color(sun.y)*(1.-0.72*overcast);
     let direct=sunlight*max(dot(n,sun),0.)*visibility;
-    let view=normalize(camera.eye.xyz-i.local);
     // Forward scattering is strongest when the observer faces the sun through
     // the leaf. A small residual represents leaf thickness below shadow texels;
     // this is artistic single scattering, not a volume transport solution.
-    let forward=pow(max(dot(-view,sun),0.),4.);
-    let back=max(-dot(n,sun),0.);
-    let transmitted=sunlight*vec3(0.88,1.,0.44)*0.50*i.transmission
-        *(0.25+0.75*forward)*back*(0.08+0.92*visibility)*ao*ao;
+    let transmitted=leaf_transmitted_light(normalize(i.local-camera.eye.xyz),n,sun,
+        sunlight,i.transmission,visibility,ao);
     let bounce=ground_irradiance(i.local-camera.eye.xyz,n,sun,outdoor_sun_color(sun.y),overcast,visibility)*ao;
     return ambient*(1.+overcast*0.3)*ao+direct+transmitted+bounce;
 }
@@ -173,15 +180,32 @@ fn beauty_plant_lighting(i:Out,visibility:f32,ao:f32)->vec3<f32> {
     if near_shadow.naadf_lo.w>0.5 {return vec4(vec3(0.8)*(0.3+0.7*max(dot(normalize(i.normal),normalize(vec3(-0.5,0.8,-0.3))),0.)),1.);}
     // Fixed canonical-cell/instance threshold: no time noise or transparency.
     // Opaque survivors write normal scene depth and receive its atmosphere pass.
-    if i.fade<1. {
+    var coverage=i.fade;
+    if i.ground_fade_radius>0. {
+        let distance=length(i.local.xz-camera.eye.xz);
+        coverage=1.-smoothstep(i.ground_fade_radius*0.8,i.ground_fade_radius,distance);
+    }
+    if coverage<1. {
         let p=bitcast<vec3<u32>>(vec3<i32>(floor(i.local*VOXELS_PER_METER-i.normal*0.01)))+camera.paint_origin.xyz;
         var h=p.x*1597334677u ^ p.y*3812015801u ^ p.z*2798796415u ^ i.seed;
         h=(h^(h>>16u))*2246822519u;
-        if f32(h&65535u)/65536.>=i.fade { discard; }
+        if f32(h&65535u)/65536.>=coverage { discard; }
     }
-    let ao=mix(1.,i.ao,lighting.sky.y);
+    return shade_vegetation(i);
+}
+fn shade_vegetation(i:Out)->vec4f {
+    var ao=mix(1.,i.ao,lighting.sky.y);
     var visibility=plant_shadow(i.local,i.normal,lighting.sun.xyz);
+    visibility*=woodland_sun_visibility(i.local-camera.eye.xyz+i.normal*.04);
     if visibility>0. {visibility=min(visibility,naadf_mesh_sun_visibility(i.local-camera.eye.xyz,normalize(i.normal),lighting.sun.xyz));}
+    if lighting.horizon.w>0. {
+        let point=i.local+lighting.origin.xyz;
+        let uv=(point.xz-lighting.horizon.xy)*(lighting.horizon.z/lighting.horizon.w);
+        let h=textureSampleLevel(plant_horizon,plant_horizon_sampler,uv,0.);
+        let terrain=terrain_horizon_light(lighting.sun.xyz,point.y,h);
+        visibility*=terrain.x;
+        ao*=terrain.y;
+    }
     if lighting.sky.y>0.5 && lighting.sun.w>0.5 {
         return vec4<f32>(i.color*beauty_plant_lighting(i,visibility,ao),1.);
     }

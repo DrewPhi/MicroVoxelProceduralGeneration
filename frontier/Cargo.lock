@@ -525,6 +525,7 @@ dependencies = [
  "frontier-runtime",
  "frontier-world",
  "glam",
+ "libloading",
  "lz4_flex",
  "naga",
  "png",
@@ -537,6 +538,9 @@ dependencies = [
 [[package]]
 name = "frontier-runtime"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "frontier-tools"

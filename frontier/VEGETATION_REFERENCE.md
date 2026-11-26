@@ -4,6 +4,28 @@ The visual target before developing distant grass/flower representations. Runtim
 terrain/vegetation/lighting are unchanged by this checkpoint. All new rendering
 code lives in the independent `frontier-reference` package.
 
+## Eroded woodland reference
+
+The independent CPU renderer also accepts the Eroded procedural world. A
+6.25 cm reference capture at 1152 × 768 with 16 samples per pixel contains
+35,585 grass records, 2,380 flower records and 377 woody records in its crop
+and shadow halo. Traced cells retain their canonical pigments, spacing, and
+quarter turns. On the Ryzen 5 7640U this capture took 3.0 s to prepare and
+39.5 s to render, with 1.11 GiB peak process RSS. The output is a finite 62 m
+visibility reference with 32 m local shadows and its own hemisphere lighting.
+Use it to check native coverage and shapes beside the rolling renderer's
+same-camera woodland still.
+
+```sh
+cargo build --release -p frontier-reference --bin vegetation_reference
+./target/release/vegetation_reference --terrain-recipe eroded \
+  --seed 6401777571733596131 --eye -128,82.45,-128 --target -149,85.67,-149 \
+  --center -151,-151 --extent 128 --far 62 --view-cull \
+  --width 1152 --height 768 --spp 16 --output output/eroded-native-reference
+```
+
+## Alpine reference
+
 ![All actual native vegetation](reference/gallery/vegetation-native/reference64.png)
 
 ## What is rendered

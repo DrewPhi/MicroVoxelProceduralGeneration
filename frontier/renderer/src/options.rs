@@ -1,4 +1,4 @@
-//! Command-line configuration for the three explicit comparison scenes.
+//! Command-line configuration for play and comparison scenes.
 use super::{Result, HEIGHT, SEED, WIDTH};
 use std::path::PathBuf;
 pub struct Options {
@@ -20,7 +20,16 @@ pub struct Options {
     pub capture: Option<PathBuf>,
     pub capture_on_exit: Option<PathBuf>,
     pub rolling_terrain: bool,
+    pub flight_chase: Option<bool>,
+    pub flight_parked: bool,
+    pub flight_altitude: Option<f64>,
+    pub flight_heading: Option<f32>,
+    pub flight_wind: glam::Vec3,
+    pub world_weather: Option<crate::world_weather::Config>,
+    pub airborne_radar: bool,
+    pub flight_walkup: bool,
     pub rolling_walk_frames: Option<PathBuf>,
+    pub formation_site: Option<[f64; 2]>,
     pub seconds: Option<f64>,
     pub width: u32,
     pub height: u32,
@@ -80,7 +89,39 @@ fn parse_on_off(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<b
     }
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>> {
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
+    let args: Vec<_> = args.collect();
+    // Explicit world selections and legacy comparison modes keep their
+    // existing defaults. Play options can override any of the new defaults.
+    let explicit_world = args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--preset"
+                | "--scene"
+                | "--terrain-recipe"
+                | "--packed-terrain"
+                | "--water-model"
+                | "--water-demo"
+                | "--benchmark-input-lock"
+                | "--help"
+                | "-h"
+        )
+    }) || args
+        .windows(2)
+        .any(|pair| pair[0] == "--live-water" && pair[1] == "on");
+    let mut defaults = Vec::new();
+    if !explicit_world {
+        defaults.extend(["--preset", "eroded", "--weather", "regional", "--msaa", "1"]);
+        // A checkpoint must reopen with the same seed. Keep the original
+        // numeric fallback for checkpoint calls that omit an explicit seed.
+        if !args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--seed" | "--weather-save"))
+        {
+            defaults.extend(["--seed", "random"]);
+        }
+    }
+    let mut args = defaults.into_iter().map(str::to_owned).chain(args);
     use crate::settings::ResourceProfile;
     let mut live_water = false;
     let mut discrete_water = false;
@@ -108,8 +149,28 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut capture = None;
     let mut capture_on_exit = None;
     let mut rolling_preference = None;
+    let mut flight_chase = None;
+    let mut flight_parked = false;
+    let mut flight_altitude: Option<f64> = None;
+    let mut flight_heading: Option<f32> = None;
+    let mut flight_wind = glam::Vec3::ZERO;
+    let mut weather = None;
+    let mut weather_age = 0.;
+    let mut weather_day = 0;
+    let mut weather_hour = 13.;
+    let mut weather_checkpoint = None;
+    let mut weather_latitude: f32 = 43.;
+    let mut weather_center: Option<[f64; 2]> = None;
+    let mut day_night = None;
+    let mut airborne_radar = false;
+    let mut flight_walkup = false;
     let mut packed_quality_requested = false;
     let mut rolling_walk_frames = None;
+    let mut formation_site = None;
+    let mut mid_detail_override = None;
+    let mut mid_spacing_explicit = false;
+    let mut mid_strips_override = None;
+    let mut depth_occlusion_override = None;
     let mut explicit_naadf_radius = false;
     let mut seconds: Option<f64> = None;
     let mut width = WIDTH;
@@ -147,6 +208,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut fov_y = 60f32;
     let mut capture_linear = false;
     let mut capture_far: Option<f32> = None;
+    let mut preset_far = None;
     let mut pixel_error = 1.0f64;
     let mut capture_unresolved = false;
     let mut adaptive_wait_quality = false;
@@ -287,22 +349,26 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 resource_overrides.push((arg, value));
             }
             "--preset" => {
-                let preset = args.next().ok_or("--preset requires alpine|seeded-world|watershed")?;
-                let watershed = preset == "watershed";
-                seeded_preset = watershed || matches!(preset.as_str(), "seeded-world" | "world");
-                if seeded_preset {
+                let preset = args.next().ok_or("--preset requires alpine|seeded-world|watershed|landscapes|landforms|eroded")?;
+                let recipe = match preset.as_str() {
+                    "watershed" => Some(frontier_world::FbmRecipe::Watershed),
+                    "landscapes" => Some(frontier_world::FbmRecipe::Landscapes),
+                    "landforms" => Some(frontier_world::FbmRecipe::Landforms),
+                    "eroded" => Some(frontier_world::FbmRecipe::Eroded),
+                    "seeded-world" | "world" => Some(frontier_world::FbmRecipe::SeededWorld),
+                    _ => None,
+                };
+                seeded_preset = recipe.is_some();
+                if let Some(recipe) = recipe {
                     params = frontier_world::FbmParams {
-                        recipe: if watershed {
-                            frontier_world::FbmRecipe::Watershed
-                        } else {
-                            frontier_world::FbmRecipe::SeededWorld
-                        },
+                        recipe,
                         ..Default::default()
                     };
                     scene = "adaptive".into();
                     camera_preset = "seeded-world".into();
                     if !explicit_start { start_xz = [0., 0.]; }
-                    capture_far = Some(6000.);
+                    preset_far = Some(6000.);
+                    capture_far = None;
                     view_levels = 11;
                     pixel_error = 5.;
                     adaptive_disk_cache = Some(PathBuf::from("output/cache/seeded-world-terrain"));
@@ -315,20 +381,22 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     visual.cloud_speed = 0.;
                     visual.overcast = 0.08;
                     visual.terrain_shadows = true;
+                    visual.natural_terrain_light = recipe == frontier_world::FbmRecipe::Eroded;
                     visual.beauty = true;
-                    visual.vegetation = watershed;
+                    visual.vegetation = recipe.has_watershed_drainage();
                     visual.walking = true;
                     continue;
                 }
                 if preset != "alpine" {
-                    return Err("--preset requires alpine|seeded-world|watershed".into());
+                    return Err("--preset requires alpine|seeded-world|watershed|landscapes|landforms|eroded".into());
                 }
                 params = frontier_world::FbmParams {
                     recipe: frontier_world::FbmRecipe::Alpine,
                     ..Default::default()
                 };
                 scene = "adaptive".into();
-                capture_far = Some(6000.);
+                preset_far = Some(6000.);
+                capture_far = None;
                 view_levels = 11;
                 pixel_error = 3.;
                 camera_preset = "alpine".into();
@@ -344,6 +412,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 visual.cloud_speed = 0.;
                 visual.overcast = 0.08;
                 visual.terrain_shadows = true;
+                visual.natural_terrain_light = false;
                 visual.beauty = true;
                 visual.vegetation = true;
                 visual.walking = true;
@@ -352,6 +421,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             | "--sun-azimuth"
             | "--exposure"
             | "--ground-bounce"
+            | "--edge-aa"
             | "--sunbeams"
             | "--streaming-haze"
             | "--fog-density"
@@ -368,6 +438,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     "--sun-azimuth" => (&mut visual.sun_azimuth, 0., 360.),
                     "--exposure" => (&mut visual.exposure, 0., 8.),
                     "--ground-bounce" => (&mut visual.ground_bounce, 0., 2.),
+                    "--edge-aa" => (&mut visual.edge_aa, 0., 1.),
                     "--sunbeams" => (&mut visual.sunbeams, 0., 2.),
                     "--streaming-haze" => (&mut visual.streaming_haze, 0., 1.),
                     "--fog-density" => (&mut visual.fog_density, 0., 0.01),
@@ -395,8 +466,82 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     visual.walking = value;
                 }
             }
+            "--formation-site" => {
+                let coordinates = args.next().ok_or("--formation-site requires X,Z")?;
+                let (x, z) = coordinates.split_once(',').ok_or("--formation-site requires X,Z")?;
+                let site = [x.parse::<f64>()?, z.parse::<f64>()?];
+                if site.iter().any(|v| !v.is_finite() || v.abs() > 1.0e7) {
+                    return Err("--formation-site requires finite coordinates within ±10,000 km".into());
+                }
+                formation_site = Some(site);
+            }
+            "--terrain-detail" => {
+                visual.terrain_detail = parse_on_off(&mut args, &arg)?;
+            }
+            "--terrain-near-spacing" => {
+                let pitch = args.next().ok_or("--terrain-near-spacing requires metres")?.parse()?;
+                if !matches!(pitch, 0.25 | 0.5 | 0.75 | 1.0 | 1.5) {
+                    return Err("--terrain-near-spacing requires 0.25, 0.5, 0.75, 1, or 1.5 metres".into());
+                }
+                visual.terrain_near_spacing = Some(pitch);
+            }
+            "--terrain-near-cells" => {
+                let side = args.next().ok_or("--terrain-near-cells requires 512 or 1024")?.parse()?;
+                if !matches!(side, 512 | 1024) {
+                    return Err("--terrain-near-cells requires 512 or 1024".into());
+                }
+                visual.terrain_near_cells = side;
+            }
+            "--terrain-far-detail" => {
+                visual.terrain_far_detail = parse_on_off(&mut args, &arg)?;
+            }
+            "--terrain-depth-occlusion" => {
+                depth_occlusion_override = Some(parse_on_off(&mut args, &arg)?);
+            }
+            "--terrain-mid-detail" => {
+                mid_detail_override = Some(parse_on_off(&mut args, &arg)?);
+            }
+            "--terrain-mid-spacing" => {
+                let spacing = args.next().ok_or("--terrain-mid-spacing requires 0.75, 1, 1.5, 2, 3, or 4")?.parse()?;
+                if ![0.75, 1., 1.5, 2., 3., 4.].contains(&spacing) {
+                    return Err("--terrain-mid-spacing requires 0.75, 1, 1.5, 2, 3, or 4".into());
+                }
+                visual.terrain_mid_spacing = spacing;
+                mid_spacing_explicit = true;
+            }
+            "--terrain-mid-strips" => {
+                mid_strips_override = Some(parse_on_off(&mut args, &arg)?);
+            }
+            "--terrain-mid-cells" => {
+                let side = args.next().ok_or("--terrain-mid-cells requires 512, 1024, or 2048")?.parse()?;
+                if !matches!(side, 512 | 1024 | 2048) {
+                    return Err("--terrain-mid-cells requires 512, 1024, or 2048".into());
+                }
+                visual.terrain_mid_cells = Some(side);
+            }
+            "--terrain-mid-error" => {
+                let pixels = args.next().ok_or("--terrain-mid-error requires pixels")?.parse()?;
+                if !(0. ..=4.).contains(&pixels) {
+                    return Err("--terrain-mid-error requires 0–4 pixels".into());
+                }
+                visual.terrain_mid_error_px = pixels;
+            }
+            "--terrain-mid-tile-error" => {
+                let metres = args.next().ok_or("--terrain-mid-tile-error requires metres")?.parse()?;
+                if !(0. ..=1.).contains(&metres) {
+                    return Err("--terrain-mid-tile-error requires 0–1 metres".into());
+                }
+                visual.terrain_mid_tile_error_m = metres;
+            }
+            "--terrain-mid-boundary-ascent" => {
+                visual.terrain_mid_boundary_ascent = parse_on_off(&mut args, &arg)?;
+            }
+            "--terrain-gray" => visual.terrain_gray = true,
             "--terrain-shadows" => {
                 visual.terrain_shadows = parse_on_off(&mut args, &arg)?;
+            }
+            "--natural-terrain-light" => {
+                visual.natural_terrain_light = parse_on_off(&mut args, &arg)?;
             }
             "--atmosphere" => {
                 atmosphere = Some(parse_on_off(&mut args, &arg)?);
@@ -510,6 +655,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 }
             }
             "--capture-linear" => capture_linear = true,
+            "--capture-terrain-distance" => visual.capture_terrain_distance = true,
             "--capture-far" => {
                 capture_far = Some(
                     args.next()
@@ -543,10 +689,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                         Some("alpine") => frontier_world::FbmRecipe::Alpine,
                         Some("seeded-world" | "world") => frontier_world::FbmRecipe::SeededWorld,
                         Some("watershed") => frontier_world::FbmRecipe::Watershed,
+                        Some("landscapes") => frontier_world::FbmRecipe::Landscapes,
+                        Some("landforms") => frontier_world::FbmRecipe::Landforms,
+                        Some("eroded") => frontier_world::FbmRecipe::Eroded,
                         Some("regional") => frontier_world::FbmRecipe::Regional,
                         Some("regional-unwarped") => frontier_world::FbmRecipe::RegionalUnwarped,
                         _ => return Err(
-                            "--terrain-recipe requires legacy|regional|regional-unwarped|alpine|seeded-world|watershed"
+                            "--terrain-recipe requires legacy|regional|regional-unwarped|alpine|seeded-world|watershed|landscapes|landforms|eroded"
                                 .into(),
                         ),
                     }
@@ -648,10 +797,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                     Some("fly") => frontier_runtime::routes::Route::Fly,
                     Some("stop-resume") => frontier_runtime::routes::Route::StopResume,
                     Some("turn-return") => frontier_runtime::routes::Route::TurnReturn,
+                    Some("bank-return") => frontier_runtime::routes::Route::BankReturn,
                     Some("walk-stop-resume") => frontier_runtime::routes::Route::WalkStopResume,
                     Some("walk-circuit") => frontier_runtime::routes::Route::WalkCircuit,
                     Some("walk-turn-return") => frontier_runtime::routes::Route::WalkTurnReturn,
-                    _ => return Err("--route requires static|fly|stop-resume|turn-return|walk-stop-resume|walk-turn-return|walk-circuit".into()),
+                    _ => return Err("--route requires static|fly|stop-resume|turn-return|bank-return|walk-stop-resume|walk-turn-return|walk-circuit".into()),
                 }
             }
             "--seconds" => {
@@ -659,6 +809,98 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             }
             "--rolling-terrain" => rolling_preference = Some(true),
             "--packed-terrain" => rolling_preference = Some(false),
+            "--flight-view" => {
+                flight_chase = Some(match args.next().as_deref() {
+                    Some("pilot") => false,
+                    Some("chase") => true,
+                    _ => return Err("--flight-view requires pilot|chase".into()),
+                });
+            }
+            "--flight-altitude" => {
+                let height = args.next().ok_or("--flight-altitude requires metres above the spawn")?.parse()?;
+                if !(1.0..=10_000.0).contains(&height) {
+                    return Err("--flight-altitude requires 1 to 10000 metres".into());
+                }
+                flight_altitude = Some(height);
+            }
+            "--flight-heading" => {
+                let heading = args.next().ok_or("--flight-heading requires degrees true")?.parse()?;
+                if !(0.0..360.0).contains(&heading) {
+                    return Err("--flight-heading requires degrees true in [0,360)".into());
+                }
+                flight_heading = Some(heading);
+            }
+            "--flight-wind" => {
+                let value = args.next().ok_or("--flight-wind requires X,Y,Z metres per second")?;
+                let components = value.split(',').map(str::parse).collect::<std::result::Result<Vec<f32>, _>>()?;
+                let [x, y, z] = components.as_slice() else {
+                    return Err("--flight-wind requires X,Y,Z metres per second".into());
+                };
+                flight_wind = glam::Vec3::new(*x, *y, *z);
+                if !flight_wind.is_finite() || flight_wind.length() > 100. {
+                    return Err("--flight-wind requires a finite speed of at most 100 m/s".into());
+                }
+            }
+            "--weather" => {
+                let regime = args.next().ok_or("--weather requires off|dynamic|regional|clear|rain|convective")?;
+                weather = if regime == "off" { None } else {
+                    Some(frontier_runtime::weather::Regime::parse(&regime)
+                        .ok_or("--weather requires off|dynamic|regional|clear|rain|convective")?)
+                };
+            }
+            "--weather-age" => {
+                weather_age = args.next().ok_or("--weather-age requires seconds")?.parse()?;
+                if !(0.0..=3600.).contains(&weather_age) {
+                    return Err("--weather-age requires 0 to 3600 seconds".into());
+                }
+            }
+            "--day-night" => {
+                day_night = Some(match args.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("--day-night requires on|off".into()),
+                });
+            }
+            "--day-length" => {
+                visual.day_length = args.next().ok_or("--day-length requires seconds")?.parse()?;
+                if !(300. ..=86400.).contains(&visual.day_length) {
+                    return Err("--day-length requires 300 to 86400 simulated seconds".into());
+                }
+            }
+            "--weather-speed" => {
+                visual.time_speed = args.next().ok_or("--weather-speed requires a multiplier")?.parse()?;
+                if !(0. ..=64.).contains(&visual.time_speed) {
+                    return Err("--weather-speed requires a multiplier from 0 to 64".into());
+                }
+            }
+            "--weather-day" => weather_day = args.next().ok_or("--weather-day requires a day number")?.parse()?,
+            "--weather-hour" => {
+                weather_hour = args.next().ok_or("--weather-hour requires a time from 0 to 24")?.parse()?;
+                if !(0.0..24.0).contains(&weather_hour) {
+                    return Err("--weather-hour requires a time from 0 to 24".into());
+                }
+            }
+            "--weather-save" => {
+                weather_checkpoint = Some(PathBuf::from(args.next().ok_or("--weather-save requires a checkpoint path")?));
+            }
+            "--weather-latitude" => {
+                weather_latitude = args.next().ok_or("--weather-latitude requires degrees")?.parse()?;
+                if !(25. ..=65.).contains(&weather_latitude.abs()) {
+                    return Err("--weather-latitude requires 25 to 65 degrees north or south".into());
+                }
+            }
+            "--weather-center" => {
+                let value = args.next().ok_or("--weather-center requires X,Z metres")?;
+                let (x,z) = value.split_once(',').ok_or("--weather-center requires X,Z metres")?;
+                let center = [x.parse::<f64>()?, z.parse::<f64>()?];
+                if center.iter().any(|v| !v.is_finite() || v.abs() > 1e9) {
+                    return Err("--weather-center requires finite world coordinates".into());
+                }
+                weather_center = Some(center);
+            }
+            "--airborne-radar" => airborne_radar = true,
+            "--flight-parked" => flight_parked = true,
+            "--flight-walkup" => { flight_walkup = true; flight_parked = true; },
             "--rolling-walk-frames" => {
                 rolling_walk_frames = Some(PathBuf::from(args.next().ok_or("--rolling-walk-frames requires an output directory")?));
             }
@@ -683,14 +925,19 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 )
             }
             "--help" | "-h" => {
-                println!("Rolling terrain is the default for procedural worlds. Explore with --preset seeded-world --seed random. Use --packed-terrain for the previous mesh renderer. --rolling-terrain explicitly selects rolling terrain. Live water, packed quality diagnostics, longer view distances and larger exact volumes use packed terrain.");
-                println!("--rolling-walk-frames DIR captures a deterministic Alpine trail walk. Add --route fly with --eye and --target for a straight approach and a terrain ownership capture.");
+                println!("Default play: a random Eroded world with rolling terrain, procedural vegetation, regional weather, a day/night cycle and 1× MSAA. Use --seed INTEGER to revisit a world. --weather off selects the procedural sky. Explicit --preset, --terrain-recipe and --scene select alternate worlds with their own defaults. Use --packed-terrain for the previous mesh renderer. Live water, packed quality diagnostics, longer view distances and larger exact volumes use packed terrain.");
+                println!("--model-preview opens the aircraft studio. Run --model-preview --help for headless captures and pose controls.");
+                println!("Add --flight-view chase or --flight-view pilot to fly an aircraft over rolling terrain. Click to take control. Shift/Ctrl increase/decrease throttle, W/S pitch down/up, A/D roll, Q/E rudder and ground steering, Z/X extend/retract flaps, Page Up/Down pitch trim, Space brakes, C changes view.");
+                println!("--weather off|dynamic|regional|clear|rain|convective enables a world-space atmosphere. --weather-age SECONDS advances the simulation before spawn. --weather-day DAY --weather-hour HOUR choose the initial local time. --weather-center X,Z anchors the region. --weather-latitude DEG sets the regional Coriolis reference. --weather-save PATH resumes and saves regional weather. --weather-speed 0..64 sets the time multiplier. --day-length SECONDS sets the solar day. --day-night on|off controls celestial lighting (on with weather). F4 opens the live weather radar. In flight M changes the cockpit weather page, comma/period change range, semicolon/apostrophe change altitude or tilt. --airborne-radar adds the stabilized sweep and profile.");
+                println!("--flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, hold right mouse to look around the cabin, H toggles heading/altitude hold, and [ / ] tune COM.");
+                println!("Terrain detail: --preset eroded enables seed-wide dissected geological relief and denser middle coverage. --terrain-mid-detail on|off, --terrain-mid-cells 512|1024|2048, --terrain-mid-spacing 0.75|1|1.5|2|3|4 metres, --terrain-mid-strips on|off. Optional extra detail: --terrain-detail on --terrain-near-spacing 0.25|0.5|0.75|1|1.5 --terrain-near-cells 512|1024; --terrain-far-detail on|off. --terrain-depth-occlusion on|off reuses foreground depth before tracing the terrain. --natural-terrain-light on|off enables the shared terrain horizon and revised clouds. Experiments: --terrain-mid-error 0..4 pixels, --terrain-mid-tile-error 0..1 metres, --terrain-mid-boundary-ascent on|off, --terrain-gray, --formation-site X,Z (Landforms). For terrain-only captures, --capture-terrain-distance writes first-hit distance in metres to the float RGB readback.");
+                println!("--rolling-walk-frames DIR captures a deterministic Alpine trail walk. Use --route fly or bank-return with --eye and --target to capture flight and terrain ownership. The walking routes work with any terrain recipe.");
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius-voxels 1..4096 (native voxel half-extent, enables NAADF); --naadf-radius 1..256 (legacy meters) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
                 println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
                 println!("Water models (opt-in): --water-model ca|discrete|procedural|moving.\n  ca: original local cellular automaton; --live-water on selects this path.\n  discrete: supplied whole-voxel waterfall/basin/outlet demo on a worker.\n  procedural: fixed 1 m generated river-bank tile with finite coarse neighbors and open boundaries.\n  moving: connected 2 m detailed window following the player, a 4 m local footprint and exact dormant history.\nMoving river flow: --water-river-rate 0..1000000 attempts native cells per simulated second at each eligible upstream/downstream continuation (default 128 for new runs; 0 selects finite water). A saved rate persists unless explicitly overridden. With positive input/output, downstream removal may lead accepted supply by at most 16 cells per channel. Blocked supply can stall accepted flow. Lakes remain finite.\nLive saves: --water-save PATH atomically saves terrain, inventory and model-specific water state on clean exit; reload with the same model/source/seed. Requires --scene adaptive, --naadf on, --naadf-follow on and --naadf-gpu-distance off.\nCA controls: --water-demo builds a two-chamber basin; G opens its dam early, P adds one counted water cell in creative mode. --water-active-radius 1|2 selects a 3 m|5 m active cube (default 1); --water-history-cells 32768..16777216 sets persistent capacity (default 1048576, at least the active cube). Unloaded CA borders are sealed.\nComparison renderer settings: --naadf-radius 8 --width 1920 --height 1080 selects an 8 m radius/16 m cube at 1080p. Ordinary NAADF radius defaults remain 64 m; water physics dimensions are independent. See LIVE_WATER.md for launch examples and experimental limits.");
                 println!("Packed distant terrain uses coarse voxels with compact seed appearance. Set FRONTIER_DISTANT_TERRAIN=surface for the packed heightfield comparison or =voxy for the detailed-map voxel comparison. Set FRONTIER_VOXY_GPU_BATCH=1 to test optional GPU batching.");
-                println!("World grid: --voxel-size METERS selects the native cube edge length for this launch (default 0.0625).\nVisual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables the new watershed terrain and vegetation. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
-                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nFrontier experimental FBM terrain (default) / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world|watershed|watershed (default regional); --start-xz X,Z; voxel-filter on and MSAA4 default\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
+                println!("World grid: --voxel-size METERS selects the native cube edge length for this launch (default 0.0625).\nVisual preview: --preset alpine selects the Alpine meadow scene; --preset seeded-world (alias world) selects continuous seeded climate/biome terrain, static water, no vegetation, and a bounded dry walking spawn. --preset watershed enables watershed terrain and vegetation. --preset landscapes selects branching ridges, stratified relief and climate-shaped cover. Free flight uses 35 m/s, or 80 m/s with Shift. --seed INTEGER|random resolves a reproducible seed (default 7). Later flags override preset values. --sun-elevation DEGREES --sun-azimuth DEGREES --exposure SCALE --ground-bounce 0..2 --sunbeams 0..2 --streaming-haze 0..1 --fog-density PER_M --fog-height-falloff PER_M --cloud-coverage 0..1 --cloud-speed 0..0.1 --overcast 0..1 --terrain-shadows on|off (bounded published terrain in current playable adaptive scenes). Alpine enables scene beauty, seeded vegetation and grounded walking; --beauty on|off toggles the lighting/atmosphere treatment; --vegetation on|off --walk on|off override them. F toggles walk/free flight; Space jumps while walking. Esc opens settings; --atmosphere on|off, --render-scale 0.5..1. Current Regional terrain is the default. Quality/resources apply together in the menu; atmosphere controls are live.\nAdaptive candidate: --scene adaptive|adaptive-topology --pixel-error 1 --adaptive-cache-mib 512 --adaptive-workers N (default up to four available CPU threads, 1..16 accepted, up to four active builds), --adaptive-build-mib 512 reservation budget. Selection batch: --adaptive-refinements 1..32 (default 8; independent of builder concurrency). Experimental nearest-leaf direct-native selection: --adaptive-direct-native on|off (default off). Optional derived disk cache: --adaptive-disk-cache PATH --adaptive-disk-mib 2048. Exact cave/bridge owner remains resident in adaptive-topology. Headless captures require settled quality; --capture-unresolved explicitly permits a coherent diagnostic image with failed quality marked in metadata. --adaptive-wait-quality starts benchmark clocks only after current coverage and the 0.8x internal error reserve settle (120s failure limit; reported quality still uses the requested bound); normal startup begins from coarse coverage. Adaptive window benchmarks accept --capture-far and explicit camera poses for matched clips.");
+                println!("Prototype comparisons: --scene hybrid-topology --camera topology|cave|bridge; --renderer mesh|brick|brick-skip|brick-directional (fixture only); --surface-layout clipmap|quadtree (fbm only, quadtree freezes source pages); --teleport-test (hybrid only); --edit-test (fixture or hybrid-topology: add 1m cube at 2s, restore original materials 2s after publication); T teleports 512m or home. Single-sample captures also write .depth.f32. Explicit headless camera: --eye X,Y,Z --target X,Y,Z --fov-y 60 --msaa 1 --voxel-filter off --capture-linear (optional unclipped float32 render target); captures write .capture.json, .linear_rgb.f32 (raw float32 with --capture-linear, otherwise decoded 8-bit target), .coverage.f32 and .depth.f32.\nExplicit FBM comparison scenes / exact native fixture\n--terrain-recipe regional|regional-unwarped|legacy|alpine|seeded-world|watershed|landscapes|landforms|eroded; --start-xz X,Z; --voxel-filter on; --msaa 1|4\n--scene pages|pages-topology|adaptive|adaptive-topology|fbm|fbm-native|hybrid|hybrid-static|fixture --pixel-error 1 --seed 7 --scale 1800 --amplitude 1000 --octaves 8 --roughness 0.5 --camera valley|aerial\n--route static|fly|stop-resume|turn-return --route-step 0.0166667 --route-speed MPS --route-clock frame|realtime --seconds N --capture-on-exit PATH --terrain-static --view-levels 7..11 --msaa 1|4 --voxel-filter on|off --capture-route-time SECONDS --capture-coverage-shift METERS (headless hybrid diagnostic only) --uncapped --warmup N --report PATH\nPages: bounded uniform reusable GPU grid baseline; --page-spacing 1|2|4|8|16 meters, 24x24 worldaligned32cell pages. Default far300*spacing meters, hard coverage344*spacing; native/collar and fixed volume owner retained; only1m spacing matches collar samples. No certified error or CDLOD claim.\nFBM: moving background-generated nested GPU grids, bounded ±2048m around published center, surface-only, no editing/native handoff. --terrain-static freezes the initial coverage for comparison. WASD 35m/s; Shift 80m/s.\nHybrid: moving 64m exact native heightfield chunks, approximate 2m collar, GPU proxy with coherent ownership publication; hybrid-topology adds a fixed exact cave/bridge owner and local edits. No collision or certified proxy error. hybrid-static preserves the fixed CPU reference. Default eye 1.7m above canonical top at origin.\nFrontier bounded native-voxel fixture\n--capture PATH [--width 1280 --height 720] or --frames N for a finite window run\nClick: capture mouse; WASD: free flight; Shift: fast; Space/Ctrl: vertical; Esc: release mouse; F12: PNG\nAim at screen center: left removes a cell, right places stone (8m reach); wait for each rebuild.\nThis reference has no streaming, distant LOD, collision or persistence.");
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -724,6 +971,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         return Err(
             "--capture-coverage-shift is only for hybrid headless publication comparisons".into(),
         );
+    }
+    if weather_checkpoint.is_some() && weather != Some(frontier_runtime::weather::Regime::Regional)
+    {
+        return Err("--weather-save requires --weather regional".into());
     }
     if capture_route_time.is_some_and(|t| !t.is_finite() || t < 0.) {
         return Err("--capture-route-time requires finite nonnegative seconds".into());
@@ -839,8 +1090,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         return Err("--vegetation on currently requires --scene adaptive".into());
     }
     params.validate()?;
+    visual.cloud_phase = crate::cloud_shape::phase(seed);
     if seeded_preset && !explicit_start && eye.is_none() && params.recipe.has_static_water() {
-        start_xz = seeded_spawn(seed, params)?;
+        start_xz = seeded_spawn(seed, params, visual.vegetation)?;
         eprintln!(
             "Seeded world seed={seed}, dry spawn=({:.1},{:.1})m",
             start_xz[0], start_xz[1]
@@ -952,11 +1204,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         );
     }
     use crate::rolling_terrain::{DEFAULT_NAADF_RADIUS, MAX_FAR, MAX_NAADF_RADIUS};
-    let supported_scene = scene == "adaptive"
-        && !live_water
-        && !adaptive_wait_quality
-        && !capture_unresolved
-        && !visual.visibility_benchmark;
+    let supported_scene =
+        scene == "adaptive" && !live_water && !capture_unresolved && !visual.visibility_benchmark;
     let supported_limits = !capture_far.is_some_and(|far| far > MAX_FAR)
         && !(explicit_naadf_radius
             && visual.naadf_enabled
@@ -967,16 +1216,113 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let rolling_terrain = rolling_preference.unwrap_or(
         supported_scene
             && supported_limits
+            && !adaptive_wait_quality
             && (!packed_comparison || rolling_walk_frames.is_some()),
     );
+    let eroded =
+        rolling_terrain && seeded_preset && params.recipe == frontier_world::FbmRecipe::Eroded;
+    if eroded
+        && !frontier_world::vegetation::uses_decorative_ground_cover()
+        && resource_profile.is_none()
+        && visual.resource_profile == ResourceProfile::Development
+    {
+        // Preserve the interactive memory profile and bound live vegetation
+        // refinement. Advisory budgets remain explicitly selectable in Settings.
+        visual.triangle_budget = 1_500_000;
+    }
+    visual.terrain_depth_occlusion = depth_occlusion_override.unwrap_or(eroded);
+    visual.terrain_mid_detail = mid_detail_override.unwrap_or(eroded);
+    visual.terrain_mid_strips = mid_strips_override.unwrap_or(eroded && visual.terrain_mid_detail);
+    if eroded && visual.terrain_mid_detail {
+        if !mid_spacing_explicit {
+            visual.terrain_mid_spacing = 3.;
+        }
+        if visual.terrain_mid_spacing == 3. {
+            visual.terrain_mid_cells.get_or_insert(1024);
+        }
+    }
+    if !visual.terrain_mid_detail
+        && (visual.terrain_mid_strips
+            || visual.terrain_mid_cells.is_some()
+            || visual.terrain_mid_spacing != 1.5
+            || visual.terrain_mid_error_px > 0.
+            || visual.terrain_mid_tile_error_m > 0.
+            || visual.terrain_mid_boundary_ascent)
+    {
+        return Err("mid cache options require --terrain-mid-detail on".into());
+    }
+    if visual.terrain_mid_detail && (!rolling_terrain || !params.recipe.has_landscape_relief()) {
+        return Err(
+            "--terrain-mid-detail requires rolling Landscapes, Landforms or Eroded terrain".into(),
+        );
+    }
+    if (visual.terrain_near_spacing.is_some() || visual.terrain_near_cells != 512)
+        && (!rolling_terrain || !visual.terrain_detail)
+    {
+        return Err(
+            "terrain near cache settings require rolling terrain and --terrain-detail on".into(),
+        );
+    }
+    if visual
+        .terrain_near_spacing
+        .is_some_and(|pitch| pitch >= visual.terrain_mid_spacing)
+    {
+        return Err("the near cache spacing must be finer than the middle cache spacing".into());
+    }
+    if visual.terrain_far_detail && (!rolling_terrain || !params.recipe.has_landscape_relief()) {
+        return Err(
+            "--terrain-far-detail requires rolling Landscapes, Landforms or Eroded terrain".into(),
+        );
+    }
+    if visual.terrain_depth_occlusion && !rolling_terrain {
+        return Err("--terrain-depth-occlusion requires rolling terrain".into());
+    }
+    if formation_site.is_some()
+        && (!rolling_terrain || params.recipe != frontier_world::FbmRecipe::Landforms)
+    {
+        return Err("--formation-site requires the rolling landforms preset".into());
+    }
     if rolling_terrain {
         if !supported_scene || !supported_limits {
-            return Err("--rolling-terrain requires a procedural adaptive scene with static water, up to 6 km visibility and up to 512 NAADF voxels of radius. Use --packed-terrain for these settings.".into());
+            return Err("--rolling-terrain requires a procedural adaptive scene with static water, up to 9 km visibility and up to 512 NAADF voxels of radius. Use --packed-terrain for these settings.".into());
         }
         if !explicit_naadf_radius {
             visual.naadf_radius_voxels = DEFAULT_NAADF_RADIUS;
         }
-        capture_far = Some(capture_far.unwrap_or(MAX_FAR));
+        capture_far = Some(
+            capture_far.unwrap_or(if params.recipe.has_landscape_relief() {
+                6000.
+            } else {
+                MAX_FAR
+            }),
+        );
+    } else {
+        capture_far = capture_far.or(preset_far);
+    }
+    if (flight_altitude.is_some() || flight_heading.is_some()) && (flight_parked || eye.is_some()) {
+        return Err(
+            "--flight-altitude and --flight-heading apply to airborne spawns without an explicit camera".into(),
+        );
+    }
+    if (flight_altitude.is_some() || flight_heading.is_some() || flight_wind != glam::Vec3::ZERO)
+        && !flight_parked
+        && flight_chase.is_none()
+    {
+        flight_chase = Some(false);
+    }
+    if flight_parked && flight_chase.is_none() {
+        flight_chase = Some(true);
+    }
+    if flight_chase.is_some() {
+        if !rolling_terrain
+            || route != frontier_runtime::routes::Route::Stationary
+            || rolling_walk_frames.is_some()
+        {
+            return Err(
+                "--flight-view requires rolling terrain and player-controlled movement".into(),
+            );
+        }
+        visual.walking = false;
     }
     if rolling_walk_frames.is_some()
         && (!rolling_terrain || capture.is_some() || capture_on_exit.is_some())
@@ -986,20 +1332,36 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 .into(),
         );
     }
+    let captured_flight = matches!(
+        route,
+        frontier_runtime::routes::Route::Fly | frontier_runtime::routes::Route::BankReturn
+    );
     if rolling_walk_frames.is_some()
-        && route != frontier_runtime::routes::Route::Fly
+        && !captured_flight
+        && !route.grounded()
         && params.recipe != frontier_world::FbmRecipe::Alpine
     {
         return Err(
-            "the trail capture requires Alpine; use --route fly for other terrain recipes".into(),
+            "the trail capture requires Alpine; use --route fly, bank-return or a walking route for other terrain recipes".into(),
         );
     }
-    if rolling_walk_frames.is_some()
-        && route == frontier_runtime::routes::Route::Fly
-        && (eye.is_none() || msaa != 1)
-    {
+    if rolling_walk_frames.is_some() && captured_flight && (eye.is_none() || msaa != 1) {
         return Err("rolling flight capture requires explicit --eye/--target and --msaa 1".into());
     }
+    if visual.capture_terrain_distance
+        && (!rolling_terrain
+            || !capture_linear
+            || visual.naadf_enabled
+            || visual.vegetation
+            || flight_chase.is_some()
+            || formation_site.is_some())
+    {
+        return Err("--capture-terrain-distance requires a rolling --capture-linear with --naadf off and --vegetation off, without aircraft or formation sites".into());
+    }
+    visual.day_night = day_night.unwrap_or(weather.is_some()) && !capture_linear;
+    visual.clock_start = f64::from(weather_day) * frontier_runtime::weather::SOLAR_DAY_SECONDS
+        + weather_hour * 3600.;
+    let day_length = visual.day_length;
     Ok(Some(Options {
         live_water,
         discrete_water,
@@ -1019,7 +1381,26 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         capture,
         capture_on_exit,
         rolling_terrain,
+        flight_chase,
+        flight_parked,
+        flight_altitude,
+        flight_heading,
+        flight_wind,
+        world_weather: weather.map(|regime| crate::world_weather::Config {
+            regime,
+            age_seconds: weather_age,
+            day: weather_day,
+            hour: weather_hour,
+            prevailing_wind: flight_wind,
+            center: weather_center,
+            day_length,
+            latitude_deg: weather_latitude,
+            checkpoint: weather_checkpoint,
+        }),
+        airborne_radar,
+        flight_walkup,
         rolling_walk_frames,
+        formation_site,
         seconds,
         width,
         height,
@@ -1069,8 +1450,17 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
 
 /// Bounded deterministic search, only used by the opt-in world preset. Check a
 /// dry 4m neighborhood and a gentle local slope; no authored path or landmark.
-fn seeded_spawn(seed: u64, params: frontier_world::FbmParams) -> Result<[f64; 2]> {
+fn seeded_spawn(
+    seed: u64,
+    params: frontier_world::FbmParams,
+    vegetation: bool,
+) -> Result<[f64; 2]> {
     let terrain = frontier_world::FbmTerrain::new(seed, params)?;
+    let woodland = if vegetation && params.recipe == frontier_world::FbmRecipe::Eroded {
+        Some(frontier_world::World::fbm(seed, params)?.with_vegetation())
+    } else {
+        None
+    };
     let mut fallback = None;
     for spacing in [128., 512., 8192.] {
         // Once local grass has been exhausted, keep the nearby dry desert or
@@ -1105,7 +1495,22 @@ fn seeded_spawn(seed: u64, params: frontier_world::FbmParams) -> Result<[f64; 2]
                                         .abs()
                                         <= 1.5
                             });
-                    if safe {
+                    let clear = safe
+                        && woodland.as_ref().is_none_or(|world| {
+                            let radius = frontier_world::vegetation::MAX_PLANT_RADIUS_CELLS
+                                + (0.85 / frontier_world::voxel_size()).ceil() as i64;
+                            let nearby = world.vegetation_records_species(
+                                [p.x - radius, p.z - radius],
+                                [p.x + radius + 1, p.z + radius + 1],
+                                frontier_world::vegetation::Species::Rowan,
+                            );
+                            nearby.is_empty()
+                                || (frontier_world::vegetation::uses_living_woodland(world)
+                                    && !crate::walking::aabb_blocked([x, h + 1.7, z], |cell| {
+                                        world.blocking_material(cell)
+                                    }))
+                        });
+                    if clear {
                         if center.ground_surface == frontier_world::Material::Grass
                             || spacing == 8192.
                         {
@@ -1144,6 +1549,77 @@ mod tests {
         .collect()
     }
     #[test]
+    fn landscapes_preset_selects_the_new_recipe_and_six_kilometre_cache() {
+        let opts = parse_args(
+            ["--preset", "landscapes", "--seed", "19", "--frames", "1"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(opts.params.recipe, frontier_world::FbmRecipe::Landscapes);
+        assert!(opts.rolling_terrain && opts.visual.naadf_enabled && opts.visual.vegetation);
+        assert_eq!(opts.capture_far, Some(6000.));
+    }
+
+    #[test]
+    fn eroded_preset_enables_wide_terrain_and_allows_overrides() {
+        let parse = |arguments: &[&str]| {
+            parse_args(
+                [
+                    "--preset",
+                    "eroded",
+                    "--seed",
+                    "19",
+                    "--start-xz",
+                    "40,50",
+                    "--frames",
+                    "1",
+                ]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let options = parse(&[]);
+        assert_eq!(options.params.recipe, frontier_world::FbmRecipe::Eroded);
+        assert!(options.rolling_terrain && options.visual.natural_terrain_light);
+        assert!(options.visual.terrain_mid_detail && options.visual.terrain_mid_strips);
+        assert_eq!(options.visual.terrain_mid_cells, Some(1024));
+        assert_eq!(options.visual.terrain_mid_spacing, 3.);
+        assert!(options.visual.terrain_depth_occlusion);
+        let options = parse(&[
+            "--terrain-mid-detail",
+            "off",
+            "--terrain-depth-occlusion",
+            "off",
+        ]);
+        assert!(!options.visual.terrain_mid_detail && !options.visual.terrain_depth_occlusion);
+        assert_eq!(options.visual.terrain_mid_cells, None);
+    }
+
+    #[test]
+    fn eroded_spawn_can_use_woodland_with_clear_native_body_space() {
+        use frontier_world::{FbmParams, FbmRecipe, World};
+
+        let params = FbmParams {
+            recipe: FbmRecipe::Eroded,
+            ..FbmParams::default()
+        };
+        let seed = 14_359_684_524_443_512_592;
+        let world = World::fbm(seed, params).unwrap().with_vegetation();
+        let [x, z] = seeded_spawn(seed, params, true).unwrap();
+        let height = world.ground_height_m(x, z);
+        assert!(!crate::walking::aabb_blocked(
+            [x, height + 1.7, z],
+            |cell| { world.blocking_material(cell) }
+        ));
+        assert_eq!(seeded_spawn(seed, params, true).unwrap(), [x, z]);
+    }
+
+    #[test]
     fn seeded_preset_uses_dry_ground_and_respects_later_overrides() {
         let parse = |args: &[&str]| {
             parse_args(args.iter().map(|s| s.to_string()))
@@ -1158,7 +1634,7 @@ mod tests {
         assert!(world.rolling_terrain);
         assert_eq!(world.visual.naadf_radius_voxels, 128);
         assert_eq!(world.pixel_error, 5.);
-        assert_eq!(world.capture_far, Some(6000.));
+        assert_eq!(world.capture_far, Some(crate::rolling_terrain::MAX_FAR));
         assert!(!world.visual.vegetation);
         let terrain = frontier_world::FbmTerrain::new(world.seed, world.params).unwrap();
         let cell = frontier_world::Cell::from_meters([world.start_xz[0], 0., world.start_xz[1]]);
@@ -1215,19 +1691,41 @@ mod tests {
                 .visual
                 .naadf_enabled
         );
-        let default = parse(&[]).unwrap().unwrap();
+        let default = parse(&["--seed", "19"]).unwrap().unwrap();
+        assert_eq!(default.params.recipe, frontier_world::FbmRecipe::Eroded);
+        assert_eq!(default.seed, 19);
         assert!(default.rolling_terrain && default.visual.naadf_enabled);
+        assert!(default.visual.walking && default.visual.vegetation);
+        assert!(default.visual.natural_terrain_light && default.visual.day_night);
+        assert_eq!(
+            default.world_weather.as_ref().map(|config| config.regime),
+            Some(frontier_runtime::weather::Regime::Regional)
+        );
         assert_eq!(default.msaa, 1);
         assert_eq!(default.visual.naadf_radius_voxels, 128);
         assert_eq!(default.capture_far, Some(6000.));
+        let overrides = parse(&["--seed", "19", "--weather", "off", "--msaa", "4"])
+            .unwrap()
+            .unwrap();
+        assert!(overrides.world_weather.is_none() && !overrides.visual.day_night);
+        assert_eq!(overrides.msaa, 4);
         let packed = parse(&["--packed-terrain"]).unwrap().unwrap();
         assert!(!packed.rolling_terrain && packed.visual.naadf_enabled);
         assert_eq!(packed.visual.naadf_radius_voxels, 1024);
+        let packed_preset = parse(&["--preset", "seeded-world", "--packed-terrain"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(packed_preset.capture_far, Some(6000.));
+        let limited = parse(&["--preset", "seeded-world", "--capture-far", "6000"])
+            .unwrap()
+            .unwrap();
+        assert!(limited.rolling_terrain);
+        assert_eq!(limited.capture_far, Some(6000.));
         for args in [
             &["--live-water", "on"][..],
             &["--adaptive-wait-quality"],
             &["--scene", "adaptive-topology"],
-            &["--capture-far", "9000"],
+            &["--capture-far", "9001"],
             &["--pixel-error", "1"],
         ] {
             assert!(!parse(args).unwrap().unwrap().rolling_terrain);
@@ -1288,6 +1786,29 @@ mod tests {
         assert_eq!(constrained.visual.build_mib, 512);
         assert_eq!(constrained.visual.terrain_gpu_mib, 512);
         assert_eq!(constrained.visual.upload_mib, 2);
+        let eroded = ["--preset", "eroded", "--start-xz", "0,0"];
+        let interactive = parse_args(eroded.into_iter().map(str::to_string))
+            .unwrap()
+            .unwrap();
+        assert_eq!(interactive.visual.triangle_budget, 1_500_000);
+        let development = parse_args(
+            eroded
+                .into_iter()
+                .chain(["--resource-profile", "development"])
+                .map(str::to_string),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(development.visual.triangle_budget, 4_000_000);
+        let finite = parse_args(
+            eroded
+                .into_iter()
+                .chain(["--frames", "1"])
+                .map(str::to_string),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(finite.visual.triangle_budget, 1_000_000);
         let args = [
             "--resource-profile",
             "development",
@@ -1316,8 +1837,15 @@ mod tests {
     }
     #[test]
     fn alpine_preset_and_visual_overrides_are_reproducible() {
-        let defaults = parse_args(std::iter::empty()).unwrap().unwrap();
+        let defaults = parse_args(
+            ["--terrain-recipe", "regional"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(defaults.params.recipe, frontier_world::FbmRecipe::Regional);
+        assert!(defaults.world_weather.is_none());
         assert!(!defaults.visual.terrain_shadows);
         assert!(!defaults.visual.vegetation);
         assert!(!defaults.visual.walking);
@@ -1340,7 +1868,7 @@ mod tests {
             alpine.start_xz,
             [frontier_world::terrain::alpine_path_center_m(-250.), -250.]
         );
-        assert_eq!(alpine.capture_far, Some(6000.));
+        assert_eq!(alpine.capture_far, Some(crate::rolling_terrain::MAX_FAR));
         assert!(alpine.visual.vegetation);
         assert!(alpine.visual.walking);
         assert!(alpine.visual.beauty);

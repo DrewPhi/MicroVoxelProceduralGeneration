@@ -11,6 +11,12 @@ pub(super) fn chunk_local_enabled() -> bool {
     *ENABLED
         .get_or_init(|| std::env::var("FRONTIER_NAADF_CHUNK_LOCAL_OVERLAY").as_deref() == Ok("1"))
 }
+pub(super) fn priority_enabled(living_woods: bool) -> bool {
+    crate::woodland_volume::render_option("FRONTIER_NAADF_PLANT_PRIORITY", living_woods)
+}
+pub(super) fn clip_enabled(living_woods: bool) -> bool {
+    crate::woodland_volume::render_option("FRONTIER_NAADF_PLANT_CLIP", living_woods)
+}
 
 // In-place MSD radix buckets group native 16³ chunks. Only three 256-entry
 // tables are needed per address byte; payload capacity never grows. Within a
@@ -126,6 +132,47 @@ impl Overlay {
             Self::Narrow(v) => v.push((address << 16) | u64::from(pigment)),
             Self::Wide(v, _) => v.push(((address as u128) << 32) | u128::from(pigment)),
         }
+    }
+    pub(super) fn push_priority(&mut self, address: u64, pigment: u32, priority: u32) {
+        let Self::Wide(values, _) = self else {
+            unreachable!("priority requires wide overlay storage");
+        };
+        values
+            .push((u128::from(address) << 64) | (u128::from(priority) << 32) | u128::from(pigment));
+    }
+
+    /// Keep the earliest plant in the canonical traversal order at each cell.
+    /// Strip the temporary priority so the usual chunk assembler sees its
+    /// ordinary address/palette layout.
+    pub(super) fn resolve_priority(
+        &mut self,
+        cancel: &impl Fn() -> bool,
+        chunk_local: bool,
+    ) -> Result<(), String> {
+        let Self::Wide(values, _) = self else {
+            unreachable!("priority requires wide overlay storage");
+        };
+        if chunk_local {
+            sort_chunks(values, |v| (v >> 76) as u64, cancel)?;
+        } else {
+            values.sort_unstable();
+        }
+        let mut kept = 0;
+        let mut previous = None;
+        for i in 0..values.len() {
+            if i % 4096 == 0 && cancel() {
+                return Err("NAADF build superseded".into());
+            }
+            let value = values[i];
+            let address = value >> 64;
+            if previous != Some(address) {
+                values[kept] = (address << 32) | u128::from(value as u32);
+                kept += 1;
+                previous = Some(address);
+            }
+        }
+        values.truncate(kept);
+        Ok(())
     }
     pub(super) fn len(&self) -> usize {
         match self {

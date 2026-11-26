@@ -6,8 +6,19 @@ use wgpu::util::DeviceExt;
 /// Choose a reproducible open view toward distant relief using the canonical
 /// source. Nearby ridges penalize headings whose horizon would hide the range.
 pub(crate) fn seeded_world_heading(source: &FbmTerrain, x: f64, z: f64) -> (f32, f32) {
-    let eye = source.ground_height_m(x, z) + 1.7;
-    let mut best = (f64::NEG_INFINITY, 0., -0.04);
+    let (yaw, pitch, _) =
+        seeded_heading_at_height(source, x, z, source.ground_height_m(x, z) + 1.7, false);
+    (yaw, pitch)
+}
+
+pub(crate) fn seeded_heading_at_height(
+    source: &FbmTerrain,
+    x: f64,
+    z: f64,
+    eye: f64,
+    airborne: bool,
+) -> (f32, f32, f64) {
+    let mut best = (f64::NEG_INFINITY, 0., -0.04, eye);
     for direction in 0..8 {
         let yaw = direction as f64 * std::f64::consts::FRAC_PI_4;
         let (dx, dz) = yaw.sin_cos();
@@ -26,17 +37,32 @@ pub(crate) fn seeded_world_heading(source: &FbmTerrain, x: f64, z: f64) -> (f32,
             far_high = far_high.max(visible);
         }
         let mut near_angle = f64::NEG_INFINITY;
+        let mut nearby_high = f64::NEG_INFINITY;
         for distance in [24., 64., 128., 256., 512.] {
             let h = source.height_m(x + dx * distance, z + dz * distance);
+            nearby_high = nearby_high.max(h);
             near_angle = near_angle.max(((h - eye) / distance).atan());
         }
         let occlusion = (near_angle - far_angle).max(0.);
-        let score = far_angle - 3. * occlusion + (far_high - far_low) / 10000. - wet * 0.025;
+        // An elevated profile should leave a forward flight corridor. The
+        // horizon can still rise above the aircraft beyond that corridor.
+        let clearance = if airborne {
+            7. * (near_angle + 0.065).max(0.)
+        } else {
+            0.
+        };
+        let score =
+            far_angle - 3. * occlusion + (far_high - far_low) / 10000. - wet * 0.025 - clearance;
         if score > best.0 {
-            best = (score, yaw, (far_angle - 0.025).clamp(-0.06, 0.12));
+            best = (
+                score,
+                yaw,
+                (far_angle - 0.025).clamp(-0.06, 0.12),
+                nearby_high,
+            );
         }
     }
-    (best.1 as f32, best.2 as f32)
+    (best.1 as f32, best.2 as f32, best.3)
 }
 
 const N: i32 = 64;
