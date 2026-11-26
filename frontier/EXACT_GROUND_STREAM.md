@@ -1,5 +1,8 @@
 # Exact ground streaming experiment
 
+See [the bounded procedural source experiment](POLYNOMIAL_GROUND.md)
+for native-column rendering with a renderer-friendly canonical generator.
+
 `exact_ground_stream` is a standalone flyable preview and benchmark for opaque
 ground from Frontier's current procedural source. Every first hit is a native
 6.25 cm column top or side. A quadtree records conservative ceilings, and
