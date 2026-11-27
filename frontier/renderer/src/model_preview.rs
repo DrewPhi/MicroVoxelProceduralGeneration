@@ -1,7 +1,7 @@
 //! A small studio that exercises the same aircraft mesh, displays and rig as flight.
 use crate::{
-    aircraft::{Instruments, Presentation},
-    aircraft_model::{self, Model, Part, Rig},
+    aircraft::{DisplayPage, Instruments, Presentation, PILOT_EYE, PILOT_VIEW_DOWN},
+    aircraft_model::{self, Model, ModelKind, Part, Rig},
     Camera, Result,
 };
 use glam::{DVec3, Mat4, Vec3};
@@ -18,7 +18,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const VIEWS: [&str; 8] = [
+const VIEWS: [&str; 10] = [
     "orbit",
     "front",
     "side",
@@ -27,6 +27,8 @@ const VIEWS: [&str; 8] = [
     "underside",
     "pilot",
     "rear-seat",
+    "panel",
+    "controls",
 ];
 const TARGET: Vec3 = Vec3::new(0., 0.1, -0.85);
 const STUDIO_COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -36,6 +38,7 @@ const DEFAULT_DISTANCE: f32 = 13.7;
 
 #[derive(Clone)]
 struct Studio {
+    aircraft: ModelKind,
     view: usize,
     yaw: f32,
     pitch: f32,
@@ -50,14 +53,19 @@ struct Studio {
     elevator: f32,
     rudder: f32,
     power: f32,
+    right_power: f32,
+    mixture: f32,
+    avionics: bool,
     wheel: f32,
     compression: f32,
     engine: bool,
     lighting: f32,
+    displays: [DisplayPage; 2],
 }
 impl Default for Studio {
     fn default() -> Self {
         Self {
+            aircraft: ModelKind::Skyhawk,
             view: 0,
             yaw: 42.,
             pitch: 20.,
@@ -72,15 +80,35 @@ impl Default for Studio {
             elevator: 0.,
             rudder: 0.,
             power: 0.,
+            right_power: 0.,
+            mixture: 1.,
+            avionics: true,
             wheel: 0.,
             compression: 0.,
             engine: false,
             lighting: 44.,
+            displays: DisplayPage::INITIAL,
         }
     }
 }
 
 impl Studio {
+    fn target(&self) -> Vec3 {
+        if self.aircraft == ModelKind::Da62 {
+            Vec3::new(0., 0.16, -0.85)
+        } else {
+            TARGET
+        }
+    }
+
+    fn default_distance(&self) -> f32 {
+        if self.aircraft == ModelKind::Da62 {
+            18.6
+        } else {
+            DEFAULT_DISTANCE
+        }
+    }
+
     fn camera(&self) -> (Camera, Option<f32>) {
         let mut camera = Camera {
             position: DVec3::ZERO,
@@ -92,13 +120,29 @@ impl Studio {
         };
         if self.view >= 6 {
             camera.fov_y = self.interior_fov;
-            if self.view == 6 {
-                camera.position = DVec3::new(0.28, 0.41, -0.48);
-                camera.pitch = -0.19;
-            } else {
+            if self.aircraft == ModelKind::Da62 {
+                let (position, pitch) = match self.view {
+                    6 => (aircraft_model::da62::PILOT_EYE, -0.23),
+                    7 => (Vec3::new(0., 0.49, -1.50), -0.20),
+                    8 => (Vec3::new(0., 0.52, -0.50), -0.30),
+                    _ => (Vec3::new(0., 0.39, -0.32), -0.42),
+                };
+                camera.position = position.as_dvec3();
+                camera.pitch = pitch;
+            } else if self.view == 6 {
+                camera.position = PILOT_EYE.as_dvec3();
+                camera.pitch = -PILOT_VIEW_DOWN;
+            } else if self.view == 7 {
                 camera.position = DVec3::new(-0.22, 0.49, -1.49);
                 camera.pitch = -0.16;
                 camera.yaw = 0.19;
+            } else if self.view == 8 {
+                camera.position = DVec3::new(0., 0.43, -0.76);
+                camera.pitch = -0.23;
+            } else {
+                camera.position = DVec3::new(0., 0.34, -0.38);
+                camera.pitch = -0.29;
+                camera.fov_y = (self.interior_fov - 4.).max(30.);
             }
             camera.position += self.pan.as_dvec3();
             camera.yaw += self.interior_look[0].to_radians();
@@ -120,7 +164,7 @@ impl Studio {
             pitch.sin(),
             yaw.cos() * pitch.cos(),
         );
-        camera.position = (TARGET + self.pan + outward * self.distance).as_dvec3();
+        camera.position = (self.target() + self.pan + outward * self.distance).as_dvec3();
         camera.yaw = yaw + std::f32::consts::PI;
         camera.pitch = -pitch;
         let ortho = (self.orthographic || self.view != 0)
@@ -130,6 +174,16 @@ impl Studio {
 
     fn plane(&self, time: f32) -> Presentation {
         Presentation {
+            kind: self.aircraft,
+            gear: self.rig.gear,
+            rear_door: self.rig.rear_door,
+            right_power: self.right_power,
+            right_prop_angle: if self.engine {
+                time * crate::aircraft::engine_speed_rad_s(self.right_power) + 0.58
+            } else {
+                0.86
+            },
+
             pose: Camera {
                 position: DVec3::ZERO,
                 yaw: 0.,
@@ -139,7 +193,18 @@ impl Studio {
                 far: FAR,
             },
             instruments: Instruments {
-                speed_mps: 40.,
+                twin: None,
+                gear_status: None,
+                true_speed_mps: if self.aircraft == ModelKind::Da62 {
+                    87.
+                } else {
+                    40.
+                },
+                speed_mps: if self.aircraft == ModelKind::Da62 {
+                    87.
+                } else {
+                    40.
+                },
                 altitude_m: 825.,
                 climb_mps: 2.05,
                 bank_degrees: self.roll * 15.,
@@ -157,12 +222,26 @@ impl Studio {
             controls: Vec3::new(self.roll, self.elevator, self.power),
             door: 0.,
             rudder: self.rudder,
-            turn_rate: self.rudder * 0.04,
-            prop_angle: if self.engine { time * 42. } else { 0.51 },
+            prop_angle: if self.engine {
+                time * 42.
+            } else if self.aircraft == ModelKind::Da62 {
+                0.34
+            } else {
+                0.51
+            },
             engine_running: self.engine,
+            ignition: self.engine,
+            mixture: if self.aircraft == ModelKind::Da62 {
+                self.right_power
+            } else {
+                self.mixture
+            },
+            avionics: self.avionics,
+            flap_selector: self.rig.flaps,
             wheel_turn: [self.wheel.to_radians(); 3],
             gear_compression: [self.compression; 3],
             radio_khz: 118_025,
+            displays: self.displays,
             home_relative_radians: 0.50,
             home_distance_km: 0.52,
             hold: false,
@@ -176,7 +255,10 @@ impl Studio {
             .default_width(258.)
             .show(ctx, |ui| {
                 ui.heading("Aircraft studio");
-                ui.label("Skyhawk · 6.25 cm voxels");
+                ui.label(format!(
+                    "{} · 6.25 cm airframe · 7.8 mm controls",
+                    self.aircraft.name()
+                ));
                 ui.add_space(8.);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.label(egui::RichText::new("Camera").strong());
@@ -187,7 +269,7 @@ impl Studio {
                                 self.pan = Vec3::ZERO;
                                 self.interior_look = [0.; 2];
                                 self.interior_fov = 64.;
-                                self.distance = DEFAULT_DISTANCE;
+                                self.distance = self.default_distance();
                             }
                         }
                     });
@@ -196,11 +278,21 @@ impl Studio {
                     ui.add_space(8.);
                     ui.label(egui::RichText::new("Inspection").strong());
                     egui::ComboBox::from_id_salt("isolate")
-                        .selected_text(self.isolate.map_or("Whole aircraft", Part::name))
+                        .selected_text(
+                            self.isolate
+                                .map_or("Whole aircraft", |part| self.aircraft.part_name(part)),
+                        )
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.isolate, None, "Whole aircraft");
-                            for part in Part::ALL {
-                                ui.selectable_value(&mut self.isolate, Some(part), part.name());
+                            for part in Part::ALL
+                                .into_iter()
+                                .filter(|&part| self.aircraft.has_part(part))
+                            {
+                                ui.selectable_value(
+                                    &mut self.isolate,
+                                    Some(part),
+                                    self.aircraft.part_name(part),
+                                );
                             }
                         });
                     ui.horizontal(|ui| {
@@ -212,11 +304,35 @@ impl Studio {
                     ui.add(
                         egui::Slider::new(&mut self.lighting, -180.0..=180.).text("Light angle"),
                     );
+                    if self.view >= 6 {
+                        for (i, label) in ["Left display", "Right display"].into_iter().enumerate()
+                        {
+                            egui::ComboBox::from_label(label)
+                                .selected_text(self.displays[i].name())
+                                .show_ui(ui, |ui| {
+                                    for page in DisplayPage::ALL {
+                                        ui.selectable_value(
+                                            &mut self.displays[i],
+                                            page,
+                                            page.name(),
+                                        );
+                                    }
+                                });
+                        }
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("Articulation").strong());
                     for (value, label) in self.rig.doors.iter_mut().zip(["Left door", "Right door"])
                     {
                         ui.add(egui::Slider::new(value, 0.0..=1.).text(label));
+                    }
+                    if self.aircraft == ModelKind::Da62 {
+                        ui.add(
+                            egui::Slider::new(&mut self.rig.rear_door, 0.0..=1.).text("Rear door"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.rig.gear, 0.0..=1.).text("Gear retraction"),
+                        );
                     }
                     for (value, label) in [
                         (&mut self.roll, "Ailerons"),
@@ -226,15 +342,29 @@ impl Studio {
                         ui.add(egui::Slider::new(value, -1.0..=1.).text(label));
                     }
                     ui.add(egui::Slider::new(&mut self.rig.flaps, 0.0..=1.).text("Flaps"));
-                    ui.add(egui::Slider::new(&mut self.power, 0.0..=1.).text("Throttle"));
+                    if self.aircraft == ModelKind::Da62 {
+                        ui.add(egui::Slider::new(&mut self.power, 0.0..=1.).text("Left power"));
+                        ui.add(
+                            egui::Slider::new(&mut self.right_power, 0.0..=1.).text("Right power"),
+                        );
+                    } else {
+                        ui.add(egui::Slider::new(&mut self.power, 0.0..=1.).text("Throttle"));
+                        ui.add(egui::Slider::new(&mut self.mixture, 0.0..=1.).text("Mixture"));
+                    }
+                    ui.checkbox(&mut self.avionics, "Avionics powered");
                     ui.add(egui::Slider::new(&mut self.wheel, 0.0..=360.).text("Wheels"));
-                    ui.add(
-                        egui::Slider::new(&mut self.compression, 0.0..=0.13)
-                            .text("Strut travel (m)"),
-                    );
+                    if self.aircraft == ModelKind::Skyhawk {
+                        ui.add(
+                            egui::Slider::new(&mut self.compression, 0.0..=0.13)
+                                .text("Strut travel (m)"),
+                        );
+                    }
                     ui.checkbox(&mut self.engine, "Propeller running");
                     if ui.button("Reset preview").clicked() {
+                        let aircraft = self.aircraft;
                         *self = Self::default();
+                        self.aircraft = aircraft;
+                        self.distance = self.default_distance();
                     }
                 });
             });
@@ -253,17 +383,22 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut studio = Studio::default();
     let mut capture: Option<PathBuf> = None;
     let mut target = None;
+    let mut inspect = false;
+    let mut isolate = None;
+    let mut distance = None;
     let mut size = [1280, 800];
     while let Some(key) = args.next() {
         if key == "--inspect" {
-            println!("{}", aircraft_model::inspect());
-            return Ok(());
+            inspect = true;
+            continue;
         }
         if key == "--help" {
-            println!("--model-preview [--view orbit|front|side|rear|top|underside|pilot|rear-seat] [--capture FILE --width N --height N] [--inspect]\n\
+            println!("--model-preview [--aircraft skyhawk|da62] [--view orbit|front|side|rear|top|underside|pilot|rear-seat|panel|controls] [--capture FILE --width N --height N] [--inspect]\n\
             Orbit: --yaw DEG --pitch DEG --distance M --orthographic --target X,Y,Z\n\
             Inspection: --isolate PART --cutaway left|right --no-glass --light DEG\n\
-            Posing: --door 0..1 --left-door 0..1 --right-door 0..1 --aileron -1..1 --elevator -1..1 --rudder -1..1 --flaps 0..1 --power 0..1 --wheel DEG --compression M --engine");
+            Displays: --left-display and --right-display accept flight|terrain|weather|systems\n\
+            Posing: --door 0..1 --left-door 0..1 --right-door 0..1 --aileron -1..1 --elevator -1..1 --rudder -1..1 --flaps 0..1 --power 0..1 --mixture 0..1 --avionics-off --wheel DEG --compression M --engine\n\
+            DA62: --rear-door 0..1 --gear 0..1 (0 down, 1 retracted) --right-power 0..1");
             return Ok(());
         }
         match key.as_str() {
@@ -279,12 +414,23 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
                 studio.engine = true;
                 continue;
             }
+            "--avionics-off" => {
+                studio.avionics = false;
+                continue;
+            }
             _ => {}
         }
         let value = args
             .next()
             .ok_or_else(|| format!("{key} requires a value"))?;
         match key.as_str() {
+            "--aircraft" => {
+                studio.aircraft = match value.to_ascii_lowercase().as_str() {
+                    "skyhawk" => ModelKind::Skyhawk,
+                    "da62" => ModelKind::Da62,
+                    _ => return Err("aircraft requires skyhawk or da62".into()),
+                };
+            }
             "--capture" => capture = Some(value.into()),
             "--width" | "--height" => {
                 let pixels = value.parse()?;
@@ -299,9 +445,16 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
                     .position(|name| *name == value)
                     .ok_or("unknown model view")?
             }
+            "--left-display" | "--right-display" => {
+                let page = DisplayPage::ALL
+                    .into_iter()
+                    .find(|page| page.name().eq_ignore_ascii_case(&value))
+                    .ok_or("display page requires flight|terrain|weather|systems")?;
+                studio.displays[usize::from(key == "--right-display")] = page;
+            }
             "--yaw" => studio.yaw = number(&value, -360., 360.)?,
             "--pitch" => studio.pitch = number(&value, -89., 89.)?,
-            "--distance" => studio.distance = number(&value, 0.55, 80.)?,
+            "--distance" => distance = Some(number(&value, 0.55, 80.)?),
             "--light" => studio.lighting = number(&value, -180., 180.)?,
             "--target" => {
                 let v = value
@@ -311,14 +464,7 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
                 let v: [f32; 3] = v.try_into().map_err(|_| "model target requires x,y,z")?;
                 target = Some(Vec3::from_array(v));
             }
-            "--isolate" => {
-                studio.isolate = Some(
-                    Part::ALL
-                        .into_iter()
-                        .find(|p| p.name() == value)
-                        .ok_or("unknown model part")?,
-                )
-            }
+            "--isolate" => isolate = Some(value),
             "--cutaway" => {
                 studio.rig.cutaway = match value.as_str() {
                     "left" => 1.,
@@ -329,22 +475,47 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
             "--door" => studio.rig.doors = [number(&value, 0., 1.)?; 2],
             "--left-door" => studio.rig.doors[0] = number(&value, 0., 1.)?,
             "--right-door" => studio.rig.doors[1] = number(&value, 0., 1.)?,
+            "--rear-door" => studio.rig.rear_door = number(&value, 0., 1.)?,
+            "--gear" => studio.rig.gear = number(&value, 0., 1.)?,
             "--aileron" => studio.roll = number(&value, -1., 1.)?,
             "--elevator" => studio.elevator = number(&value, -1., 1.)?,
             "--rudder" => studio.rudder = number(&value, -1., 1.)?,
             "--flaps" => studio.rig.flaps = number(&value, 0., 1.)?,
             "--power" => studio.power = number(&value, 0., 1.)?,
+            "--right-power" => studio.right_power = number(&value, 0., 1.)?,
+            "--mixture" => studio.mixture = number(&value, 0., 1.)?,
             "--wheel" => studio.wheel = number(&value, 0., 360.)?,
             "--compression" => studio.compression = number(&value, 0., 0.13)?,
             _ => return Err(format!("unknown model preview argument {key}").into()),
         }
     }
+    if inspect {
+        println!("{}", aircraft_model::inspect(studio.aircraft));
+        return Ok(());
+    }
+    studio.distance = distance.unwrap_or_else(|| studio.default_distance());
+    if let Some(name) = isolate {
+        studio.isolate = Some(
+            Part::ALL
+                .into_iter()
+                .find(|&part| {
+                    studio.aircraft.part_name(part) == name && studio.aircraft.has_part(part)
+                })
+                .ok_or("unknown model part")?,
+        );
+    }
     if let Some(target) = target {
-        studio.pan = target - if studio.view < 6 { TARGET } else { Vec3::ZERO };
+        studio.pan = target
+            - if studio.view < 6 {
+                studio.target()
+            } else {
+                Vec3::ZERO
+            };
     }
     if let Some(path) = capture {
         let instance = wgpu::Instance::default();
-        let gpu = pollster::block_on(StudioGpu::new(&instance, None))?.1;
+        let (adapter, gpu) = pollster::block_on(StudioGpu::new(&instance, None, studio.aircraft))?;
+        eprintln!("Aircraft studio adapter: {}", adapter.get_info().name);
         return gpu.capture(&studio, size, &path);
     }
     let event_loop = EventLoop::new()?;
@@ -396,6 +567,7 @@ impl StudioGpu {
     async fn new(
         instance: &wgpu::Instance,
         surface: Option<&wgpu::Surface<'_>>,
+        aircraft: ModelKind,
     ) -> Result<(wgpu::Adapter, Self)> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -428,7 +600,7 @@ impl StudioGpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await?;
-        let model = Model::new(&device, format, samples);
+        let model = Model::new_for(&device, format, samples, aircraft);
         // A tiny generated chart exercises the real panel shader in the studio.
         model.set_preview_chart(&queue);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -681,18 +853,19 @@ struct Preview {
 }
 
 impl WindowState {
-    fn new(el: &ActiveEventLoop, size: [u32; 2]) -> Result<Self> {
+    fn new(el: &ActiveEventLoop, size: [u32; 2], aircraft: ModelKind) -> Result<Self> {
         let window = Arc::new(
             el.create_window(
                 Window::default_attributes()
-                    .with_title("Frontier aircraft studio")
+                    .with_title(format!("Frontier aircraft studio · {}", aircraft.name()))
                     .with_inner_size(winit::dpi::PhysicalSize::new(size[0], size[1]))
                     .with_min_inner_size(winit::dpi::LogicalSize::new(690, 420)),
             )?,
         );
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
-        let (adapter, gpu) = pollster::block_on(StudioGpu::new(&instance, Some(&surface)))?;
+        let (adapter, gpu) =
+            pollster::block_on(StudioGpu::new(&instance, Some(&surface), aircraft))?;
         let w = window.inner_size().width.max(1);
         let h = window.inner_size().height.max(1);
         let mut config = surface
@@ -861,7 +1034,7 @@ impl ApplicationHandler for Preview {
         if self.state.is_some() {
             return;
         }
-        match WindowState::new(el, self.size) {
+        match WindowState::new(el, self.size, self.studio.aircraft) {
             Ok(state) => {
                 state.window.request_redraw();
                 self.state = Some(state);

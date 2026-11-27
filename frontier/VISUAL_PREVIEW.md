@@ -23,9 +23,13 @@ prefers an existing release binary.
 
 Launch `./run.sh --model-preview` to inspect the Skyhawk in Frontier's aircraft
 renderer. Drag to orbit or look around in a seat, right-drag to pan, and scroll
-to zoom. The studio has orthographic reference views, a pilot and rear-seat
-view, cutaways, part isolation, adjustable lighting and pose sliders. Set the
-doors independently. Flap deployment in the studio is a rig check.
+to zoom. The studio has orthographic reference views, pilot, rear-seat and
+panel and controls views, cutaways, part isolation, adjustable lighting and
+pose sliders. Small cockpit hardware uses 7.8125 mm voxels on the aircraft's
+local grid. The cabin shell and exterior use 6.25 cm voxels.
+Use the display selectors in a cabin view to preview either instrument page.
+The controls view frames both yokes at full travel. The model inspector
+reports yoke clearance and framing at the default pilot FOV.
 
 For repeatable headless captures, run
 `./run.sh --model-preview --view orbit --door 1 --cutaway left --capture /tmp/skyhawk.png`.
@@ -40,6 +44,71 @@ window. After an edit, rebuild the release binary before capturing again.
 The design uses the newer 172S high-wing silhouette, four-seat cabin and
 dual-screen layout from the [Textron Skyhawk product card](https://cessna.txtav.com/-/media/cessna/files/product-cards/piston/skyhawk_product_card.pdf).
 The exterior paint and flight display graphics are Frontier artwork.
+
+### DA62 model
+
+```sh
+./run.sh --model-preview --aircraft da62
+./run.sh --model-preview --aircraft da62 --view panel
+./run.sh --model-preview --aircraft da62 --view orbit --cutaway left --door 1 --rear-door 1
+```
+
+The DA62 uses 6.25 cm voxels for the airframe, 1.56 cm for the contoured
+seat upholstery, and 7.8 mm for the cockpit hardware. It has two three-blade
+propellers and seven seats. The studio can pose its three
+doors, gear, control surfaces, center sticks, and independent power levers.
+The two displays can cycle through Frontier's instrument pages in the studio.
+The DA62 can also spawn as a playable aircraft in the world.
+
+```sh
+./run.sh --preset seeded-world --seed 1878846491374251281 --aircraft da62 --flight-walkup
+./run.sh --preset alpine --seed 9 --aircraft da62 --flight-view chase --flight-altitude 850
+```
+
+Press **V** to board at the cabin. Use **Shift** and **Ctrl** for both
+power levers, or press **Tab** and drag the levers separately with the cockpit cursor.
+**7** and **8** toggle the left and right engine. **G** cycles the gear
+in flight and **C** changes the camera. Use **Z/X** for flaps, **O** for
+the doors while stopped, and **Space** for the wheel brakes.
+
+The DA62 uses the same 120 Hz solver with its own wing and tail sections,
+a fixed 1,999 kg loading, and two 180 hp engine models. Each nacelle
+generates thrust, reaction torque, and local propwash independently.
+Gear position affects drag, ground contact, and the pilot's gear readout.
+The stall horn follows the airflow at a modeled detector on the left wing.
+Flaps raise maximum lift and shift the angle at which airflow separates. The flight HUD shows true airspeed alongside the main airspeed
+readout, which is equivalent airspeed. Compare true airspeed with Diamond's
+cruise figures. [DA62 flight manual, stall warning system](https://www.manualslib.com/manual/1626359/Diamond-Da-62.html?page=469) · [Diamond cruise performance](https://info.diamondair.com/Brochure_DA62_2023.pdf)
+The structure transfers loads through the wing spars, engine mounts,
+T-tail, and landing gear. Separated assemblies fall and collide in the
+edited voxel world. These are game simulation parameters and structural
+strengths calibrated for the game. [Diamond specifications](https://www.diamondaircraft.com/en/private-owners/aircraft/da62/tech-specs/)
+
+The dimensions and door placement follow Diamond's drawings. The blue and
+silver livery is Frontier artwork based on the supplied exterior photograph.
+[Technical three-view](https://www.diamondaircraft.com/en/private-owners/aircraft/da62/tech-specs/)
+· [Cabin and upholstery reference](https://www.diamondaircraft.com/fileadmin/diamondaircraft/documents/da62/DA62_Exterior_and_Interior_Design_2024_SCREEN.pdf)
+
+To compare the DA62 with the manufacturer's original 711×400 drawing, capture
+the default orthographic views with the gear down. Use the same directory for
+both images.
+
+```sh
+mkdir -p output/da62-profiles
+./run.sh --model-preview --aircraft da62 --view front --distance 14.6 --width 1600 --height 1000 --capture output/da62-profiles/front.png
+./run.sh --model-preview --aircraft da62 --view side --distance 11.2 --width 1600 --height 1000 --capture output/da62-profiles/side.png
+python tools/da62_profile_compare.py /path/to/diamond-drawing.png output/da62-profiles output/da62-profiles/overlay
+```
+
+The comparison registers to wheel contact and the aircraft centerline or nose.
+It saves a uniform-scale overlay, a second overlay scaled to both printed
+dimensions, a translucent render, and errors in original drawing pixels.
+The front error samples the outer wings. The side error samples the upper and
+lower outline over fixed intervals that avoid the wheels and propeller.
+Optional isolated front captures named `left-propeller.png` and
+`right-propeller.png` add measured blade sweeps at the same camera setting.
+
+Pass `"aircraft": "da62"` to the aircraft studio MCP preview or inspector.
 
 Start on foot beside the voxel Skyhawk on a tested natural strip with
 `./run.sh --preset seeded-world --seed 1878846491374251281 --flight-walkup`.
@@ -62,14 +131,34 @@ steps out when stopped and leaves the plane where you parked it. Natural
 strip selection checks a 360 m dry corridor near spawn, with a 288 m
 search if a longer strip is unavailable.
 
-**C** switches pilot/chase view. Hold **right mouse** to look around. **O**
+**C** switches pilot/chase view. In the pilot seat, open **Esc → Cockpit
+camera** to adjust the side offset, height and fore/aft position. **Reset
+pilot view** restores the starting position. Press **L** to toggle freelook. **O**
 operates the doors when stopped. **H** engages heading/altitude hold in flight.
-**[ / ]** tune COM. The pilot's six round instruments show airspeed,
-attitude, altitude, turn rate, heading and vertical speed. The upper right
-screen is the north-up terrain radar, with contours, surface water, ownship
-and the launch point. The lower screen shows the direction the wind comes
-from, speed in knots and vertical motion in ft/min. **WX N/A** marks the
-weather placeholder.
+**[ / ]** tune COM. The left display starts on Flight and the right starts on
+Terrain. **N** cycles the left display and **M** cycles the right through Flight,
+Terrain, Weather and Systems. Flight shows attitude, airspeed, altitude and
+heading. Terrain shows the north-up chart, contours, surface water, ownship and
+the launch point. Systems shows COM, power, flaps, trim and hold status.
+On Weather, **K** cycles radar products. The round airspeed, attitude and
+altitude backup instruments sit flush in the same face as the screens.
+
+With the pilot view active, press **Tab** to release the mouse over the
+cockpit. The view stays where you were looking and the flight controls
+stay active. Hover over a control to identify it, then click or drag it.
+Press **Tab** again to capture the mouse. Drag downward to pull a knob
+or upward to push it. The black throttle and red mixture knob slide in and out of the dash.
+Click the ignition key, avionics rocker, or white flap selector to operate
+them. **Insert / Delete** also adjust mixture, **I** operates ignition, and
+**U** toggles avionics. The flap selector cycles through the same detents as
+the keyboard flap controls.
+
+In Frontier, pulling mixture to cutoff stops the engine. Push it back in
+and operate the ignition to restart. Lean settings affect simulated thrust
+and propeller sound. The starter is represented by one action. Turning
+avionics off blanks the two displays and releases heading/altitude hold.
+The modeled push-pull directions follow the
+[FAA reciprocating-engine control reference](https://www.faa.gov/sites/faa.gov/files/regulations_policies/handbooks_manuals/aviation/amt_general_handbook.pdf).
 
 Press **Y**, or select **Show airflow** in the Esc menu. Cyan voxel tracers
 illustrate the approximate flow around the airframe. Green lift and amber

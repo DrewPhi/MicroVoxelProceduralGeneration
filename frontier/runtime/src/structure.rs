@@ -46,7 +46,7 @@ struct State {
     severed: bool,
 }
 
-/// Parents precede children. Nodes are structural assemblies, never particles.
+/// Nodes are structural assemblies. The solve order places parents before their children.
 /// `solve` uses caller-owned input and internal scratch space without allocating.
 #[derive(Clone)]
 pub struct Structure<const N: usize> {
@@ -82,16 +82,28 @@ impl<const N: usize> Structure<N> {
         dt: f32,
         detached: &mut Vec<u64>,
     ) -> bool {
+        self.solve_in_order(nodes, active, loads, dt, detached, 1..N)
+    }
+
+    /// Solve using a parent-first traversal. Node zero remains the root.
+    pub fn solve_in_order(
+        &mut self,
+        nodes: &[Node; N],
+        active: u64,
+        loads: &[Load; N],
+        dt: f32,
+        detached: &mut Vec<u64>,
+        order: impl DoubleEndedIterator<Item = usize> + Clone,
+    ) -> bool {
         self.reactions = *loads;
         self.peak_utilization = 0.;
         let mut changed = false;
-        for child in (1..N).rev() {
+        for child in order.clone().rev() {
             if active & (1 << child) == 0 {
                 continue;
             }
             let node = nodes[child];
             let joint = node.joint.expect("non-root structure node has a joint");
-            debug_assert!(joint.parent < child);
             let state = &mut self.states[child];
             if state.severed || active & (1 << joint.parent) == 0 {
                 continue;
@@ -148,7 +160,7 @@ impl<const N: usize> Structure<N> {
         let mut component = [0; N];
         detached.clear();
         detached.push(active & 1);
-        for i in 1..N {
+        for i in order {
             if active & (1 << i) == 0 {
                 continue;
             }

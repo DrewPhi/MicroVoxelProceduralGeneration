@@ -61,15 +61,18 @@ TOOL = {
 PREVIEW_NAME = "render_aircraft_preview"
 INSPECT_NAME = "inspect_aircraft_model"
 AIRCRAFT_ONLY = "--aircraft-only" in sys.argv[1:]
-VIEWS = ["orbit", "front", "side", "rear", "top", "underside", "pilot", "rear-seat"]
+VIEWS = ["orbit", "front", "side", "rear", "top", "underside", "pilot", "rear-seat", "panel", "controls"]
+AIRCRAFT = {"type": "string", "enum": ["skyhawk", "da62"], "default": "skyhawk"}
 PREVIEW_NUMBERS = {
     "yaw": (-360, 360), "pitch": (-89, 89), "distance": (0.55, 80),
     "light": (-180, 180), "door": (0, 1), "left_door": (0, 1), "right_door": (0, 1),
     "aileron": (-1, 1), "elevator": (-1, 1), "rudder": (-1, 1), "flaps": (0, 1),
-    "power": (0, 1), "wheel": (0, 360), "compression": (0, 0.13),
+    "power": (0, 1), "right_power": (0, 1), "rear_door": (0, 1), "gear": (0, 1),
+    "wheel": (0, 360), "compression": (0, 0.13),
 }
 PREVIEW_FLAGS = ("orthographic", "no_glass", "engine")
 PREVIEW_PROPERTIES = {
+    "aircraft": AIRCRAFT,
     "views": {"type": "array", "items": {"type": "string", "enum": VIEWS},
               "minItems": 1, "maxItems": 6, "default": ["orbit"]},
     "width": {"type": "integer", "minimum": 320, "maximum": 1920, "default": 960},
@@ -87,15 +90,16 @@ PREVIEW_TOOL = {
     "description": (
         "Render up to six repeatable, antialiased images of the real in-engine aircraft without a game world or window. "
         "Use orthographic views for proportions or custom yaw, pitch, distance and target for close-ups. "
-        "Pose each door, ailerons, elevator, rudder, flaps, wheels, struts and propeller, change the light, "
-        "or use a cutaway and named part isolation to inspect the cabin and model joints."
+        "Pose doors, control surfaces, wheels and propellers, change the light, "
+        "or inspect the cabin and model joints with a cutaway or named part isolation. "
+        "Choose da62 for its rear door, retractable gear and second power lever."
     ),
     "inputSchema": {"type": "object", "properties": PREVIEW_PROPERTIES, "additionalProperties": False},
 }
 INSPECT_TOOL = {
     "name": INSPECT_NAME,
-    "description": "Get the current aircraft scale and coordinate system, part names, native voxel counts, triangle counts and rest-pose bounds.",
-    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "description": "Get the chosen aircraft's voxel scales, coordinate system, part names, voxel counts, triangle counts and rest-pose bounds.",
+    "inputSchema": {"type": "object", "properties": {"aircraft": AIRCRAFT}, "additionalProperties": False},
 }
 
 
@@ -110,10 +114,17 @@ def aircraft_binary(*args):
 
 
 def inspect_aircraft(arguments):
-    if arguments != {}:
-        raise ValueError("inspect_aircraft_model takes no arguments.")
-    aircraft = json.loads(aircraft_binary("--inspect"))
+    if not isinstance(arguments, dict) or arguments.keys() - {"aircraft"}:
+        raise ValueError("inspect_aircraft_model accepts an optional aircraft name.")
+    aircraft = json.loads(aircraft_binary("--aircraft", aircraft_name(arguments), "--inspect"))
     return {"content": [{"type": "text", "text": json.dumps(aircraft)}], "structuredContent": aircraft}
+
+
+def aircraft_name(arguments):
+    name = arguments.get("aircraft", AIRCRAFT["default"])
+    if name not in AIRCRAFT["enum"]:
+        raise ValueError("aircraft must be skyhawk or da62.")
+    return name
 
 
 def render_aircraft(arguments):
@@ -124,7 +135,7 @@ def render_aircraft(arguments):
     views = arguments.get("views", ["orbit"])
     if type(views) is not list or not 1 <= len(views) <= 6 or any(v not in VIEWS for v in views):
         raise ValueError("Provide 1 to 6 supported view names.")
-    args = []
+    args = ["--aircraft", aircraft_name(arguments)]
     dimensions = {name: arguments.get(name, PREVIEW_PROPERTIES[name]["default"]) for name in ("width", "height")}
     for name, value in dimensions.items():
         spec = PREVIEW_PROPERTIES[name]

@@ -134,8 +134,9 @@ on-screen visibility.
 
 ## Pilot instruments
 
-The upper screen is the terrain chart. **M** cycles the lower display. On the
-Skyhawk, **DATALINK** is a north-up precipitation mosaic from a simulated
+**N** cycles the left display and **M** cycles the right. Either display can
+show Weather. Within that page, **K** cycles the products. **DATALINK** is a
+north-up precipitation mosaic from a simulated
 ground station, with the product's age in minutes and hatched no-coverage
 areas. It uses the latest delivered station scan. **WIND** shows a north-up
 wind slice with brightness from calm to 60 kt and arrows indicating the
@@ -150,7 +151,7 @@ resolved wind and the other pages show precipitation.
 
 | Key | Function |
 |---|---|
-| M | Cycle weather pages |
+| K | Cycle weather products |
 | Comma / period | Decrease / increase range |
 | Semicolon / apostrophe | Lower / raise the wind layer in 500 ft steps, change WX tilt in 1° steps, or change profile bearing in 3° steps |
 

@@ -86,6 +86,13 @@ pub(super) fn rasterize(skin: &[Vertex]) -> Voxels {
 }
 
 pub(super) fn mesh(cells: Voxels) -> Vec<Vertex> {
+    mesh_at(cells, EDGE)
+}
+
+pub(super) fn mesh_at(cells: Voxels, pitch: f32) -> Vec<Vertex> {
+    if cells.is_empty() {
+        return Vec::new();
+    }
     let mesh = crate::vegetation_mesher::mesh_colored_cells(
         cells.into_iter().map(|(p, color)| {
             (
@@ -100,7 +107,7 @@ pub(super) fn mesh(cells: Voxels) -> Vec<Vertex> {
         }),
         1,
         1,
-        EDGE,
+        pitch,
         || false,
     );
     mesh.indices
@@ -126,8 +133,14 @@ mod tests {
         assert!(vertices
             .iter()
             .any(|v| v.part == super::super::Part::Prop as u32));
-        for v in vertices.iter().filter(|v| v.display == 0) {
-            assert!(v.position.iter().all(|p| (p / EDGE).fract() == 0.));
+        let geometry = super::super::geometry();
+        for (index, v) in vertices.iter().enumerate().filter(|(_, v)| v.display == 0) {
+            let edge = if geometry.fine_parts[v.part as usize].contains(&(index as u32)) {
+                super::super::cockpit::EDGE
+            } else {
+                EDGE
+            };
+            assert!(v.position.iter().all(|p| (p / edge).fract() == 0.));
             assert_eq!(v.normal.iter().map(|n| n.abs()).sum::<f32>(), 1.);
             assert!(v.normal.iter().all(|n| n.fract() == 0.));
         }

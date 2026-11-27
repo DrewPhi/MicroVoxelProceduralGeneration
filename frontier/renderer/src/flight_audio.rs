@@ -9,7 +9,7 @@ const TAU: f32 = std::f32::consts::TAU;
 
 #[derive(Clone, Copy, Default)]
 struct Sound {
-    prop_rate: f32,
+    prop_rate: [f32; 2],
     throttle: f32,
     airspeed: f32,
     tire_speed: f32,
@@ -20,6 +20,7 @@ struct Sound {
     cockpit: bool,
     gear: f32,
     door: f32,
+    retract: f32,
     flaps: f32,
     brake: f32,
 }
@@ -65,13 +66,10 @@ impl Audio {
             let state = plane.map_or_else(Sound::default, |plane| {
                 let pose = plane.presentation(camera);
                 let (wing_separation, _) = plane.aerodynamic_state();
+                let throttle = plane.effective_throttle(pose.pose.position.y, 1.);
                 Sound {
-                    prop_rate: if pose.engine_running {
-                        aircraft::engine_speed_rad_s(pose.instruments.throttle)
-                    } else {
-                        0.
-                    },
-                    throttle: pose.instruments.throttle,
+                    prop_rate: plane.engine_rates(pose.pose.position.y),
+                    throttle,
                     airspeed: plane.airspeed_mps(),
                     tire_speed: if pose.instruments.grounded {
                         plane.ground_speed_mps()
@@ -88,6 +86,7 @@ impl Audio {
                     cockpit: plane.exterior_pose().is_none(),
                     gear: pose.gear_compression.into_iter().fold(0., f32::max),
                     door: pose.door,
+                    retract: pose.gear,
                     flaps: pose.instruments.flaps_degrees / 30.,
                     brake: plane.brake_pressure(),
                 }
@@ -147,10 +146,10 @@ impl CabinRattle {
 }
 
 struct Mixer {
-    phase: f32,
+    phase: [f32; 2],
     horn_phase: f32,
     roll_phase: f32,
-    engine_gain: f32,
+    engine_gain: [f32; 2],
     horn_gain: f32,
     wind_gain: f32,
     tire_gain: f32,
@@ -164,16 +163,16 @@ struct Mixer {
     random: u32,
     low: f32,
     mid: f32,
-    motor_rate: f32,
+    motor_rate: [f32; 2],
 }
 
 impl Default for Mixer {
     fn default() -> Self {
         Self {
-            phase: 0.,
+            phase: [0., 1.],
             horn_phase: 0.,
             roll_phase: 0.,
-            engine_gain: 0.,
+            engine_gain: [0.; 2],
             horn_gain: 0.,
             wind_gain: 0.,
             tire_gain: 0.,
@@ -187,7 +186,7 @@ impl Default for Mixer {
             random: 19,
             low: 0.,
             mid: 0.,
-            motor_rate: 72.,
+            motor_rate: [72.; 2],
         }
     }
 }
@@ -207,15 +206,18 @@ impl Mixer {
             };
         }
         let servo = ((sound.flaps - self.previous.flaps).abs() * 120.
-            + (sound.door - self.previous.door).abs() * 38.)
+            + (sound.door - self.previous.door).abs() * 38.
+            + (sound.retract - self.previous.retract).abs() * 90.)
             .min(1.);
         self.previous = sound;
         let interior = if sound.cockpit { 0.64 } else { 1. };
-        let engine = if sound.prop_rate > 0. {
-            (0.16 + 0.16 * sound.throttle) * interior
-        } else {
-            0.
-        };
+        let engine = sound.prop_rate.map(|rate| {
+            if rate > 0. {
+                (0.16 + 0.16 * sound.throttle) * interior
+            } else {
+                0.
+            }
+        });
         let wind = (sound.airspeed / 76.).clamp(0., 1.25).powf(1.6)
             * (0.23 + sound.gust * 0.16)
             * interior;
@@ -234,15 +236,18 @@ impl Mixer {
         let dt = 1. / RATE as f32;
 
         for sample in samples {
-            self.engine_gain += 0.0008 * (engine - self.engine_gain);
+            for (i, target) in engine.into_iter().enumerate() {
+                self.engine_gain[i] += 0.0008 * (target - self.engine_gain[i]);
+                self.motor_rate[i] += 0.0007 * (sound.prop_rate[i].max(72.) - self.motor_rate[i]);
+                self.phase[i] = (self.phase[i] + self.motor_rate[i] * dt).rem_euclid(TAU);
+            }
             self.wind_gain += 0.00055 * (wind - self.wind_gain);
             self.tire_gain += 0.001 * (tires - self.tire_gain);
             self.horn_gain += 0.003 * (horn - self.horn_gain);
             self.buffet_gain += 0.001 * (buffet - self.buffet_gain);
             self.creak_gain += 0.0007 * (creak - self.creak_gain);
             self.servo_gain += 0.001 * (servo * 0.10 - self.servo_gain);
-            self.motor_rate += 0.0007 * (sound.prop_rate.max(72.) - self.motor_rate);
-            self.phase = (self.phase + self.motor_rate * dt).rem_euclid(TAU);
+
             self.horn_phase = (self.horn_phase + 704. * TAU * dt).rem_euclid(TAU);
             self.roll_phase =
                 (self.roll_phase + (19. + 2.2 * sound.tire_speed) * TAU * dt).rem_euclid(TAU);
@@ -254,11 +259,19 @@ impl Mixer {
             let noise = (self.random >> 8) as f32 / 8_388_608. - 1.;
             self.low += 0.038 * (noise - self.low);
             self.mid += 0.27 * (noise - self.mid);
-            let motor = (2. * self.phase).sin() * 0.50
-                + self.phase.sin() * 0.20
-                + (4. * self.phase).sin() * 0.19
-                + (6. * self.phase).sin() * 0.06
-                + self.low * 0.32;
+            let motor: f32 = self
+                .phase
+                .into_iter()
+                .zip(self.engine_gain)
+                .map(|(phase, gain)| {
+                    ((2. * phase).sin() * 0.50
+                        + phase.sin() * 0.20
+                        + (4. * phase).sin() * 0.19
+                        + (6. * phase).sin() * 0.06
+                        + self.low * 0.32)
+                        * gain
+                })
+                .sum();
             let tire = (self.mid * 0.77 + self.roll_phase.sin() * 0.19) * self.tire_gain;
             let alert =
                 (self.horn_phase.sin() + 0.22 * (3. * self.horn_phase).sin()) * self.horn_gain;
@@ -272,15 +285,7 @@ impl Mixer {
             let snap =
                 self.tearing * (0.9 * self.mid + 0.43 * (noise - self.mid) + 0.53 * self.low);
             self.tearing *= 0.9991;
-            let center = self.engine_gain * motor
-                + tire
-                + rumble
-                + alert
-                + impact
-                + servo
-                + cabin
-                + creak
-                + snap;
+            let center = motor + tire + rumble + alert + impact + servo + cabin + creak + snap;
             let hiss = self.wind_gain * (1.35 * self.mid + 0.22 * (noise - self.mid));
             let side = self.wind_gain * 0.16 * (self.low - self.mid)
                 - cabin * 0.42 * self.cabin.strike.pan;
@@ -435,7 +440,7 @@ mod tests {
         mixer.block(silent, false, Jolt::default(), &mut samples);
         assert_eq!(level(&samples), 0);
         let flight = Sound {
-            prop_rate: 190.,
+            prop_rate: [190., 0.],
             throttle: 0.6,
             airspeed: 47.,
             cockpit: true,

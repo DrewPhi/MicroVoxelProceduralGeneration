@@ -4,12 +4,14 @@ use glam::{IVec3, Vec3};
 
 pub(super) const EDGE: f32 = 0.0625;
 pub(super) const DOOR_PIVOT: Vec3 = Vec3::new(0.65625, 0., 0.75);
-pub(super) const YOKE_PIVOT: Vec3 = Vec3::new(0.28125, -0.3675, 0.60);
 const NAVY: [f32; 3] = [0.042, 0.078, 0.106];
-const TRIM: [f32; 3] = [0.19, 0.23, 0.24];
-const SEAT: [f32; 3] = [0.32, 0.34, 0.34];
-const VINYL: [f32; 3] = [0.66, 0.65, 0.56];
-const LINER: [f32; 3] = [0.49, 0.52, 0.52];
+const TRIM: [f32; 3] = [0.16, 0.18, 0.18];
+const DASH: [f32; 3] = [0.074, 0.082, 0.087];
+const BEZEL: [f32; 3] = [0.029, 0.035, 0.04];
+const STITCH: [f32; 3] = [0.53, 0.44, 0.33];
+const SEAT: [f32; 3] = [0.29, 0.21, 0.15];
+const VINYL: [f32; 3] = [0.67, 0.49, 0.32];
+const LINER: [f32; 3] = [0.68, 0.49, 0.32];
 
 pub(super) struct Cabin {
     pub solids: [Voxels; Part::COUNT],
@@ -139,7 +141,7 @@ pub(super) fn build() -> Cabin {
     }
 
     let interior = &mut cabin.solids[Part::Cabin as usize];
-    block(interior, [-10, -7, -33], [10, -6, 15], SEAT);
+    block(interior, [-10, -7, -33], [10, -6, 15], TRIM);
     block(interior, [-2, 10, -15], [2, 11, -7], TRIM);
     block(interior, [-1, 10, -13], [1, 11, -10], [0.83, 0.76, 0.57]);
     for side in [-1, 1] {
@@ -169,40 +171,26 @@ pub(super) fn build() -> Cabin {
         side_box(interior, side, [2, -1, -16], [8, 2, -15], TRIM);
         side_box(interior, side, [8, -3, -12], [9, -2, -7], NAVY);
         side_box(interior, side, [8, -2, -8], [9, -1, -7], METAL);
-        side_box(interior, side, [9, -4, 8], [10, 0, 14], LINER);
+        side_box(interior, side, [2, -1, -10], [3, 4, -9], STITCH);
+        side_box(interior, side, [7, -1, -10], [8, 4, -9], STITCH);
+        side_box(interior, side, [9, -5, 7], [10, 1, 15], LINER);
+        side_box(interior, side, [9, 0, 7], [10, 1, 13], SEAT);
     }
-    // The pilot gets a six-pack of round gauges and the copilot gets the two displays.
-    block(interior, [-10, -6, 14], [10, 2, 16], TRIM);
-    block(interior, [-10, 2, 14], [10, 3, 17], BLACK);
-    block(interior, [-10, -6, 13], [10, -4, 14], BLACK);
-    block(interior, [-10, -6, 13], [0, -1, 14], NAVY);
-    block(interior, [1, -6, 12], [10, -4, 13], BLACK);
-    block(interior, [-2, -6, 5], [2, -5, 13], NAVY);
-    for x in [-9, -7, -5, 4, 6, 8] {
-        block(interior, [x, -6, 12], [x + 1, -5, 13], METAL);
+    // Two recessed displays share one glare shield. Backup instruments and
+    // their switchgear occupy the lower face, between the two control columns.
+    block(interior, [-10, -6, 14], [10, 3, 16], DASH);
+    block(interior, [-11, 1, 15], [11, 3, 17], BEZEL);
+    block(interior, [-9, 3, 14], [9, 4, 17], BEZEL);
+    block(interior, [-10, 2, 14], [10, 3, 16], BEZEL);
+    let face_depth = 14. * EDGE - 0.002;
+    for (kind, x) in [(7, [1, 9]), (8, [-9, -1])] {
+        block(interior, [x[0] - 1, -2, 14], [x[1] + 1, 3, 15], BEZEL);
+        cabin.displays.push((kind, panel(x, [-2, 3], face_depth)));
     }
-    for x in [-9, -3, 3, 9] {
-        block(interior, [x, -4, 13], [x + 1, -3, 14], METAL);
-    }
-    block(interior, [-1, -5, 11], [0, -4, 12], PINSTRIPE);
-    block(interior, [-2, -5, 11], [-1, -4, 12], [0.65, 0.09, 0.04]);
-    for (row, kinds) in [[1, 2, 3], [4, 5, 6]].into_iter().enumerate() {
-        for (column, kind) in kinds.into_iter().enumerate() {
-            let x = 10 - column as i32 * 3;
-            let y = 3 - row as i32 * 3;
-            cabin
-                .displays
-                .push((kind, panel([x - 3, x], [y - 3, y], 14. * EDGE - 0.002)));
-        }
-    }
-    for (kind, x, y, depth) in [
-        (7, [-9, 0], [0, 3], 14.),
-        (11, [-9, 0], [-3, 0], 13.),
-        (8, [1, 10], [-6, -4], 12.),
-    ] {
-        cabin
-            .displays
-            .push((kind, panel(x, y, depth * EDGE - 0.002)));
+    // Compact mechanical backup instruments.
+    for (kind, x) in [(1, [2, 4]), (2, [-1, 1]), (3, [-4, -2])] {
+        let face = panel(x, [-5, -3], face_depth).map(|p| p + Vec3::Y * (0.5 * EDGE));
+        cabin.displays.push((kind, face));
     }
 
     for side in [-1, 1] {
@@ -216,6 +204,7 @@ pub(super) fn build() -> Cabin {
         side_box(door, side, [10, -7, -12], [11, -4, 12], ACCENT);
         side_box(door, side, [10, -4, -12], [11, -3, 12], PINSTRIPE);
         side_box(door, side, [9, -5, -11], [10, 1, 10], LINER);
+        side_box(door, side, [9, 0, -11], [10, 1, 10], SEAT);
         side_box(door, side, [8, -4, -9], [9, -3, 5], TRIM);
         side_box(door, side, [10, 3, -12], [11, 4, 12], NAVY);
         side_box(door, side, [10, 4, -12], [11, 11, -11], NAVY);
@@ -228,35 +217,5 @@ pub(super) fn build() -> Cabin {
             .push((part, side_pane(side, [4, 11], [-11, 11])));
     }
 
-    for (part, x) in [(Part::LeftPedal, 6), (Part::RightPedal, 2)] {
-        for offset in [0, -9] {
-            let x = x + offset;
-            block(
-                &mut cabin.solids[part as usize],
-                [x, -6, 8],
-                [x + 2, -5, 10],
-                METAL,
-            );
-            block(
-                &mut cabin.solids[part as usize],
-                [x, -5, 9],
-                [x + 2, -4, 10],
-                BLACK,
-            );
-        }
-    }
-    for (part, side) in [(Part::Yoke, 1), (Part::CopilotYoke, -1)] {
-        let yoke = &mut cabin.solids[part as usize];
-        side_box(yoke, side, [4, -6, 9], [5, -5, 14], METAL);
-        side_box(yoke, side, [2, -6, 8], [7, -5, 9], BLACK);
-        side_box(yoke, side, [1, -5, 8], [2, -2, 9], BLACK);
-        side_box(yoke, side, [7, -5, 8], [8, -2, 9], BLACK);
-        side_box(yoke, side, [2, -2, 8], [3, -1, 9], BLACK);
-        side_box(yoke, side, [6, -2, 8], [7, -1, 9], BLACK);
-        side_box(yoke, side, [4, -5, 7], [5, -4, 8], TRIM);
-    }
-    let throttle = &mut cabin.solids[Part::Throttle as usize];
-    block(throttle, [-1, -5, 10], [0, -4, 14], METAL);
-    block(throttle, [-1, -5, 9], [1, -4, 11], BLACK);
     cabin
 }

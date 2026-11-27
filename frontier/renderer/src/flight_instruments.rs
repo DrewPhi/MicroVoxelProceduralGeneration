@@ -80,6 +80,15 @@ pub(super) fn show(ctx: &egui::Context, flight: Instruments) {
                             flight.altitude_m * 3.28084,
                             flight.climb_mps * 196.85
                         ));
+                        if let (Some(power), Some(gear)) = (flight.twin, flight.gear_status) {
+                            ui.small(format!(
+                                "{:.0} kt TAS   ·   L {:.0}% / R {:.0}%   ·   {}",
+                                flight.true_speed_mps * 1.94384,
+                                power[0] * 100.,
+                                power[1] * 100.,
+                                gear
+                            ));
+                        }
                         if flight.show_airflow {
                             ui.small("Y · Airflow");
                             ui.horizontal(|ui| {
