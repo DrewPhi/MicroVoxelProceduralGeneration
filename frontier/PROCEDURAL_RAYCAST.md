@@ -494,3 +494,381 @@ The new tests check dirty-strip coverage, analytic root isolation and WGSL
 validation. The checked-in reports include all final sampled configurations
 and earlier diagnostic findings. The experimental binary, prior procedural
 ray caster and production Frontier renderer remain separate entry points.
+
+## Playable Alpine test
+
+`--rolling-terrain` selects the experimental path through Frontier's normal
+camera, depth, walking, and vegetation passes. It uses the seed-generated
+8 m and 0.5 m rolling textures and a window of canonical columns. The
+default native cache is 512² at the selected world voxel size. It submits no adaptive terrain face meshes. The distant shader
+estimates the projected coverage of voxel tops and sides and lights those
+fractions separately. Trees, flowers and grass use the existing vegetation
+streamer. `--naadf on` also renders the nearest 8 m with the existing volume
+renderer at 6.25 cm. `--naadf off` uses exact tops and side faces from the column window
+for all nearby ground.
+
+```sh
+cargo build --release --locked --bin frontier
+FRONTIER_VEGETATION_FAR_RADIUS_M=320 ./run.sh --preset alpine --rolling-terrain --naadf on
+FRONTIER_VEGETATION_FAR_RADIUS_M=320 ./run.sh --preset alpine --rolling-terrain --naadf off
+```
+
+Click the window to capture the mouse. Use WASD to walk and Space to jump.
+Left click removes a selected voxel and right click places stone within the
+resident column window. The run keeps edits in memory. Edited columns can
+contain disjoint solid intervals, and their bounds use the highest occupied
+interval. Far samples still come from the unedited source. Long-range edit
+display, save/reload, and dynamic water remain future integration work. The
+first mode still traces native columns for coverage. Coincident hits
+give NAADF depth priority, with the exact columns filling missed rays and
+covering any frame where a matching NAADF revision is unavailable.
+The 32 m window shifts in 8 m increments. The Seeded World extension below
+moved regular column fills to a background worker. The cut to bilinear
+terrain at the edge still needs cliff-specific transition tests.
+
+For a matched walk, use this command for each near backend. The input follows
+the authored trail center and uses the normal swept-voxel walking controller.
+The capture writes camera poses and a final frame with diagnostics. Encode the
+PNG sequence at 24 fps.
+
+```sh
+FRONTIER_VEGETATION_FAR_RADIUS_M=320 ./run.sh --preset alpine --rolling-terrain \
+  --naadf on --msaa 1 --start-xz 96,390 --width 1280 --height 720 \
+  --atmosphere off --terrain-shadows off --exposure 1 --sun-elevation 42 \
+  --sun-azimuth 205 --route-step 0.0416666666666667 --route-speed 1.45 \
+  --frames 240 --rolling-walk-frames output/rolling-playable/on
+```
+
+On the Radeon 760M, the 1080p 1× MSAA, eight-second `walk-stop-resume`
+windowed comparison with vegetation, 320 m tree range, and atmosphere and
+terrain shadows off measured these frame intervals:
+
+| Near renderer | Samples | Frame p50 / p95 / p99 |
+| --- | ---: | ---: |
+| Exact columns | 792 | 9.53 / 10.83 / 12.05 ms |
+| NAADF plus exact column fallback | 610 | 12.37 / 14.63 / 15.16 ms |
+
+The 720p-per-view recording used matching camera poses across all 240 frames.
+In a separate 960×540 fixed-camera check with vegetation off, the two near
+paths agreed on terrain versus sky at every pixel. Across 284,335 common
+hits within 6 m of forward depth, the absolute depth difference was
+0.054 mm at p95 and 0.086 mm at maximum. The terrain in these runs is unedited.
+
+### Native grid sizes and distant voxel appearance
+
+The playable path now consumes the engine's `--voxel-size`. Near ray
+traversal uses camera-relative voxel coordinates and rebased integer column
+heights. The 512² default covers 32 m at 6.25 cm. An explicit NAADF radius
+up to 512 voxels enlarges the fallback window to cover the requested volume
+through its origin shifts. The default NAADF radius remains 128 voxels.
+
+The distant material uses coherent rock and turf variation, separate roof
+and riser materials, and projected face lighting. A short shading query
+recovers the visible face of a voxelized local tangent plane when cells
+span enough of the projected terrain footprint. At grazing angles that
+footprint grows, and the shader returns to averaged face lighting. The
+local query follows the staircase reconstruction explored in
+`experiment/astra-worldgen@dc7a161` (`frontier/renderer/src/native_stairs.wgsl`).
+Cached terrain still supplies distant scene depth and silhouettes. Broad
+landform shadows sample the rolling cache when terrain shadows are enabled.
+NAADF retains its own voxel shadow tracing and uses the raster shadow map
+only in the packed terrain path.
+
+```sh
+FRONTIER_VEGETATION_FAR_RADIUS_M=320 ./run.sh --preset alpine --rolling-terrain \
+  --naadf on --voxel-size 0.0625
+```
+
+Matched Radeon 760M terrain-only checks at 6.25 cm, 15 cm and 1 m
+agreed on terrain versus sky between the two near renderers. Within
+6 m of forward depth, the maximum difference was below 0.09 mm at all
+three sizes. The images also exercise 3.125 cm and 2 m voxels, and a
+16 m NAADF radius with 6.25 cm voxels.
+
+The final short 1080p trail runs with vegetation, 8 m NAADF and atmosphere
+compositing off measured 14.18 ms frame p95 with terrain shadows disabled
+and 14.93 ms with the rolling horizon shadows enabled. The earlier shader
+measured 13.90 ms p95 with terrain shadows disabled on the same route.
+
+### Mountain approach handoff test
+
+The seed-7 Alpine flight approached one unedited rock face at 14.8 m/s,
+from roughly 189 m to 4.6 m. The annotated capture draws the same camera
+and depth test twice. The second draw tags the visible surface as outer
+cache, inner cache, exact columns, or NAADF. The centre ray also records
+the resulting depth and an independent canonical voxel ray depth. The
+recording is fixed-cadence playback. Timing comes from a separate live
+run at 1080p with MSAA 1 and terrain shadows on. Both runs had vegetation
+and atmosphere off to isolate the terrain.
+
+| NAADF radius | First exact center hit | First NAADF center hit | Live frame p95 / p99 |
+| --- | ---: | ---: | ---: |
+| 8 m | 17.46 m | 12.61 m | 23.67 / 89.57 ms |
+| 16 m | 29.79 m | 24.86 m | 33.76 / 183.34 ms |
+
+Distances are forward depth along this approach. The exact windows are
+axis-aligned and move in discrete steps, so the crossing distances vary
+with heading and residency. The two near stages were separated by eight
+recorded frames, about a third of a second of camera travel. At 16 m
+radius, the centre depth error changed 3.4 mm at the exact-column entry
+and 1.1 mm at the NAADF entry. At 8 m, the corresponding changes were
+25 mm and less than 0.02 mm. The large visual seam appears where the
+cached surface gives way to exact columns. The exact-column to NAADF
+transition is much less visible on this face.
+
+In the timed run, camera frames that crossed a native grid or height
+origin update had median preparation costs of 51 ms and 113 ms for the
+8 m and 16 m profiles. The preparation timer also includes the disabled
+vegetation pass. Its p95 on the other frames was about 0.01 ms. Building
+and uploading those native pages synchronously is the main CPU hitch
+observed here.
+
+```sh
+./run.sh --preset alpine --rolling-terrain --naadf-radius-voxels 256 \
+  --voxel-size .0625 --msaa 1 --walk off --vegetation off --atmosphere off \
+  --terrain-shadows on --exposure 1 --sun-elevation 44 --sun-azimuth 242 \
+  --eye -552,912,2720 --target -321,725,2910 --route fly --route-speed 14.8 \
+  --route-step .0416666666666667 --frames 300 --width 1280 --height 720 \
+  --rolling-walk-frames output/rolling-handoff/radius-256
+```
+
+## Seeded World and other procedural recipes
+
+```sh
+cargo build --release --locked --bin frontier
+./run.sh --preset seeded-world --seed random --rolling-terrain --naadf on --voxel-size 0.0625 --msaa 1
+```
+
+The launcher prints the resolved seed. Press **F** to switch between walking
+and flying. Seeded World uses the generator's dry spawn, biome materials, and
+static water. Watershed and the other adaptive procedural recipes use the
+same sampled backend. Standard Alpine retains its GPU strip generator.
+
+The sampled backend uses 1024² patches at 24 m spacing for the 6 km view and
+512² patches at 1.5 m spacing around the player. Cache windows and their
+sample halos share a world-aligned lattice, so moving a window reuses
+overlapping samples and fills only the exposed area. Height, pigment, and
+maxima publish together. The maxima bound the rendered bilinear patches.
+The distant surface can miss narrow rivers and small landforms between
+samples. The near column cache uses integer ground and water heights from
+the native source. It keeps the last ready window during regular shifts and
+applies current edits when publishing its replacement. NAADF remains the
+nearby volumetric renderer.
+
+Terrain meshes remain disabled in this mode. The launch flag keeps the
+renderer opt-in while flight pacing, narrow waterways, the exact-column
+handoff, and long-distance edit visibility are being assessed.
+
+### Seeded World launch checks
+
+Radeon 760M with RADV, 1920×1080, 60° vertical FOV, 6 km view, 1× MSAA,
+atmosphere enabled, 6.25 cm voxels, and an 8 m NAADF radius. The random
+launch resolved seed `1878846491374251281`.
+
+| Seven-second run | Frame samples | Frame p95 | Frame p99 | GPU render p95 |
+|---|---:|---:|---:|---:|
+| Stationary | 617 | 12.26 ms | 12.88 ms | 10.11 ms |
+| 80 m/s flight, background column sampling | 609 | 12.43 ms | 13.13 ms | 10.61 ms |
+| 80 m/s flight, synchronous column sampling | 715 | 32.72 ms | 38.00 ms | 9.13 ms |
+
+The GPU render span covers opaque rendering and atmosphere. Frame intervals
+include CPU preparation and presentation. These short runs quantify the
+recenter hitch at one seed and pose.
+
+```sh
+./run.sh --preset seeded-world --seed 1878846491374251281 \
+  --rolling-terrain --naadf on --msaa 1 --width 1920 --height 1080 \
+  --seconds 7 --warmup 20 --uncapped --benchmark-input-lock --atmosphere on \
+  --route fly --route-clock realtime --route-speed 80 --walk off \
+  --report output/rolling-seeded-world/1080p-flight.json
+```
+
+### Static water at the NAADF boundary
+
+Astra's riverbed surveys (`b166034` and `cf4613a`) carry bed color and water
+depth into distant water shading. The rolling renderer now stores those
+inputs with its height samples and uses the existing exact-column texture
+for the same approximation at the NAADF boundary. The water cuts continue
+to use the original visibility geometry. Both paths use the same Fresnel,
+absorption, sky reflection, and world-aligned ripple phase. As a hit
+approaches the edge of the resident volume, NAADF blends its refracted
+native bed and reflected banks into that common approximation across a
+band up to 2.5 m wide. The distant cache quantizes optical depth in 6.25 cm
+increments up to about 16 m. At distance, bed shape continues to depend on
+cache spacing.
+
+Matched captures in `output/rolling-water-handoff` cover a river and coastal
+shallows. The river's mean absolute 8-bit channel difference across
+four-pixel strips on each side of the NAADF ownership boundary fell from
+31.7 to 5.1 over a 512-pixel span. The dry Alpine regression matched
+pixel for pixel. On the Radeon 760M, two order-swapped pairs of five-second
+1080p river approaches gave 14.71–15.78 ms frame p95 before and
+15.25–15.63 ms after. The packed NAADF path also passed a window smoke test.
+
+```sh
+./run.sh --preset seeded-world --seed 1878846491374251281 --rolling-terrain \
+  --naadf on --msaa 1 --width 1280 --height 720 \
+  --eye -15.96875,163.8875,8.03125 --target -15.96875,162.1875,-0.96875 \
+  --capture output/rolling-water-handoff/river.png
+```
+
+## Screen-space sampling of exact voxels
+
+The opt-in `cached_heightfield --spiky-fixture` uses the Legacy seed-7
+player-height regression pose, a 60° vertical field of view and a 300 m
+**radial** clip. An 8192² texture covers 512 × 512 m with exact 6.25 cm
+column heights. The clip keeps the tested camera frusta within that window.
+Each mip stores bounds for the same surface. Every visibility sample
+intersects its native columns. The proof applies to the finite fixture.
+
+The benchmark offers single-ray DDA and fixed four and 64-sample controls.
+`packet4` shares a verified empty prefix across each 8 × 8 pixel tile before
+traversing the same four subpixel rays. The proof encloses the tile rays in
+successive slabs and bounds each slab with at most four max-mip texels.
+`adaptive` uses the same proof and selects four samples around depth or face
+changes and at grazing angles. `silhouette` selects extra samples only when
+neighbouring center samples suggest a silhouette or a large depth jump.
+`filtered` shares that selection and filters face lighting in proportion to
+estimated projected areas of the three voxel face orientations. The filter
+blends with exact face lighting as the pixels resolve individual faces.
+The two adaptive selection rules and the face-area estimate are heuristics.
+The 64-sample image is a dense same-kernel reference, with independent CPU
+checks on selected center rays.
+
+The test isolates ordinary terrain and diagnostic lighting. It uses a dense
+resident column cache and excludes vegetation, arbitrary volumes, water,
+weather, edits and cold flight streaming. A 4 m bilinear control uses the
+same camera, source and lighting functions. The supplied Python comparison
+reports terrain–sky coverage independently from color.
+
+### First Radeon 760M measurements
+
+Release build, Vulkan RADV PHOENIX, Mesa 25.2.8. Shaded GPU p95
+at 1920 × 1080, with 40 stationary or 72 banked samples per native mode,
+two trials with reversed mode order. The banked timings exclude video
+readback. These are isolated terrain-pass times.
+
+| Method | Stationary | Banked |
+| --- | ---: | ---: |
+| 4 m bilinear control | 5.04 ms | |
+| Exact center ray, boundary-ascent traversal | 4.97 ms | 3.50 ms |
+| Exact center ray, stackless DDA | 5.63 ms | 3.76 ms |
+| Exact DDA + four samples near silhouettes | 6.69 ms | 4.65 ms |
+| Exact DDA + silhouette samples and footprint lighting | 6.85 ms | 4.92 ms |
+| Broad adaptive sampling | 18.34 ms | 9.61 ms |
+| Four samples with a shared empty prefix | 17.85 ms | 9.63 ms |
+| Four independent subpixel samples | 24.83 ms | 15.87 ms |
+| 64 independent subpixel samples | 352.53 ms | |
+
+The instrumented stationary packet run certified 581,696 sky pixels and
+reduced the number of extra rays from 8.29 million to 5.97 million.
+The packet and independent four-sample masks agreed at every pixel
+in the stationary capture, across 96 banked frames at 640 × 360, and at
+the final pose of a seed-42 banked repeat. Forward depth on 484 center rays
+agreed with the independent voxel raycaster in terrain or sky and face ID
+on both 1080p routes. Radial depth errors at p95 were 0.012 mm stationary
+and 0.053 mm banked. The tested runs reported zero traversal failures.
+
+Against the 64-sample coverage reference, the filtered candidate reduced
+stationary pixels with more than 25 percentage points of coverage error
+from 1,372 to 35. On the 96-frame motion comparison, average absolute
+coverage error at mixed terrain–sky pixels fell from 21.2 to 8.4 percentage
+points. At the final banked pose, average RGB error in sRGB reduced from
+0.0090 to 0.0016 on the 0–1 scale. Fine face shading remains approximate
+and some repetitive patterns remain in the stationary slopes.
+
+Native terrain and its bounds require 341.3 MiB of logical GPU textures.
+For the stationary run, canonical column generation took 2.88 s, building
+the bounds took 0.27 s, and upload took 0.17 s. First completed frame was
+3.57 s. Extending coverage now depends on reducing generation and residency.
+The next experiment should page in exact columns on demand using
+conservative procedural bounds, including explicit accounting of omitted
+or late pages on the approach to a long-range ridge.
+
+### Reproduction
+
+From `frontier/`:
+
+```sh
+cargo build --release --locked --bin cached_heightfield
+out=output/footprint
+bench=target/release/cached_heightfield
+modes=dda,dick,packet4,adaptive,silhouette,filtered,ssaa4,ssaa64
+"$bench" --spiky-fixture --shaded --width 1920 --height 1080 --frames 20 \
+  --warmup 6 --trials 2 --native --cells 8192 --modes "$modes" \
+  --oracle 484 --output "$out/still/native"
+"$bench" --spiky-fixture --shaded --width 1920 --height 1080 --frames 16 \
+  --warmup 4 --trials 2 --bilinear --cells 128 --modes dda --output "$out/still/proxy"
+python3 tools/footprint_compare.py "$out/still"
+
+"$bench" --spiky-fixture --shaded --width 640 --height 360 --frames 96 \
+  --warmup 3 --trials 1 --route bank --capture-motion --native --cells 8192 \
+  --modes dda,filtered,packet4,ssaa4,ssaa64 --output "$out/bank/native"
+"$bench" --spiky-fixture --shaded --width 640 --height 360 --frames 96 \
+  --warmup 3 --trials 1 --route bank --capture-motion --bilinear --cells 128 \
+  --modes dda --output "$out/bank/proxy"
+python3 tools/footprint_compare.py "$out/bank" --movie
+
+"$bench" --spiky-fixture --shaded --width 1920 --height 1080 --frames 36 \
+  --warmup 6 --trials 2 --route bank --native --cells 8192 \
+  --modes dda,dick,packet4,adaptive,silhouette,filtered,ssaa4 --oracle 484 \
+  --output "$out/bank-1080"
+```
+
+Research references include [Catmull's area-sampling reference](https://ohiostate.pressbooks.pub/app/uploads/sites/45/2017/09/catmull-zbuffer.pdf),
+[Heckbert and Hanrahan's beam traversal](https://publications.ri.cmu.edu/beam-tracing-polygonal-objects),
+and [Igehy's ray footprints](https://graphics.stanford.edu/papers/trd/).
+The 2026 [NAADF paper](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.70413)
+shows another route to antialiasing exact voxel intersections by accumulating
+reprojected history, which is useful to test after measuring rapid camera motion.
+
+### Fresh Eroded world capture
+
+The snapshot input accepts canonical opaque ground exported from the production
+world crate. The exporter samples every 6.25 cm column. It also samples the
+canonical ground palette on a 1 m lattice for diagnostic shading. The ray
+kernel uses the native heights for intersections. The source is the default
+Eroded generator on the fresh seed `1685576058315138427`. The valley camera
+looks across a 512 m patch with a radial clip of 245 m. This tests the exact
+kernel on the game’s current terrain recipe without substituting the older
+Alpine or Legacy generator.
+
+Build the exporter against the production checkout's crate with the same
+Rust toolchain as the experiment. From the production checkout's `frontier/`:
+
+```sh
+experiment=/absolute/path/to/frontier-raycast/frontier
+cargo build --release --locked -p frontier-world
+rustc --edition 2021 -C opt-level=3 -L dependency=target/release/deps \
+  --extern frontier_world=target/release/libfrontier_world.rlib \
+  "$experiment/tools/exact_ground_capture.rs" -o /tmp/frontier-exact-ground-capture
+/tmp/frontier-exact-ground-capture export 1685576058315138427 -6912 5888 \
+  8192 /tmp/frontier-eroded-valley-f32.bin
+```
+
+Then from the experiment checkout's `frontier/`:
+
+```sh
+cargo build --release --locked --bin cached_heightfield
+target/release/cached_heightfield --ground-snapshot /tmp/frontier-eroded-valley-f32.bin \
+  --origin -6912,5888 --eye -6656,458.75,6144 \
+  --target -6743.4619,361.7881,6295.4888 --far 245 --seed 1685576058315138427 \
+  --native --cells 8192 --width 1920 --height 1080 --shaded \
+  --modes dda,filtered,ssaa64 --frames 14 --warmup 5 --trials 2 --oracle 484 \
+  --output output/fresh-eroded-valley
+```
+
+The exporter took 10.43 s for the valley. Resident terrain textures including
+the palette occupy 342.3 MiB. The snapshot covers opaque ground.
+The full renderer also needs water, vegetation, edit data and streaming.
+The benchmark's CPU check uses an independent flat traversal of the supplied
+native heights. At 1080p the valley's terrain GPU p95 was 7.62 ms with
+one ray, 8.80 ms with filtering, and 253.70 ms with 64 samples. The
+filtered mode reduced average terrain–sky coverage error on mixed pixels
+from 20.2 to 7.7 percentage points against the 64-sample reference.
+
+The wider ravine view uses `--eye -6688,435.75,6080
+--target -6547.9551,463.5846,6220.0449 --far 185` with the same snapshot and
+benchmark settings. Its filtered terrain GPU p95 was 7.55 ms on the Radeon
+760M. Both views completed all traversals and had zero sky/ground
+disagreements with the independent CPU traversal on 484 pixel-center rays.

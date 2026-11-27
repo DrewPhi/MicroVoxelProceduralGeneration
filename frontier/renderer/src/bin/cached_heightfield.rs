@@ -7,18 +7,23 @@ mod stream;
 use bytemuck::{Pod, Zeroable};
 use data::Surface;
 use frontier_world::{raycast, FbmParams, FbmRecipe, FbmTerrain, World};
-use glam::{DQuat, DVec2, DVec3, IVec2, Vec3};
+use glam::{DQuat, DVec2, DVec3, IVec2, Vec3, Vec3Swizzles};
 use std::{
     collections::HashMap,
     error::Error,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::Instant,
 };
 use wgpu::util::DeviceExt;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const SOURCE: &str = include_str!("cached_heightfield.wgsl");
+const SOURCE: &str = concat!(
+    include_str!("cached_heightfield.wgsl"),
+    "\n",
+    include_str!("cached_heightfield/footprint.wgsl"),
+);
 const EYE: DVec3 = DVec3::new(-43.625, 75., -289.5625);
 const INNER_CELLS: u32 = 512;
 const TARGET: DVec3 = DVec3::new(0., 490., 3300.);
@@ -64,6 +69,12 @@ struct Options {
     bands: u32,
     stride: u32,
     native: bool,
+    spiky_fixture: bool,
+    snapshot: Option<PathBuf>,
+    snapshot_origin: Option<DVec2>,
+    snapshot_eye: Option<DVec3>,
+    snapshot_target: Option<DVec3>,
+    snapshot_far: Option<f64>,
     stream: bool,
     nested: bool,
     history: bool,
@@ -95,6 +106,12 @@ fn options() -> Result<Option<Options>> {
         bands: 64,
         stride: 1,
         native: false,
+        spiky_fixture: false,
+        snapshot: None,
+        snapshot_origin: None,
+        snapshot_eye: None,
+        snapshot_target: None,
+        snapshot_far: None,
         stream: false,
         nested: false,
         history: false,
@@ -115,11 +132,13 @@ fn options() -> Result<Option<Options>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("cached_heightfield [--width 640 --height 360 --cells 1024 --frames 20 --warmup 4 --trials 2 --seed 7] [--modes max,dick,dda,vertical] [--route still|grazing|walk|turn|high|low|bank|banked|revisit|teleport] [--level --bands 64] [--mip-step 1|2 --minmax --bilinear --native --stream --nested --history --shift-window --audit-native --shaded --instrument --capture-motion --allow-software --oracle 0 --probe X,Y --output DIR]");
+                println!("cached_heightfield [--width 640 --height 360 --cells 1024 --frames 20 --warmup 4 --trials 2 --seed 7] [--modes max,dick,dda,vertical,adaptive,silhouette,filtered,packet4,ssaa4,ssaa64] [--route still|grazing|walk|turn|high|low|bank|banked|revisit|teleport] [--level --bands 64] [--mip-step 1|2 --minmax --bilinear --native --spiky-fixture --stream --nested --history --shift-window --audit-native --shaded --instrument --capture-motion --allow-software --oracle 0 --probe X,Y --output DIR]");
+                println!("Production ground snapshot: --native --ground-snapshot FILE --origin X,Z --eye X,Y,Z --target X,Y,Z --far RADIAL_METRES");
                 return Ok(None);
             }
             "--bilinear" => o.bilinear = true,
             "--native" => o.native = true,
+            "--spiky-fixture" => o.spiky_fixture = true,
             "--history" => o.history = true,
             "--shift-window" => o.shift_window = true,
             "--audit-native" => o.audit_native = true,
@@ -153,6 +172,11 @@ fn options() -> Result<Option<Options>> {
                     "--bands" => o.bands = value.parse()?,
                     "--mip-step" => o.stride = value.parse()?,
                     "--oracle" => o.oracle = value.parse()?,
+                    "--ground-snapshot" => o.snapshot = Some(value.into()),
+                    "--origin" => o.snapshot_origin = Some(DVec2::from_array(position(&value)?)),
+                    "--eye" => o.snapshot_eye = Some(DVec3::from_array(position(&value)?)),
+                    "--target" => o.snapshot_target = Some(DVec3::from_array(position(&value)?)),
+                    "--far" => o.snapshot_far = Some(value.parse()?),
                     "--probe" => {
                         let (x, y) = value.split_once(',').ok_or("probe needs X,Y")?;
                         o.probes.push([x.parse()?, y.parse()?]);
@@ -163,7 +187,12 @@ fn options() -> Result<Option<Options>> {
             }
         }
     }
-    if !(32..=4096).contains(&o.cells)
+    let max_cells = if o.radial_clip() && o.native {
+        8192
+    } else {
+        4096
+    };
+    if !(32..=max_cells).contains(&o.cells)
         || !o.cells.is_power_of_two()
         || !(1..=1920).contains(&o.width)
         || !(1..=1080).contains(&o.height)
@@ -176,9 +205,9 @@ fn options() -> Result<Option<Options>> {
         || o.probes.iter().any(|p| p[0] >= o.width || p[1] >= o.height)
         || o.warmup > 60
         || (o.bilinear && o.native)
-        || o.modes
-            .iter()
-            .any(|m| !matches!(m.as_str(), "max" | "dick" | "dda" | "vertical"))
+        || o.modes.iter().any(|m| {
+            !matches!(m.as_str(), "max" | "dick" | "dda" | "vertical") && footprint(m).is_none()
+        })
         || !matches!(
             o.route.as_str(),
             "still"
@@ -197,13 +226,14 @@ fn options() -> Result<Option<Options>> {
     }
     if o.modes.iter().any(|m| m == "vertical")
         && (!o.level
+            || o.radial_clip()
             || o.nested
             || o.history
             || matches!(o.route.as_str(), "bank" | "banked")
             || o.stride != 1)
     {
         return Err(
-            "vertical mode requires an unbanked level camera, one cache and mip step 1".into(),
+            "vertical mode requires an unbanked level camera, an axial clip, one cache and mip step 1".into(),
         );
     }
     if o.stream && (o.cells < 128 || o.minmax || o.native) {
@@ -218,13 +248,108 @@ fn options() -> Result<Option<Options>> {
     if o.native && o.cells < 256 {
         return Err("native fixture requires at least 256 cells per side".into());
     }
+    if o.modes.iter().any(|m| footprint(m).is_some()) && (o.stream || o.history || !o.shaded) {
+        return Err("pixel footprint experiments require finite terrain and --shaded".into());
+    }
+    if o.modes
+        .iter()
+        .any(|m| footprint(m).is_some_and(|samples| samples.tile_proof || samples.adaptive))
+        && !o.native
+    {
+        return Err("footprint proofs require --native columns".into());
+    }
+    if o.spiky_fixture
+        && (o.stream
+            || !matches!(o.route.as_str(), "still" | "walk" | "bank")
+            || (o.native && o.cells != 8192))
+    {
+        return Err("the spiky fixture uses a 512 m finite window (8192 native columns per side) with a still, walk or bank route".into());
+    }
+    match (
+        o.snapshot_origin,
+        o.snapshot_eye,
+        o.snapshot_target,
+        o.snapshot_far,
+    ) {
+        (Some(origin), Some(eye), Some(target), Some(far)) if o.snapshot.is_some() => {
+            let local_eye = eye.xz() - origin;
+            let direction = target - eye;
+            if !o.native
+                || o.spiky_fixture
+                || o.route != "still"
+                || o.level
+                || !far.is_finite()
+                || far <= 0.025
+                || origin.fract() != DVec2::ZERO
+                || direction.xz().length_squared() < 1e-12
+                || local_eye.min_element() < far
+                || local_eye.max_element() + far >= o.cells as f64 / 16.
+            {
+                return Err("ground snapshot needs native still mode, a whole-metre origin and a radial camera contained within the snapshot".into());
+            }
+        }
+        (None, None, None, None) if o.snapshot.is_none() => (),
+        _ => return Err(
+            "ground snapshot needs all of --ground-snapshot, --origin, --eye, --target and --far"
+                .into(),
+        ),
+    }
     Ok(Some(o))
 }
 
+fn position<const N: usize>(text: &str) -> Result<[f64; N]> {
+    let values = text
+        .split(',')
+        .map(str::parse)
+        .collect::<std::result::Result<Vec<f64>, _>>()?;
+    if values.len() != N || values.iter().any(|x| !x.is_finite()) {
+        return Err(format!("expected {N} comma-separated finite coordinates").into());
+    }
+    values
+        .try_into()
+        .map_err(|_| "invalid coordinate count".into())
+}
+
+struct Sampling {
+    axis: u32,
+    adaptive: bool,
+    tile_proof: bool,
+    silhouette_only: bool,
+    filter_faces: bool,
+}
+
+fn footprint(mode: &str) -> Option<Sampling> {
+    match mode {
+        "adaptive" | "silhouette" | "filtered" | "packet4" | "ssaa4" | "ssaa64" => Some(Sampling {
+            axis: if mode == "ssaa64" { 8 } else { 2 },
+            adaptive: matches!(mode, "adaptive" | "silhouette" | "filtered"),
+            tile_proof: matches!(mode, "adaptive" | "packet4"),
+            silhouette_only: matches!(mode, "silhouette" | "filtered"),
+            filter_faces: mode == "filtered",
+        }),
+        _ => None,
+    }
+}
+
 impl Options {
+    fn radial_clip(&self) -> bool {
+        self.spiky_fixture || self.snapshot.is_some()
+    }
+
+    fn terrain_params(&self) -> FbmParams {
+        FbmParams {
+            recipe: if self.spiky_fixture {
+                FbmRecipe::Legacy
+            } else {
+                FbmRecipe::Alpine
+            },
+            ..Default::default()
+        }
+    }
+
     fn view(&self, s: &Surface, terrain: &FbmTerrain, frame: u32) -> View {
         let t = f64::from(frame) / f64::from(self.frames.saturating_sub(1).max(1));
-        let (mut eye, target, yaw, roll) = match self.route.as_str() {
+        let (mut eye, target, mut yaw, mut roll) = match self.route.as_str() {
             "grazing" => (
                 DVec3::new(-1156., 995., 2460.),
                 DVec3::new(900., 650., 3900.),
@@ -273,7 +398,33 @@ impl Options {
             _ => (EYE, TARGET, 0., 0.),
         };
         let mut target = target;
-        let far = if self.native {
+        let far = if let (Some(snapshot_eye), Some(snapshot_target), Some(far)) =
+            (self.snapshot_eye, self.snapshot_target, self.snapshot_far)
+        {
+            eye = snapshot_eye;
+            target = snapshot_target;
+            far as f32
+        } else if self.spiky_fixture {
+            let slope = DVec3::new(
+                -8.731370115810932e-8,
+                -0.04993761703372,
+                -0.9987523555755615,
+            );
+            eye = DVec3::new(0., terrain.height_m(0., 0.) + 1.7, 0.);
+            yaw = 0.;
+            roll = 0.;
+            if self.route == "walk" {
+                eye.z -= 5. * t;
+                eye.y = terrain.height_m(0., eye.z) + 1.7;
+            }
+            if self.route == "bank" {
+                eye += DVec3::new(10. * t, 29. - 12. * t, -35. * t);
+                roll = 0.26 * (t * std::f64::consts::PI).sin();
+                yaw = 0.10 * (2. * t - 1.);
+            }
+            target = eye + slope;
+            300.
+        } else if self.native {
             eye = EYE + DVec3::new(0., 0., 4. * t * f64::from(u8::from(self.route == "walk")));
             eye.y = terrain.height_m(eye.x, eye.z) + 1.7;
             target = eye + DVec3::new(0.3, -2., 8.);
@@ -394,13 +545,11 @@ fn oracle(
         return Ok("null".into());
     }
     let n = (o.oracle as f64).sqrt().floor() as u32;
-    let world = World::fbm(
-        o.seed,
-        FbmParams {
-            recipe: FbmRecipe::Alpine,
-            ..Default::default()
-        },
-    )?;
+    let world = o
+        .snapshot
+        .is_none()
+        .then(|| World::fbm(o.seed, o.terrain_params()))
+        .transpose()?;
     let mut sample_errors = Vec::new();
     let mut native_errors = Vec::new();
     let mut sample_mask = 0;
@@ -421,22 +570,25 @@ fn oracle(
         let (eye, d) = view.ray(x, y);
         let [time, face] = pixels[(x + y * o.width) as usize];
         let got = (time >= 0.).then_some(f64::from(time));
-        let far = f64::from(view.eye[3]);
+        let scale = if o.radial_clip() { 1. / d.length() } else { 1. };
+        let far = f64::from(view.eye[3]) * scale;
+        let near = 0.025 * scale;
         let reference = if let Some(inner) = inner {
-            inner.reference(eye, d, 0.025, far).or_else(|| {
-                let start = inner.clip(eye, d, 0.025, far).map_or(0.025, |(_, end)| end);
+            inner.reference(eye, d, near, far).or_else(|| {
+                let start = inner.clip(eye, d, near, far).map_or(near, |(_, end)| end);
                 s.reference(eye, d, start, far)
             })
         } else {
-            s.reference(eye, d, 0.025, far)
+            s.reference(eye, d, near, far)
         };
-        let near = 0.025;
-        let native = raycast(
-            &world,
-            (eye + d * near).to_array(),
-            d.to_array(),
-            (far - near) * d.length(),
-        );
+        let native = world.as_ref().and_then(|world| {
+            raycast(
+                world,
+                (eye + d * near).to_array(),
+                d.to_array(),
+                (far - near) * d.length(),
+            )
+        });
         if index >= (n * n) as usize {
             let number = |v: Option<f64>| v.map_or("null".to_owned(), |x| x.to_string());
             let native_depth = native.map(|h| h.distance + near * d.length());
@@ -446,7 +598,9 @@ fn oracle(
                 ));
         }
         sample_mask += usize::from(got.is_some() != reference.is_some());
-        native_mask += usize::from(got.is_some() != native.is_some());
+        if world.is_some() {
+            native_mask += usize::from(got.is_some() != native.is_some());
+        }
         if let (Some(a), Some(b)) = (got, reference) {
             let e = (a - b).abs() * d.length();
             sample_max = sample_max.max(e);
@@ -460,11 +614,18 @@ fn oracle(
         }
     }
     let probes = targeted.join(",");
+    let native_counts = if world.is_some() {
+        format!(
+            r#""native_coverage_disagreements":{native_mask},"native_error_m_p50_p95_p99":{:?},"native_face_disagreements":{native_faces}"#,
+            summary(native_errors)
+        )
+    } else {
+        r#""native_coverage_disagreements":null,"native_error_m_p50_p95_p99":null,"native_face_disagreements":null"#.into()
+    };
     Ok(format!(
-        r#"{{"rays":{},"sampled_coverage_disagreements":{sample_mask},"sampled_error_m_p50_p95_p99":{:?},"sampled_max_m":{sample_max},"native_coverage_disagreements":{native_mask},"native_error_m_p50_p95_p99":{:?},"native_face_disagreements":{native_faces},"probes":[{probes}]}}"#,
+        r#"{{"rays":{},"sampled_coverage_disagreements":{sample_mask},"sampled_error_m_p50_p95_p99":{:?},"sampled_max_m":{sample_max},{native_counts},"probes":[{probes}]}}"#,
         (n * n) as usize + o.probes.len(),
-        summary(sample_errors),
-        summary(native_errors)
+        summary(sample_errors)
     ))
 }
 
@@ -592,43 +753,85 @@ fn native_source_audit(
     ))
 }
 
+fn read_ground_snapshot(path: &Path, cells: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+    let mut file = fs::File::open(path)?;
+    let heights = cells * cells;
+    let colors = (cells / 16).pow(2);
+    if file.metadata()?.len() != ((heights + colors) * 4) as u64 {
+        return Err("ground snapshot length differs from the selected --cells".into());
+    }
+    let mut heights = vec![0f32; heights];
+    let mut colors = vec![0f32; colors];
+    for plane in [&mut heights, &mut colors] {
+        file.read_exact(bytemuck::cast_slice_mut(plane))?;
+        if cfg!(target_endian = "big") {
+            for value in plane {
+                *value = f32::from_bits(u32::from_le(value.to_bits()));
+            }
+        }
+    }
+    if heights
+        .iter()
+        .any(|h| !h.is_finite() || (h * 16.).fract() != 0.)
+        || colors.iter().any(|c| !(0. ..=16_777_215.).contains(c))
+    {
+        return Err("ground snapshot contains invalid heights or colors".into());
+    }
+    Ok((heights, colors))
+}
+
 fn main() -> Result<()> {
     let start = Instant::now();
     let Some(o) = options()? else {
         return Ok(());
     };
     fs::create_dir_all(&o.output)?;
-    let params = FbmParams {
-        recipe: FbmRecipe::Alpine,
-        ..Default::default()
-    };
-    let terrain = FbmTerrain::new(o.seed, params)?;
+    let terrain = FbmTerrain::new(o.seed, o.terrain_params())?;
     let timer = Instant::now();
-    let origin = if o.native {
-        DVec2::new(-44., -293.)
+    let origin = if let Some(origin) = o.snapshot_origin {
+        origin
+    } else if o.spiky_fixture {
+        DVec2::new(-256., -384.)
+    } else if o.native {
+        DVec2::new(-44., -293.) - DVec2::splat(o.cells as f64 * 0.0625 * 0.35).floor()
     } else {
         DVec2::new(-8192., -4096.)
     };
-    let origin = if o.native {
-        origin - DVec2::splat(o.cells as f64 * 0.0625 * 0.35).floor()
-    } else {
-        origin
-    };
     let pitch = if o.native {
         0.0625
+    } else if o.spiky_fixture {
+        512. / o.cells as f64
     } else {
         16384. / o.cells as f64
     };
-    let surface = if o.stream {
-        Surface {
-            origin,
-            n: o.cells,
-            pitch,
-            bilinear: true,
-            points: Vec::new(),
-        }
+    let (surface, albedo) = if let Some(path) = &o.snapshot {
+        let (points, colors) = read_ground_snapshot(path, o.cells)?;
+        (
+            Surface {
+                origin,
+                n: o.cells,
+                pitch,
+                bilinear: false,
+                points,
+            },
+            colors,
+        )
+    } else if o.stream {
+        (
+            Surface {
+                origin,
+                n: o.cells,
+                pitch,
+                bilinear: true,
+                points: Vec::new(),
+            },
+            Vec::new(),
+        )
     } else {
-        Surface::build(&terrain, origin, o.cells, pitch, o.bilinear)
+        (
+            Surface::build(&terrain, origin, o.cells, pitch, o.bilinear),
+            Vec::new(),
+        )
     };
     let generation_ms = elapsed(timer);
     let timer = Instant::now();
@@ -687,7 +890,13 @@ fn main() -> Result<()> {
     };
     let maximum = texture(n, n.ilog2() + 1, format);
     let sample = texture(
-        if o.bilinear { n + 1 } else { 1 },
+        if o.bilinear {
+            n + 1
+        } else if o.snapshot.is_some() {
+            n / 16
+        } else {
+            1
+        },
         1,
         wgpu::TextureFormat::R32Float,
     );
@@ -699,6 +908,9 @@ fn main() -> Result<()> {
             upload(&queue, &sample, 0, n + 1, 1, &surface.points);
         }
     }
+    if o.snapshot.is_some() {
+        upload(&queue, &sample, 0, n / 16, 1, &albedo);
+    }
     drop(levels);
     queue.submit([]);
     device.poll(wgpu::Maintain::Wait);
@@ -709,6 +921,8 @@ fn main() -> Result<()> {
     let terrain_bytes = 4 * u64::from(channels) * (4 * u64::from(n) * u64::from(n) - 1) / 3
         + if o.bilinear {
             4 * u64::from(n + 1) * u64::from(n + 1)
+        } else if o.snapshot.is_some() {
+            (albedo.len() * 4) as u64
         } else {
             4
         };
@@ -842,7 +1056,14 @@ fn main() -> Result<()> {
         bind_group_layouts: &[&layout],
         push_constant_ranges: &[],
     });
-    let pipeline = |entry, method| {
+    let pipeline = |entry, method, sample_mode: Option<Sampling>| {
+        let samples = sample_mode.unwrap_or(Sampling {
+            axis: 2,
+            adaptive: false,
+            tile_proof: false,
+            silhouette_only: false,
+            filter_faces: false,
+        });
         let constants = HashMap::from([
             ("METHOD".into(), f64::from(method)),
             ("BILINEAR".into(), f64::from(o.bilinear)),
@@ -852,6 +1073,13 @@ fn main() -> Result<()> {
             ("STREAM".into(), f64::from(o.stream)),
             ("NESTED".into(), f64::from(o.nested)),
             ("HISTORY".into(), f64::from(o.history)),
+            ("RADIAL_CLIP".into(), f64::from(o.radial_clip())),
+            ("GROUND_ALBEDO".into(), f64::from(o.snapshot.is_some())),
+            ("FOOTPRINT_SAMPLES".into(), f64::from(samples.axis)),
+            ("ADAPTIVE_FOOTPRINT".into(), f64::from(samples.adaptive)),
+            ("TILE_PROOF".into(), f64::from(samples.tile_proof)),
+            ("SILHOUETTE_ONLY".into(), f64::from(samples.silhouette_only)),
+            ("FILTER_FACES".into(), f64::from(samples.filter_faces)),
         ]);
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
@@ -869,14 +1097,23 @@ fn main() -> Result<()> {
         .modes
         .iter()
         .map(|s| match s.as_str() {
-            "max" => pipeline("independent", 0u32),
-            "dick" => pipeline("independent", 1u32),
-            "dda" => pipeline("independent", 2u32),
-            _ => pipeline("vertical", 1u32),
+            "max" => pipeline("independent", 0u32, None),
+            "dick" => pipeline("independent", 1u32, None),
+            "vertical" => pipeline("vertical", 1u32, None),
+            _ => pipeline("independent", 2u32, None),
         })
         .collect();
-    let shade = o.shaded.then(|| pipeline("shade_image", 1u32));
-    let retain = o.history.then(|| pipeline("save_history", 1u32));
+    let shade: Vec<_> = o
+        .modes
+        .iter()
+        .map(|mode| {
+            o.shaded.then(|| match footprint(mode) {
+                Some(samples) => pipeline("shade_footprint", 2u32, Some(samples)),
+                None => pipeline("shade_image", 1u32, None),
+            })
+        })
+        .collect();
+    let retain = o.history.then(|| pipeline("save_history", 1u32, None));
     let query_count = 2 * (1 + u32::from(o.shaded) + u32::from(o.history));
     let query = device.create_query_set(&wgpu::QuerySetDescriptor {
         label: None,
@@ -963,7 +1200,7 @@ fn main() -> Result<()> {
                 queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&view));
                 let mut cmd = device.create_command_encoder(&Default::default());
                 for (pass, pipe) in std::iter::once(&pipes[i])
-                    .chain(shade.iter())
+                    .chain(shade[i].iter())
                     .chain(retain.iter())
                     .enumerate()
                 {
@@ -1013,12 +1250,37 @@ fn main() -> Result<()> {
                 if final_frame || capture {
                     let data = fetch(&device, &depth_read)?;
                     let hits = bytemuck::cast_slice::<u8, [f32; 2]>(&data);
-                    let unresolved = hits.iter().filter(|h| h[0] == -2.).count();
-                    motion_unresolved[i] = motion_unresolved[i].max(unresolved);
+                    let mut unresolved = hits.iter().filter(|h| h[0] == -2.).count();
                     if let Some(read) = &rgb_read {
-                        let colors = fetch(&device, read)?;
+                        let mut colors = fetch(&device, read)?;
+                        let coverage = if footprint(mode).is_some() {
+                            let mask: Vec<_> = colors
+                                .chunks_exact_mut(4)
+                                .zip(hits)
+                                .map(|(pixel, hit)| {
+                                    let value = pixel[3];
+                                    if pixel == [255, 0, 255, 0] && hit[0] != -2. {
+                                        unresolved += 1;
+                                    }
+                                    pixel[3] = 255;
+                                    value
+                                })
+                                .collect();
+                            Some(mask)
+                        } else if o.radial_clip() {
+                            Some(
+                                hits.iter()
+                                    .map(|hit| if hit[0] >= 0. { 255 } else { 0 })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
                         if final_frame {
                             save_png(&folder.join("terrain.png"), o.width, o.height, &colors)?;
+                            if let Some(mask) = &coverage {
+                                fs::write(folder.join("coverage.u8"), mask)?;
+                            }
                         }
                         if capture {
                             let frames = folder.join("frames");
@@ -1029,8 +1291,12 @@ fn main() -> Result<()> {
                                 o.height,
                                 &colors,
                             )?;
+                            if let Some(mask) = &coverage {
+                                fs::write(frames.join(format!("{frame:04}.u8")), mask)?;
+                            }
                         }
                     }
+                    motion_unresolved[i] = motion_unresolved[i].max(unresolved);
                     if !final_frame {
                         continue;
                     }
@@ -1108,6 +1374,11 @@ fn main() -> Result<()> {
                                 .ok()
                         })
                         .unwrap_or(0);
+                    let measures = if footprint(mode).is_some() {
+                        r#"["trace_bounds_fetches","tested_leaf_intervals","extra_rays","certified_sky_pixels"]"#
+                    } else {
+                        r#"["bounds_fetches","tested_leaf_intervals","valid_history_caps","tested_history_depths"]"#
+                    };
                     let fields = [
                         format!(
                             r#""adapter":{:?},"driver":{:?},"device_type":{:?}"#,
@@ -1161,7 +1432,14 @@ fn main() -> Result<()> {
                         ),
                         format!(r#""history":{},"history_bytes":{history_bytes}"#, o.history),
                         format!(
-                            r#""counters":["bounds_fetches","tested_leaf_intervals","valid_history_caps","tested_history_depths"],"counter_totals":{counts},"unresolved":{unresolved},"captured_max_unresolved":{},"oracle":{check}"#,
+                            r#""spiky_fixture":{},"ground_snapshot":{},"radial_clip":{},"footprint_samples_per_axis":{}"#,
+                            o.spiky_fixture,
+                            o.snapshot.is_some(),
+                            o.radial_clip(),
+                            footprint(mode).map_or(1, |samples| samples.axis)
+                        ),
+                        format!(
+                            r#""counters":{measures},"counter_totals":{counts},"unresolved":{unresolved},"captured_max_unresolved":{},"oracle":{check}"#,
                             motion_unresolved[i]
                         ),
                     ];

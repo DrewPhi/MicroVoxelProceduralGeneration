@@ -36,13 +36,16 @@ fn camera_basis_matches_raster_projection_without_world_origin_cancellation() {
 }
 #[test]
 fn shader_is_valid() {
-    let m = naga::front::wgsl::parse_str(&crate::voxel_shader(SHADER)).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&m)
-    .unwrap();
+    for rolling_water in [false, true] {
+        let m = naga::front::wgsl::parse_str(&crate::voxel_shader(primary_shader(rolling_water)))
+            .unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&m)
+        .unwrap();
+    }
 }
 
 #[test]

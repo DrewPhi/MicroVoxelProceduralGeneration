@@ -32,12 +32,18 @@ override STREAM: bool = false;
 override NESTED: bool = false;
 override HISTORY: bool = false;
 override LEVEL_STEP: u32 = 1u;
+override RADIAL_CLIP: bool = false;
+override GROUND_ALBEDO: bool = false;
 const INF: f32 = 1.e20;
 const NEAR: f32 = .025;
 
-fn screen_ray(pixel: vec2u) -> vec3f {
-    let uv = (vec2f(pixel)+.5)*2./vec2f(view.size.xy)-1.;
+fn screen_ray_at(pixel: vec2f) -> vec3f {
+    let uv = pixel*2./vec2f(view.size.xy)-1.;
     return view.forward.xyz + uv.x*view.right.xyz - uv.y*view.up.xyz;
+}
+fn screen_ray(pixel: vec2u) -> vec3f { return screen_ray_at(vec2f(pixel)+.5); }
+fn clip_scale(direction: vec3f) -> f32 {
+    return select(1.,1./length(direction),RADIAL_CLIP);
 }
 fn row_slope(row: i32) -> f32 {
     return screen_ray(vec2u(0,u32(row))).y;
@@ -60,7 +66,9 @@ struct Ray {
     grid: Grid,
 }
 fn ray_grid(direction: vec2f, grid: Grid, clip_near: f32, clip_far: f32) -> Ray {
-    let origin = (view.eye.xz-grid.extent.xy)*grid.extent.z;
+    return ray_grid_at((view.eye.xz-grid.extent.xy)*grid.extent.z,direction,grid,clip_near,clip_far);
+}
+fn ray_grid_at(origin: vec2f, direction: vec2f, grid: Grid, clip_near: f32, clip_far: f32) -> Ray {
     let signs = select(vec2i(1), vec2i(-1), direction < vec2f(0.));
     let start = select(origin,vec2f(grid.extent.w)-origin,signs<vec2i(0));
     let velocity = abs(direction*grid.extent.z);
@@ -139,7 +147,12 @@ fn parent_height(world: vec2f) -> f32 {
 fn fade_limits(grid: Grid) -> vec2f {
     // Origin snaps in 64-sample increments. The blend is already entirely
     // parent terrain before reaching either edge, at every sub-strip pose.
-    let end=(grid.extent.w*.5-66.)/grid.extent.z;
+    var end=(grid.extent.w*.5-66.)/grid.extent.z;
+    if view.inner_cache.w != 0 {
+        let offset=(view.eye.xz-grid.extent.xy)*grid.extent.z;
+        let border=min(offset,grid.extent.w-offset);
+        end=max(0.,min(end,(min(border.x,border.y)-2.)/grid.extent.z));
+    }
     return vec2f(.55*end,end);
 }
 fn sample_at(grid: Grid, cell: vec2i) -> f32 {
@@ -340,8 +353,9 @@ fn independent(@builtin(global_invocation_id) id:vec3u) {
     let index=id.x+id.y*view.size.x;
     var counts=vec4u(0);
     let direction=screen_ray(id.xy);
-    var near=NEAR;
-    var far=view.eye.w;
+    let scale=clip_scale(direction);
+    var near=NEAR*scale;
+    var far=view.eye.w*scale;
     if HISTORY {far=history_limit(id.xy,direction,&counts);}
     var hit=vec2f(-1.,0.);
     if NESTED {
@@ -430,34 +444,53 @@ fn terrain_normal(hit: vec2f, p: vec3f) -> vec3f {
     let dz=mix(h.z-h.x,h.w-h.y,uv.x)*grid.extent.z;
     return normalize(vec3f(-dx,1.,-dz));
 }
+fn sampled_albedo(p: vec2f) -> vec3f {
+    let grid = outer_grid();
+    let q = (p - grid.extent.xy) * (grid.extent.z / 16.) - .5;
+    let cell = vec2i(floor(q));
+    let limit = vec2i(textureDimensions(samples)) - 1;
+    let a = vec2i(clamp(cell, vec2i(0), limit));
+    let b = vec2i(clamp(cell + 1, vec2i(0), limit));
+    let p00 = unpack4x8unorm(u32(textureLoad(samples,a,0).r)).rgb;
+    let p10 = unpack4x8unorm(u32(textureLoad(samples,vec2i(b.x,a.y),0).r)).rgb;
+    let p01 = unpack4x8unorm(u32(textureLoad(samples,vec2i(a.x,b.y),0).r)).rgb;
+    let p11 = unpack4x8unorm(u32(textureLoad(samples,b,0).r)).rgb;
+    let uv = fract(q);
+    return mix(mix(p00,p10,uv.x),mix(p01,p11,uv.x),uv.y);
+}
+fn ground_color(p:vec3f,n:vec3f,depth:f32) -> vec3f {
+    let sun=normalize(vec3f(-.54,.66,-.52));
+    let light=.39+.16*max(n.y,0.)+.52*max(dot(n,sun),0.);
+    if GROUND_ALBEDO { return sampled_albedo(p.xz) * light; }
+    let slope=length(n.xz)/max(.025,n.y);
+    let rock=smoothstep(.52,.77,slope);
+    let snow=smoothstep(1160.,1320.,p.y)*(1.-smoothstep(.6,1.4,slope));
+    var material=mix(vec3f(.18,.34,.10),vec3f(.35,.37,.39),rock);
+    material=mix(material,vec3f(.74,.78,.83),snow);
+    if p.z>-550. && p.z<1500. {
+        let trail=16.+60.*sin(p.z/310.)+.055*p.z;
+        let width=clamp(depth*1.1547/f32(view.size.y),.025,4.);
+        let core=1.-smoothstep(max(0.,.55-.5*width),.55+.5*width,abs(p.x-trail));
+        material=mix(material,vec3f(.32,.22,.13),core);
+    }
+    return material*light;
+}
+fn terrain_color(hit:vec2f,d:vec3f) -> vec3f {
+    if hit.x>=0. {
+        let p=fma(vec3f(hit.x),d,view.eye.xyz);
+        return ground_color(p,terrain_normal(hit,p),hit.x);
+    }
+    if hit.x==-2. {return vec3f(1,0,1);}
+    return mix(vec3f(.59,.70,.83),vec3f(.23,.44,.73),smoothstep(0.,.65,max(d.y,0.)));
+}
+fn pack_pixel(rgb:vec3f,coverage:f32) -> u32 {
+    let srgb=select(12.92*rgb,1.055*pow(rgb,vec3f(1./2.4))-.055,rgb>vec3f(.0031308));
+    return pack4x8unorm(vec4f(srgb,coverage));
+}
 @compute @workgroup_size(8,8)
 fn shade_image(@builtin(global_invocation_id) id:vec3u) {
     if any(id.xy>=view.size.xy) {return;}
     let index=id.x+id.y*view.size.x;
     let hit=hits[index];
-    let d=screen_ray(id.xy);
-    var rgb=mix(vec3f(.59,.70,.83),vec3f(.23,.44,.73),smoothstep(0.,.65,max(d.y,0.)));
-    if hit.x>=0. {
-        let p=fma(vec3f(hit.x),d,view.eye.xyz);
-        let n=terrain_normal(hit,p);
-        let slope=length(n.xz)/max(.025,n.y);
-        let rock=smoothstep(.52,.77,slope);
-        let snow=smoothstep(1160.,1320.,p.y)*(1.-smoothstep(.6,1.4,slope));
-        var material=mix(vec3f(.18,.34,.10),vec3f(.35,.37,.39),rock);
-        material=mix(material,vec3f(.74,.78,.83),snow);
-        if p.z>-550. && p.z<1500. {
-            // Filter only the authored trail's appearance across the pixel
-            // footprint. Visibility remains a single primary sample.
-            let trail=16.+60.*sin(p.z/310.)+.055*p.z;
-            let width=clamp(hit.x*1.1547/f32(view.size.y),.025,4.);
-            let core=1.-smoothstep(max(0.,.55-.5*width),.55+.5*width,abs(p.x-trail));
-            material=mix(material,vec3f(.32,.22,.13),core);
-        }
-        let sun=normalize(vec3f(-.54,.66,-.52));
-        let light=.39+.16*max(n.y,0.)+.52*max(dot(n,sun),0.);
-        rgb=material*light;
-    }
-    if hit.x==-2. {rgb=vec3f(1,0,1);}
-    let srgb=select(12.92*rgb,1.055*pow(rgb,vec3f(1./2.4))-.055,rgb>vec3f(.0031308));
-    colors[index]=pack4x8unorm(vec4f(srgb,1.));
+    colors[index]=pack_pixel(terrain_color(hit,screen_ray(id.xy)),1.);
 }

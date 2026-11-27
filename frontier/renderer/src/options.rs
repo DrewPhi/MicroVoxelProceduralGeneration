@@ -19,6 +19,8 @@ pub struct Options {
     pub render_scale: f32,
     pub capture: Option<PathBuf>,
     pub capture_on_exit: Option<PathBuf>,
+    pub rolling_terrain: bool,
+    pub rolling_walk_frames: Option<PathBuf>,
     pub seconds: Option<f64>,
     pub width: u32,
     pub height: u32,
@@ -105,6 +107,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
     let mut render_scale = 1.0f32;
     let mut capture = None;
     let mut capture_on_exit = None;
+    let mut rolling_terrain = false;
+    let mut rolling_walk_frames = None;
+    let mut explicit_naadf_radius = false;
     let mut seconds: Option<f64> = None;
     let mut width = WIDTH;
     let mut height = HEIGHT;
@@ -230,6 +235,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--naadf-gpu-distance" => visual.naadf_gpu_distance = parse_on_off(&mut args, &arg)?,
             "--naadf-follow" => visual.naadf_follow = parse_on_off(&mut args, &arg)?,
             "--naadf-radius" => {
+                explicit_naadf_radius = true;
                 explicit_naadf = true;
                 let radius: u32 = args.next().ok_or("NAADF radius requires metres")?.parse()?;
                 if !(1..=256).contains(&radius) {
@@ -244,6 +250,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 visual.naadf_enabled = true;
             }
             "--naadf-radius-voxels" => {
+                explicit_naadf_radius = true;
                 explicit_naadf = true;
                 let radius = args.next().ok_or("--naadf-radius-voxels requires an integer")?.parse()?;
                 crate::naadf::stream::radius_roots(radius)?;
@@ -648,6 +655,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "--seconds" => {
                 seconds = Some(args.next().ok_or("--seconds requires duration")?.parse()?)
             }
+            "--rolling-terrain" => rolling_terrain = true,
+            "--rolling-walk-frames" => {
+                rolling_walk_frames = Some(PathBuf::from(args.next().ok_or("--rolling-walk-frames requires an output directory")?));
+            }
             "--capture-on-exit" => {
                 capture_on_exit = Some(PathBuf::from(
                     args.next().ok_or("--capture-on-exit requires PNG path")?,
@@ -669,6 +680,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
                 )
             }
             "--help" | "-h" => {
+                println!("Playable meshless terrain: --preset seeded-world --seed random --rolling-terrain --naadf on|off. --rolling-walk-frames DIR captures a deterministic Alpine trail walk. Add --route fly with --eye and --target for a straight approach and a terrain ownership capture.");
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius-voxels 1..4096 (native voxel half-extent, enables NAADF); --naadf-radius 1..256 (legacy meters) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
                 println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
                 println!("Water models (opt-in): --water-model ca|discrete|procedural|moving.\n  ca: original local cellular automaton; --live-water on selects this path.\n  discrete: supplied whole-voxel waterfall/basin/outlet demo on a worker.\n  procedural: fixed 1 m generated river-bank tile with finite coarse neighbors and open boundaries.\n  moving: connected 2 m detailed window following the player, a 4 m local footprint and exact dormant history.\nMoving river flow: --water-river-rate 0..1000000 attempts native cells per simulated second at each eligible upstream/downstream continuation (default 128 for new runs; 0 selects finite water). A saved rate persists unless explicitly overridden. With positive input/output, downstream removal may lead accepted supply by at most 16 cells per channel. Blocked supply can stall accepted flow. Lakes remain finite.\nLive saves: --water-save PATH atomically saves terrain, inventory and model-specific water state on clean exit; reload with the same model/source/seed. Requires --scene adaptive, --naadf on, --naadf-follow on and --naadf-gpu-distance off.\nCA controls: --water-demo builds a two-chamber basin; G opens its dam early, P adds one counted water cell in creative mode. --water-active-radius 1|2 selects a 3 m|5 m active cube (default 1); --water-history-cells 32768..16777216 sets persistent capacity (default 1048576, at least the active cube). Unloaded CA borders are sealed.\nComparison renderer settings: --naadf-radius 8 --width 1920 --height 1080 selects an 8 m radius/16 m cube at 1080p. Ordinary NAADF radius defaults remain 64 m; water physics dimensions are independent. See LIVE_WATER.md for launch examples and experimental limits.");
@@ -935,6 +947,31 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
             "live water uses window ticks; use --frames/--seconds with --capture-on-exit".into(),
         );
     }
+    if rolling_terrain {
+        if scene != "adaptive" || live_water || adaptive_wait_quality {
+            return Err("--rolling-terrain requires --scene adaptive, static water, and no packed-terrain quality wait".into());
+        }
+        if !explicit_naadf_radius {
+            visual.naadf_radius_voxels = 128;
+        }
+        if visual.naadf_enabled && visual.naadf_radius_voxels > 512 {
+            return Err("--rolling-terrain supports an NAADF radius of up to 512 voxels in this experiment".into());
+        }
+        capture_far = Some(capture_far.unwrap_or(6000.).min(6000.));
+    }
+    if rolling_walk_frames.is_some() && (!rolling_terrain || capture.is_some() || capture_on_exit.is_some()) {
+        return Err("--rolling-walk-frames requires --rolling-terrain and a dedicated output directory".into());
+    }
+    if rolling_walk_frames.is_some() && route != frontier_runtime::routes::Route::Fly
+        && params.recipe != frontier_world::FbmRecipe::Alpine
+    {
+        return Err("the trail capture requires Alpine; use --route fly for other terrain recipes".into());
+    }
+    if rolling_walk_frames.is_some() && route == frontier_runtime::routes::Route::Fly
+        && (eye.is_none() || msaa != 1)
+    {
+        return Err("rolling flight capture requires explicit --eye/--target and --msaa 1".into());
+    }
     Ok(Some(Options {
         live_water,
         discrete_water,
@@ -953,6 +990,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>>
         render_scale,
         capture,
         capture_on_exit,
+        rolling_terrain,
+        rolling_walk_frames,
         seconds,
         width,
         height,
@@ -1124,6 +1163,12 @@ mod tests {
         let recipe = parse(&["--terrain-recipe", "seeded-world"]);
         assert!(!recipe.visual.walking);
         assert_eq!(recipe.start_xz, [0., 0.]);
+        let rolling = parse(&[
+            "--preset", "seeded-world", "--seed", "19", "--rolling-terrain", "--naadf", "on",
+        ]);
+        assert!(rolling.rolling_terrain && rolling.visual.naadf_enabled);
+        assert_eq!(rolling.params, world.params);
+        assert_eq!(rolling.visual.naadf_radius_voxels, 128);
     }
     #[test]
     fn adaptive_defaults_to_hybrid_with_explicit_overrides() {
