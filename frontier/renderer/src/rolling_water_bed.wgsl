@@ -92,7 +92,8 @@ fn rolling_bed_transmission(ray:vec3f,normal:vec3f,bed:vec3f,depth:f32)->vec3f {
 }
 
 fn rolling_column_optics(relative:vec3f,face:vec3f,ray:vec3f,distance:f32)->WaterOptics {
-    let normal=rolling_water_normal(relative,face,ray,distance);
+    let surface=select(face,vec3f(0.,1.,0.),(native_view.source.w&8u)!=0u);
+    let normal=rolling_water_normal(relative,surface,ray,distance);
     // Sample on the water side of a voxel riser.
     let cell=vec2i(floor(native_view.sky.zw+relative.xz*native_view.voxel.y-face.xz*.005));
     if any(cell<vec2i(0)) || any(cell>=vec2i(i32(native_view.grid.w))) {

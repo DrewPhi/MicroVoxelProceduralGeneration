@@ -808,6 +808,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 seconds = Some(args.next().ok_or("--seconds requires duration")?.parse()?)
             }
             "--rolling-terrain" => rolling_preference = Some(true),
+            "--native-lattice" => {
+                rolling_preference = Some(true);
+                visual.native_lattice = true;
+            }
             "--packed-terrain" => rolling_preference = Some(false),
             "--flight-view" => {
                 flight_chase = Some(match args.next().as_deref() {
@@ -927,6 +931,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
             "--help" | "-h" => {
                 println!("Default play: a random Eroded world with rolling terrain, procedural vegetation, regional weather, a day/night cycle and 1× MSAA. Use --seed INTEGER to revisit a world. --weather off selects the procedural sky. Explicit --preset, --terrain-recipe and --scene select alternate worlds with their own defaults. Use --packed-terrain for the previous mesh renderer. Live water, packed quality diagnostics, longer view distances and larger exact volumes use packed terrain.");
                 println!("--model-preview opens the aircraft studio. Run --model-preview --help for headless captures and pose controls.");
+                println!("--native-lattice selects a fixed Eroded voxel-column source at 6.25 cm with a 6 km maximum horizon.");
                 println!("Add --flight-view chase or --flight-view pilot to fly an aircraft over rolling terrain. Click to take control. Shift/Ctrl increase/decrease throttle, W/S pitch down/up, A/D roll, Q/E rudder and ground steering, Z/X extend/retract flaps, Page Up/Down pitch trim, Space brakes, C changes view.");
                 println!("--weather off|dynamic|regional|clear|rain|convective enables a world-space atmosphere. --weather-age SECONDS advances the simulation before spawn. --weather-day DAY --weather-hour HOUR choose the initial local time. --weather-center X,Z anchors the region. --weather-latitude DEG sets the regional Coriolis reference. --weather-save PATH resumes and saves regional weather. --weather-speed 0..64 sets the time multiplier. --day-length SECONDS sets the solar day. --day-night on|off controls celestial lighting (on with weather). F4 opens the live weather radar. In flight M changes the cockpit weather page, comma/period change range, semicolon/apostrophe change altitude or tilt. --airborne-radar adds the stabilized sweep and profile.");
                 println!("--flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, hold right mouse to look around the cabin, H toggles heading/altitude hold, and [ / ] tune COM.");
@@ -1231,7 +1236,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
         visual.triangle_budget = 1_500_000;
     }
     visual.terrain_depth_occlusion = depth_occlusion_override.unwrap_or(eroded);
-    visual.terrain_mid_detail = mid_detail_override.unwrap_or(eroded);
+    visual.terrain_mid_detail = mid_detail_override.unwrap_or(eroded && !visual.native_lattice);
     visual.terrain_mid_strips = mid_strips_override.unwrap_or(eroded && visual.terrain_mid_detail);
     if eroded && visual.terrain_mid_detail {
         if !mid_spacing_explicit {
@@ -1298,6 +1303,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
         );
     } else {
         capture_far = capture_far.or(preset_far);
+    }
+    if visual.native_lattice {
+        if !rolling_terrain
+            || params.recipe != frontier_world::FbmRecipe::Eroded
+            || frontier_world::voxel_size() != frontier_world::VOXEL_SIZE
+            || capture_far.is_some_and(|far| far > crate::native_lattice::MAX_FAR)
+        {
+            return Err("--native-lattice requires rolling Eroded terrain, 6.25 cm voxels and a horizon of up to 6000 m".into());
+        }
+        if visual.terrain_detail || visual.terrain_mid_detail || visual.terrain_far_detail {
+            return Err("--native-lattice uses one terrain source. Disable the terrain detail caches".into());
+        }
     }
     if (flight_altitude.is_some() || flight_heading.is_some()) && (flight_parked || eye.is_some()) {
         return Err(

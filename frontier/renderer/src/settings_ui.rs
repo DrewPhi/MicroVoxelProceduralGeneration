@@ -442,7 +442,7 @@ impl SettingsUi {
                                 self.settings.vegetation_lod_curve.clone();
                             self.lod_editor = Some(LodEditor::Vegetation);
                         }
-                        if self.rolling && ui.button("Terrain LOD curve").clicked() {
+                        if self.rolling && !self.settings.native_lattice && ui.button("Terrain LOD curve").clicked() {
                             self.loading_draft.terrain_lod_curve =
                                 self.settings.terrain_lod_curve.clone();
                             self.lod_editor = Some(LodEditor::Terrain);
@@ -481,7 +481,13 @@ impl SettingsUi {
                                 "Lower values request more terrain detail and may reduce FPS.",
                             );
                             }
-                            let max_distance = if self.rolling { crate::rolling_terrain::MAX_FAR } else { 40_000. };
+                            let max_distance = if self.settings.native_lattice {
+                                crate::native_lattice::MAX_FAR
+                            } else if self.rolling {
+                                crate::rolling_terrain::MAX_FAR
+                            } else {
+                                40_000.
+                            };
                             ui.add(
                                 egui::Slider::new(
                                     &mut self.loading_draft.view_distance,

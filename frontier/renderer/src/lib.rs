@@ -54,6 +54,7 @@ mod playability;
 mod player_edit;
 mod procedural_water_live;
 mod rolling_terrain;
+mod native_lattice;
 mod rolling_walk;
 mod rolling_woodland_shadow;
 mod settings;
@@ -1100,6 +1101,7 @@ impl Gpu {
                 self.rolling_probe_depth.get().is_some(),
                 self.vegetation_stats.tree_radius_m,
             );
+            rolling.encode_native_visibility(encoder, width, height);
         }
         if let Some(adaptive) = &self.adaptive {
             adaptive.set_naadf_mask(
@@ -3426,7 +3428,8 @@ impl Viewer {
                 ));
             } else if self.rolling_terrain {
                 window.set_title(&format!(
-                    "Frontier rolling terrain | {:.0} FPS | Esc settings / F12",
+                    "Frontier {} | {:.0} FPS | Esc settings / F12",
+                    if self.visual_settings.native_lattice {"native lattice"} else {"rolling terrain"},
                     self.frames as f64 / elapsed
                 ));
             } else {
@@ -3925,17 +3928,26 @@ pub fn run() -> Result<()> {
         appearance_method::initialize_meadow_application();
     }
     adaptive_geometry::distant_voxels::Mode::initialize_application();
-    let graded_source = if rolling_terrain && flight_parked {
+    let graded_source = if visual_settings.native_lattice || (rolling_terrain && flight_parked) {
         let terrain = frontier_world::FbmTerrain::new(seed, params)?;
-        let near = eye.map_or(start_xz, |eye| [eye[0], eye[2]]);
-        let runway = aircraft::find_dirt_runway(&terrain, near)
-            .ok_or("no dry aerodrome site near spawn; pick another --start-xz or seed")?;
-        let [x, z] = runway.center_m();
-        eprintln!(
-            "Dirt runway: 520 × 24 m at ({x:.1}, {z:.1}), elevation {:.1} m",
-            runway.height_m()
-        );
-        Some(terrain.with_dirt_runway(runway))
+        let terrain = if visual_settings.native_lattice {
+            terrain.with_native_lattice()
+        } else {
+            terrain
+        };
+        Some(if flight_parked {
+            let near = eye.map_or(start_xz, |eye| [eye[0], eye[2]]);
+            let runway = aircraft::find_dirt_runway(&terrain, near)
+                .ok_or("no dry aerodrome site near spawn; pick another --start-xz or seed")?;
+            let [x, z] = runway.center_m();
+            eprintln!(
+                "Dirt runway: 520 × 24 m at ({x:.1}, {z:.1}), elevation {:.1} m",
+                runway.height_m()
+            );
+            terrain.with_dirt_runway(runway)
+        } else {
+            terrain
+        })
     } else {
         None
     };
@@ -4945,7 +4957,7 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),voxel_size(),params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if rolling_terrain {"rolling_meshless_heightfield_and_exact_voxel_columns"} else if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if viewer.visual_settings.native_lattice {"fixed_lattice_exact_native_voxel_columns"} else if rolling_terrain {"rolling_meshless_heightfield_and_exact_voxel_columns"} else if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {voxel_size()},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or(g.index_count,|t|t.index_count)/3,|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
             json.pop();
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));

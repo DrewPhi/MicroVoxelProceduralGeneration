@@ -119,6 +119,36 @@ pub fn bound_native_height(
     let center =
         [0, 1].map(|a| (region.min[a] as f64 + region.size_cells[a] as f64 * 0.5) * voxel_size());
     let radius = region.size_cells.map(|v| v as f64 * voxel_size() * 0.5);
+    if terrain.native_lattice_enabled() {
+        use crate::native_lattice::{PITCH_CELLS, RELIEF_MAX};
+
+        let lo = region.min.map(|v| v.div_euclid(PITCH_CELLS));
+        let hi = end.map(|v| (v as i64 - 1).div_euclid(PITCH_CELLS) + 1);
+        let count = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1);
+        if count > i64::from(budget.max_noise_cells.max(4)) {
+            return None;
+        }
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for z in lo[1]..=hi[1] {
+            for x in lo[0]..=hi[0] {
+                let c = terrain.lattice_control([x * PITCH_CELLS, z * PITCH_CELLS]);
+                min = min.min(c.ground_top - 4);
+                max = max.max(c.visible_top.max(c.ground_top + RELIEF_MAX));
+            }
+        }
+        let range = [min, max].map(|height| height as f64 * voxel_size());
+        return Some(HeightBound {
+            center_xz: center,
+            half_extent_m: radius,
+            center_height_m: (range[0] + range[1]) * 0.5,
+            coefficients: [0.; 2],
+            remainder_m: (range[1] - range[0]) * 0.5,
+            height_range: range,
+            noise_cells: count as u32,
+            full_range_fallbacks: 0,
+        });
+    }
     let x = Aa {
         c: center[0],
         a: [radius[0], 0.0],

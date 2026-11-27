@@ -1,5 +1,6 @@
 //! Playable integration of the cached-heightfield experiment.
 use crate::foreground_depth::{self, ForegroundDepth};
+use crate::native_lattice::{self, NativeLattice};
 use crate::rolling_woodland_shadow::{self, CanopyGroundShade, WoodlandShadow};
 use crate::terrain_horizon::{self, TerrainHorizon};
 use crate::{
@@ -609,6 +610,7 @@ pub(crate) struct RollingTerrain {
     curve_negative_start: f32,
     curve_uniform: wgpu::Buffer,
     exact: ExactColumns,
+    lattice: Option<NativeLattice>,
     view: wgpu::Buffer,
     native_view: wgpu::Buffer,
     water_layout: wgpu::BindGroupLayout,
@@ -652,6 +654,10 @@ impl RollingTerrain {
             .fbm_terrain()
             .ok_or("rolling terrain requires a procedural terrain source")?;
         let landscapes = terrain.params().recipe.has_landscape_relief();
+        let use_lattice = terrain.native_lattice_enabled();
+        let lattice_beams = std::env::var_os("FRONTIER_NATIVE_LATTICE_BEAMS").is_some();
+        let lattice_compute = std::env::var_os("FRONTIER_NATIVE_LATTICE_COMPUTE").is_some();
+        let lattice_relief_bounds = std::env::var_os("FRONTIER_NATIVE_LATTICE_RELIEF_BOUNDS").is_some();
         let living_woods = frontier_world::vegetation::uses_living_woodland(world);
         let close_pitch = settings
             .terrain_near_spacing
@@ -685,9 +691,16 @@ impl RollingTerrain {
         } else {
             "fn foreground_at(pixel:vec2u)->f32 {return 1.;}"
         };
+        let lattice_source = if use_lattice {
+            native_lattice::SHADER
+        } else {
+            ""
+        };
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rolling terrain composition"),
-            source: wgpu::ShaderSource::Wgsl(format!("{SOURCE}\n{foreground_source}").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{SOURCE}\n{foreground_source}\n{lattice_source}").into(),
+            ),
         });
         let bindings = [0, 1, 2, 6, 7, 9, 10, 11, 12, 13, 14, 18, 19, 31].map(|binding| {
             wgpu::BindGroupLayoutEntry {
@@ -744,6 +757,9 @@ impl RollingTerrain {
         ));
         rolling_layout.extend(horizon_layout);
         rolling_layout.extend(CanopyGroundShade::read_entries());
+        if use_lattice {
+            rolling_layout.extend(NativeLattice::layout());
+        }
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rolling terrain layout"),
             entries: &rolling_layout,
@@ -757,6 +773,12 @@ impl RollingTerrain {
             bind_group_layouts: &groups,
             push_constant_ranges: &[],
         });
+        let mut lattice_constants = HashMap::new();
+        if use_lattice {
+            lattice_constants.insert("LATTICE_BEAMS".into(), f64::from(u8::from(lattice_beams)));
+            lattice_constants.insert("LATTICE_COMPUTE".into(), f64::from(u8::from(lattice_compute)));
+            lattice_constants.insert("LATTICE_RELIEF_BOUNDS".into(), f64::from(u8::from(lattice_relief_bounds)));
+        }
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("meshless terrain and voxel column depth"),
             layout: Some(&layout),
@@ -768,9 +790,13 @@ impl RollingTerrain {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some("rolling_fragment"),
+                entry_point: Some(if use_lattice {
+                    "lattice_terrain_fragment"
+                } else {
+                    "rolling_fragment"
+                }),
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &HashMap::from([
+                    constants: &HashMap::from_iter(lattice_constants.into_iter().chain([
                         (
                             "METHOD".into(),
                             if settings.terrain_mid_boundary_ascent {
@@ -817,7 +843,7 @@ impl RollingTerrain {
                             "CAPTURE_DISTANCE".into(),
                             f64::from(u8::from(settings.capture_terrain_distance)),
                         ),
-                    ]),
+                    ])),
                     ..Default::default()
                 },
                 targets: &[Some(gpu.scene_format.into())],
@@ -990,6 +1016,9 @@ impl RollingTerrain {
             curve_negative_start: 0.,
             curve_uniform: uniform(bytemuck::cast_slice(&[[0_f32; 4]; CURVE_PROFILE_VECTORS])),
             exact,
+            lattice: use_lattice.then(|| {
+                NativeLattice::new(device, &module, world.seed(), lattice_beams, lattice_compute, lattice_relief_bounds)
+            }),
             view: uniform(bytemuck::bytes_of(&View::zeroed())),
             native_view,
             water_layout,
@@ -1017,11 +1046,17 @@ impl RollingTerrain {
     ) -> Result<()> {
         let eye = DVec2::new(camera.position.x, camera.position.z);
         self.outer.update(device, queue, eye)?;
-        self.inner.update(device, queue, eye)?;
+        if let Some(lattice) = &mut self.lattice {
+            if lattice.update(device, world, camera, &self.view)? {
+                self.bind = None;
+            }
+        } else {
+            self.inner.update(device, queue, eye)?;
+        }
         if let Some(detail) = &mut self.detail {
             detail.update(device, queue, eye)?;
         }
-        if &self.terrain_curve != curve {
+        if self.lattice.is_none() && &self.terrain_curve != curve {
             self.terrain_curve = curve.clone();
             let samples = terrain_curve_samples(curve);
             let values = samples.iter().flatten().copied();
@@ -1142,6 +1177,9 @@ impl RollingTerrain {
                 &self.horizon_sampler,
             ));
             resources.extend(self.canopy_ground_shade.bindings());
+            if let Some(lattice) = &self.lattice {
+                resources.extend(lattice.bindings());
+            }
             self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rolling terrain resources"),
                 layout: &self.pipeline.get_bind_group_layout(0),
@@ -1165,7 +1203,7 @@ impl RollingTerrain {
         self.bind.is_some()
     }
     pub fn fits_settings(&self, settings: &VisualSettings) -> bool {
-        (!matches!(self.outer.pitch, 8. | 16.) || settings.view_distance <= 6500.)
+        (self.lattice.is_some() || !matches!(self.outer.pitch, 8. | 16.) || settings.view_distance <= 6500.)
             && (!settings.naadf_enabled
                 || self.exact.side >= ExactColumns::side_for(settings.naadf_radius_voxels))
     }
@@ -1182,7 +1220,7 @@ impl RollingTerrain {
             )
         };
         format!(
-            r#"{{"gpu_bytes":{},"outer":{},"inner":{},"near":{},"exact_publications":{},"exact_proxy_fallback_updates":{},"horizon_builds":{}}}"#,
+            r#"{{"gpu_bytes":{},"outer":{},"inner":{},"near":{},"exact_publications":{},"exact_proxy_fallback_updates":{},"horizon_builds":{},"native_lattice":{}}}"#,
             self.gpu_bytes(),
             layer(&self.outer),
             layer(&self.inner),
@@ -1192,7 +1230,8 @@ impl RollingTerrain {
                 .map_or_else(|| "null".to_owned(), layer),
             self.exact.publications,
             self.exact.proxy_fallback_updates,
-            self.horizon.as_ref().map_or(0, TerrainHorizon::builds)
+            self.horizon.as_ref().map_or(0, TerrainHorizon::builds),
+            self.lattice.as_ref().map_or_else(|| "null".to_owned(), NativeLattice::report)
         )
     }
     pub fn gpu_bytes(&self) -> usize {
@@ -1229,6 +1268,7 @@ impl RollingTerrain {
             + self.canopy_ground_shade.bytes()
             + usize::from(self.horizon.is_some()) * terrain_horizon::GPU_BYTES
             + self.foreground.as_ref().map_or(0, ForegroundDepth::bytes)
+            + self.lattice.as_ref().map_or(0, NativeLattice::bytes)
     }
     pub fn formation_shadow(&self) -> &FormationShadow {
         &self.formation_shadow
@@ -1347,6 +1387,9 @@ impl RollingTerrain {
             ],
         };
         queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&view));
+        if let Some(lattice) = &self.lattice {
+            lattice.prepare(queue, camera);
+        }
         let [lo, hi] = owner
             .unwrap_or([[0.; 3]; 2])
             .map(|v| glam::DVec3::from_array(v).as_vec3());
@@ -1384,7 +1427,8 @@ impl RollingTerrain {
                     | (u32::from(
                         self.landscapes && settings.voxel_filter && self.exact.revision == Some(0),
                     ) << 1)
-                    | (u32::from(settings.terrain_gray) << 2),
+                    | (u32::from(settings.terrain_gray) << 2)
+                    | (u32::from(self.lattice.is_some()) << 3),
             ],
             horizon_grid: self.terrain_horizon_grid(),
             world_eye: camera
@@ -1416,6 +1460,12 @@ impl RollingTerrain {
                 pass.set_bind_group(1, visibility.unwrap_or_else(|| foreground.fallback()), &[]);
             }
             pass.draw(0..3, 0..1);
+        }
+    }
+
+    pub fn encode_native_visibility(&self, encoder: &mut wgpu::CommandEncoder, width: u32, height: u32) {
+        if let Some(lattice) = &self.lattice {
+            lattice.encode_visibility(encoder, width, height);
         }
     }
 }

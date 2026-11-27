@@ -22,6 +22,7 @@ pub use grid::{
     VOXEL_SIZE,
 };
 pub mod moving_water;
+pub mod native_lattice;
 pub mod physical_fluid;
 pub mod procedural_water;
 pub mod rock_formation;

@@ -1,6 +1,7 @@
 //! CPU-canonical, seeded mountain heightfield, independent of renderer spacing.
 //! Greenfield gradient noise/FBM composition; no external implementation copied.
-use crate::{voxel_size, Cell, Material};
+use crate::{native_lattice, voxel_size, Cell, Material};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "runway.rs"]
 mod runway;
 pub use runway::DirtRunway;
@@ -163,6 +164,7 @@ pub struct FbmTerrain {
     seed: u64,
     params: FbmParams,
     runway: Option<DirtRunway>,
+    lattice_identity: u64,
 }
 impl FbmTerrain {
     pub fn new(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
@@ -171,11 +173,56 @@ impl FbmTerrain {
             seed,
             params,
             runway: None,
+            lattice_identity: 0,
         })
     }
     pub fn with_dirt_runway(mut self, runway: DirtRunway) -> Self {
         self.runway = Some(runway);
+        if self.native_lattice_enabled() {
+            self.lattice_identity = next_lattice_identity();
+        }
         self
+    }
+
+    pub fn with_native_lattice(mut self) -> Self {
+        assert_eq!(self.params.recipe, FbmRecipe::Eroded);
+        assert_eq!(voxel_size(), crate::VOXEL_SIZE);
+        self.lattice_identity = next_lattice_identity();
+        self
+    }
+
+    pub fn native_lattice_enabled(&self) -> bool {
+        self.lattice_identity != 0
+    }
+
+    /// Sample a control vertex of the native-column generator. A runway's
+    /// flat grade extends to the first enclosing lattice vertices.
+    pub fn lattice_control(&self, [x, z]: [i64; 2]) -> TerrainColumn {
+        if let Some(runway) = self.runway.filter(|_| self.native_lattice_enabled()) {
+            let center = runway.center_m();
+            let extents = runway.half_extents_m();
+            let point = [x, z].map(|c| c as f64 * voxel_size());
+            let pitch = native_lattice::PITCH_CELLS as f64 * voxel_size();
+            if (0..2).all(|i| {
+                point[i] >= ((center[i] - extents[i]) / pitch).floor() * pitch
+                    && point[i] <= ((center[i] + extents[i]) / pitch).ceil() * pitch
+            }) {
+                return TerrainColumn {
+                    ground_top: runway.top_cells(),
+                    visible_top: runway.top_cells(),
+                    ground_surface: Material::Soil,
+                    ground_subsurface: Material::Soil,
+                };
+            }
+        }
+        self.raw_column_and_cover(x, z, false).0
+    }
+
+    pub fn lattice_relief_at(&self, origin: [i64; 2]) -> bool {
+        let Some(runway) = self.runway else { return true };
+        let min = origin.map(|c| c as f64 * voxel_size());
+        let max = min.map(|m| m + native_lattice::PITCH_CELLS as f64 * voxel_size());
+        !runway.intersects(min, max)
     }
 
     pub fn dirt_runway(&self) -> Option<DirtRunway> {
@@ -192,6 +239,9 @@ impl FbmTerrain {
     /// recipe), seed, this version and `appearance_version` in any persistent
     /// source/cache identity. Elevation and material recipes evolve separately.
     pub fn source_version(&self) -> u32 {
+        if self.native_lattice_enabled() {
+            return 0x1_0008;
+        }
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,
             FbmRecipe::Watershed | FbmRecipe::Landscapes | FbmRecipe::Landforms => 1,
@@ -611,6 +661,12 @@ impl FbmTerrain {
     /// Sample physical climate and landforms for diagnostics (seeded-world recipe).
     pub fn sample_fields(&self, x: f64, z: f64) -> SeededFields {
         let mut fields = seeded_world::fields(self.seed, self.params, x, z);
+        if self.native_lattice_enabled() {
+            let cell = Cell::from_meters([x, 0., z]);
+            let column = self.column_cells(cell.x, cell.z);
+            Self::apply_lattice_fields(&mut fields, column);
+            return fields;
+        }
         if let Some(runway) = self.runway {
             let weight = runway.weight([x, z]);
             let change = (runway.height_m() - fields.ground_height_m) * weight;
@@ -664,16 +720,46 @@ impl FbmTerrain {
         {
             return None;
         }
-        Some(seeded_world::eroded_column(
+        let (mut column, cover, mut fields) = seeded_world::eroded_column(
             self.seed,
             self.params,
             xm,
             zm,
             overstory,
-        ))
+        );
+        if self.native_lattice_enabled() {
+            column = self.column_cells(x, z);
+            Self::apply_lattice_fields(&mut fields, column);
+        }
+        Some((column, cover, fields))
     }
 
     fn column_and_cover(&self, x: i64, z: i64, sample_cover: bool) -> (TerrainColumn, f64) {
+        if self.native_lattice_enabled() {
+            let column = native_lattice::column(self, self.lattice_identity, [x, z]);
+            let cover = if sample_cover
+                && column.visible_top == column.ground_top
+                && column.ground_surface == Material::Grass
+            {
+                self.raw_column_and_cover(x, z, true).1
+            } else {
+                0.
+            };
+            (column, cover)
+        } else {
+            self.raw_column_and_cover(x, z, sample_cover)
+        }
+    }
+
+    fn apply_lattice_fields(fields: &mut SeededFields, column: TerrainColumn) {
+        let ground = column.ground_top as f64 * voxel_size();
+        fields.temperature -= 0.00019 * (ground - fields.ground_height_m);
+        fields.ground_height_m = ground;
+        fields.water_height_m = (column.visible_top > column.ground_top)
+            .then(|| column.visible_top as f64 * voxel_size());
+    }
+
+    fn raw_column_and_cover(&self, x: i64, z: i64, sample_cover: bool) -> (TerrainColumn, f64) {
         let xm = (x as f64 + 0.5) * voxel_size();
         let zm = (z as f64 + 0.5) * voxel_size();
         let weight = self.runway.map_or(0., |r| r.weight([xm, zm]));
@@ -741,6 +827,11 @@ impl FbmTerrain {
     pub fn surface_color(&self, x: f64, z: f64, height: f64) -> [f32; 3] {
         self.surface_material(x, z, height).color()
     }
+}
+
+fn next_lattice_identity() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Center of the authored walking path, in default-scale scene meters.
