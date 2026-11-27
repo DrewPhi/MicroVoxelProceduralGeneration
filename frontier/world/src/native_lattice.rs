@@ -2,6 +2,8 @@
 use crate::{terrain::TerrainColumn, FbmTerrain};
 use std::cell::RefCell;
 
+pub mod detail;
+
 pub const PITCH_CELLS: i64 = 128;
 pub const RELIEF_MAX: i64 = 3;
 pub const DRY_HEAD_DROP: i64 = 12;
@@ -87,8 +89,16 @@ pub(crate) fn column(terrain: &FbmTerrain, identity: u64, cell: [i64; 2]) -> Ter
     let mut result = corners
         [usize::from(local[0] >= PITCH_CELLS / 2) + 2 * usize::from(local[1] >= PITCH_CELLS / 2)];
     result.ground_top = interpolate(corners.map(|c| c.ground_top), local, PITCH_CELLS);
+    let carrier = result.ground_top;
+    let detailed = terrain.native_detail_enabled();
     if terrain.lattice_relief_at(origin) {
-        result.ground_top += relief(cell, relief_seed(terrain.seed()));
+        let seed = relief_seed(terrain.seed());
+        result.ground_top += if detailed {
+            let tile = detail::tile_index(origin.map(|v| v / PITCH_CELLS), seed);
+            detail::column(tile, local[0] as usize, local[1] as usize)
+        } else {
+            relief(cell, seed)
+        };
     }
     result.visible_top = result.ground_top;
     if corners.iter().any(|c| c.visible_top > c.ground_top) {
@@ -99,9 +109,12 @@ pub(crate) fn column(terrain: &FbmTerrain, identity: u64, cell: [i64; 2]) -> Ter
                 c.ground_top - DRY_HEAD_DROP
             }
         });
-        result.visible_top = result
-            .ground_top
-            .max(interpolate(heads, local, PITCH_CELLS));
+        let water = interpolate(heads, local, PITCH_CELLS);
+        if detailed && water > carrier {
+            // Maintain connected channels through small-scale bed relief.
+            result.ground_top = result.ground_top.min(water - 1);
+        }
+        result.visible_top = result.ground_top.max(water);
     }
     result
 }

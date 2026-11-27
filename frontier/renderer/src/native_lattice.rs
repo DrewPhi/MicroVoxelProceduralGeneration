@@ -2,11 +2,15 @@
 use crate::{Camera, Result};
 use bytemuck::{Pod, Zeroable};
 use frontier_world::{
-    native_lattice::{self, DRY_HEAD_DROP, PITCH_CELLS, RELIEF_MAX},
+    native_lattice::{self, detail, DRY_HEAD_DROP, PITCH_CELLS, RELIEF_MAX},
     FbmTerrain, Material, World, VOXEL_SIZE,
 };
 use glam::Vec3Swizzles;
-use std::{collections::BTreeMap, sync::Arc, thread::JoinHandle};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    thread::JoinHandle,
+};
 use wgpu::util::DeviceExt;
 
 pub(crate) const SHADER: &str = include_str!("native_lattice.wgsl");
@@ -71,6 +75,8 @@ impl Window {
         let width = SIDE + 1;
         let mut controls = vec![[0; 2]; width * width];
         let shift = previous.map(|old| [0, 1].map(|i| (origin[i] - old.origin[i]) / PITCH_CELLS));
+        let detailed = terrain.native_detail_enabled();
+        let seed = native_lattice::relief_seed(terrain.seed());
         let rows = width.div_ceil(8);
         std::thread::scope(|scope| {
             for (chunk, block) in controls.chunks_mut(rows * width).enumerate() {
@@ -99,8 +105,13 @@ impl Window {
                             } else {
                                 0
                             });
+                        let tile = if detailed {
+                            detail::tile_index(point.map(|v| v / PITCH_CELLS), seed) as i32
+                        } else {
+                            0
+                        };
                         *sample = [
-                            i32::try_from(c.ground_top).unwrap(),
+                            height_bits(c.ground_top) | (tile << 24),
                             pack_head(head)
                                 | ((c.ground_surface as i32) << 22)
                                 | ((c.ground_subsurface as i32) << 26)
@@ -122,12 +133,17 @@ impl Window {
                     controls[i + width + 1],
                 ];
                 let margin = if corners[0][1] & RELIEF != 0 {
-                    RELIEF_MAX as i32
+                    if detailed {
+                        detail::roof((corners[0][0] as u32 >> 24) as usize) as i32
+                    } else {
+                        RELIEF_MAX as i32
+                    }
                 } else {
                     0
                 };
                 let mut top = i32::MIN;
-                for [ground, packed] in corners {
+                for [control, packed] in corners {
+                    let ground = unpack_height(control);
                     top = top.max(ground + margin);
                     if packed & WET != 0 {
                         top = top.max(ground + ((packed << 10) >> 10));
@@ -256,6 +272,112 @@ impl Window {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct NativeLatticeConfig {
+    beams: bool,
+    compute: bool,
+    relief_bounds: bool,
+    detailed: bool,
+    split: bool,
+    detail_step: u32,
+    tile_width: u32,
+}
+
+impl NativeLatticeConfig {
+    pub fn for_source(detailed: bool, msaa: u32) -> Self {
+        let flag = |name, default| std::env::var_os(name).map_or(default, |value| value != "0");
+        let number = |name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        };
+        Self {
+            beams: flag("FRONTIER_NATIVE_LATTICE_BEAMS", detailed),
+            compute: msaa == 1 && flag("FRONTIER_NATIVE_LATTICE_COMPUTE", detailed),
+            relief_bounds: flag("FRONTIER_NATIVE_LATTICE_RELIEF_BOUNDS", false),
+            detailed,
+            split: flag("FRONTIER_NATIVE_DETAIL_SPLIT", detailed),
+            detail_step: number("FRONTIER_NATIVE_DETAIL_STEP")
+                .filter(|n| *n <= 3)
+                .unwrap_or(1),
+            tile_width: number("FRONTIER_NATIVE_DETAIL_GROUP")
+                .filter(|n| [8, 16, 32, 64].contains(n))
+                .unwrap_or(8),
+        }
+    }
+
+    pub fn shader_constants(self) -> HashMap<String, f64> {
+        [
+            ("LATTICE_BEAMS", u32::from(self.beams)),
+            ("LATTICE_COMPUTE", u32::from(self.compute)),
+            ("LATTICE_RELIEF_BOUNDS", u32::from(self.relief_bounds)),
+            ("LATTICE_DETAIL", u32::from(self.detailed)),
+            ("LATTICE_SPLIT", u32::from(self.split)),
+            ("LATTICE_DETAIL_STEP", self.detail_step),
+            ("LATTICE_DETAIL_TILE_X", self.tile_width),
+        ]
+        .map(|(key, value)| (key.to_owned(), f64::from(value)))
+        .into()
+    }
+}
+
+fn detail_binding() -> wgpu::BindingType {
+    wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Uint,
+        view_dimension: wgpu::TextureViewDimension::D2Array,
+        multisampled: false,
+    }
+}
+
+fn detail_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    detailed: bool,
+) -> (wgpu::TextureView, usize) {
+    let side = if detailed { PITCH_CELLS as u32 } else { 1 };
+    let layers = if detailed {
+        (detail::atlas().len() / detail::NODES) as u32
+    } else {
+        1
+    };
+    let mut packed = Vec::with_capacity(if detailed { detail::atlas().len() } else { 1 });
+    if detailed {
+        for tile in detail::atlas().chunks_exact(detail::NODES) {
+            for mip in 0..=side.ilog2() {
+                let width = (side >> mip) as usize;
+                let first = roof_offset(width);
+                packed.extend_from_slice(&tile[first..first + width * width]);
+            }
+        }
+    } else {
+        packed.push(0);
+    }
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("native relief atlas"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: side.ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        bytemuck::cast_slice(&packed),
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    (view, packed.len() * std::mem::size_of::<u16>())
+}
+
 pub(crate) struct NativeLattice {
     window: Option<Arc<Window>>,
     pending: Option<JoinHandle<Arc<Window>>>,
@@ -264,8 +386,13 @@ pub(crate) struct NativeLattice {
     beam_pipeline: Option<wgpu::ComputePipeline>,
     beam_bind: Option<wgpu::BindGroup>,
     results: wgpu::Buffer,
+    detail: wgpu::TextureView,
+    detail_bytes: usize,
+    config: NativeLatticeConfig,
     visibility: Option<wgpu::ComputePipeline>,
+    resolve: Option<wgpu::ComputePipeline>,
     visibility_bind: Option<wgpu::BindGroup>,
+    resolve_bind: Option<wgpu::BindGroup>,
     buffers: Option<[wgpu::Buffer; 3]>,
     revision: Option<u64>,
     seed: u32,
@@ -277,12 +404,17 @@ pub(crate) struct NativeLattice {
 impl NativeLattice {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         module: &wgpu::ShaderModule,
         seed: u64,
-        beams: bool,
-        compute: bool,
-        relief_bounds: bool,
+        config: NativeLatticeConfig,
     ) -> Self {
+        let NativeLatticeConfig {
+            beams,
+            compute,
+            detailed,
+            ..
+        } = config;
         let pipeline =
             |entry: &str, constants: &std::collections::HashMap<String, f64>, bindings: &[u32]| {
                 let entries = bindings
@@ -290,16 +422,20 @@ impl NativeLattice {
                     .map(|&binding| wgpu::BindGroupLayoutEntry {
                         binding,
                         visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: if matches!(binding, 0 | 32) {
-                                wgpu::BufferBindingType::Uniform
-                            } else {
-                                wgpu::BufferBindingType::Storage {
-                                    read_only: binding < 37,
-                                }
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                        ty: if binding == 40 {
+                            detail_binding()
+                        } else {
+                            wgpu::BindingType::Buffer {
+                                ty: if matches!(binding, 0 | 32) {
+                                    wgpu::BufferBindingType::Uniform
+                                } else {
+                                    wgpu::BufferBindingType::Storage {
+                                        read_only: !matches!(binding, 37 | 39),
+                                    }
+                                },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            }
                         },
                         count: None,
                     })
@@ -325,6 +461,7 @@ impl NativeLattice {
                     cache: None,
                 })
             };
+        let (detail, detail_bytes) = detail_texture(device, queue, detailed);
         Self {
             window: None,
             pending: None,
@@ -352,21 +489,26 @@ impl NativeLattice {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             }),
+            detail,
+            detail_bytes,
+            config,
             beam_bind: None,
             visibility: compute.then(|| {
                 pipeline(
                     "lattice_visibility",
-                    &std::collections::HashMap::from([
-                        ("LATTICE_BEAMS".to_owned(), f64::from(u8::from(beams))),
-                        (
-                            "LATTICE_RELIEF_BOUNDS".to_owned(),
-                            f64::from(u8::from(relief_bounds)),
-                        ),
-                    ]),
-                    &[0, 32, 33, 34, 35, 36, 39],
+                    &config.shader_constants(),
+                    &[0, 32, 33, 34, 35, 36, 39, 40],
+                )
+            }),
+            resolve: (compute && config.split).then(|| {
+                pipeline(
+                    "lattice_resolve",
+                    &config.shader_constants(),
+                    &[0, 32, 33, 34, 35, 36, 39, 40],
                 )
             }),
             visibility_bind: None,
+            resolve_bind: None,
             buffers: None,
             revision: None,
             seed: native_lattice::relief_seed(seed),
@@ -462,7 +604,7 @@ impl NativeLattice {
                     ],
                 })
             });
-            self.visibility_bind = self.visibility.as_ref().map(|pipeline| {
+            let visibility_resources = |pipeline: &wgpu::ComputePipeline| {
                 let layout = pipeline.get_bind_group_layout(0);
                 let buffers = [
                     (0, rolling_view),
@@ -473,16 +615,25 @@ impl NativeLattice {
                     (36, &self.prefix),
                     (39, &self.results),
                 ];
-                let resources = buffers.map(|(binding, buffer)| wgpu::BindGroupEntry {
-                    binding,
-                    resource: buffer.as_entire_binding(),
+                let mut resources = buffers
+                    .into_iter()
+                    .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                        binding,
+                        resource: buffer.as_entire_binding(),
+                    })
+                    .collect::<Vec<_>>();
+                resources.push(wgpu::BindGroupEntry {
+                    binding: 40,
+                    resource: wgpu::BindingResource::TextureView(&self.detail),
                 });
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("native lattice visibility resources"),
                     layout: &layout,
                     entries: &resources,
                 })
-            });
+            };
+            self.visibility_bind = self.visibility.as_ref().map(visibility_resources);
+            self.resolve_bind = self.resolve.as_ref().map(visibility_resources);
             self.buffers = Some([controls, roofs, edits]);
             self.revision = Some(world.revision());
             self.edited = edited;
@@ -513,24 +664,28 @@ impl NativeLattice {
         queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&data));
     }
 
-    pub fn layout() -> [wgpu::BindGroupLayoutEntry; 6] {
-        [32, 33, 34, 35, 36, 38].map(|binding| wgpu::BindGroupLayoutEntry {
+    pub fn layout() -> [wgpu::BindGroupLayoutEntry; 7] {
+        [32, 33, 34, 35, 36, 38, 40].map(|binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: if binding == 32 {
-                    wgpu::BufferBindingType::Uniform
-                } else {
-                    wgpu::BufferBindingType::Storage { read_only: true }
-                },
-                has_dynamic_offset: false,
-                min_binding_size: None,
+            ty: if binding == 40 {
+                detail_binding()
+            } else {
+                wgpu::BindingType::Buffer {
+                    ty: if binding == 32 {
+                        wgpu::BufferBindingType::Uniform
+                    } else {
+                        wgpu::BufferBindingType::Storage { read_only: true }
+                    },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                }
             },
             count: None,
         })
     }
 
-    pub fn bindings(&self) -> [wgpu::BindGroupEntry<'_>; 6] {
+    pub fn bindings(&self) -> [wgpu::BindGroupEntry<'_>; 7] {
         let [controls, roofs, edits] = self.buffers.as_ref().unwrap();
         let buffers = [
             &self.view,
@@ -541,8 +696,12 @@ impl NativeLattice {
             &self.results,
         ];
         std::array::from_fn(|i| wgpu::BindGroupEntry {
-            binding: [32, 33, 34, 35, 36, 38][i],
-            resource: buffers[i].as_entire_binding(),
+            binding: [32, 33, 34, 35, 36, 38, 40][i],
+            resource: if i == 6 {
+                wgpu::BindingResource::TextureView(&self.detail)
+            } else {
+                buffers[i].as_entire_binding()
+            },
         })
     }
 
@@ -558,11 +717,15 @@ impl NativeLattice {
                 pass.dispatch_workgroups(width.div_ceil(64), height.div_ceil(64), 1);
             }
         }
-        if let Some((pipeline, bind)) = self
-            .visibility
-            .as_ref()
-            .zip(self.visibility_bind.as_ref())
-            .filter(|_| width.saturating_mul(height) <= MAX_COMPUTE_PIXELS)
+        if width.saturating_mul(height) > MAX_COMPUTE_PIXELS {
+            return;
+        }
+        for (pipeline, bind) in [
+            self.visibility.as_ref().zip(self.visibility_bind.as_ref()),
+            self.resolve.as_ref().zip(self.resolve_bind.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("native lattice visibility"),
@@ -570,12 +733,17 @@ impl NativeLattice {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            pass.dispatch_workgroups(
+                width.div_ceil(self.config.tile_width),
+                height.div_ceil(64 / self.config.tile_width),
+                1,
+            );
         }
     }
 
     pub fn bytes(&self) -> usize {
         (self.prefix.size() + self.results.size()) as usize
+            + self.detail_bytes
             + self
                 .buffers
                 .as_ref()
@@ -584,13 +752,21 @@ impl NativeLattice {
 
     pub fn report(&self) -> String {
         format!(
-            r#"{{"pitch_m":{PITCH_M},"side":{SIDE},"publications":{},"generated_controls":{},"edited_patches":{},"gpu_bytes":{},"beams":{},"compute":{}}}"#,
+            r#"{{"pitch_m":{PITCH_M},"side":{SIDE},"publications":{},"generated_controls":{},"edited_patches":{},"gpu_bytes":{},"beams":{},"compute":{},"relief_atlas_bytes":{},"detail_step":{},"visibility_group_width":{},"split_wet_and_edits":{}}}"#,
             self.publications,
             self.generated,
             self.edited,
             self.bytes(),
             self.beam_pipeline.is_some(),
-            self.visibility.is_some()
+            self.visibility.is_some(),
+            if self.config.detailed {
+                self.detail_bytes
+            } else {
+                0
+            },
+            self.config.detail_step,
+            self.config.tile_width,
+            self.resolve.is_some()
         )
     }
 }
@@ -605,6 +781,39 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan GPU; captures production depth and compares with CPU voxel DDA"]
     fn production_depth_matches_native_world_and_sparse_edits() {
+        capture_native_fixture(false, None);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan GPU; compares all-scale terrain with the native voxel DDA"]
+    fn production_depth_matches_native_detail_and_sparse_edits() {
+        capture_native_fixture(true, None);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan GPU; traces a six-kilometre horizon and a river"]
+    fn production_depth_matches_native_detail_on_ridges_and_water() {
+        capture_native_fixture(
+            true,
+            Some((
+                DVec3::new(-6688., 1450., 6080.),
+                DVec3::new(-5350., 900., 8360.),
+                6000.,
+                false,
+            )),
+        );
+        capture_native_fixture(
+            true,
+            Some((
+                DVec3::new(-7520.37, 149.02, 6850.07),
+                DVec3::new(-7448.28, 128.70, 6912.18),
+                256.,
+                true,
+            )),
+        );
+    }
+
+    fn capture_native_fixture(detailed: bool, pose: Option<(DVec3, DVec3, f32, bool)>) {
         let source = FbmTerrain::new(
             1685576058315138427,
             FbmParams {
@@ -612,25 +821,35 @@ mod tests {
                 ..Default::default()
             },
         )
-        .unwrap()
-        .with_native_lattice();
+        .unwrap();
+        let source = if detailed {
+            source.with_native_detail()
+        } else {
+            source.with_native_lattice()
+        };
         let mut world = World::from_fbm_terrain(source.clone());
         let xz = [-6688.03, 6080.02];
         let z = xz[1] + 34.16;
         let top = source.ground_height_m(xz[0], z);
-        let eye = DVec3::new(xz[0] - 0.37, top + 22.4, xz[1]);
-        let direction = (DVec3::new(xz[0], top, z) - eye).normalize();
+        let (eye, target, far, water) = pose.unwrap_or((
+            DVec3::new(xz[0] - 0.37, top + 22.4, xz[1]),
+            DVec3::new(xz[0], top, z),
+            256.,
+            false,
+        ));
+        let direction = (target - eye).normalize();
         let camera = Camera {
             position: eye,
             yaw: direction.x.atan2(direction.z) as f32,
             pitch: direction.y.asin() as f32,
             roll: 0.15,
-            far: 256.,
+            far,
             fov_y: 43.,
         };
         let settings = VisualSettings {
             view_distance: camera.far,
             native_lattice: true,
+            native_detail: detailed,
             capture_terrain_distance: true,
             msaa: 1,
             ..Default::default()
@@ -658,18 +877,12 @@ mod tests {
         gpu.configure_visuals(&world, &settings);
         gpu.init_rolling(&world, camera).unwrap();
 
-        let center = raycast(
-            &world,
-            eye.to_array(),
-            camera.direction().as_dvec3().to_array(),
-            256.,
-        )
-        .expect("CPU center ray hits ground");
-        assert!(!gpu.rolling.as_ref().unwrap().owns_column(center.cell));
         let width = 65u32;
         let height = 37u32;
-        let directory =
-            std::env::temp_dir().join(format!("frontier-lattice-audit-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "frontier-lattice-audit-{}-{detailed}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         let forward = camera.direction();
         let right = forward.cross(camera.view_up()).normalize();
@@ -689,6 +902,7 @@ mod tests {
             let bytes = std::fs::read(path.with_extension("linear_rgb.f32")).unwrap();
             let coverage = std::fs::read(path.with_extension("coverage.f32")).unwrap();
             let mut hits = 0;
+            let mut wet_hits = 0;
             let mut worst = 0.0f64;
             let pixel_distance = |x: u32, y: u32| {
                 let start = (y * width + x) as usize;
@@ -699,12 +913,18 @@ mod tests {
                     let i = (y * width + x) as usize;
                     let present =
                         f32::from_le_bytes(coverage[i * 4..i * 4 + 4].try_into().unwrap()) == 1.;
-                    let cpu = raycast(world, eye.to_array(), ray(x, y).as_dvec3().to_array(), 256.);
+                    let cpu = raycast(
+                        world,
+                        eye.to_array(),
+                        ray(x, y).as_dvec3().to_array(),
+                        f64::from(far),
+                    );
                     assert_eq!(present, cpu.is_some(), "{label} coverage at ({x},{y})");
                     if let Some(hit) = cpu {
                         let error = (f64::from(pixel_distance(x, y)) - hit.distance).abs();
                         worst = worst.max(error);
                         hits += 1;
+                        wet_hits += usize::from(hit.material == Material::Water);
                         assert!(
                             error < 0.025,
                             "{label} depth at ({x},{y}) differs by {error:.5} m"
@@ -712,12 +932,29 @@ mod tests {
                     }
                 }
             }
-            eprintln!("{label}: {hits} CPU DDA hits, maximum depth error {worst:.5} m");
+            eprintln!(
+                "{label}: {hits} CPU DDA hits ({wet_hits} wet), maximum depth error {worst:.5} m"
+            );
             assert!(hits > 100);
+            if water {
+                assert!(wet_hits > 0);
+            }
             pixel_distance(width / 2, height / 2)
         };
 
         let original = check(&gpu, &world, "unedited");
+        if pose.is_some() {
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        let center = raycast(
+            &world,
+            eye.to_array(),
+            camera.direction().as_dvec3().to_array(),
+            f64::from(far),
+        )
+        .expect("CPU center ray hits ground");
+        assert!(!gpu.rolling.as_ref().unwrap().owns_column(center.cell));
         let p = center.cell;
         let mut cuts = Vec::new();
         for dz in -10..=10 {

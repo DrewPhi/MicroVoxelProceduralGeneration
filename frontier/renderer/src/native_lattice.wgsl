@@ -21,6 +21,11 @@ const LATTICE_COMPUTE_MAX_PIXELS=2097152u;
 override LATTICE_COMPUTE:bool = false;
 override LATTICE_BEAMS:bool = false;
 override LATTICE_RELIEF_BOUNDS:bool = false;
+override LATTICE_DETAIL:bool = false;
+override LATTICE_DETAIL_STEP:u32 = 1u;
+override LATTICE_DETAIL_TILE_X:u32 = 8u;
+override LATTICE_SPLIT:bool = false;
+@group(0) @binding(40) var lattice_detail:texture_2d_array<u32>;
 @group(0) @binding(38) var<storage,read> lattice_read_hits:array<vec2u>;
 @group(0) @binding(39) var<storage,read_write> lattice_write_hits:array<vec2u>;
 
@@ -89,6 +94,27 @@ fn lattice_interpolate(corners: vec4i, local: vec2i) -> i32 {
     return (integral+residual)>>8u;
 }
 
+fn lattice_control_heights(packed:vec4i) -> vec4i {
+    return (packed<<vec4u(8u))>>vec4u(8u);
+}
+
+fn lattice_detail_node(tile:u32,local:vec2i,level:u32) -> u32 {
+    return textureLoad(lattice_detail,local>>vec2u(level),i32(tile),i32(level)).x;
+}
+
+fn lattice_detail_top(tile:u32,local:vec2i,level:u32)->i32 {
+    return (i32(lattice_detail_node(tile,local,level))<<24u)>>24u;
+}
+
+// The chord of a quadratic deviates from it by at most c*(b-a)^2/4
+// on the interval. This lower bound avoids a reciprocal per visited node.
+fn lattice_interval_min(polynomial:vec3f,lo:f32,hi:f32)->f32 {
+    let a=fma(fma(polynomial.z,lo,polynomial.y),lo,polynomial.x);
+    let b=fma(fma(polynomial.z,hi,polynomial.y),hi,polynomial.x);
+    let width=hi-lo;
+    return min(a,b)-.25*max(0.,polynomial.z)*width*width;
+}
+
 fn lattice_exact_height(corners:vec4i, local:vec2i, world:vec2i, entry_y:f32, minimum_y:f32, relief:bool) -> f32 {
     let value = lattice_interpolate(corners,local);
     if !relief {return f32(value)*.0625;}
@@ -153,7 +179,8 @@ fn lattice_curve(h:vec4f,uv:vec2f,dh:vec2f) -> vec3f {
 
 fn lattice_margin(h:vec4f) -> f32 {
     let slope=max(abs(h.y-h.x),abs(h.w-h.z))+max(abs(h.z-h.x),abs(h.w-h.y));
-    return slope*(.5/f32(LATTICE_WIDTH))+.012;
+    let magnitude=max(max(abs(h.x),abs(h.y)),max(abs(h.z),abs(h.w)));
+    return slope*(.5/f32(LATTICE_WIDTH))+max(.012,magnitude*1e-6);
 }
 
 fn lattice_relief_cap(world:vec2i) -> f32 {
@@ -203,7 +230,7 @@ fn lattice_edit_hit(edit:vec4i,y:f32,end_y:f32,t:f32,end:f32,slope:f32,face:u32)
     return hit;
 }
 
-fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:f32,entry:u32,edited:bool) -> LatticeHit {
+fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:f32,entry:u32,source_edited:bool,dry_only:bool) -> LatticeHit {
     let side=i32(lattice_view.config.x)+1;
     let p=lattice_real_cell(broad,tile_cell);
     let vertex_index=p.x+side*p.y;
@@ -211,11 +238,19 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
     let b=lattice_controls[vertex_index+1];
     let c=lattice_controls[vertex_index+side];
     let d=lattice_controls[vertex_index+side+1];
-    let heights=vec4i(a.x,b.x,c.x,d.x);
+    let heights=lattice_control_heights(vec4i(a.x,b.x,c.x,d.x));
+    let tile=u32(a.x)>>24u;
     let tags=vec4i(a.y,b.y,c.y,d.y);
     let materials=vec4u((tags>>vec4u(22u))&vec4i(15));
     let subsurface=vec4u((tags>>vec4u(26u))&vec4i(15));
-    let wet=((a.y|b.y|c.y|d.y)&(1i<<30u))!=0;
+    let source_wet=((a.y|b.y|c.y|d.y)&(1i<<30u))!=0;
+    if dry_only && (source_wet || source_edited) {
+        // Earlier intervals have already been proved empty. Preserve enough
+        // lead-in for the general traversal to recover the entry face.
+        return LatticeHit(-3.,0u,0u,0u,lo);
+    }
+    let wet=!dry_only && source_wet;
+    let edited=!dry_only && source_edited;
     let relief=a.y<0;
     let heads=heights+((tags<<vec4u(10u))>>vec4u(10u));
     let h=vec4f(heights)*.0625;
@@ -223,19 +258,32 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
     let mirror=clamp(fma(vec2f(lo),broad.velocity,relative_origin),vec2f(0.),vec2f(1.));
     let uv=select(1.-mirror,mirror,broad.sign>vec2i(0));
     let duration=hi-lo;
+    let y=fma(lo,direction.y,lattice_view.eye.y);
+    let line=vec3f(y,direction.y*duration,0.);
+    let dh=vec2f(broad.sign)*broad.velocity*duration;
+    let carrier=lattice_curve(h,uv,dh);
+    let carrier_margin=lattice_margin(h);
+    let head_heights=vec4f(heads)*.0625;
+    var head=vec3f(0.);
+    var head_margin=0.;
+    if wet {
+        head=lattice_curve(head_heights,uv,dh);
+        head_margin=lattice_margin(head_heights);
+    }
+    let detailed=LATTICE_DETAIL && relief;
     var t=lo;
     var face=entry;
     var edits=vec4i(0);
     if edited {
         edits=lattice_find_edit(p.x+p.y*(side-1),1,lattice_edits[0].x);
     } else {
-        let dh=vec2f(broad.sign)*broad.velocity*duration;
-        let y=fma(lo,direction.y,lattice_view.eye.y);
-        let margin=lattice_margin(h)+select(0.,.1875,relief);
-        var crossing=lattice_root_hit(lattice_curve(h,uv,dh)+vec3f(margin,0.,0.),y,direction.y,duration);
+        var margin=carrier_margin+select(0.,.1875,relief);
+        if detailed {
+            margin=carrier_margin+f32(lattice_detail_top(tile,vec2i(0),7u))*.0625;
+        }
+        var crossing=lattice_root_hit(carrier+vec3f(margin,0.,0.),y,direction.y,duration);
         if wet {
-            let w=vec4f(heads)*.0625;
-            let water=lattice_root_hit(lattice_curve(w,uv,dh)+vec3f(lattice_margin(w),0.,0.),y,direction.y,duration);
+            let water=lattice_root_hit(head+vec3f(head_margin,0.,0.),y,direction.y,duration);
             if water>=0. && (crossing<0. || water<crossing) {crossing=water;}
         }
         if crossing<0. {return lattice_miss(-1.);}
@@ -249,12 +297,22 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
     let base=p*LATTICE_WIDTH;
     var cell=clamp(lattice_cell_at(native,t),first,last);
     var last_block=vec2i(-1);
-    for (var i=0u;i<258u;i+=1u) {
+    // Try the flat exact DDA for very short candidate intervals. Its
+    // answers are identical and it avoids loading any child bounds.
+    let horizontal_work=(hi-t)*(native.velocity.x+native.velocity.y);
+    let hierarchy=detailed && !edited && LATTICE_DETAIL_STEP>0u && horizontal_work>5.;
+    let difference=line-carrier;
+    let inverse_duration=1./duration;
+    let water_difference=line-head;
+    let step=max(1u,LATTICE_DETAIL_STEP);
+    let highest=6u;
+    var level=select(0u,highest,hierarchy);
+    for (var i=0u;i<2048u;i+=1u) {
         // The one-metre relief band is bilinear between these knots. Bound
         // it once over the block, then add the maximum of the finer band.
         // The quadratic carrier bound can skip the entire block or narrow
         // its entry before the same exact native DDA.
-        if LATTICE_RELIEF_BOUNDS && relief && !wet && !edited {
+        if LATTICE_RELIEF_BOUNDS && !LATTICE_DETAIL && relief && !wet && !edited {
             let block=cell>>vec2u(4u);
             if any(block!=last_block) {
                 last_block=block;
@@ -288,9 +346,24 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
             }
         }
         let local=lattice_real_cell(native,cell)-base;
-        let outgoing=lattice_crossings(native,cell+1);
+        let edge=((cell>>vec2u(level))+1)<<vec2u(level);
+        let outgoing=lattice_crossings(native,edge);
         let end=max(t,min(hi,min(outgoing.x,outgoing.y)));
-        if end>t {
+        if end>t && level>0u {
+            let a=clamp((t-lo)*inverse_duration,0.,1.);
+            let b=clamp((end-lo)*inverse_duration,a,1.);
+            let upper=carrier_margin+f32(lattice_detail_top(tile,local,level))*.0625;
+            let ground_possible=lattice_interval_min(difference,a,b)<=upper;
+            var water_possible=false;
+            if wet {
+                water_possible=lattice_interval_min(water_difference,a,b)<=head_margin;
+            }
+            if ground_possible || water_possible {
+                level-=min(step,level);
+                continue;
+            }
+        }
+        if end>t && level==0u {
             let y=fma(t,direction.y,lattice_view.eye.y);
             let end_y=fma(end,direction.y,lattice_view.eye.y);
             var edit=vec4i(0);
@@ -300,15 +373,28 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
                 if hit.t>=0. {return hit;}
             } else {
                 let world=base+local+lattice_view.origin.xy;
-                let ground=lattice_exact_height(heights,local,world,y,min(y,end_y),relief);
-                var height=ground;
+                var ground=0.;
+                var height=0.;
                 var water=0.;
-                if wet {
-                    // Use the full height at a possible water surface so its
-                    // depth and bed are independent of the traversal.
-                    let bed=lattice_exact_height(heights,local,world,INF,-INF,relief);
-                    height=max(bed,f32(lattice_interpolate(heads,local))*.0625);
-                    water=height-bed;
+                if LATTICE_DETAIL {
+                    let base=lattice_interpolate(heights,local);
+                    var bed=base;
+                    if relief {bed+=lattice_detail_top(tile,local,0u);}
+                    if wet {
+                        let head=lattice_interpolate(heads,local);
+                        if head>base {bed=min(bed,head-1);}
+                        water=f32(max(0,head-bed))*.0625;
+                    }
+                    ground=f32(bed)*.0625;
+                    height=ground+water;
+                } else {
+                    ground=lattice_exact_height(heights,local,world,y,min(y,end_y),relief);
+                    height=ground;
+                    if wet {
+                        ground=lattice_exact_height(heights,local,world,INF,-INF,relief);
+                        height=max(ground,f32(lattice_interpolate(heads,local))*.0625);
+                        water=height-ground;
+                    }
                 }
                 var distance=-1.;
                 var hit_face=face;
@@ -328,7 +414,8 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
                     if water>0. && (hit_face==0u || y>=height-water) {
                         material=7u;
                     } else if hit_face!=0u {
-                        let actual=lattice_exact_height(heights,local,world,INF,-INF,relief);
+                        var actual=ground;
+                        if !LATTICE_DETAIL && !wet {actual=lattice_exact_height(heights,local,world,INF,-INF,relief);}
                         if y<actual-.75 {material=3u;}
                         else if y<actual-.0625 {material=subsurface[corner];}
                     }
@@ -338,8 +425,15 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
             }
         }
         if end>=hi {return lattice_miss(-1.);}
-        let next=lattice_increment(cell,outgoing,end);
+        var next=lattice_increment(cell,outgoing,end);
+        if level>0u {next=lattice_advance(native,edge,outgoing,end);}
         if any(next<first)||any(next>last) {return lattice_miss(-1.);}
+        if hierarchy {
+            let changed=u32((next.x^cell.x)|(next.y^cell.y));
+            if changed==0u {return lattice_miss(-2.);}
+            let sibling=firstLeadingBit(changed);
+            level=min(highest,((sibling+step-1u)/step)*step);
+        }
         face=lattice_face_at(native,outgoing);
         t=end;
         cell=next;
@@ -347,7 +441,7 @@ fn lattice_patch_hit(direction:vec3f,broad:LatticeRay,tile_cell:vec2i,lo:f32,hi:
     return lattice_miss(-2.);
 }
 
-fn lattice_trace(direction:vec3f, start: f32, far: f32) -> LatticeHit {
+fn lattice_trace(direction:vec3f, start: f32, far: f32, dry_only:bool) -> LatticeHit {
     let side=i32(lattice_view.config.x);
     let root=lattice_view.config.y;
     let sign=select(vec2i(-1),vec2i(1),direction.xz>=vec2f(0.));
@@ -377,7 +471,7 @@ fn lattice_trace(direction:vec3f, start: f32, far: f32) -> LatticeHit {
         let roof=f32(select(packed,(packed<<8u)>>8u,mip==0u))*.0625+.003;
         if end>t && fma(select(t,end,descending),direction.y,lattice_view.eye.y)<=roof {
             if mip==0u {
-                let hit=lattice_patch_hit(direction,ray,leaf,t,end,entry,(packed&(1i<<30u))!=0i);
+                let hit=lattice_patch_hit(direction,ray,leaf,t,end,entry,(packed&(1i<<30u))!=0i,dry_only);
                 if hit.t!=-1. {return hit;}
             } else {
                 let low=edge-(1i<<mip);
@@ -419,7 +513,7 @@ fn lattice_compute_fits() -> bool {
     return view.size.x*view.size.y<=LATTICE_COMPUTE_MAX_PIXELS;
 }
 
-@compute @workgroup_size(8,8)
+@compute @workgroup_size(LATTICE_DETAIL_TILE_X,64u/LATTICE_DETAIL_TILE_X)
 fn lattice_visibility(@builtin(global_invocation_id) id:vec3u) {
     if any(id.xy>=view.size.xy) {return;}
     let ray=screen_ray(id.xy);
@@ -428,17 +522,80 @@ fn lattice_visibility(@builtin(global_invocation_id) id:vec3u) {
     if LATTICE_BEAMS && all(view.size.xy<=vec2u(LATTICE_BEAM_MAX_EXTENT)) {
         start=max(start,lattice_prefix(id.xy));
     }
-    let hit=lattice_trace(ray/scale,start*scale,view.eye.w);
-    let wet_depth=u32(clamp(round(hit.water_depth*256.),0.,1048575.));
-    let attributes=hit.face | (hit.material<<4u) | (hit.bed<<8u) | (wet_depth<<12u);
-    lattice_write_hits[id.y*view.size.x+id.x]=vec2u(bitcast<u32>(hit.t),attributes);
+    let hit=lattice_trace(ray/scale,start*scale,view.eye.w,LATTICE_SPLIT);
+    lattice_write_hits[id.y*view.size.x+id.x]=lattice_encode_hit(hit);
 }
 
-fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u) -> vec4f {
+fn lattice_encode_hit(hit:LatticeHit)->vec2u {
+    if hit.t == -3. {return vec2u(bitcast<u32>(hit.t),bitcast<u32>(hit.water_depth));}
+    let wet_depth=u32(clamp(round(hit.water_depth*256.),0.,1048575.));
+    let attributes=hit.face | (hit.material<<4u) | (hit.bed<<8u) | (wet_depth<<12u);
+    return vec2u(bitcast<u32>(hit.t),attributes);
+}
+
+@compute @workgroup_size(LATTICE_DETAIL_TILE_X,64u/LATTICE_DETAIL_TILE_X)
+fn lattice_resolve(@builtin(global_invocation_id) id:vec3u) {
+    if any(id.xy>=view.size.xy) {return;}
+    let pixel=id.y*view.size.x+id.x;
+    let prior=lattice_write_hits[pixel];
+    if bitcast<f32>(prior.x)!=-3. {return;}
+    let start=bitcast<f32>(prior.y)-.004;
+    let direction=screen_ray(id.xy);
+    let hit=lattice_trace(direction/length(direction),start,view.eye.w,false);
+    lattice_write_hits[pixel]=lattice_encode_hit(hit);
+}
+
+// Project one pixel onto the local terrain plane. At grazing incidence a
+// pixel covers a long strip of terrain even when the hit is close by.
+fn lattice_pixel_span(direction:vec3f, depth:f32, normal:vec3f) -> f32 {
+    let dx=2.*view.right.xyz/f32(view.size.x);
+    let dy=2.*view.up.xyz/f32(view.size.y);
+    let denominator=dot(normal,direction);
+    if abs(denominator)<1e-6 {return depth*2.;}
+    let tx=depth*(dx-direction*dot(normal,dx)/denominator);
+    let ty=depth*(dy-direction*dot(normal,dy)/denominator);
+    return max(length(tx.xz),length(ty.xz));
+}
+
+fn lattice_detail_average(sample:vec2i, level:u32, owner:vec2i, control:vec2i) -> f32 {
+    let side=LATTICE_WIDTH>>level;
+    let tile=sample/side;
+    var sample_control=control;
+    if any(tile!=owner) {
+        let width=i32(lattice_view.config.x)+1;
+        sample_control=lattice_controls[tile.y*width+tile.x];
+    }
+    if sample_control.y>=0 {return 0.;}
+    let node=lattice_detail_node(u32(sample_control.x)>>24u,(sample%side)<<vec2u(level),level);
+    return f32((i32(node)<<16u)>>24u);
+}
+
+fn lattice_detail_normal_gradient(position:vec2f,level:u32,owner:vec2i,control:vec2i) -> vec2f {
+    let stride=f32(1u<<level);
+    let q=position*(16./stride)-.5;
+    let i=vec2i(floor(q));
+    let uv=fract(q);
+    let a=lattice_detail_average(i,level,owner,control);
+    let b=lattice_detail_average(i+vec2i(1,0),level,owner,control);
+    let c=lattice_detail_average(i+vec2i(0,1),level,owner,control);
+    let d=lattice_detail_average(i+1,level,owner,control);
+    return vec2f(mix(b-a,d-c,uv.y),mix(c-a,d-b,uv.x))/stride;
+}
+
+fn lattice_screen_gradient(position:vec2f,footprint:f32,owner:vec2i,control:vec2i) -> vec2f {
+    let level=clamp(log2(max(1.,footprint*16.)),0.,7.);
+    let a=u32(floor(level));
+    let b=min(7u,a+1u);
+    let slope=lattice_detail_normal_gradient(position,a,owner,control);
+    if a==b {return slope*min(1.,8./max(footprint,.0625));}
+    return mix(slope,lattice_detail_normal_gradient(position,b,owner,control),fract(level));
+}
+
+fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u,center_sample:bool) -> vec4f {
     let scale=length(direction);
     let ray=direction/scale;
     var hit=lattice_miss(-1.);
-    if LATTICE_COMPUTE && lattice_compute_fits() {
+    if center_sample && LATTICE_COMPUTE && lattice_compute_fits() {
         let stored=lattice_read_hits[pixel.y*view.size.x+pixel.x];
         let t=bitcast<f32>(stored.x);
         if t>far*scale {return vec4f(0.,0.,0.,-1.);}
@@ -448,7 +605,7 @@ fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u) -> vec4f {
         if LATTICE_BEAMS && all(view.size.xy<=vec2u(LATTICE_BEAM_MAX_EXTENT)) {
             start=max(start,lattice_prefix(pixel));
         }
-        hit=lattice_trace(ray,start*scale,far*scale);
+        hit=lattice_trace(ray,start*scale,far*scale,false);
     }
     if hit.t<0. {return vec4f(0.,0.,0.,hit.t);}
     let distance=hit.t/scale;
@@ -466,10 +623,12 @@ fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u) -> vec4f {
         return vec4f(rolling_water(ray,normal,rolling_bed_transmission(ray,normal,bed,hit.water_depth)),distance);
     }
     var slope=face;
+    var detail_footprint=.0625;
     var pigment=native_view.palette[hit.material].rgb;
     let edited=(hit.face&8u)!=0u;
     if !edited {
-        let tile=(lattice_view.eye.xz+relative.xz)*.125;
+        let position_m=lattice_view.eye.xz+relative.xz;
+        let tile=position_m*.125;
         let column=vec2i(floor(tile));
         let position=fract(tile);
         let side=i32(lattice_view.config.x)+1;
@@ -478,15 +637,23 @@ fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u) -> vec4f {
         let b=lattice_controls[index+1];
         let c=lattice_controls[index+side];
         let d=lattice_controls[index+side+1];
-        let h=vec4f(vec4i(a.x,b.x,c.x,d.x))*.0625;
+        let h=vec4f(lattice_control_heights(vec4i(a.x,b.x,c.x,d.x)))*.0625;
         let mixed=h.w-h.z-h.y+h.x;
         let gradient=vec2f(h.y-h.x+mixed*position.y,h.z-h.x+mixed*position.x)*.125;
         slope=normalize(vec3f(-gradient.x,1.,-gradient.y));
+        if LATTICE_DETAIL {
+            detail_footprint=lattice_pixel_span(direction,distance,slope)*select(.5,1.,center_sample);
+            let relief=lattice_screen_gradient(position_m,detail_footprint,column,a);
+            let combined=gradient+relief;
+            slope=normalize(vec3f(-combined.x,1.,-combined.y));
+        }
         let materials=vec4u((vec4i(a.y,b.y,c.y,d.y)>>vec4u(22u))&vec4i(15));
         pigment=mix(mix(native_view.palette[materials.x].rgb,native_view.palette[materials.y].rgb,position.x),
                     mix(native_view.palette[materials.z].rgb,native_view.palette[materials.w].rgb,position.x),position.y);
     }
-    let resolved=select(rolling_voxel_resolution(relative,ray,slope),1.,edited);
+    var visibility_fraction=rolling_voxel_resolution(relative,ray,slope);
+    if LATTICE_DETAIL {visibility_fraction=min(1.,.0625/max(detail_footprint,.0001));}
+    let resolved=select(visibility_fraction,1.,edited);
     let normal=normalize(mix(slope,face,resolved));
     if (native_view.source.w&4u)!=0u {
         return vec4f(vec3f(.38)*rolling_light_visible(normal,1.),distance);
@@ -497,7 +664,9 @@ fn lattice_fragment(direction:vec3f,near:f32,far:f32,pixel:vec2u) -> vec4f {
     let footprint=2.*native_view.voxel.w*distance/f32(view.size.y)
         /max(.04,-dot(ray,slope));
     let cover=pigment_noise(p.xz/120.,0xb5297a4du);
-    let grain=(pigment_noise(p.xz/24.,0x68e31da4u)-.5)*(1.-smoothstep(6.,35.,footprint));
+    var grain_weight=1.-smoothstep(6.,35.,footprint);
+    if LATTICE_DETAIL {grain_weight=min(1.,24./max(detail_footprint,.0625));}
+    let grain=(pigment_noise(p.xz/24.,0x68e31da4u)-.5)*grain_weight;
     var albedo=pigment*(.92+.16*cover+.19*grain);
     if native_view.owner_max.w>.5 && hit.t>570. {
         let canopy=filtered_pigment(p.xz,outer_grid()).grove;
@@ -569,10 +738,30 @@ fn lattice_find_prefix(@builtin(global_invocation_id) id:vec3u) {
     lattice_write_prefix[id.y*pixels.x+id.x]=t;
 }
 
+struct LatticeSampleVertex {
+    @builtin(position) position:vec4f,
+    @location(0) @interpolate(linear, sample) ndc:vec2f,
+}
+
+@vertex
+fn lattice_sample_triangle(@builtin(vertex_index) index:u32) -> LatticeSampleVertex {
+    let clip=rolling_clip(index);
+    return LatticeSampleVertex(clip,clip.xy);
+}
+
 @fragment
 fn lattice_terrain_fragment(@builtin(position) pixel:vec4f) -> RollingFragment {
     let coordinate=vec2u(pixel.xy);
-    let direction=screen_ray(coordinate);
+    return lattice_render(coordinate,screen_ray(coordinate),true);
+}
+
+@fragment
+fn lattice_terrain_msaa(pixel:LatticeSampleVertex) -> RollingFragment {
+    let direction=view.forward.xyz+pixel.ndc.x*view.right.xyz+pixel.ndc.y*view.up.xyz;
+    return lattice_render(vec2u(pixel.position.xy),direction,false);
+}
+
+fn lattice_render(coordinate:vec2u,direction:vec3f,center_sample:bool) -> RollingFragment {
     let far=view.eye.w;
     let scale=length(direction);
     let foreground=foreground_at(coordinate);
@@ -582,7 +771,7 @@ fn lattice_terrain_fragment(@builtin(position) pixel:vec4f) -> RollingFragment {
         let occluder=NEAR*far/max(NEAR,far-padded*(far-NEAR));
         ray_limit=min(ray_limit,occluder*1.0001+.01);
     }
-    let surface=lattice_fragment(direction,NEAR,ray_limit,coordinate);
+    let surface=lattice_fragment(direction,NEAR,ray_limit,coordinate,center_sample);
     let t=surface.w;
     if t<0. {
         if t == -2. {return RollingFragment(vec4f(1.,0.,1.,1.),.999999);}

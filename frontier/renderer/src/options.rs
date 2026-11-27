@@ -808,9 +808,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 seconds = Some(args.next().ok_or("--seconds requires duration")?.parse()?)
             }
             "--rolling-terrain" => rolling_preference = Some(true),
-            "--native-lattice" => {
+            "--native-lattice" | "--native-detail" => {
                 rolling_preference = Some(true);
                 visual.native_lattice = true;
+                visual.native_detail = arg == "--native-detail";
             }
             "--packed-terrain" => rolling_preference = Some(false),
             "--flight-view" => {
@@ -931,7 +932,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
             "--help" | "-h" => {
                 println!("Default play: a random Eroded world with rolling terrain, procedural vegetation, regional weather, a day/night cycle and 1× MSAA. Use --seed INTEGER to revisit a world. --weather off selects the procedural sky. Explicit --preset, --terrain-recipe and --scene select alternate worlds with their own defaults. Use --packed-terrain for the previous mesh renderer. Live water, packed quality diagnostics, longer view distances and larger exact volumes use packed terrain.");
                 println!("--model-preview opens the aircraft studio. Run --model-preview --help for headless captures and pose controls.");
-                println!("--native-lattice selects a fixed Eroded voxel-column source at 6.25 cm with a 6 km maximum horizon.");
+                println!("--native-lattice selects the original Eroded voxel-column experiment. --native-detail selects the multiscale relief experiment. Both use 6.25 cm voxels and a 6 km maximum horizon.");
                 println!("Add --flight-view chase or --flight-view pilot to fly an aircraft over rolling terrain. Click to take control. Shift/Ctrl increase/decrease throttle, W/S pitch down/up, A/D roll, Q/E rudder and ground steering, Z/X extend/retract flaps, Page Up/Down pitch trim, Space brakes, C changes view.");
                 println!("--weather off|dynamic|regional|clear|rain|convective enables a world-space atmosphere. --weather-age SECONDS advances the simulation before spawn. --weather-day DAY --weather-hour HOUR choose the initial local time. --weather-center X,Z anchors the region. --weather-latitude DEG sets the regional Coriolis reference. --weather-save PATH resumes and saves regional weather. --weather-speed 0..64 sets the time multiplier. --day-length SECONDS sets the solar day. --day-night on|off controls celestial lighting (on with weather). F4 opens the live weather radar. In flight M changes the cockpit weather page, comma/period change range, semicolon/apostrophe change altitude or tilt. --airborne-radar adds the stabilized sweep and profile.");
                 println!("--flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, hold right mouse to look around the cabin, H toggles heading/altitude hold, and [ / ] tune COM.");

@@ -263,3 +263,95 @@ terrain view.
 The full scene is playable at 720p. Keep the current renderer as the
 default while 1080p exact visibility takes more than the 33.3 ms frame
 budget and the active terrain memory remains substantially higher.
+
+## Native detail at every terrain scale
+
+The previous experiment used the 8 m Eroded control lattice plus two
+small relief bands. Near a cliff it could show exact voxel steps on a
+surface whose larger ledges and crevices were missing. `--native-detail`
+selects a new canonical source. The original Eroded generator still
+supplies the broad landforms, climate, and drainage. A deterministic
+world-space relief field supplies structure between the control points.
+It subdivides the 8 m regions down to the native 6.25 cm voxel spacing.
+Native column heights include every subdivision. Physics, ray picking,
+vegetation placement, and sparse edits use those same heights.
+
+The source chooses from 256 relief tiles using hashes on shared world
+edges. Neighbors agree on the edge curve. The interior uses recursive
+midpoint displacement and native-cell grain. The finite set of tile
+shapes is a design choice and can repeat across a world. The carrier
+and relief together define a new canonical world with different heights. A small bed constraint preserves the base
+channel where its water surface cuts the carrier.
+
+The renderer stores exact residual samples and conservative maxima in
+an 11 MiB signed-data atlas uploaded as an R16Uint texture array.
+It checks the ray against a quadratic carrier and the maximum residual
+of each candidate region. The hierarchy rejects empty intervals and
+descends to integer columns for the visible first hits. The use of edge-matched procedural tiles and
+a conservative height hierarchy is informed by [Wang Tiles for Image
+and Texture Generation](https://doi.org/10.1145/882262.882265) and
+[Maximum Mipmaps](https://pure.mpg.de/rest/items/item_1325622_5/component/file_3590464/content).
+
+Lighting estimates the pixel's world-space footprint from the camera
+projection and local slope. It interpolates relief gradients across
+sample scales so resolved geometry retains voxel-face lighting and
+subpixel roughness blends continuously. At 1× the renderer traces the
+pixel center. At `--msaa 4` it traces each raster sample at its actual
+subpixel location with the same full native geometry. Four samples
+provide a finer estimate of the pixel's area coverage.
+The performance runs below use 1× with native display-sized rendering.
+Vegetation retains its existing selection and filtering.
+
+### Run and verify
+
+```sh
+cargo build --release --locked --bin frontier
+target/release/frontier --native-detail --seed random --weather regional \
+  --flight-walkup --width 1280 --height 720 --msaa 1
+cargo test --release --locked -p frontier-world --lib native_lattice
+cargo test --release --locked -p frontier-renderer --lib \
+  production_depth_matches_native -- --ignored --nocapture --test-threads 1
+```
+
+Use the preceding bank-return benchmark command with `--native-detail`
+and `--msaa 1`. A streaming run uses `--route fly --route-speed 120
+--frames 840`. The geometry audit compares production output with CPU
+voxel DDA in the cut and placed-block fixture, a banked 6 km view and
+a stretch of river. The audit checks first hits against the canonical
+source for the selected mode. It matched 1,358 sampled hits for the
+new source, including 60 water hits. Maximum measured depth error was
+1.33 mm, in the 6 km fixture. A runway spawn on seed 7 also completed
+with vegetation, weather, and the nearby NAADF volume enabled.
+
+To compare traversal on identical native detail, set
+`FRONTIER_NATIVE_DETAIL_SPLIT=0` to visit water and edits in the primary
+pass, `FRONTIER_NATIVE_DETAIL_STEP=0` to use flat native DDA inside a
+candidate tile, or `FRONTIER_NATIVE_DETAIL_GROUP=16` to use 16×4 workgroups.
+These switches change the search or dispatch only. The default runs an
+8×8 primary pass for dry terrain, then resolves the pixels whose rays
+reached a potentially wet or edited patch. Every unresolved pixel is
+handed off to the general exact search. The first pass provides a
+conservative starting distance for that search.
+
+### Radeon 760M measurements
+
+All runs use the Ryzen 5 7640U and the AMD Radeon 760M via RADV
+Vulkan, Mesa 25.2.8. The bank uses seed 1685576058315138427 and a
+6 km view. Presented p50 / p95 / p99 include CPU and presentation.
+GPU p95 spans shadows, visibility, opaque rendering, atmosphere and UI.
+
+| Native detail trial | Resolution | Presented samples | Presented p50 / p95 / p99 | GPU p95 |
+|---|---:|---:|---:|---:|
+| Texture atlas, single pass | 1920×1080 | 149 | 49.9 / 55.3 / 56.1 ms | 52.8 ms |
+| Split exact pass, bank | 1280×720 | 149 | 22.8 / 25.0 / 26.5 ms | 22.9 ms |
+| Final split exact pass, bank | 1920×1080 | 149 | 44.2 / 48.9 / 50.7 ms | 46.3 ms |
+| Final split exact pass, 120 m/s flight | 1280×720 | 809 | 25.3 / 30.0 / 33.6 ms | 27.4 ms |
+
+The final flight published six cache windows. The active reported terrain
+memory, including lighting and the compute output, was about 111 MiB.
+A flat native DDA reached 113 ms p95 at 1080p. Stepping over more
+hierarchy levels per node and grouping rays into wider workgroups
+also slowed this route. Keeping the 8×8 group and splitting the dry
+search from wet and edited tiles gave the best measured full-scene
+result. Native 720p meets the 30 FPS target at p95 on these routes.
+Native 1080p exceeds its 33.3 ms budget, so the mode remains experimental.

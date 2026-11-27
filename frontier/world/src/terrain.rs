@@ -165,6 +165,7 @@ pub struct FbmTerrain {
     params: FbmParams,
     runway: Option<DirtRunway>,
     lattice_identity: u64,
+    native_detail: bool,
 }
 impl FbmTerrain {
     pub fn new(seed: u64, params: FbmParams) -> Result<Self, FbmError> {
@@ -174,6 +175,7 @@ impl FbmTerrain {
             params,
             runway: None,
             lattice_identity: 0,
+            native_detail: false,
         })
     }
     pub fn with_dirt_runway(mut self, runway: DirtRunway) -> Self {
@@ -188,7 +190,19 @@ impl FbmTerrain {
         assert_eq!(self.params.recipe, FbmRecipe::Eroded);
         assert_eq!(voxel_size(), crate::VOXEL_SIZE);
         self.lattice_identity = next_lattice_identity();
+        self.native_detail = false;
         self
+    }
+
+    pub fn with_native_detail(self) -> Self {
+        Self {
+            native_detail: true,
+            ..self.with_native_lattice()
+        }
+    }
+
+    pub fn native_detail_enabled(&self) -> bool {
+        self.native_detail
     }
 
     pub fn native_lattice_enabled(&self) -> bool {
@@ -240,7 +254,7 @@ impl FbmTerrain {
     /// source/cache identity. Elevation and material recipes evolve separately.
     pub fn source_version(&self) -> u32 {
         if self.native_lattice_enabled() {
-            return 0x1_0008;
+            return if self.native_detail { 0x1_0009 } else { 0x1_0008 };
         }
         match self.params.recipe {
             FbmRecipe::SeededWorld => SEEDED_WORLD_SOURCE_VERSION,

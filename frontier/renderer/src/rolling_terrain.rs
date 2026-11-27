@@ -1,6 +1,6 @@
 //! Playable integration of the cached-heightfield experiment.
 use crate::foreground_depth::{self, ForegroundDepth};
-use crate::native_lattice::{self, NativeLattice};
+use crate::native_lattice::{self, NativeLattice, NativeLatticeConfig};
 use crate::rolling_woodland_shadow::{self, CanopyGroundShade, WoodlandShadow};
 use crate::terrain_horizon::{self, TerrainHorizon};
 use crate::{
@@ -655,9 +655,7 @@ impl RollingTerrain {
             .ok_or("rolling terrain requires a procedural terrain source")?;
         let landscapes = terrain.params().recipe.has_landscape_relief();
         let use_lattice = terrain.native_lattice_enabled();
-        let lattice_beams = std::env::var_os("FRONTIER_NATIVE_LATTICE_BEAMS").is_some();
-        let lattice_compute = std::env::var_os("FRONTIER_NATIVE_LATTICE_COMPUTE").is_some();
-        let lattice_relief_bounds = std::env::var_os("FRONTIER_NATIVE_LATTICE_RELIEF_BOUNDS").is_some();
+        let lattice_config = NativeLatticeConfig::for_source(terrain.native_detail_enabled(), settings.msaa);
         let living_woods = frontier_world::vegetation::uses_living_woodland(world);
         let close_pitch = settings
             .terrain_near_spacing
@@ -773,24 +771,29 @@ impl RollingTerrain {
             bind_group_layouts: &groups,
             push_constant_ranges: &[],
         });
-        let mut lattice_constants = HashMap::new();
-        if use_lattice {
-            lattice_constants.insert("LATTICE_BEAMS".into(), f64::from(u8::from(lattice_beams)));
-            lattice_constants.insert("LATTICE_COMPUTE".into(), f64::from(u8::from(lattice_compute)));
-            lattice_constants.insert("LATTICE_RELIEF_BOUNDS".into(), f64::from(u8::from(lattice_relief_bounds)));
-        }
+        let lattice_constants = if use_lattice {
+            lattice_config.shader_constants()
+        } else {
+            HashMap::new()
+        };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("meshless terrain and voxel column depth"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &module,
-                entry_point: Some("rolling_triangle"),
+                entry_point: Some(if use_lattice && settings.msaa > 1 {
+                    "lattice_sample_triangle"
+                } else {
+                    "rolling_triangle"
+                }),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some(if use_lattice {
+                entry_point: Some(if use_lattice && settings.msaa > 1 {
+                    "lattice_terrain_msaa"
+                } else if use_lattice {
                     "lattice_terrain_fragment"
                 } else {
                     "rolling_fragment"
@@ -1017,7 +1020,7 @@ impl RollingTerrain {
             curve_uniform: uniform(bytemuck::cast_slice(&[[0_f32; 4]; CURVE_PROFILE_VECTORS])),
             exact,
             lattice: use_lattice.then(|| {
-                NativeLattice::new(device, &module, world.seed(), lattice_beams, lattice_compute, lattice_relief_bounds)
+                NativeLattice::new(device, &gpu.queue, &module, world.seed(), lattice_config)
             }),
             view: uniform(bytemuck::bytes_of(&View::zeroed())),
             native_view,

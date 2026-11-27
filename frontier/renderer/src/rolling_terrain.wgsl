@@ -643,10 +643,14 @@ fn distant_shade(depth: f32, direction: vec3f, fine: bool, detailed: bool) -> ve
     return mix(color,water_color,water);
 }
 
-@vertex
-fn rolling_triangle(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+fn rolling_clip(index:u32) -> vec4f {
     let xy = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
     return vec4f(xy * 2. - 1., 0., 1.);
+}
+
+@vertex
+fn rolling_triangle(@builtin(vertex_index) index:u32) -> @builtin(position) vec4f {
+    return rolling_clip(index);
 }
 
 struct RollingFragment {
