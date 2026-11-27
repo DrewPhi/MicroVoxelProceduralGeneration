@@ -1466,6 +1466,10 @@ impl RollingTerrain {
         }
     }
 
+    pub fn center_hits(&self, width: u32, height: u32) -> Option<&wgpu::Buffer> {
+        self.lattice.as_ref()?.center_hits(width, height)
+    }
+
     pub fn encode_native_visibility(&self, encoder: &mut wgpu::CommandEncoder, width: u32, height: u32) {
         if let Some(lattice) = &self.lattice {
             lattice.encode_visibility(encoder, width, height);

@@ -741,6 +741,12 @@ impl NativeLattice {
         }
     }
 
+    // Packed center-sample hits written by encode_visibility in this frame.
+    pub fn center_hits(&self, width: u32, height: u32) -> Option<&wgpu::Buffer> {
+        (self.visibility_bind.is_some() && width.saturating_mul(height) <= MAX_COMPUTE_PIXELS)
+            .then_some(&self.results)
+    }
+
     pub fn bytes(&self) -> usize {
         (self.prefix.size() + self.results.size()) as usize
             + self.detail_bytes

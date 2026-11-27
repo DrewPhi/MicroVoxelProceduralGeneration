@@ -27,6 +27,7 @@ mod development_resources;
 mod discrete_water_live;
 mod flight_audio;
 mod flight_feedback;
+mod exact_vegetation;
 mod flight_instruments;
 mod foreground_depth;
 mod formation_mesh;
@@ -317,6 +318,7 @@ struct Gpu {
     formation_mesh: formation_mesh::FormationMesh,
     rolling_probe_depth: std::cell::Cell<Option<f32>>,
     vegetation: Option<vegetation_gpu::VegetationGpu>,
+    exact_vegetation: Option<exact_vegetation::ExactVegetation>,
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_background_paused: bool,
     naadf: Option<naadf::Experiment>,
@@ -586,6 +588,7 @@ impl Gpu {
             weather_fraction: 0.,
             rolling_probe_depth: std::cell::Cell::new(None),
             vegetation: None,
+            exact_vegetation: None,
             vegetation_stream: None,
             vegetation_background_paused: false,
             naadf: None,
@@ -1231,6 +1234,10 @@ impl Gpu {
         }
         if let (Some(vegetation), Some(adaptive)) = (&self.vegetation, &self.adaptive) {
             vegetation.draw(&mut pass, &self.bind_group, adaptive.near_shadow_bind());
+        }
+        if let Some(plants) = &self.exact_vegetation {
+            let terrain = plants.prepare(self, *camera, width, height);
+            plants.draw(&mut pass, terrain.as_ref());
         }
         if let Some(t) = &plant_timings {
             t.color_end(&mut pass);
@@ -2965,7 +2972,11 @@ impl Viewer {
                     .as_ref()
                     .and_then(|v| v.static_world())
                     .unwrap_or(&self.world),
-                self.camera,
+                if self.visual_settings.exact_vegetation {
+                    display_camera
+                } else {
+                    self.camera
+                },
                 width,
                 height,
             )?;
@@ -4604,11 +4615,16 @@ pub fn run() -> Result<()> {
                 "initial page experiment finite cover cannot cover requested camera/far".into(),
             );
         }
-        gpu.settle_vegetation(&world, camera, width, height)?;
-        gpu.settle_naadf(&world, camera)?;
         let display = aircraft
             .as_ref()
             .map_or(camera, |plane| plane.display_camera(camera));
+        let vegetation_camera = if visual_settings.exact_vegetation {
+            display
+        } else {
+            camera
+        };
+        gpu.settle_vegetation(&world, vegetation_camera, width, height)?;
+        gpu.settle_naadf(&world, camera)?;
         gpu.capture(&world, &display, &path, width, height)?;
         let metadata_path = path.with_extension("capture.json");
         let mut metadata = std::fs::read_to_string(&metadata_path)?;

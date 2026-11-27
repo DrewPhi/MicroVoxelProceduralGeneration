@@ -69,6 +69,7 @@ impl Gpu {
     ) -> Result<()> {
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
         if !world.vegetation_enabled() {
+            self.exact_vegetation.take();
             self.vegetation.take();
             self.vegetation_stream.take();
             self.vegetation_stats = Default::default();
@@ -76,6 +77,19 @@ impl Gpu {
             self.vegetation_caster_roots.clear();
             return Ok(());
         }
+        if self.visual_settings.as_ref().is_some_and(|settings| settings.exact_vegetation) {
+            self.vegetation.take();
+            self.vegetation_stream.take();
+            self.vegetation_stats = Default::default();
+            self.vegetation_inspection.clear();
+            self.vegetation_caster_roots.clear();
+            let previous = self.exact_vegetation.take();
+            self.exact_vegetation = Some(exact_vegetation::ExactVegetation::update(
+                previous, self, world, camera,
+            )?);
+            return Ok(());
+        }
+        self.exact_vegetation.take();
         if self.vegetation_stream.is_none() {
             self.vegetation_stream = Some(vegetation::VegetationStream::for_renderer(
                 world.clone(),
@@ -247,6 +261,9 @@ impl Gpu {
         }
     }
     pub(super) fn vegetation_json(&self) -> String {
+        if let Some(plants) = &self.exact_vegetation {
+            return plants.json();
+        }
         let s = self.vegetation_stats;
         let g = self
             .vegetation
