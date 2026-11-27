@@ -44,6 +44,8 @@ impl Gpu {
             .revision
             .map(|_| world.terrain_render_snapshot());
         let world = terrain_snapshot.as_ref().unwrap_or(world);
+        let flora_snapshot = world.module_flora_enabled().then(|| world.clone().with_vegetation_enabled(false));
+        let world = flora_snapshot.as_ref().unwrap_or(world);
         let mut experiment = self.naadf.take().unwrap_or_default();
         experiment.poll(
             self,
@@ -68,7 +70,7 @@ impl Gpu {
         height: u32,
     ) -> Result<()> {
         self.medium_ground_height = world.height_m(camera.position.x, camera.position.z) as f32;
-        if !world.vegetation_enabled() {
+        if !world.vegetation_enabled() || world.module_flora_enabled() {
             self.exact_vegetation.take();
             self.vegetation.take();
             self.vegetation_stream.take();
@@ -261,6 +263,9 @@ impl Gpu {
         }
     }
     pub(super) fn vegetation_json(&self) -> String {
+        if let Some(info) = self.rolling.as_ref().and_then(|terrain| terrain.module_flora_json()) {
+            return info;
+        }
         if let Some(plants) = &self.exact_vegetation {
             return plants.json();
         }

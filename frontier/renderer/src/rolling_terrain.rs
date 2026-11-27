@@ -1,6 +1,7 @@
 //! Playable integration of the cached-heightfield experiment.
 use crate::foreground_depth::{self, ForegroundDepth};
 use crate::native_lattice::{self, NativeLattice, NativeLatticeConfig};
+use crate::module_flora::{self, ModuleFlora};
 use crate::rolling_woodland_shadow::{self, CanopyGroundShade, WoodlandShadow};
 use crate::terrain_horizon::{self, TerrainHorizon};
 use crate::{
@@ -655,7 +656,9 @@ impl RollingTerrain {
             .ok_or("rolling terrain requires a procedural terrain source")?;
         let landscapes = terrain.params().recipe.has_landscape_relief();
         let use_lattice = terrain.native_lattice_enabled();
-        let lattice_config = NativeLatticeConfig::for_source(terrain.native_detail_enabled(), settings.msaa);
+        let lattice_config = NativeLatticeConfig::for_source(
+            terrain.native_detail_enabled(), settings.msaa, settings.module_flora,
+        );
         let living_woods = frontier_world::vegetation::uses_living_woodland(world);
         let close_pitch = settings
             .terrain_near_spacing
@@ -697,7 +700,10 @@ impl RollingTerrain {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rolling terrain composition"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{SOURCE}\n{foreground_source}\n{lattice_source}").into(),
+                format!(
+                    "{SOURCE}\n{foreground_source}\n{lattice_source}\n{}",
+                    if settings.module_flora { module_flora::SHADER } else { "" },
+                ).into(),
             ),
         });
         let bindings = [0, 1, 2, 6, 7, 9, 10, 11, 12, 13, 14, 18, 19, 31].map(|binding| {
@@ -1020,7 +1026,12 @@ impl RollingTerrain {
             curve_uniform: uniform(bytemuck::cast_slice(&[[0_f32; 4]; CURVE_PROFILE_VECTORS])),
             exact,
             lattice: use_lattice.then(|| {
-                NativeLattice::new(device, &gpu.queue, &module, world.seed(), lattice_config)
+                NativeLattice::new(
+                    device, &gpu.queue, &module, world.seed(), lattice_config,
+                    settings.module_flora.then(|| ModuleFlora::new(
+                        device, &module, gpu.scene_format, settings.msaa, lattice_config.compute, settings.capture_terrain_distance
+                    )),
+                )
             }),
             view: uniform(bytemuck::bytes_of(&View::zeroed())),
             native_view,
@@ -1050,7 +1061,7 @@ impl RollingTerrain {
         let eye = DVec2::new(camera.position.x, camera.position.z);
         self.outer.update(device, queue, eye)?;
         if let Some(lattice) = &mut self.lattice {
-            if lattice.update(device, world, camera, &self.view)? {
+            if lattice.update(device, world, camera, &self.view, &self.native_view)? {
                 self.bind = None;
             }
         } else {
@@ -1206,7 +1217,8 @@ impl RollingTerrain {
         self.bind.is_some()
     }
     pub fn fits_settings(&self, settings: &VisualSettings) -> bool {
-        (self.lattice.is_some() || !matches!(self.outer.pitch, 8. | 16.) || settings.view_distance <= 6500.)
+        (self.lattice.is_none() || settings.view_distance <= native_lattice::MAX_FAR)
+            && (self.lattice.is_some() || !matches!(self.outer.pitch, 8. | 16.) || settings.view_distance <= 6500.)
             && (!settings.naadf_enabled
                 || self.exact.side >= ExactColumns::side_for(settings.naadf_radius_voxels))
     }
@@ -1391,7 +1403,7 @@ impl RollingTerrain {
         };
         queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&view));
         if let Some(lattice) = &self.lattice {
-            lattice.prepare(queue, camera);
+            lattice.prepare(queue, camera, settings.vegetation);
         }
         let [lo, hi] = owner
             .unwrap_or([[0.; 3]; 2])
@@ -1407,7 +1419,7 @@ impl RollingTerrain {
                 self.exact.side as f32,
             ],
             owner_min: lo.extend(if owner.is_some() { 1. } else { 0. }).to_array(),
-            owner_max: hi.extend(f32::from(settings.vegetation)).to_array(),
+            owner_max: hi.extend(f32::from(settings.vegetation && !settings.module_flora)).to_array(),
             sun: sun.extend(if settings.beauty { 1. } else { 0. }).to_array(),
             sky: [
                 settings.overcast,
@@ -1468,6 +1480,22 @@ impl RollingTerrain {
 
     pub fn center_hits(&self, width: u32, height: u32) -> Option<&wgpu::Buffer> {
         self.lattice.as_ref()?.center_hits(width, height)
+    }
+
+    pub fn encode_module_flora(&self, encoder: &mut wgpu::CommandEncoder, far: f32) {
+        if let Some(flora) = self.lattice.as_ref().and_then(|lattice| lattice.flora.as_ref()) {
+            flora.encode(encoder, far);
+        }
+    }
+
+    pub fn draw_module_flora(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if let Some(flora) = self.lattice.as_ref().and_then(|lattice| lattice.flora.as_ref()) {
+            flora.draw(pass);
+        }
+    }
+
+    pub fn module_flora_json(&self) -> Option<String> {
+        self.lattice.as_ref()?.flora.as_ref().map(ModuleFlora::json)
     }
 
     pub fn encode_native_visibility(&self, encoder: &mut wgpu::CommandEncoder, width: u32, height: u32) {

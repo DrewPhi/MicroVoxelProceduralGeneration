@@ -23,6 +23,7 @@ pub use grid::{
 };
 pub mod moving_water;
 pub mod native_lattice;
+pub mod module_flora;
 pub mod physical_fluid;
 pub mod procedural_water;
 pub mod rock_formation;
@@ -164,6 +165,7 @@ pub struct World {
     seed: u64,
     terrain: Option<FbmTerrain>,
     vegetation: Option<Arc<vegetation::TileCache>>,
+    module_flora: bool,
     topology_base: Option<i64>,
     rock_formations: Arc<[rock_formation::RockFormation]>,
     edits: Arc<BTreeMap<Cell, Material>>,
@@ -212,6 +214,18 @@ impl WorldColumn<'_> {
                 .source_with_column(c, self.height, self.terrain_column)
         })
     }
+    /// Terrain plus the module flora ground band. Woody models are queried separately.
+    pub fn terrain_and_ground_cover(&self, y: i64) -> Material {
+        let base = self.material_without_fluid(y);
+        let c = Cell { x: self.x, y, z: self.z };
+        if base != Material::Air || !self.world.module_flora_enabled() || self.world.edits.contains_key(&c) {
+            return base;
+        }
+        self.terrain_column
+            .and_then(|column| module_flora::grass_material(c, native_lattice::relief_seed(self.world.seed), column))
+            .unwrap_or(base)
+    }
+
     pub fn material(&self, y: i64) -> Material {
         let c = Cell {
             x: self.x,
@@ -251,6 +265,7 @@ impl World {
             seed,
             terrain: None,
             vegetation: None,
+            module_flora: false,
             topology_base: None,
             rock_formations: Arc::default(),
             edits: Arc::default(),

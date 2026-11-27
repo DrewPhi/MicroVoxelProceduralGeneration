@@ -71,7 +71,12 @@ fn roof_offset(n: usize) -> usize {
 }
 
 impl Window {
-    fn sample(terrain: &FbmTerrain, origin: [i64; 2], previous: Option<&Self>) -> Self {
+    fn sample(
+        terrain: &FbmTerrain,
+        origin: [i64; 2],
+        previous: Option<&Self>,
+        flora: bool,
+    ) -> Self {
         let width = SIDE + 1;
         let mut controls = vec![[0; 2]; width * width];
         let shift = previous.map(|old| [0, 1].map(|i| (origin[i] - old.origin[i]) / PITCH_CELLS));
@@ -121,6 +126,7 @@ impl Window {
                 });
             }
         });
+        let cover = flora.then(frontier_world::module_flora::cover_atlas);
         let mut roofs = vec![0; (4 * SIDE * SIDE - 1) / 3];
         let offset = roof_offset(SIDE);
         for z in 0..SIDE {
@@ -132,12 +138,21 @@ impl Window {
                     controls[i + width],
                     controls[i + width + 1],
                 ];
+                let tile = (corners[0][0] as u32 >> 24) as usize;
+                let has_cover = cover.is_some()
+                    && corners
+                        .iter()
+                        .any(|c| ((c[1] >> 22) & 15) == Material::Grass as i32);
                 let margin = if corners[0][1] & RELIEF != 0 {
-                    if detailed {
-                        detail::roof((corners[0][0] as u32 >> 24) as usize) as i32
+                    if let Some(cover) = cover.filter(|_| has_cover) {
+                        i32::from((cover[tile * detail::NODES] >> 16) as i8)
+                    } else if detailed {
+                        detail::roof(tile) as i32
                     } else {
                         RELIEF_MAX as i32
                     }
+                } else if has_cover {
+                    frontier_world::module_flora::GRASS_HEIGHT as i32
                 } else {
                     0
                 };
@@ -232,12 +247,26 @@ impl Window {
                     base.ground_top,
                     base.visible_top,
                 ]);
+                if world.module_flora_enabled() {
+                    let (grass, flower) = frontier_world::module_flora::grass(
+                        native_lattice::relief_seed(world.seed()),
+                        x,
+                        z,
+                        base,
+                    );
+                    if flower {
+                        edges.push(base.ground_top + grass - 1);
+                    }
+                    if grass != 0 {
+                        edges.push(base.ground_top + grass);
+                    }
+                }
                 edges.sort_unstable();
                 edges.dedup();
                 let start = data.len();
                 let column = world.column(x, z);
                 for span in edges.windows(2) {
-                    let material = column.material_without_fluid(span[0]);
+                    let material = column.terrain_and_ground_cover(span[0]);
                     if material != Material::Air {
                         let top = i32::try_from(span[1]).unwrap();
                         data.push([i32::try_from(span[0]).unwrap(), top, material as i32, 0]);
@@ -275,34 +304,47 @@ impl Window {
 #[derive(Clone, Copy)]
 pub(crate) struct NativeLatticeConfig {
     beams: bool,
-    compute: bool,
+    pub compute: bool,
     relief_bounds: bool,
     detailed: bool,
+    flora: bool,
     split: bool,
     detail_step: u32,
+    beam_width: u32,
+    flora_leap: bool,
     tile_width: u32,
+    group_threads: u32,
 }
 
 impl NativeLatticeConfig {
-    pub fn for_source(detailed: bool, msaa: u32) -> Self {
+    pub fn for_source(detailed: bool, msaa: u32, flora: bool) -> Self {
         let flag = |name, default| std::env::var_os(name).map_or(default, |value| value != "0");
         let number = |name| {
             std::env::var(name)
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
         };
+        let group_threads = number("FRONTIER_NATIVE_DETAIL_GROUP_THREADS")
+            .filter(|n| [32, 64].contains(n))
+            .unwrap_or(if flora { 32 } else { 64 });
         Self {
             beams: flag("FRONTIER_NATIVE_LATTICE_BEAMS", detailed),
             compute: msaa == 1 && flag("FRONTIER_NATIVE_LATTICE_COMPUTE", detailed),
             relief_bounds: flag("FRONTIER_NATIVE_LATTICE_RELIEF_BOUNDS", false),
             detailed,
+            flora,
             split: flag("FRONTIER_NATIVE_DETAIL_SPLIT", detailed),
             detail_step: number("FRONTIER_NATIVE_DETAIL_STEP")
                 .filter(|n| *n <= 3)
-                .unwrap_or(1),
+                .unwrap_or(if flora { 2 } else { 1 }),
+            beam_width: number("FRONTIER_NATIVE_DETAIL_BEAM_WIDTH")
+                .filter(|n| [4, 8, 16].contains(n))
+                .unwrap_or(if flora { 4 } else { 8 }),
+            flora_leap: flag("FRONTIER_NATIVE_DETAIL_LOCAL_LEAP", flora),
+            group_threads,
             tile_width: number("FRONTIER_NATIVE_DETAIL_GROUP")
-                .filter(|n| [8, 16, 32, 64].contains(n))
-                .unwrap_or(8),
+                .filter(|&n| [8, 16, 32, 64].contains(&n) && n <= group_threads)
+                .unwrap_or(if flora { 16 } else { 8 }),
         }
     }
 
@@ -312,9 +354,13 @@ impl NativeLatticeConfig {
             ("LATTICE_COMPUTE", u32::from(self.compute)),
             ("LATTICE_RELIEF_BOUNDS", u32::from(self.relief_bounds)),
             ("LATTICE_DETAIL", u32::from(self.detailed)),
+            ("LATTICE_FLORA", u32::from(self.flora)),
             ("LATTICE_SPLIT", u32::from(self.split)),
             ("LATTICE_DETAIL_STEP", self.detail_step),
+            ("LATTICE_BEAM_WIDTH", self.beam_width),
+            ("LATTICE_LOCAL_LEAP", u32::from(self.flora_leap)),
             ("LATTICE_DETAIL_TILE_X", self.tile_width),
+            ("LATTICE_GROUP_THREADS", self.group_threads),
         ]
         .map(|(key, value)| (key.to_owned(), f64::from(value)))
         .into()
@@ -329,10 +375,23 @@ fn detail_binding() -> wgpu::BindingType {
     }
 }
 
+fn pack_mip_chain<T: Copy>(atlas: &[T], side: u32) -> Vec<T> {
+    let mut data = Vec::with_capacity(atlas.len());
+    for tile in atlas.chunks_exact(detail::NODES) {
+        for mip in 0..=side.ilog2() {
+            let width = (side >> mip) as usize;
+            let first = roof_offset(width);
+            data.extend_from_slice(&tile[first..first + width * width]);
+        }
+    }
+    data
+}
+
 fn detail_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     detailed: bool,
+    flora: bool,
 ) -> (wgpu::TextureView, usize) {
     let side = if detailed { PITCH_CELLS as u32 } else { 1 };
     let layers = if detailed {
@@ -340,18 +399,25 @@ fn detail_texture(
     } else {
         1
     };
-    let mut packed = Vec::with_capacity(if detailed { detail::atlas().len() } else { 1 });
-    if detailed {
-        for tile in detail::atlas().chunks_exact(detail::NODES) {
-            for mip in 0..=side.ilog2() {
-                let width = (side >> mip) as usize;
-                let first = roof_offset(width);
-                packed.extend_from_slice(&tile[first..first + width * width]);
-            }
-        }
+    let packed_terrain;
+    let packed_flora;
+    let (format, contents) = if flora {
+        packed_flora = pack_mip_chain(frontier_world::module_flora::cover_atlas(), side);
+        (
+            wgpu::TextureFormat::R32Uint,
+            bytemuck::cast_slice(&packed_flora),
+        )
     } else {
-        packed.push(0);
-    }
+        packed_terrain = if detailed {
+            pack_mip_chain(detail::atlas(), side)
+        } else {
+            vec![0u16]
+        };
+        (
+            wgpu::TextureFormat::R16Uint,
+            bytemuck::cast_slice(&packed_terrain),
+        )
+    };
     let texture = device.create_texture_with_data(
         queue,
         &wgpu::TextureDescriptor {
@@ -364,18 +430,18 @@ fn detail_texture(
             mip_level_count: side.ilog2() + 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Uint,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         },
         wgpu::util::TextureDataOrder::LayerMajor,
-        bytemuck::cast_slice(&packed),
+        contents,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    (view, packed.len() * std::mem::size_of::<u16>())
+    (view, contents.len())
 }
 
 pub(crate) struct NativeLattice {
@@ -399,6 +465,8 @@ pub(crate) struct NativeLattice {
     publications: u64,
     generated: usize,
     edited: usize,
+    cover_enabled: bool,
+    pub(crate) flora: Option<crate::module_flora::ModuleFlora>,
 }
 
 impl NativeLattice {
@@ -408,6 +476,7 @@ impl NativeLattice {
         module: &wgpu::ShaderModule,
         seed: u64,
         config: NativeLatticeConfig,
+        flora: Option<crate::module_flora::ModuleFlora>,
     ) -> Self {
         let NativeLatticeConfig {
             beams,
@@ -461,7 +530,7 @@ impl NativeLattice {
                     cache: None,
                 })
             };
-        let (detail, detail_bytes) = detail_texture(device, queue, detailed);
+        let (detail, detail_bytes) = detail_texture(device, queue, detailed, config.flora);
         Self {
             window: None,
             pending: None,
@@ -474,15 +543,23 @@ impl NativeLattice {
             prefix: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("native lattice shared ray intervals"),
                 size: 4 * u64::from(if beams {
-                    (MAX_BEAM_EXTENT / 8).pow(2)
+                    (MAX_BEAM_EXTENT / config.beam_width).pow(2)
                 } else {
                     1
                 }),
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             }),
-            beam_pipeline: beams
-                .then(|| pipeline("lattice_find_prefix", &Default::default(), &[0, 32, 34, 37])),
+            beam_pipeline: beams.then(|| {
+                pipeline(
+                    "lattice_find_prefix",
+                    &HashMap::from([(
+                        "LATTICE_BEAM_WIDTH".to_owned(),
+                        f64::from(config.beam_width),
+                    )]),
+                    &[0, 32, 34, 37],
+                )
+            }),
             results: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("native lattice full-resolution hit buffer"),
                 size: 8 * u64::from(if compute { MAX_COMPUTE_PIXELS } else { 1 }),
@@ -515,6 +592,8 @@ impl NativeLattice {
             publications: 0,
             generated: 0,
             edited: 0,
+            cover_enabled: false,
+            flora,
         }
     }
 
@@ -524,9 +603,13 @@ impl NativeLattice {
         world: &World,
         camera: Camera,
         rolling_view: &wgpu::Buffer,
+        native_view: &wgpu::Buffer,
     ) -> Result<bool> {
         let xz = camera.position.xz().to_array();
-        let far = f64::from(camera.far);
+        if camera.far > MAX_FAR {
+            return Err("native lattice view distance exceeds 6000 m".into());
+        }
+        let far = f64::from(camera.far) + if self.flora.is_some() { 12. } else { 0. };
         let origin = xz.map(|p| {
             ((p / VOXEL_SIZE).floor() as i64).div_euclid(RECENTER_CELLS) * RECENTER_CELLS
                 - SIDE as i64 / 2 * PITCH_CELLS
@@ -553,6 +636,7 @@ impl NativeLattice {
                 terrain,
                 origin,
                 self.window.as_deref(),
+                self.config.flora,
             )));
         }
         let fresh = ready.is_some();
@@ -565,11 +649,13 @@ impl NativeLattice {
         if self.pending.is_none() && window.origin != origin {
             let terrain = terrain.clone();
             let previous = Arc::clone(window);
+            let flora = self.config.flora;
             self.pending = Some(std::thread::spawn(move || {
-                Arc::new(Window::sample(&terrain, origin, Some(&previous)))
+                Arc::new(Window::sample(&terrain, origin, Some(&previous), flora))
             }));
         }
-        if fresh || self.revision != Some(world.revision()) {
+        let cover_enabled = world.module_flora_enabled();
+        if fresh || self.revision != Some(world.revision()) || self.cover_enabled != cover_enabled {
             let (roofs, edits, edited) = window.edit_buffers(device, world);
             let controls = if fresh {
                 storage(
@@ -634,15 +720,28 @@ impl NativeLattice {
             };
             self.visibility_bind = self.visibility.as_ref().map(visibility_resources);
             self.resolve_bind = self.resolve.as_ref().map(visibility_resources);
+            if let Some(flora) = &mut self.flora {
+                flora.publish(
+                    device,
+                    world,
+                    rolling_view,
+                    &self.view,
+                    &controls,
+                    &self.detail,
+                    &self.results,
+                    native_view,
+                );
+            }
             self.buffers = Some([controls, roofs, edits]);
             self.revision = Some(world.revision());
+            self.cover_enabled = cover_enabled;
             self.edited = edited;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub fn prepare(&self, queue: &wgpu::Queue, camera: Camera) {
+    pub fn prepare(&self, queue: &wgpu::Queue, camera: Camera, vegetation: bool) {
         let [x, z] = self.window.as_ref().unwrap().origin;
         let eye = [
             camera.position.x / VOXEL_SIZE - x as f64,
@@ -657,7 +756,7 @@ impl NativeLattice {
                 camera.far,
             ],
             origin: [x as i32, z as i32, self.seed as i32, 0],
-            config: [SIDE as u32, ROOT, 0, 0],
+            config: [SIDE as u32, ROOT, u32::from(vegetation), 0],
             eye_cell: [cell[0] as i32, cell[1] as i32, 0, 0],
             eye_fraction: [(eye[0] - cell[0]) as f32, (eye[1] - cell[1]) as f32, 0., 0.],
         };
@@ -714,7 +813,8 @@ impl NativeLattice {
                 });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, bind, &[]);
-                pass.dispatch_workgroups(width.div_ceil(64), height.div_ceil(64), 1);
+                let batch = 8 * self.config.beam_width;
+                pass.dispatch_workgroups(width.div_ceil(batch), height.div_ceil(batch), 1);
             }
         }
         if width.saturating_mul(height) > MAX_COMPUTE_PIXELS {
@@ -735,7 +835,7 @@ impl NativeLattice {
             pass.set_bind_group(0, bind, &[]);
             pass.dispatch_workgroups(
                 width.div_ceil(self.config.tile_width),
-                height.div_ceil(64 / self.config.tile_width),
+                height.div_ceil(self.config.group_threads / self.config.tile_width),
                 1,
             );
         }
@@ -758,7 +858,7 @@ impl NativeLattice {
 
     pub fn report(&self) -> String {
         format!(
-            r#"{{"pitch_m":{PITCH_M},"side":{SIDE},"publications":{},"generated_controls":{},"edited_patches":{},"gpu_bytes":{},"beams":{},"compute":{},"relief_atlas_bytes":{},"detail_step":{},"visibility_group_width":{},"split_wet_and_edits":{}}}"#,
+            r#"{{"pitch_m":{PITCH_M},"side":{SIDE},"publications":{},"generated_controls":{},"edited_patches":{},"gpu_bytes":{},"beams":{},"compute":{},"relief_atlas_bytes":{},"detail_step":{},"visibility_group_width":{},"visibility_group_threads":{},"beam_width":{},"local_interval_leap":{},"split_wet_and_edits":{}}}"#,
             self.publications,
             self.generated,
             self.edited,
@@ -772,6 +872,9 @@ impl NativeLattice {
             },
             self.config.detail_step,
             self.config.tile_width,
+            self.config.group_threads,
+            self.config.beam_width,
+            self.config.flora_leap,
             self.resolve.is_some()
         )
     }

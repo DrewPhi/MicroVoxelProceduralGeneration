@@ -1513,6 +1513,15 @@ impl World {
         self.vegetation = enabled.then(|| self.vegetation.clone().unwrap_or_default());
         self
     }
+    pub fn with_module_flora(mut self, enabled: bool) -> Self {
+        self.module_flora = enabled;
+        self
+    }
+
+    pub fn module_flora_enabled(&self) -> bool {
+        self.module_flora && self.vegetation_enabled()
+    }
+
     pub fn vegetation_enabled(&self) -> bool {
         self.vegetation.is_some()
     }
@@ -1585,6 +1594,9 @@ impl World {
         records
     }
     pub fn vegetation_voxel(&self, c: Cell) -> Option<PlantVoxel> {
+        if self.module_flora_enabled() {
+            return crate::module_flora::voxel(self.fbm_terrain()?, c, false);
+        }
         for species in [Species::Rowan, Species::Grass, Species::Edelweiss] {
             if let Some(v) = self.vegetation_species_voxel(c, species) {
                 return Some(v);
@@ -1638,6 +1650,11 @@ impl World {
         let terrain = self.source(c);
         if terrain != Material::Air {
             return terrain;
+        }
+        if self.module_flora_enabled() {
+            return self.fbm_terrain()
+                .and_then(|terrain| crate::module_flora::voxel(terrain, c, true))
+                .map_or(Material::Air, |v| v.material);
         }
         let Some(cache) = &self.vegetation else {
             return Material::Air;

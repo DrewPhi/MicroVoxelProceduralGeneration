@@ -1,5 +1,7 @@
 # Editable vegetation without geometry LODs
 
+See [the shared-module vegetation renderer](MODULE_FLORA.md) for the 6 km path.
+
 `--exact-vegetation` is a finite rolling-terrain experiment. It uses the
 existing seeded plant records and models. Trees, bushes, grass and flowers
 contribute the original occupied native cells wherever the canonical world

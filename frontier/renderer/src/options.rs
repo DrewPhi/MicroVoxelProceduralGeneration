@@ -814,6 +814,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 visual.native_detail = arg == "--native-detail";
             }
             "--exact-vegetation" => visual.exact_vegetation = true,
+            "--module-flora" => {
+                visual.module_flora = true;
+                visual.vegetation = true;
+                visual.native_lattice = true;
+                visual.native_detail = true;
+                rolling_preference = Some(true);
+            }
             "--packed-terrain" => rolling_preference = Some(false),
             "--flight-view" => {
                 flight_chase = Some(match args.next().as_deref() {
@@ -939,6 +946,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 println!("--flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, hold right mouse to look around the cabin, H toggles heading/altitude hold, and [ / ] tune COM.");
                 println!("Terrain detail: --preset eroded enables seed-wide dissected geological relief and denser middle coverage. --terrain-mid-detail on|off, --terrain-mid-cells 512|1024|2048, --terrain-mid-spacing 0.75|1|1.5|2|3|4 metres, --terrain-mid-strips on|off. Optional extra detail: --terrain-detail on --terrain-near-spacing 0.25|0.5|0.75|1|1.5 --terrain-near-cells 512|1024; --terrain-far-detail on|off. --terrain-depth-occlusion on|off reuses foreground depth before tracing the terrain. --natural-terrain-light on|off enables the shared terrain horizon and revised clouds. Experiments: --terrain-mid-error 0..4 pixels, --terrain-mid-tile-error 0..1 metres, --terrain-mid-boundary-ascent on|off, --terrain-gray, --formation-site X,Z (Landforms). For terrain-only captures, --capture-terrain-distance writes first-hit distance in metres to the float RGB readback.");
                 println!("--rolling-walk-frames DIR captures a deterministic Alpine trail walk. Use --route fly or bank-return with --eye and --target to capture flight and terrain ownership. The walking routes work with any terrain recipe.");
+                println!("--module-flora selects shared native trees and procedural native ground cover for the 6 km Eroded renderer.");
                 println!("Native vegetation experiment: --exact-vegetation with rolling terrain, --vegetation on and --capture-far up to 256 m traces editable native plant voxels without plant meshes or distance-based geometry changes.");
                 println!("NAADF experiment: --naadf on|off --naadf-follow on|off --naadf-gpu-distance on|off --naadf-radius-voxels 1..4096 (native voxel half-extent, enables NAADF); --naadf-radius 1..256 (legacy meters) --naadf-budget-mib 16..16384. Exact region follows the player by default; --naadf-follow off freezes it. Initial visibility prototype, no NAADF GI.\nResource profiles: --resource-profile development|constrained|custom. Interactive default: development; finite comparisons retain constrained baseline. Overrides: --native-radius METERS --vegetation-near METERS --terrain-cache-mib N --build-memory-mib N --terrain-gpu-mib N --plant-cpu-mib N --plant-gpu-mib N --triangle-budget N --upload-mib 1..64. Existing --adaptive-workers and --adaptive-refinements set throughput. CPU and shared GPU working budgets leave RAM headroom; capacities allocate lazily.");
                 println!("Player pickup defaults on with live water: --player-edit on|off. L press previews, release picks up; quick <150ms takes one voxel, charge to 900ms takes up to two. R places owned selected material; 1..6 selects Grass/Soil/Stone/Wood/Sand/Snow. --pickup-reach 2 --hand-volume-liters 0.5 --hand-extent 0.125 --pickup-quick-ms 150 --pickup-full-ms 900 --inventory-capacity 64. Preview outlines exact selected native cells; wet placement is rejected pending supported displacement. --player-edit off enables explicit creative/debug L remove/R Stone. Inventory, sequence, terrain and fluid share the save.");
@@ -1306,6 +1314,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
         );
     } else {
         capture_far = capture_far.or(preset_far);
+    }
+    if visual.module_flora && (!visual.native_detail || visual.exact_vegetation) {
+        return Err("--module-flora requires native-detail terrain and its own vegetation path".into());
     }
     if visual.exact_vegetation
         && (!rolling_terrain

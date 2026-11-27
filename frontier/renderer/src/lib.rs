@@ -28,6 +28,7 @@ mod discrete_water_live;
 mod flight_audio;
 mod flight_feedback;
 mod exact_vegetation;
+mod module_flora;
 mod flight_instruments;
 mod foreground_depth;
 mod formation_mesh;
@@ -1105,6 +1106,7 @@ impl Gpu {
                 self.vegetation_stats.tree_radius_m,
             );
             rolling.encode_native_visibility(encoder, width, height);
+            rolling.encode_module_flora(encoder, camera.far);
         }
         if let Some(adaptive) = &self.adaptive {
             adaptive.set_naadf_mask(
@@ -1238,6 +1240,9 @@ impl Gpu {
         if let Some(plants) = &self.exact_vegetation {
             let terrain = plants.prepare(self, *camera, width, height);
             plants.draw(&mut pass, terrain.as_ref());
+        }
+        if let Some(rolling) = &self.rolling {
+            rolling.draw_module_flora(&mut pass);
         }
         if let Some(t) = &plant_timings {
             t.color_end(&mut pass);
@@ -3985,7 +3990,10 @@ pub fn run() -> Result<()> {
     } else {
         world
     };
-    let mut world = world.with_vegetation_enabled(visual_settings.vegetation);
+    let mut world = world
+        .with_vegetation_enabled(visual_settings.vegetation)
+        .with_module_flora(visual_settings.module_flora);
+
     let mut live_water = if live_water_enabled {
         Some(discrete_water_live::WaterDriver::new(
             &mut world,
