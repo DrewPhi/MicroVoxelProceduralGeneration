@@ -296,6 +296,17 @@ impl SettingsUi {
             if let Some(flight) = stats.flight.filter(|_| !self.open) {
                 crate::flight_instruments::show(ctx, flight);
             }
+            if !self.open && !self.radar.open {
+                if let (Some(pointer), Some(control)) = (stats.cockpit_pointer, stats.cockpit_control) {
+                    let screen = ctx.screen_rect();
+                    let anchor = screen.min + egui::vec2(pointer.x * screen.width(), pointer.y * screen.height());
+                    egui::Area::new(egui::Id::new("cockpit control hint"))
+                        .fixed_pos(anchor + egui::vec2(16., 18.)).interactable(false)
+                        .show(ctx, |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| ui.small(control.label()));
+                        });
+                }
+            }
             if !self.player_overlay.text.is_empty() && !self.open {
                 egui::Area::new(egui::Id::new("player inventory"))
                     .anchor(egui::Align2::CENTER_BOTTOM,[0.,-18.]).interactable(false).show(ctx,|ui| {
@@ -456,6 +467,24 @@ impl SettingsUi {
                             changes.toggle_airflow = ui.selectable_label(flight.show_airflow, "Show airflow · Y").clicked();
                             changes.toggle_flight_audio = ui.selectable_label(stats.flight_audio, "Flight sound").clicked();
                             changes.toggle_flight_camera_motion = ui.selectable_label(stats.flight_camera_motion, "Camera inertia · J").clicked();
+                        });
+                    }
+                    if let Some(offset) = stats.cockpit_eye_offset {
+                        ui.collapsing("Cockpit camera", |ui| {
+                            let mut cm = offset * 100.;
+                            let min = crate::aircraft::COCKPIT_OFFSET_MIN * 100.;
+                            let max = crate::aircraft::COCKPIT_OFFSET_MAX * 100.;
+                            let mut changed = false;
+                            for (axis, label) in ["Side offset", "Height", "Fore / aft"].into_iter().enumerate() {
+                                changed |= ui.add(egui::Slider::new(&mut cm[axis], min[axis]..=max[axis])
+                                    .fixed_decimals(1).suffix(" cm").text(label)).changed();
+                            }
+                            if changed {
+                                changes.cockpit_eye_offset = Some(cm / 100.);
+                            }
+                            if ui.button("Reset pilot view").clicked() {
+                                changes.cockpit_eye_offset = Some(glam::Vec3::ZERO);
+                            }
                         });
                     }
                     if let Some(message) = &self.settings_error {

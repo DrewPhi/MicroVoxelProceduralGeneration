@@ -1,6 +1,7 @@
 //! Aircraft debug tracers. The sampled forces are from the flight model.
 //! Passive tracers use local relative wind and an approximate obstacle/wake field.
 use crate::aircraft::{airframe, Airflow, WING_SECTIONS};
+use crate::aircraft_model::{da62, ModelKind};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use std::time::Instant;
@@ -102,11 +103,11 @@ impl Preview {
                 for _ in 0..steps {
                     let point =
                         trace.point + velocity(trace.point, &flow, direction, self.time) * step;
-                    if !crate::aircraft::parked_solid(point) {
+                    if !crate::aircraft::parked_solid(flow.kind, point) {
                         trace.point = point;
                     }
                 }
-                if crate::aircraft::parked_solid(trace.point) {
+                if crate::aircraft::parked_solid(flow.kind, trace.point) {
                     trace.age = 3.;
                     continue;
                 }
@@ -173,14 +174,33 @@ fn deflect(v: Vec3, point: Vec3, radii: Vec3) -> Vec3 {
 
 fn velocity(p: Vec3, flow: &Airflow<'_>, direction: Vec3, time: f32) -> Vec3 {
     let mut v = flow.relative_air - flow.angular_velocity.cross(p - flow.center_of_gravity);
-    if p.z < airframe::PROP_Z {
-        let slip_radius = 0.92 + 0.035 * (airframe::PROP_Z - p.z);
-        let radial = (p.x * p.x + (p.y + 0.06).powi(2)).sqrt() / slip_radius;
-        v.z -= flow.propwash * (1. - radial).clamp(0., 1.);
+    let twin = flow.kind == ModelKind::Da62;
+    let mounts = if twin {
+        [da62::PROP, da62::PROP.with_x(-da62::ENGINE)]
+    } else {
+        [Vec3::new(0., -0.06, airframe::PROP_Z), Vec3::ZERO]
+    };
+    for (mount, wash) in mounts.into_iter().zip(flow.engine_wash) {
+        let behind = mount.z - p.z;
+        if behind > 0. {
+            let radial = (p - mount).truncate().length() / (0.92 + 0.035 * behind);
+            v.z -= wash * (1. - radial).clamp(0., 1.);
+        }
     }
-    let u = (p.x / airframe::WING.span).abs();
+    let u = (p.x
+        / if twin {
+            da62::SPAN
+        } else {
+            airframe::WING.span
+        })
+    .abs();
     if u < 1. {
-        let (chord, center, height) = airframe::WING.section(u);
+        let (chord, center, height) = if twin {
+            let [lead, chord, y] = da62::surface(false, u);
+            (chord, lead - 0.5 * chord, y)
+        } else {
+            airframe::WING.section(u)
+        };
         let around = p - Vec3::new(p.x, height, center);
         v = deflect(v, around, Vec3::new(1., 0.16, chord * 0.57));
         let per_side = WING_SECTIONS / 2;
@@ -196,9 +216,20 @@ fn velocity(p: Vec3, flow: &Airflow<'_>, direction: Vec3, time: f32) -> Vec3 {
             v.y += eddy * 4. * sample.separation * strength;
         }
     }
-    let tail_x = (p.x / airframe::TAIL.span).abs();
+    let tail_x = (p.x
+        / if twin {
+            da62::TAIL_SPAN
+        } else {
+            airframe::TAIL.span
+        })
+    .abs();
     if tail_x < 1. {
-        let (chord, center, height) = airframe::TAIL.section(tail_x);
+        let (chord, center, height) = if twin {
+            let [lead, chord, y] = da62::surface(true, tail_x);
+            (chord, lead - 0.5 * chord, y)
+        } else {
+            airframe::TAIL.section(tail_x)
+        };
         v = deflect(
             v,
             Vec3::new(0., p.y - height, p.z - center),

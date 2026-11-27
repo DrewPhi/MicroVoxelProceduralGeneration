@@ -1,4 +1,5 @@
-//! Skyhawk structural description and its mapping to actual model-local voxels.
+//! Aircraft structural description and its mapping to actual model-local voxels.
+use crate::aircraft_model::{da62, ModelKind};
 use crate::{
     aircraft,
     aircraft_model::{self, Part},
@@ -10,8 +11,17 @@ use std::sync::{Arc, OnceLock};
 
 use aircraft::airframe::{FIN_HEIGHT, FIN_ROOT, TAIL, WING};
 
-pub const COUNT: usize = 36;
-pub const INTACT: u64 = (1 << COUNT) - 1;
+pub const ENGINES: usize = 36;
+pub const REAR_DOOR: usize = 38;
+pub const COUNT: usize = 39;
+pub const INTACT: u64 = (1 << ENGINES) - 1;
+pub fn intact(kind: ModelKind) -> u64 {
+    if kind == ModelKind::Da62 {
+        (1 << COUNT) - 1
+    } else {
+        INTACT
+    }
+}
 pub const TAILCONE: usize = 17;
 pub const TAIL_FIRST: usize = 18;
 pub const FIN_FIRST: usize = 26;
@@ -32,9 +42,10 @@ pub fn section_node(index: usize) -> usize {
     }
 }
 
-pub fn wing_flex(structure: &Structure<COUNT>, active: u64) -> [f32; 2] {
-    let model = asset();
-    let dx = WING.span / 8.;
+pub fn wing_flex(kind: ModelKind, structure: &Structure<COUNT>, active: u64) -> [f32; 2] {
+    let model = asset_for(kind);
+    let span = wing_span(kind);
+    let dx = span / 8.;
     std::array::from_fn(|side| {
         let sign = if side == 0 { 1. } else { -1. };
         (0..8)
@@ -46,16 +57,25 @@ pub fn wing_flex(structure: &Structure<COUNT>, active: u64) -> [f32; 2] {
                 let joint = node.joint.unwrap();
                 let moment = load.moment + (node.center - joint.anchor).cross(load.force);
                 let u = i as f32 / 8.;
-                let rigidity = 1_580_000. * (1. - u).powi(2) + 185_000.;
-                sign * moment.z / rigidity * (WING.span - (i as f32 + 0.5) * dx) * dx
+                let rigidity = if kind == ModelKind::Da62 { 2.3 } else { 1. }
+                    * (1_580_000. * (1. - u).powi(2) + 185_000.);
+                sign * moment.z / rigidity * (span - (i as f32 + 0.5) * dx) * dx
             })
             .sum::<f32>()
             .clamp(-0.18, 0.30)
     })
 }
 
-pub fn flex_point(mut p: Vec3, x: f32, flex: [f32; 2]) -> Vec3 {
-    let span = ((x.abs() - 0.6) / (WING.span - 0.6)).clamp(0., 1.);
+fn wing_span(kind: ModelKind) -> f32 {
+    if kind == ModelKind::Da62 {
+        da62::SPAN
+    } else {
+        WING.span
+    }
+}
+
+pub fn flex_point(kind: ModelKind, mut p: Vec3, x: f32, flex: [f32; 2]) -> Vec3 {
+    let span = ((x.abs() - 0.6) / (wing_span(kind) - 0.6)).clamp(0., 1.);
     p.y += flex[usize::from(x < 0.)] * span * span;
     p
 }
@@ -102,19 +122,77 @@ pub fn owner(part: Part, cell: IVec3) -> usize {
     }
 }
 
+pub(super) fn owner_for(kind: ModelKind, part: Part, cell: IVec3) -> usize {
+    if kind == ModelKind::Skyhawk {
+        return owner(part, cell);
+    }
+    da62_owner(part, (cell.as_vec3() + 0.5) * EDGE)
+}
+
+pub(super) fn da62_owner(part: Part, p: Vec3) -> usize {
+    let x = p.x.abs();
+    let side = usize::from(p.x < 0.);
+    let tail = || strip(p, TAIL_FIRST, 4, da62::TAIL_SPAN);
+    let fin = || FIN_FIRST + (((p.y - da62::FIN_ROOT) / da62::FIN_HEIGHT * 4.) as usize).min(3);
+    match part {
+        Part::Prop => ENGINES,
+        Part::RightProp => ENGINES + 1,
+        Part::LeftDoor => DOOR_FIRST,
+        Part::RightDoor => DOOR_FIRST + 1,
+        Part::RearDoor => REAR_DOOR,
+        Part::LeftFlap | Part::RightFlap | Part::LeftAileron | Part::RightAileron => {
+            strip(p, 1, 8, da62::SPAN)
+        }
+        Part::Elevator => tail(),
+        Part::Rudder => fin(),
+        Part::RightWheel | Part::RightStrut => GEAR_FIRST,
+        Part::LeftWheel | Part::LeftStrut => GEAR_FIRST + 1,
+        Part::NoseWheel | Part::NoseGear => GEAR_FIRST + 2,
+        Part::Body => {
+            if p.z < -4.70 && p.y >= 1.29 && x >= 0.095 {
+                return tail();
+            }
+            if p.z < -3.65 && p.y > 0.39 && x < 0.16 {
+                return fin();
+            }
+            if (1.37..2.13).contains(&x) && (-1.88..1.46).contains(&p.z) {
+                let [lead, chord, height] = da62::surface(false, x / da62::SPAN);
+                let outside_wing =
+                    !(lead - chord..lead).contains(&p.z) || (p.y - height).abs() > 0.145;
+                if (-0.47..0.34).contains(&p.y) && outside_wing {
+                    return ENGINES + side;
+                }
+            }
+            if x > 0.72 && p.z > -2. && p.z < 1.54 {
+                return strip(p, 1, 8, da62::SPAN);
+            }
+            if p.z > 1.17 {
+                return NOSE;
+            }
+            if p.z < -3.05 {
+                return TAILCONE;
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 fn fin(p: Vec3) -> usize {
     FIN_FIRST + (((p.y - FIN_ROOT).max(0.) / FIN_HEIGHT * 4.) as usize).min(3)
 }
 
 pub struct Asset {
     pub structure: [Node; COUNT],
+    pub order: [usize; COUNT - 1],
     pub probes: [Vec<Vec3>; COUNT],
     pub inertia: [Mat3; COUNT],
     cells: [Vec<(Part, IVec3, [f32; 3])>; COUNT],
 }
 
-fn joint(node: usize, p: Vec3) -> Option<Joint> {
-    let (parent, anchor, axes, forces, moments, toughness) = match node {
+fn joint(kind: ModelKind, node: usize, p: Vec3) -> Option<Joint> {
+    let twin = kind == ModelKind::Da62;
+    let (mut parent, mut anchor, axes, mut forces, mut moments, toughness) = match node {
         0 => return None,
         1..17 => {
             let index = (node - 1) % 8;
@@ -185,6 +263,14 @@ fn joint(node: usize, p: Vec3) -> Option<Joint> {
             Vec3::splat(12_000.),
             0.16,
         ),
+        ENGINES..REAR_DOOR => (
+            strip(p, 1, 8, da62::SPAN),
+            da62::PROP.with_x(p.x),
+            Mat3::IDENTITY,
+            Vec3::splat(48_000.),
+            Vec3::splat(27_000.),
+            0.19,
+        ),
         _ => (
             0,
             Vec3::new(p.x, 0.16, 0.35),
@@ -194,6 +280,41 @@ fn joint(node: usize, p: Vec3) -> Option<Joint> {
             0.14,
         ),
     };
+    if twin {
+        match node {
+            1..17 => {
+                let u = ((node - 1) % 8) as f32 / 8.;
+                let [lead, chord, y] = da62::surface(false, u);
+                anchor = Vec3::new(
+                    p.x.signum() * (u * da62::SPAN).max(0.71),
+                    y,
+                    lead - 0.45 * chord,
+                );
+            }
+            TAILCONE => anchor = Vec3::new(0., 0.04, -3.05),
+            TAIL_FIRST..FIN_FIRST => {
+                let u = ((node - TAIL_FIRST) % 4) as f32 / 4.;
+                let [lead, chord, y] = da62::surface(true, u);
+                anchor = Vec3::new(p.x.signum() * u * da62::TAIL_SPAN, y, lead - 0.45 * chord);
+                if u == 0. {
+                    parent = NOSE - 1;
+                }
+            }
+            FIN_FIRST..NOSE => {
+                anchor = Vec3::new(
+                    0.,
+                    da62::FIN_ROOT + ((node - FIN_FIRST) as f32 / 4.) * da62::FIN_HEIGHT,
+                    -5.30,
+                )
+            }
+            GEAR_FIRST..=32 => parent = ENGINES + usize::from(p.x < 0.),
+            _ => {}
+        }
+        if node < ENGINES {
+            forces *= 1.85;
+            moments *= 2.15;
+        }
+    }
     Some(Joint {
         parent,
         anchor,
@@ -213,7 +334,20 @@ fn joint(node: usize, p: Vec3) -> Option<Joint> {
     })
 }
 
-fn mass(node: usize) -> f32 {
+fn mass(kind: ModelKind, node: usize) -> f32 {
+    if kind == ModelKind::Da62 {
+        return match node {
+            0 => 0.,
+            1..17 => [24., 31., 29., 19., 17., 12., 8., 5.][(node - 1) % 8],
+            TAILCONE => 72.,
+            TAIL_FIRST..FIN_FIRST => 4.4,
+            FIN_FIRST..NOSE => 5.,
+            NOSE => 58.,
+            GEAR_FIRST..DOOR_FIRST => 22.,
+            ENGINES..REAR_DOOR => 201.,
+            _ => 12.,
+        };
+    }
     match node {
         0 => 0.,
         1..17 => [11., 21., 17., 10., 7., 6., 5., 4.][(node - 1) % 8],
@@ -226,39 +360,51 @@ fn mass(node: usize) -> f32 {
     }
 }
 
+#[cfg(test)]
 pub fn asset() -> &'static Asset {
+    asset_for(ModelKind::Skyhawk)
+}
+
+pub fn asset_for(kind: ModelKind) -> &'static Asset {
     static ASSET: OnceLock<Asset> = OnceLock::new();
-    ASSET.get_or_init(|| {
+    static DIAMOND: OnceLock<Asset> = OnceLock::new();
+    let cache = if kind == ModelKind::Da62 {
+        &DIAMOND
+    } else {
+        &ASSET
+    };
+    cache.get_or_init(|| {
+        let solids = aircraft_model::structural_cells(kind);
         let mut points: [Vec<Vec3>; COUNT] = std::array::from_fn(|_| Vec::new());
         let mut groups: [Vec<(Part, IVec3, [f32; 3])>; COUNT] = std::array::from_fn(|_| Vec::new());
         for part in Part::ALL {
-            let mut cells: Vec<_> = aircraft_model::solid_parts()[part as usize]
-                .keys()
-                .copied()
-                .collect();
+            let mut cells: Vec<_> = solids[part as usize].keys().copied().collect();
             cells.sort_unstable_by_key(|p| (p.x, p.y, p.z));
             for cell in cells {
-                let owner = owner(part, cell);
+                let owner = owner_for(kind, part, cell);
                 points[owner].push((cell.as_vec3() + Vec3::splat(0.5)) * EDGE);
-                groups[owner].push((
-                    part,
-                    cell,
-                    aircraft_model::solid_parts()[part as usize][&cell],
-                ));
+                groups[owner].push((part, cell, solids[part as usize][&cell]));
             }
         }
         let structure = std::array::from_fn(|i| {
+            if !live(intact(kind), i) {
+                return Node {
+                    center: Vec3::ZERO,
+                    mass: 0.,
+                    joint: None,
+                };
+            }
             assert!(!points[i].is_empty(), "empty structural assembly {i}");
             let center = points[i].iter().sum::<Vec3>() / points[i].len() as f32;
             Node {
                 center,
-                mass: mass(i),
-                joint: joint(i, center),
+                mass: mass(kind, i),
+                joint: joint(kind, i, center),
             }
         });
         let inertia = std::array::from_fn(|i| {
             let node = structure[i];
-            let voxel_mass = node.mass / points[i].len() as f32;
+            let voxel_mass = node.mass / points[i].len().max(1) as f32;
             points[i].iter().fold(
                 Mat3::from_diagonal(Vec3::splat(node.mass * EDGE * EDGE / 6.)),
                 |m, p| m + point_inertia(*p - node.center) * voxel_mass,
@@ -268,8 +414,22 @@ pub fn asset() -> &'static Asset {
             let xs = &points[i];
             support_points(xs)
         });
+        let mut order = std::array::from_fn(|i| i + 1);
+        if kind == ModelKind::Da62 {
+            let depth = |mut i: usize| {
+                let mut steps = 0;
+                while let Some(joint) = structure[i].joint {
+                    i = joint.parent;
+                    steps += 1;
+                    assert!(steps < COUNT, "cycle in DA62 attachments");
+                }
+                steps
+            };
+            order.sort_by_key(|&i| depth(i));
+        }
         Asset {
             structure,
+            order,
             probes,
             inertia,
             cells: groups,
@@ -310,6 +470,7 @@ pub fn point_inertia(r: Vec3) -> Mat3 {
 }
 
 pub struct Damage {
+    pub kind: ModelKind,
     pub active: u64,
     pub structure: Structure<COUNT>,
     pub fragments: Vec<destruction::Fragment>,
@@ -322,6 +483,7 @@ pub struct Damage {
 impl Default for Damage {
     fn default() -> Self {
         Self {
+            kind: ModelKind::Skyhawk,
             active: INTACT,
             structure: Structure::default(),
             fragments: Vec::new(),
@@ -334,6 +496,7 @@ impl Default for Damage {
 }
 
 pub struct FragmentStructure {
+    kind: ModelKind,
     mask: u64,
     structure: Structure<COUNT>,
     joints: [Mat4; Part::COUNT],
@@ -354,14 +517,7 @@ struct Chip {
 }
 
 pub fn pose_joints(pose: aircraft::Presentation) -> [Mat4; Part::COUNT] {
-    aircraft_model::joints(
-        pose,
-        aircraft_model::Rig {
-            doors: [pose.door; 2],
-            flaps: pose.instruments.flaps_degrees / aircraft::airframe::FLAP_TRAVEL.to_degrees(),
-            ..Default::default()
-        },
-    )
+    pose.kind.joints(pose, aircraft_model::Rig::flight(pose))
 }
 
 impl FragmentStructure {
@@ -374,7 +530,7 @@ impl FragmentStructure {
         velocity: Vec3,
         angular: Vec3,
     ) -> destruction::Fragment {
-        let asset = asset();
+        let asset = asset_for(self.kind);
         let mass_of = |i: usize| {
             if i == 0 {
                 self.root_mass
@@ -435,8 +591,8 @@ impl FragmentStructure {
             for p in coords {
                 let rest = (p.as_vec3() + Vec3::splat(0.5)) * EDGE;
                 let moved = joint.transform_point3(rest);
-                let point = if (1..17).contains(&owner(part, p)) {
-                    flex_point(moved, rest.x, self.flex)
+                let point = if (1..17).contains(&owner_for(self.kind, part, p)) {
+                    flex_point(self.kind, moved, rest.x, self.flex)
                 } else {
                     moved
                 } - center;
@@ -444,7 +600,35 @@ impl FragmentStructure {
                 hi = hi.max(point);
                 positions.push(point);
             }
-            aircraft_model::fragment_part(cells, part, joint, center, self.flex, &mut vertices);
+            // Coarse occupancy represents the contact shape of fine-only gear and
+            // propellers. Render those parts from their own detail lattice.
+            let cells = if self.kind == ModelKind::Da62 {
+                let original = &aircraft_model::solid_parts_for(self.kind)[part as usize];
+                cells
+                    .into_iter()
+                    .filter(|(p, _)| original.contains_key(p))
+                    .collect()
+            } else {
+                cells
+            };
+            aircraft_model::fragment_part(
+                self.kind,
+                cells,
+                part,
+                joint,
+                center,
+                self.flex,
+                &mut vertices,
+            );
+        }
+        if self.kind == ModelKind::Da62 {
+            aircraft_model::da62_fragment_details(
+                mask,
+                &self.joints,
+                center,
+                self.flex,
+                &mut vertices,
+            );
         }
         // Build contact extrema for each occupied segment, preserving the
         // leading and trailing edges of long, slender fragments.
@@ -479,6 +663,7 @@ impl FragmentStructure {
                 inverse_inertia: inertia.inverse(),
             }),
             source: Some(Self {
+                kind: self.kind,
                 mask,
                 structure: self.structure.clone(),
                 joints: self.joints,
@@ -503,8 +688,12 @@ impl FragmentStructure {
         angular: Vec3,
         chips_out: &mut Vec<destruction::Fragment>,
     ) -> destruction::Fragment {
-        let node = mask.trailing_zeros() as usize;
-        let asset = asset();
+        let asset = asset_for(self.kind);
+        let node = [0]
+            .into_iter()
+            .chain(asset.order)
+            .find(|&i| live(mask, i))
+            .unwrap();
         let mut chips = Vec::new();
         let mut direction = Vec3::ZERO;
         let mut speed = 0.;
@@ -518,7 +707,7 @@ impl FragmentStructure {
                 speed = (stress * 0.000075).sqrt().clamp(0.65, 3.5);
                 let mut candidates = Vec::new();
                 for &(part, cell, color) in &asset.cells[node] {
-                    let cells = &aircraft_model::solid_parts()[part as usize];
+                    let cells = &aircraft_model::structural_cells(self.kind)[part as usize];
                     if self
                         .excluded
                         .iter()
@@ -537,7 +726,7 @@ impl FragmentStructure {
                     let rest = (cell.as_vec3() + Vec3::splat(0.5)) * EDGE;
                     let moved = self.joints[part as usize].transform_point3(rest);
                     let center = if (1..17).contains(&node) {
-                        flex_point(moved, rest.x, self.flex)
+                        flex_point(self.kind, moved, rest.x, self.flex)
                     } else {
                         moved
                     };
@@ -607,7 +796,7 @@ pub fn separate(
     let orientation = Quat::from_mat3(&axes);
     let origin = pose.pose.position;
     let cg_world = origin + (axes * cg).as_dvec3();
-    let members = asset()
+    let members = asset_for(pose.kind)
         .structure
         .iter()
         .enumerate()
@@ -617,6 +806,7 @@ pub fn separate(
     let root_center =
         (cg * mass - members.map(|(_, n)| n.center * n.mass).sum::<Vec3>()) / root_mass;
     let mut source = FragmentStructure {
+        kind: pose.kind,
         mask,
         structure: damage.structure.clone(),
         joints: pose_joints(pose),
@@ -652,7 +842,7 @@ pub fn fracture_fragment(
     let point = orientation.conjugate() * (hit.contact.point - body.pose.center).as_vec3()
         + body.shape.center;
     let impulse = orientation.conjugate() * hit.impulse;
-    let asset = asset();
+    let asset = asset_for(source.kind);
     let node = (0..COUNT)
         .filter(|&i| live(source.mask, i))
         .min_by(|&a, &b| {
@@ -675,12 +865,13 @@ pub fn fracture_fragment(
     }
     loads[node].apply(impulse / DURATION, point - asset.structure[node].center);
     let mut components = Vec::new();
-    if !source.structure.solve(
+    if !source.structure.solve_in_order(
         &asset.structure,
         source.mask,
         &loads,
         DURATION,
         &mut components,
+        asset.order.iter().copied(),
     ) {
         return;
     }

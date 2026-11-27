@@ -167,8 +167,11 @@ impl Default for VisualSettings {
 pub struct SettingsStats {
     pub can_board: bool,
     pub flight: Option<crate::aircraft::Instruments>,
+    pub cockpit_pointer: Option<glam::Vec2>,
+    pub cockpit_control: Option<crate::aircraft_model::CockpitControl>,
     pub flight_audio: bool,
     pub flight_camera_motion: bool,
+    pub cockpit_eye_offset: Option<glam::Vec3>,
     pub available_mib: Option<usize>,
     pub naadf_status: String,
     pub naadf_gpu_mib: f64,
@@ -195,6 +198,7 @@ pub struct SettingsChanges {
     pub toggle_airflow: bool,
     pub toggle_flight_audio: bool,
     pub toggle_flight_camera_motion: bool,
+    pub cockpit_eye_offset: Option<glam::Vec3>,
 }
 
 impl VisualSettings {

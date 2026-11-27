@@ -82,7 +82,25 @@ cargo build --release --locked --bin frontier
   --capture-far 6000 --width 1280 --height 720 --msaa 1 --naadf off
 ```
 
-To reproduce the steep valley benchmark:
+## DA62 runway launch
+
+Seed 7 places a 520 m dirt runway at world coordinates (3856, 3072) m.
+This command starts in the DA62 pilot seat with regional weather and the
+6 km native terrain and vegetation path.
+
+```sh
+./run.sh --preset eroded --seed 7 --module-flora --aircraft da62 \
+  --flight-parked --flight-view pilot --weather regional \
+  --capture-far 6000 --width 1280 --height 720 --msaa 1 --naadf off
+```
+
+Use `--flight-walkup` in place of `--flight-parked` to start beside the
+aircraft. Open a door with **O** and board with **V**. The flight controls
+include **Shift/Ctrl** for both power levers, **Q/E** for ground steering,
+**Z/X** for flaps, **S/W** for pitch, **G** for gear and **C** for camera.
+`--seed random` selects a fresh world and searches for a dry runway site.
+
+## Reproduce the valley benchmark
 
 ```sh
 ./target/release/frontier --preset eroded --module-flora \

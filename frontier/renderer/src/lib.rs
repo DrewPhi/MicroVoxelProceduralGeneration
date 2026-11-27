@@ -85,7 +85,7 @@ mod woodland_volume;
 mod world_weather;
 
 use frontier_world::{voxel_size, Cell, Material, World};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec2, Vec3};
 use std::{
     collections::HashSet,
     error::Error,
@@ -268,6 +268,15 @@ impl Camera {
         Mat4::perspective_rh(self.fov_y.to_radians(), aspect, 0.025, self.far)
             * Mat4::look_to_rh(eye, self.direction(), self.view_up())
     }
+    fn pointer_ray(&self, pointer: Vec2, aspect: f32) -> Vec3 {
+        let forward = self.direction();
+        let right = forward.cross(self.view_up()).normalize();
+        let up = right.cross(forward);
+        let ndc = pointer * Vec2::new(2., -2.) + Vec2::new(-1., 1.);
+        let half_height = (self.fov_y.to_radians() * 0.5).tan();
+        (forward + half_height * (right * ndc.x * aspect + up * ndc.y)).normalize()
+    }
+
     fn view_up(&self) -> Vec3 {
         // Derive the zero-roll frame from heading even with the nose vertical.
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
@@ -810,18 +819,25 @@ impl Gpu {
     ) {
         self.airframe_pose = aircraft
             .map(|plane| plane.presentation(camera))
-            .or_else(|| parked.map(|(plane, pose)| plane.presentation(*pose)));
-        if self.airframe_pose.is_some()
-            && self
+            .or_else(|| {
+                parked.map(|(plane, pose)| aircraft::Presentation {
+                    engine_running: false,
+                    ..plane.presentation(*pose)
+                })
+            });
+        if let Some(pose) = self.airframe_pose {
+            if self
                 .airframe
                 .as_ref()
-                .is_none_or(|model| model.samples != self.sample_count)
-        {
-            self.airframe = Some(aircraft_model::Model::new(
-                &self.device,
-                self.scene_format,
-                self.sample_count,
-            ));
+                .is_none_or(|model| model.samples != self.sample_count || model.kind != pose.kind)
+            {
+                self.airframe = Some(aircraft_model::Model::new_for(
+                    &self.device,
+                    self.scene_format,
+                    self.sample_count,
+                    pose.kind,
+                ));
+            }
         }
         if let (Some(model), Some(pose)) = (&mut self.airframe, self.airframe_pose) {
             if let Some(plane) = aircraft.or_else(|| parked.map(|(plane, _)| plane)) {
@@ -1772,6 +1788,21 @@ impl Gpu {
                 metadata.push_str(&format!(",\"naadf_traversal_diagnostics\":{counters}}}"));
             }
         }
+        if let Some(plane) = self.airframe_pose {
+            metadata.pop();
+            metadata.push_str(&format!(
+                ",\"cockpit\":{{\"aircraft\":\"{}\",\"gear\":{},\"right_power\":{},\"throttle\":{},\"mixture\":{},\"ignition\":{},\"engine_running\":{},\"avionics\":{},\"flaps_degrees\":{}}}}}",
+                plane.kind.name(),
+                plane.gear,
+                plane.right_power,
+                plane.instruments.throttle,
+                plane.mixture,
+                plane.ignition,
+                plane.engine_running,
+                plane.avionics,
+                plane.instruments.flaps_degrees,
+            ));
+        }
         std::fs::write(metadata_path, metadata)?;
         let mut png = png::Encoder::new(std::fs::File::create(path)?, width, height);
         png.set_color(png::ColorType::Rgba);
@@ -1952,6 +1983,7 @@ struct Viewer {
     rolling_terrain: bool,
     aircraft: Option<aircraft::Aircraft>,
     parked_aircraft: Option<(aircraft::Aircraft, Camera)>,
+    flight_aircraft: aircraft_model::ModelKind,
     flight_wind: Vec3,
     airborne_radar: bool,
     world_weather: Option<world_weather::Session>,
@@ -2014,6 +2046,8 @@ struct Viewer {
     shadow_trace: playability::ShadowTrace,
     keys: HashSet<KeyCode>,
     grabbed: bool,
+    cockpit_cursor: bool,
+    pointer: Option<winit::dpi::PhysicalPosition<f64>>,
     minimized: bool,
     last_frame: Instant,
     fps_start: Instant,
@@ -2076,13 +2110,14 @@ impl Viewer {
         self.parked_aircraft = self.aircraft.take().map(|p| (p, pose));
         self.camera = walker;
         self.set_walking(true);
+        self.close_cockpit_cursor();
         true
     }
     fn use_aircraft(&mut self) {
         if self.aircraft.is_some() {
             self.leave_aircraft();
-        } else if let Some((_, pose)) = &self.parked_aircraft {
-            if aircraft::Aircraft::can_board(&self.world, *pose, self.camera.position) {
+        } else if let Some((plane, pose)) = &self.parked_aircraft {
+            if plane.can_board_here(&self.world, *pose, self.camera.position) {
                 let (plane, pose) = self.parked_aircraft.take().unwrap();
                 self.camera = pose;
                 self.aircraft = Some(plane);
@@ -2090,7 +2125,8 @@ impl Viewer {
             }
         } else {
             let mut pose = self.camera;
-            let mut plane = aircraft::Aircraft::enter(&self.world, &mut pose);
+            let mut plane =
+                aircraft::Aircraft::enter_as(&self.world, &mut pose, self.flight_aircraft);
             plane.enable_damage();
             plane.set_wind(self.flight_wind);
             plane.radar.equipped = self.airborne_radar;
@@ -2557,10 +2593,60 @@ impl Viewer {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
         }
     }
+    fn cockpit_pointer(&self) -> Option<Vec2> {
+        let pointer = self.pointer.filter(|_| self.cockpit_cursor)?;
+        let position = Vec2::new(
+            pointer.x as f32 / self.width as f32,
+            pointer.y as f32 / self.height as f32,
+        );
+        (position.cmpge(Vec2::ZERO).all() && position.cmplt(Vec2::ONE).all()).then_some(position)
+    }
+
+    fn cockpit_control(&self, pointer: Vec2) -> Option<aircraft_model::CockpitControl> {
+        self.aircraft.as_ref()?.cockpit_control(
+            self.camera,
+            pointer,
+            self.width as f32 / self.height as f32,
+        )
+    }
+
+    fn close_cockpit_cursor(&mut self) {
+        if std::mem::take(&mut self.cockpit_cursor) {
+            self.grab(true);
+        }
+    }
+
+    fn toggle_cockpit_cursor(&mut self) {
+        if self.cockpit_cursor {
+            self.close_cockpit_cursor();
+        } else if self
+            .aircraft
+            .as_ref()
+            .is_some_and(|plane| plane.exterior_pose().is_none())
+        {
+            self.cockpit_cursor = true;
+            self.grab(false);
+            if let Some(window) = &self.window {
+                let size = window.inner_size();
+                let center = winit::dpi::PhysicalPosition::new(
+                    f64::from(size.width) * 0.5,
+                    f64::from(size.height) * 0.5,
+                );
+                if window.set_cursor_position(center).is_ok() {
+                    self.pointer = Some(center);
+                }
+            }
+        }
+    }
+
     fn grab(&mut self, grabbed: bool) {
+        self.pointer = None;
         if !grabbed {
             self.player_edit.cancel();
-            if let Some(plane) = &mut self.aircraft {
+        }
+        if let Some(plane) = &mut self.aircraft {
+            plane.set_cockpit_control(None);
+            if !grabbed && !self.cockpit_cursor {
                 plane.set_looking(false);
             }
         }
@@ -2681,8 +2767,11 @@ impl Viewer {
             .settings_ui
             .as_ref()
             .is_some_and(|ui| ui.radar_open() && !ui.menu_open());
+        let clicking_cockpit = self.cockpit_cursor
+            && self.aircraft.is_some()
+            && self.settings_ui.as_ref().is_none_or(|ui| !ui.owns_cursor());
         if !self.benchmark_input_lock
-            && (self.grabbed || watching_weather && self.aircraft.is_some())
+            && (self.grabbed || clicking_cockpit || watching_weather && self.aircraft.is_some())
             && self.pending_teleport.is_none()
         {
             if let Some(plane) = &mut self.aircraft {
@@ -2751,6 +2840,7 @@ impl Viewer {
                         self.destruction.receive(&mut self.world, damage);
                     }
                     self.set_walking(false);
+                    self.close_cockpit_cursor();
                 } else if was_grounded != plane.on_ground() {
                     eprintln!(
                         "Aircraft {} at {:.0} kt",
@@ -2808,7 +2898,13 @@ impl Viewer {
                         .filter(|(_, pose)| {
                             self.camera.position.distance_squared(pose.position) < 64.
                         })
-                        .map(|(_, pose)| (pose.position, aircraft::axes(*pose).transpose()));
+                        .map(|(plane, pose)| {
+                            (
+                                plane.kind(),
+                                pose.position,
+                                aircraft::axes(*pose).transpose(),
+                            )
+                        });
                     self.camera.position =
                         DVec3::from_array(self.walking.advance_presented_sampled(
                             self.camera.position.to_array(),
@@ -2817,10 +2913,10 @@ impl Viewer {
                             dt as f64,
                             self.visual_settings.step_smoothing,
                             |cell| {
-                                if let Some((origin, inverse)) = collider {
+                                if let Some((kind, origin, inverse)) = collider {
                                     let local = inverse
                                         * (DVec3::from_array(cell.center_m()) - origin).as_vec3();
-                                    if aircraft::parked_solid(local) {
+                                    if aircraft::parked_solid(kind, local) {
                                         return frontier_world::Material::Stone;
                                     }
                                 }
@@ -2938,7 +3034,10 @@ impl Viewer {
             self.flight_audio
                 .update(self.aircraft.as_ref(), self.camera, jolt);
         }
-        if let (Some(weather), Some(plane)) = (&mut self.world_weather, &self.aircraft) {
+        if let (Some(weather), Some(plane)) = (
+            &mut self.world_weather,
+            self.aircraft.as_ref().filter(|plane| plane.shows_weather()),
+        ) {
             let pose = plane.exterior_pose().unwrap_or(self.camera);
             weather.request_instrument(frontier_runtime::weather::radar::Request {
                 position: pose.position,
@@ -3633,22 +3732,45 @@ impl ApplicationHandler for Viewer {
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
             WindowEvent::Occluded(value) => self.minimized = value,
             WindowEvent::Focused(false) => {
+                self.cockpit_cursor = false;
                 self.keys.clear();
                 self.grab(false);
+            }
+            WindowEvent::CursorMoved { position, .. } if self.cockpit_cursor => {
+                let previous = self.pointer.replace(position);
+                if let (Some(previous), Some(plane)) = (previous, &mut self.aircraft) {
+                    plane.drag_cockpit(position.y - previous.y);
+                }
+            }
+            WindowEvent::CursorLeft { .. } if self.cockpit_cursor => {
+                self.pointer = None;
+                if let Some(plane) = &mut self.aircraft {
+                    plane.set_cockpit_control(None);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.benchmark_input_lock || self.pending_teleport.is_some() {
                     return;
                 }
-                if !self.grabbed {
+                if self.cockpit_cursor {
+                    if button == MouseButton::Left {
+                        let control = if state == ElementState::Pressed {
+                            self.cockpit_pointer()
+                                .and_then(|pointer| self.cockpit_control(pointer))
+                        } else {
+                            None
+                        };
+                        if let Some(plane) = &mut self.aircraft {
+                            plane.set_cockpit_control(control);
+                        }
+                    }
+                } else if !self.grabbed {
                     if state == ElementState::Pressed {
                         self.grab(true);
                     }
-                } else if let Some(plane) = &mut self.aircraft {
-                    if button == MouseButton::Right {
-                        plane.set_looking(state == ElementState::Pressed);
-                    }
-                } else if button == MouseButton::Left || button == MouseButton::Right {
+                } else if self.aircraft.is_none()
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
+                {
                     if self.player_edit.enabled {
                         self.player_mouse(button, state);
                     } else if state == ElementState::Pressed {
@@ -3681,7 +3803,12 @@ impl ApplicationHandler for Viewer {
                                 live.inventory_mut().select_slot(slot);
                             }
                         }
-                        if key == KeyCode::KeyG && !event.repeat {
+                        if key == KeyCode::KeyG
+                            && !event.repeat
+                            && self.aircraft.as_ref().is_none_or(|plane| {
+                                plane.kind() == aircraft_model::ModelKind::Skyhawk
+                            })
+                        {
                             if let Some(live) = &mut self.live_water {
                                 live.open_dam(&mut self.world);
                             }
@@ -3699,9 +3826,17 @@ impl ApplicationHandler for Viewer {
                             if let Some(plane) = &mut self.aircraft {
                                 plane.toggle_view(&mut self.camera, &self.world);
                             }
+                            self.close_cockpit_cursor();
                         }
+                        if key == KeyCode::Tab && !event.repeat {
+                            self.toggle_cockpit_cursor();
+                        }
+                        let freelook_available = self.grabbed;
                         if let Some(plane) = &mut self.aircraft {
                             match key {
+                                KeyCode::KeyL if !event.repeat && freelook_available => {
+                                    plane.toggle_look()
+                                }
                                 KeyCode::KeyO if !event.repeat => plane.toggle_doors(),
                                 KeyCode::KeyH if !event.repeat => plane.toggle_hold(self.camera),
                                 KeyCode::KeyZ if !event.repeat => plane.select_flap(1),
@@ -3710,7 +3845,16 @@ impl ApplicationHandler for Viewer {
                                 KeyCode::KeyJ if !event.repeat => {
                                     plane.toggle_camera_motion(&mut self.camera, &self.world)
                                 }
-                                KeyCode::KeyM if !event.repeat => plane.radar.cycle(),
+                                KeyCode::KeyN if !event.repeat => plane.cycle_display(0),
+                                KeyCode::KeyM if !event.repeat => plane.cycle_display(1),
+                                KeyCode::KeyK if !event.repeat => plane.radar.cycle(),
+                                KeyCode::KeyI if !event.repeat => plane.toggle_ignition(),
+                                KeyCode::KeyG if !event.repeat => plane.toggle_gear(),
+                                KeyCode::Digit7 if !event.repeat => plane.toggle_twin_engine(0),
+                                KeyCode::Digit8 if !event.repeat => plane.toggle_twin_engine(1),
+                                KeyCode::KeyU if !event.repeat => plane.toggle_avionics(),
+                                KeyCode::Insert => plane.adjust_mixture(0.05),
+                                KeyCode::Delete => plane.adjust_mixture(-0.05),
                                 KeyCode::Comma if !event.repeat => plane.radar.adjust_range(-1),
                                 KeyCode::Period if !event.repeat => plane.radar.adjust_range(1),
                                 KeyCode::Semicolon if !event.repeat => {
@@ -3852,6 +3996,7 @@ pub fn run() -> Result<()> {
         capture,
         capture_on_exit,
         rolling_terrain,
+        flight_aircraft,
         flight_chase,
         flight_parked,
         flight_altitude,
@@ -4395,10 +4540,10 @@ pub fn run() -> Result<()> {
     let mut parked_aircraft = None;
     let aircraft = if let Some(chase) = flight_chase {
         let mut plane = if let Some(runway) = world.fbm_terrain().and_then(|t| t.dirt_runway()) {
-            aircraft::Aircraft::park_on_runway(&world, &mut camera, runway)
+            aircraft::Aircraft::park_on_runway(&world, &mut camera, runway, flight_aircraft)
                 .ok_or("unable to place aircraft on the graded runway")?
         } else if flight_parked {
-            aircraft::Aircraft::park(&world, &mut camera)
+            aircraft::Aircraft::park_as(&world, &mut camera, flight_aircraft)
                 .ok_or("no suitable parking spot near spawn; pick another --start-xz or seed")?
         } else {
             if eye.is_none() {
@@ -4426,10 +4571,12 @@ pub fn run() -> Result<()> {
                     camera.pitch = 0.;
                 }
             }
-            aircraft::Aircraft::enter(&world, &mut camera)
+            aircraft::Aircraft::enter_as(&world, &mut camera, flight_aircraft)
         };
         plane.set_wind(flight_wind);
-        if rolling_terrain && capture.is_none() {
+        if rolling_terrain
+            && (capture.is_none() || flight_aircraft == aircraft_model::ModelKind::Da62)
+        {
             plane.enable_damage();
         }
         plane.radar.equipped = airborne_radar;
@@ -4739,6 +4886,7 @@ pub fn run() -> Result<()> {
         rolling_terrain,
         aircraft,
         parked_aircraft,
+        flight_aircraft,
         flight_wind,
         airborne_radar,
         world_weather,
@@ -4848,6 +4996,8 @@ pub fn run() -> Result<()> {
         terrain_center_lag_end_m: 0.,
         keys: HashSet::new(),
         grabbed: false,
+        cockpit_cursor: false,
+        pointer: None,
         minimized: false,
         last_frame: now,
         fps_start: now,

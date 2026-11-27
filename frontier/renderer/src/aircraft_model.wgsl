@@ -1,16 +1,17 @@
 struct View {
     matrix: mat4x4<f32>,
-    joints: array<mat4x4<f32>, 22>,
+    joints: array<mat4x4<f32>, 28>,
     sun: vec4f,
     eye: vec4f,
     flight: vec4f, // km/h, altitude, bank, pitch
     nav: vec4f,    // heading, climb rate, home bearing relative to nose, home range
-    radio: vec4f,  // COM frequency in kHz, flight hold, stall, ground flag
+    radio: vec4f,  // COM kHz, flight hold, stall, gear indication or ground flag
     chart: vec4f,
     motion: vec4f,
     wind: vec4f,
     weather_display: vec4f,
     weather_profile: vec4f,
+    screen_pages: vec4u,
     inspection: vec4f,
     shadow_matrix: mat4x4<f32>,
 }
@@ -37,12 +38,16 @@ fn animate_vertex(p:vec3f, normal:vec3f, part:u32)->AnimatedVertex {
     let joint=view.joints[part];
     var pos=joint*vec4f(p,1.);
     var n=(joint*vec4f(normal,0.)).xyz;
-    if (part==0u && abs(p.x)>.60 && p.y>.57 && p.y<1.42 && abs(p.z)<.96)
+    let twin=view.eye.w>.5;
+    let wing=select(abs(p.x)>.60 && p.y>.57 && p.y<1.42 && abs(p.z)<.96,
+        abs(p.x)>.72 && abs(p.x)<7.29 && abs(p.z+.32)<1.20 && p.y>-.39 && p.y<.61,twin);
+    if (part==0u && wing)
         || part==5u || part==6u || part==20u || part==21u {
-        let span=clamp((abs(p.x)-.60)/4.9,0.,1.);
+        let width=select(4.9,6.675,twin);
+        let span=clamp((abs(p.x)-.60)/width,0.,1.);
         let flex=select(view.inspection.z,view.inspection.w,p.x<0.);
         pos.y+=flex*span*span;
-        n.x-=2.*span*flex*sign(p.x)*n.y/4.9;
+        n.x-=2.*span*flex*sign(p.x)*n.y/width;
     }
     return AnimatedVertex(pos,n);
 }
@@ -86,6 +91,7 @@ fn glyph(code:u32) -> u32 {
         case 77u: { return 23549u; } // M
         case 78u: { return 24573u; } // N
         case 79u: { return 31599u; } // O
+        case 89u: { return 9389u; } // Y
         case 80u: { return 4843u; } // P
         case 82u: { return 23275u; } // R
         case 83u: { return 31183u; } // S
@@ -169,29 +175,6 @@ fn dial(p:vec2f,kind:u32)->vec3f {
         color=mix(color,AMBER,max(wings,1.-smoothstep(.05,.05+aa,r)));
         return mix(color,rim,smoothstep(.86,.96,r));
     }
-    if kind==4u {
-        let wings=rotate(p,-clamp(view.motion.x/.053,-1.,1.)*.48);
-        let whitewing=max(stroke(wings,vec2f(-.71,0.),vec2f(.71,0.),.033,aa),stroke(wings,vec2f(0.,-.24),vec2f(0.,.15),.038,aa));
-        color=mix(color,WHITE,whitewing);
-        color=mix(color,MINT,label(uv,vec2f(.30,.17),vec2f(.035,.026),vec3u(84,82,78)));
-        for(var i=-1;i<=1;i+=2){
-            color=mix(color,AMBER,stroke(p,vec2f(f32(i)*.61,.32),vec2f(f32(i)*.79,.41),.022,aa));
-        }
-        return color;
-    }
-    if kind==5u {
-        let heading=radians(view.nav.x);
-        let tick=abs(sin((angle+heading)*18.));
-        if r>.71 && r<.88 && tick<.27 {color=WHITE;}
-        for(var i=0u;i<4u;i++){
-            let codes=array<u32,4>(78u,69u,83u,87u);
-            let pos=radial(f32(i)*TAU*.25-heading)*.32+.5;
-            color=mix(color,WHITE,label(uv,pos-vec2f(.034,.055),vec2f(.021,.022),vec3u(codes[i],0u,0u)));
-        }
-        color=mix(color,AMBER,stroke(p,vec2f(0.,-.88),vec2f(0.,-.58),.032,aa));
-        let hdg=u32(round(view.nav.x))%360u;
-        return mix(color,WHITE,number(uv,vec2f(.30,.46),vec2f(.036,.027),hdg,3u));
-    }
     var sweep=TAU*.83;
     var start=-sweep*.5;
     var major=9.;
@@ -202,12 +185,7 @@ fn dial(p:vec2f,kind:u32)->vec3f {
         start=0.; sweep=TAU; major=10.; step_value=1u;
         reading=fract(view.flight.y*3.28084/1000.);
         unit=vec3u(70,84,0);
-    } else if kind==6u {
-        start=-TAU*.5+.20; sweep=TAU-.4; major=8.; step_value=5u;
-        // Zero at nine o'clock; climb above it, descent below it.
-        start=-TAU*.25-sweep*.5;
-        reading=clamp(.5+view.nav.y*196.85/4000.,0.,1.);
-        unit=vec3u(86,83,73);
+
     }
     let along=fract((angle-start)/TAU+1.)*TAU/sweep;
     if along<=1. {
@@ -221,8 +199,7 @@ fn dial(p:vec2f,kind:u32)->vec3f {
     }
     for(var i=0u;i<=10u;i++){
         if f32(i)>major || (kind==3u && i==10u) {break;}
-        var val=i*step_value;
-        if kind==6u {val=u32(abs(i32(i)-4))*step_value;}
+        let val=i*step_value;
         let pos=radial(start+sweep*f32(i)/major)*.306+.5;
         let digits=select(select(1u,2u,val>=10u),3u,val>=100u);
         color=mix(color,WHITE,number(uv,pos-vec2f(f32(digits)*.029,.041),vec2f(.016,.017),val,digits));
@@ -237,9 +214,76 @@ fn dial(p:vec2f,kind:u32)->vec3f {
     return mix(color,AMBER,1.-smoothstep(.049,.049+aa,r));
 }
 
+fn flight_display(uv:vec2f)->vec3f {
+    // The attitude field rotates under a fixed aircraft symbol.
+    let p=(uv-vec2f(.5,.49))*vec2f(1.6,1.);
+    let attitude=rotate(p,view.flight.z);
+    let horizon=attitude.y-view.flight.w*.72;
+    let aa=clamp(fwidth(horizon),.002,.018);
+    let sky=mix(vec3f(.030,.19,.39),vec3f(.125,.40,.58),clamp(1.+2.*horizon,0.,1.));
+    let ground=mix(vec3f(.44,.24,.095),vec3f(.27,.132,.053),clamp(horizon*2.,0.,1.));
+    var color=mix(sky,ground,smoothstep(-aa,aa,horizon));
+    let interval=radians(10.)*.72;
+    let mark=round(horizon/interval);
+    let ladder=abs(horizon-mark*interval);
+    let half_width=select(.084,.158,mark==0.);
+    if abs(attitude.x)<half_width && abs(mark)<=5. {
+        color=mix(color,WHITE,1.-smoothstep(.003,.003+aa,ladder));
+    }
+    let wings=max(stroke(p,vec2f(-.18,0.),vec2f(-.054,0.),.009,aa),
+                  stroke(p,vec2f(.054,0.),vec2f(.18,0.),.009,aa));
+    color=mix(color,AMBER,max(wings,1.-smoothstep(.013,.013+aa,length(p))));
+    for (var i=-2;i<=2;i+=1) {
+        let tick=radial(f32(i)*.5236);
+        color=mix(color,WHITE,stroke(p,tick*.288,tick*.312,.002,aa));
+    }
+    let bank=radial(-view.flight.z);
+    color=mix(color,AMBER,stroke(p,bank*.25,bank*.28,.005,aa));
+
+    let knots=view.flight.x/1.852;
+    let feet=view.flight.y*3.28084;
+    let speed=knots+(uv.y-.49)*-85.;
+    let altitude=feet+(uv.y-.49)*-900.;
+    if uv.x<.197 || uv.x>.785 {
+        let tick=select(abs(fract(speed/10.+.5)-.5),abs(fract(altitude/100.+.5)-.5),uv.x>.785);
+        color=vec3f(.037,.068,.090);
+        if tick<.055 && ((uv.x>.15 && uv.x<.185) || (uv.x>.795 && uv.x<.832)) {color=WHITE;}
+    }
+    if box_at(uv,vec2f(.019,.421),vec2f(.182,.550))
+        || box_at(uv,vec2f(.793,.421),vec2f(.984,.550)) {color=INK;}
+    if uv.y<.129 || uv.y>.84 {color=INK;}
+    let small=vec2f(.011,.014);
+    color=mix(color,MINT,label(uv,vec2f(.034,.033),small,vec3u(70,76,84)));
+    color=mix(color,MINT,label(uv,vec2f(.034,.181),small,vec3u(75,84,83)));
+    color=mix(color,MINT,label(uv,vec2f(.861,.181),small,vec3u(70,84,0)));
+    color=mix(color,WHITE,number(uv,vec2f(.032,.453),vec2f(.012,.014),u32(round(knots)),3u));
+    color=mix(color,WHITE,number(uv,vec2f(.817,.453),vec2f(.008,.014),u32(round(abs(feet))),5u));
+    if feet<0. {
+        color=mix(color,WHITE,letters(uv,vec2f(.794,.453),vec2f(.006,.014),
+            array<u32,8>(45,0,0,0,0,0,0,0),1u));
+    }
+    color=mix(color,MINT,label(uv,vec2f(.317,.888),small,vec3u(72,68,71)));
+    color=mix(color,WHITE,number(uv,vec2f(.516,.875),vec2f(.018,.018),
+        u32(round(view.nav.x))%360u,3u));
+    let vertical=view.nav.y*196.85;
+    let sign=select(43u,45u,vertical<0.);
+    color=mix(color,MINT,label(uv,vec2f(.465,.033),small,vec3u(86,47,83)));
+    color=mix(color,WHITE,letters(uv,vec2f(.616,.033),small,
+        array<u32,8>(sign,0,0,0,0,0,0,0),1u));
+    color=mix(color,WHITE,number(uv,vec2f(.664,.033),small,
+        u32(clamp(round(abs(vertical)),0.,9999.)),4u));
+    color=mix(color,MINT,label(uv,vec2f(.846,.033),small,vec3u(70,80,77)));
+    if view.radio.z>.5 {
+        color=mix(color,AMBER,letters(uv,vec2f(.198,.033),small,array<u32,8>(83,84,65,76,76,0,0,0),5u));
+    } else if view.radio.y>.5 {
+        color=mix(color,MINT,label(uv,vec2f(.198,.033),small,vec3u(65,80,0)));
+    }
+    return color;
+}
+
 fn navigation(uv:vec2f)->vec3f {
     // +X is east, +Z is south. North stays up as the aircraft banks and turns.
-    let delta=(uv-.5)*vec2f(view.chart.w,view.chart.w/3.);
+    let delta=(uv-.5)*vec2f(view.chart.w,view.chart.w*.625);
     let texel=(view.chart.xy+delta)/view.chart.z+vec2f(textureDimensions(terrain_chart))/2.;
     let cell=vec2i(floor(texel));
     let f=fract(texel);
@@ -259,23 +303,56 @@ fn navigation(uv:vec2f)->vec3f {
     let icon=rotate(delta/view.chart.w,-radians(view.nav.x));
     if stroke(icon,vec2f(0.,-.060),vec2f(0.,.049),.005,.002)+stroke(icon,vec2f(-.046,.008),vec2f(.046,.008),.007,.002)>.5 {color=vec3f(.98,.94,.76);}
     if uv.y<.13 {color=INK;}
-    color=mix(color,MINT,label(uv,vec2f(.04,.03),vec2f(.018,.015),vec3u(78,65,86)));
+    color=mix(color,MINT,label(uv,vec2f(.04,.03),vec2f(.014,.014),vec3u(78,65,86)));
     let distance=u32(clamp(round(view.nav.w*10.),0.,999.));
     let text=array<u32,8>(48u+distance/100u,48u+distance/10u%10u,46u,48u+distance%10u,0u,75u,77u,0u);
-    return mix(color,WHITE,letters(uv,vec2f(.46,.03),vec2f(.017,.015),text,7u));
+    return mix(color,WHITE,letters(uv,vec2f(.60,.035),vec2f(.012,.013),text,7u));
 }
 
-fn radio(uv:vec2f)->vec3f {
+fn systems(uv:vec2f)->vec3f {
     var color=INK;
-    color=mix(color,MINT,label(uv,vec2f(.04,.22),vec2f(.011,.10),vec3u(67,79,77)));
+    if uv.y>.16 && uv.y<.96 {
+        color=vec3f(.034,.055,.072);
+    }
+    let unit=vec2f(.012,.018);
+    color=mix(color,MINT,letters(uv,vec2f(.048,.036),unit,
+        array<u32,8>(83,89,83,84,69,77,83,0),7u));
+
+    color=mix(color,MINT,label(uv,vec2f(.050,.209),unit,vec3u(67,79,77)));
     let f=u32(view.radio.x);
     let mhz=f/1000u;
     let khz=f%1000u;
     let com=array<u32,8>(48u+mhz/100u,48u+mhz/10u%10u,48u+mhz%10u,46u,
                         48u+khz/100u,48u+khz/10u%10u,48u+khz%10u,0u);
-    color=mix(color,WHITE,letters(uv,vec2f(.20,.22),vec2f(.020,.10),com,7u));
-    let ap=select(vec3f(.32,.39,.35),MINT,view.radio.y>.5);
-    return mix(color,ap,label(uv,vec2f(.82,.22),vec2f(.021,.10),vec3u(65,80,0)));
+    color=mix(color,WHITE,letters(uv,vec2f(.336,.194),vec2f(.018,.023),com,7u));
+
+    let twin=view.eye.w>.5;
+    color=mix(color,MINT,label(uv,vec2f(.05,.394),unit,select(vec3u(84,72,82),vec3u(76,80,87),twin)));
+    color=mix(color,WHITE,number(uv,vec2f(.76,.382),vec2f(.014,.022),
+        u32(round(view.motion.y*100.)),3u));
+    if box_at(uv,vec2f(.052,.52),vec2f(.945,.587)) {
+        color=select(vec3f(.069,.112,.125),MINT,uv.x<=mix(.052,.945,view.motion.y));
+    }
+    color=mix(color,MINT,letters(uv,vec2f(.05,.675),unit,
+        array<u32,8>(70,76,65,80,83,0,0,0),5u));
+    color=mix(color,WHITE,number(uv,vec2f(.370,.675),unit,u32(round(view.motion.z)),2u));
+    color=mix(color,MINT,letters(uv,vec2f(.55,.675),unit,
+        array<u32,8>(84,82,73,77,0,0,0,0),4u));
+    let sign=select(43u,45u,view.motion.w<0.);
+    color=mix(color,WHITE,letters(uv,vec2f(.785,.675),unit,
+        array<u32,8>(sign,0,0,0,0,0,0,0),1u));
+    color=mix(color,WHITE,number(uv,vec2f(.834,.675),unit,u32(round(abs(view.motion.w)*100.)),3u));
+    color=mix(color,MINT,label(uv,vec2f(.05,.843),unit,select(vec3u(77,73,88),vec3u(82,80,87),twin)));
+    color=mix(color,WHITE,number(uv,vec2f(.251,.843),unit,
+        u32(round(view.motion.x*100.)),3u));
+    if view.screen_pages.w==0u {
+        color=mix(color,AMBER,letters(uv,vec2f(.55,.843),unit,
+            array<u32,8>(69,78,71,0,79,70,70,0),7u));
+    } else if view.radio.y>.5 {
+        color=mix(color,MINT,letters(uv,vec2f(.55,.843),unit,
+            array<u32,8>(65,80,0,72,79,76,68,0),7u));
+    }
+    return color;
 }
 
 fn wx_image(uv:vec2f)->vec3f {
@@ -343,7 +420,7 @@ fn weather(uv:vec2f)->vec3f {
         array<u32,8>(87,73,78,68,0,0,0,0),4u));
     color=mix(color,vec3f(.57,.68,.71),letters(uv,vec2f(.57,.058),vec2f(.015,.029),
         array<u32,8>(87,88,0,78,47,65,0,0),6u));
-    let p=(uv-vec2f(.18,.61))*vec2f(3.,1.);
+    let p=(uv-vec2f(.18,.61))*vec2f(1.6,1.);
     let r=length(p);
     let ring=1.-smoothstep(.006,.018,abs(r-.244));
     color=mix(color,vec3f(.21,.38,.44),ring);
@@ -375,9 +452,24 @@ fn weather(uv:vec2f)->vec3f {
     return color;
 }
 
+fn screen(uv:vec2f, page:u32)->vec3f {
+    // Keep these page IDs in step with aircraft::DisplayPage.
+    switch page {
+        case 0u: { return flight_display(uv); }
+        case 1u: { return navigation(uv); }
+        case 2u: { return weather(uv); }
+        default: { return systems(uv); }
+    }
+}
+
 fn section_hidden(v:V)->bool {
     // The cutaway removes the roof and one side of the airframe over the cabin.
     if view.inspection.x==0. {return false;}
+    if view.eye.w>.5 {
+        let cabin_shell=v.part==0u || v.part==3u || v.part==4u || v.part==27u;
+        return cabin_shell && abs(v.local.x)<.85 && v.local.z> -3.12 && v.local.z<1.58
+            && (v.local.y>.51 || (v.local.x*view.inspection.x>.36 && v.local.y>-.395));
+    }
     // Overhead lighting and trim follow the removed roof in a section view.
     if v.part==18u && v.local.y>.60 {return true;}
     return v.local.z> -2.15 && v.local.z<1.1 &&
@@ -389,11 +481,24 @@ fn section_hidden(v:V)->bool {
     if section_hidden(v) {discard;}
     if v.display>0u {
         let uv=v.uv;
+        if v.display>=10u {
+            var text=array<u32,8>(69,78,71,73,78,69,83,0); // ENGINES
+            var count=7u;
+            if v.display==11u { text=array<u32,8>(76,73,71,72,84,83,0,0); count=6u; }
+            if v.display==12u { text=array<u32,8>(71,69,65,82,0,0,0,0); count=4u; }
+            let ink=letters(uv,vec2f(.08,.15),vec2f(.84/f32(4u*count),.14),text,count);
+            if ink==0. {discard;}
+            return vec4f(vec3f(.67,.70,.68)*(.50+.5*max(dot(normalize(v.normal),view.sun.xyz),0.)),1.);
+        }
+        if v.display<=3u {
+            let p=uv*2.-1.;
+            let color=dial(p,v.display);
+            if dot(p,p)>1.04 {discard;}
+            return vec4f(color,1.);
+        }
         if any(uv<vec2f(.017)) || any(uv>vec2f(.983)) {return vec4f(FACE,1.);}
-        if v.display<=6u {return vec4f(dial(uv*2.-1.,v.display),1.);}
-        if v.display==11u {return vec4f(weather(uv),1.);}
-        if v.display==7u {return vec4f(navigation(uv),1.);}
-        return vec4f(radio(uv),1.);
+        if view.screen_pages.z==0u {return vec4f(INK,1.);}
+        return vec4f(screen(uv,view.screen_pages[v.display-7u]),1.);
     }
     let n=normalize(v.normal);
     let eye=normalize(view.eye.xyz-v.local);
@@ -401,7 +506,14 @@ fn section_hidden(v:V)->bool {
     let sky=vec3f(.34,.40,.48)*(.78+.22*n.y);
     let direct=vec3f(.77,.71,.63)*max(dot(n,view.sun.xyz),0.);
     let gloss=pow(max(dot(n,half_vec),0.),35.)*.075;
-    return vec4f(v.color*(sky+direct)+gloss,1.);
+    var paint=v.color;
+    if view.eye.w>.5 && v.part==18u && v.color.g>.5 && v.color.r<.2
+        && v.local.x>.12 && v.local.x<.23 && abs(v.local.y+.062)<.015
+        && abs(v.local.z-.855)<.030 {
+        if view.radio.w<.5 { paint=vec3f(.037,.067,.044); }
+        if view.radio.w>1.5 { paint=vec3f(.75,.30,.04); }
+    }
+    return vec4f(paint*(sky+direct)+gloss,1.);
 }
 
 @fragment fn fs_glass(v:V)->@location(0) vec4f {
@@ -424,7 +536,11 @@ fn section_hidden(v:V)->bool {
     let mirror=reflect(-eye,n);
     let sky=mix(vec3f(.21,.39,.54),vec3f(.095,.23,.44),sqrt(clamp(mirror.y,0.,1.)));
     let glint=.60*pow(max(dot(mirror,view.sun.xyz),0.),130.);
-    return vec4f(sky+vec3f(glint,glint*.82,glint*.60),clamp(.05+fresnel*.56+glint*.35,0.,.72));
+    if view.eye.w>.5 && dot(face,eye)<0. {
+        return vec4f(sky, .035 + .12*pow(grazing,5.));
+    }
+    let tint=select(.05,.17,view.eye.w>.5);
+    return vec4f(sky+vec3f(glint,glint*.82,glint*.60),clamp(tint+fresnel*.56+glint*.35,0.,.72));
 }
 
 struct MarkerV {

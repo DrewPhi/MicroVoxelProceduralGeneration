@@ -1,5 +1,4 @@
-//! Lightweight high-wing bush plane, authored in metres around its pilot.
-//! The same depth test as terrain handles ridgelines and ground occlusion.
+//! Voxel airframes, articulated parts and shared aircraft rendering.
 use crate::aircraft::airframe::{
     elevator_deflection, fin_section, AILERON_HINGE_Z, AILERON_TRAVEL, CONTROL_TIP,
     ELEVATOR_HINGE_Z, FIN_HEIGHT, FIN_ROOT, FLAP_SPLIT, FLAP_TRAVEL, PROP_Z, RUDDER_HINGE_Z,
@@ -8,6 +7,7 @@ use crate::aircraft::airframe::{
 use crate::{aircraft::Presentation, mesh::Vertex, Camera};
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Mat4, Vec3};
+use std::sync::OnceLock;
 use wgpu::util::DeviceExt;
 
 const WHITE: [f32; 3] = [0.83, 0.86, 0.86];
@@ -255,6 +255,67 @@ pub(super) mod voxels;
 #[path = "aircraft_cabin.rs"]
 mod cabin;
 
+#[path = "aircraft_cockpit.rs"]
+mod cockpit;
+pub(crate) use cockpit::Control as CockpitControl;
+
+#[path = "aircraft_da62.rs"]
+pub(crate) mod da62;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ModelKind {
+    #[default]
+    Skyhawk,
+    Da62,
+}
+
+impl ModelKind {
+    fn geometry(self) -> &'static Geometry {
+        match self {
+            Self::Skyhawk => geometry(),
+            Self::Da62 => da62::geometry(),
+        }
+    }
+
+    pub(crate) fn joints(self, pose: Presentation, rig: Rig) -> [Mat4; Part::COUNT] {
+        match self {
+            Self::Skyhawk => joints(pose, rig),
+            Self::Da62 => da62::joints(pose, rig),
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "skyhawk" => Some(Self::Skyhawk),
+            "da62" => Some(Self::Da62),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Skyhawk => "Skyhawk",
+            Self::Da62 => "DA62",
+        }
+    }
+
+    pub(crate) fn part_name(self, part: Part) -> &'static str {
+        match (self, part) {
+            (Self::Da62, Part::Prop) => "left-propeller",
+            (Self::Da62, Part::Yoke) => "pilot-stick",
+            (Self::Da62, Part::CopilotYoke) => "copilot-stick",
+            (Self::Da62, Part::Throttle) => "left-power-lever",
+            (Self::Da62, Part::Mixture) => "right-power-lever",
+            _ => part.name(),
+        }
+    }
+
+    pub(crate) fn has_part(self, part: Part) -> bool {
+        let mesh = self.geometry();
+        !mesh.parts[part as usize].is_empty() || mesh.panes.iter().any(|pane| pane.part == part)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub(crate) enum Part {
@@ -280,9 +341,15 @@ pub(crate) enum Part {
     CopilotYoke,
     LeftFlap,
     RightFlap,
+    Mixture,
+    Ignition,
+    Avionics,
+    FlapSelector,
+    RightProp,
+    RearDoor,
 }
 impl Part {
-    pub(super) const COUNT: usize = 22;
+    pub(super) const COUNT: usize = 28;
     pub(crate) const ALL: [Self; Self::COUNT] = [
         Self::Body,
         Self::Prop,
@@ -306,6 +373,12 @@ impl Part {
         Self::CopilotYoke,
         Self::LeftFlap,
         Self::RightFlap,
+        Self::Mixture,
+        Self::Ignition,
+        Self::Avionics,
+        Self::FlapSelector,
+        Self::RightProp,
+        Self::RearDoor,
     ];
     pub(crate) fn name(self) -> &'static str {
         [
@@ -331,6 +404,12 @@ impl Part {
             "copilot-yoke",
             "left-flap",
             "right-flap",
+            "mixture",
+            "ignition",
+            "avionics-switch",
+            "flap-selector",
+            "right-propeller",
+            "rear-door",
         ][self as usize]
     }
 }
@@ -348,8 +427,10 @@ struct ModelVertex {
 
 struct Pane {
     first: u32,
+    count: u32,
     center: Vec3,
     part: Part,
+    prop_disc: bool,
 }
 
 struct DamagedMesh {
@@ -361,6 +442,8 @@ struct DamagedMesh {
 }
 struct Geometry {
     parts: [std::ops::Range<u32>; Part::COUNT],
+    fine_parts: [std::ops::Range<u32>; Part::COUNT],
+    displays_start: u32,
     volumes: [usize; Part::COUNT],
     vertices: Vec<ModelVertex>,
     opaque_count: u32,
@@ -568,26 +651,27 @@ fn geometry() -> &'static Geometry {
             solids[part as usize] = door;
         }
         let mut vertices = Vec::new();
-        let volumes = std::array::from_fn(|part| solids[part].len());
+        let mut fine = cockpit::model();
+        let volumes = std::array::from_fn(|part| solids[part].len() + fine[part].len());
         let mut parts = std::array::from_fn(|_| 0..0);
+        let mut fine_parts = std::array::from_fn(|_| 0..0);
         for (part, solid) in solids.iter().enumerate() {
             let first = vertices.len() as u32;
             vertices.extend(
                 voxels::mesh(solid.clone())
                     .into_iter()
-                    .map(|v| ModelVertex {
-                        position: v.position,
-                        color: v.color,
-                        normal: v.normal,
-                        part: part as u32,
-                        display: 0,
-                        uv: [0.; 2],
-                    }),
+                    .map(|v| solid_vertex(v, part)),
             );
+            let fine_start = vertices.len() as u32;
+            vertices.extend(
+                voxels::mesh_at(std::mem::take(&mut fine[part]), cockpit::EDGE)
+                    .into_iter()
+                    .map(|v| solid_vertex(v, part)),
+            );
+            fine_parts[part] = fine_start..vertices.len() as u32;
             parts[part] = first..vertices.len() as u32;
         }
-        // Cabin displays are contiguous with its opaque voxel range only when
-        // drawn in the separate display range, so the part picker can show both.
+        let displays_start = vertices.len() as u32;
         for (kind, points) in cabin.displays {
             rectangle(&mut vertices, Part::Cabin, kind, points);
         }
@@ -600,8 +684,10 @@ fn geometry() -> &'static Geometry {
                 rectangle(&mut vertices, part, 0, points);
                 Pane {
                     first,
+                    count: 6,
                     center: points.iter().sum::<Vec3>() * 0.25,
                     part,
+                    prop_disc: false,
                 }
             })
             .collect();
@@ -621,12 +707,16 @@ fn geometry() -> &'static Geometry {
         );
         panes.push(Pane {
             first,
+            count: 6,
             center: prop_center,
             part: Part::Body,
+            prop_disc: true,
         });
         Geometry {
             prop: parts[Part::Prop as usize].clone(),
             parts,
+            fine_parts,
+            displays_start,
             volumes,
             vertices,
             opaque_count,
@@ -640,7 +730,145 @@ pub(super) fn solid_parts() -> &'static [voxels::Voxels; Part::COUNT] {
     &geometry().solids
 }
 
+pub(super) fn solid_parts_for(kind: ModelKind) -> &'static [voxels::Voxels; Part::COUNT] {
+    &kind.geometry().solids
+}
+
+pub(super) fn structural_cells(kind: ModelKind) -> &'static [voxels::Voxels; Part::COUNT] {
+    if kind == ModelKind::Skyhawk {
+        return solid_parts();
+    }
+    static CELLS: OnceLock<[voxels::Voxels; Part::COUNT]> = OnceLock::new();
+    CELLS.get_or_init(|| {
+        let mesh = kind.geometry();
+        let mut cells = mesh.solids.clone();
+        for part in [
+            Part::Prop,
+            Part::RightProp,
+            Part::NoseWheel,
+            Part::LeftWheel,
+            Part::RightWheel,
+            Part::NoseGear,
+            Part::LeftStrut,
+            Part::RightStrut,
+        ] {
+            let r = mesh.fine_parts[part as usize].clone();
+            for v in &mesh.vertices[r.start as usize..r.end as usize] {
+                let p = Vec3::from_array(v.position) - Vec3::from_array(v.normal) * 0.001;
+                cells[part as usize]
+                    .entry((p / cabin::EDGE).floor().as_ivec3())
+                    .or_insert(v.color);
+            }
+        }
+        cells
+    })
+}
+
+fn da62_details() -> &'static [Vec<ModelVertex>; crate::aircraft_damage::COUNT] {
+    use crate::aircraft_damage::{da62_owner, COUNT};
+    static DETAILS: OnceLock<[Vec<ModelVertex>; COUNT]> = OnceLock::new();
+    DETAILS.get_or_init(|| {
+        let mesh = ModelKind::Da62.geometry();
+        let mut by_node = std::array::from_fn(|_| Vec::new());
+        for part in Part::ALL {
+            let r = mesh.fine_parts[part as usize].clone();
+            for t in mesh.vertices[r.start as usize..r.end as usize].chunks_exact(3) {
+                let center = t.iter().map(|v| Vec3::from_array(v.position)).sum::<Vec3>() / 3.;
+                by_node[da62_owner(part, center)].extend_from_slice(t);
+            }
+        }
+        by_node
+    })
+}
+
+pub(super) fn da62_fragment_details(
+    mask: u64,
+    joints: &[Mat4; Part::COUNT],
+    center: Vec3,
+    flex: [f32; 2],
+    out: &mut Vec<crate::destruction::Vertex>,
+) {
+    for (node, mesh) in da62_details().iter().enumerate() {
+        if !crate::aircraft_damage::live(mask, node) {
+            continue;
+        }
+        for v in mesh {
+            let joint = joints[v.part as usize];
+            let rest = Vec3::from_array(v.position);
+            let moved = joint.transform_point3(rest);
+            let point = if (1..17).contains(&node) {
+                crate::aircraft_damage::flex_point(ModelKind::Da62, moved, rest.x, flex)
+            } else {
+                moved
+            };
+            out.push(crate::destruction::Vertex {
+                position: (point - center).to_array(),
+                normal: joint
+                    .transform_vector3(Vec3::from_array(v.normal))
+                    .normalize_or_zero()
+                    .to_array(),
+                color: v.color,
+            });
+        }
+    }
+}
+
+fn solid_vertex(vertex: Vertex, part: usize) -> ModelVertex {
+    ModelVertex {
+        position: vertex.position,
+        color: vertex.color,
+        normal: vertex.normal,
+        part: part as u32,
+        display: 0,
+        uv: [0.; 2],
+    }
+}
+
+pub(crate) fn pick_cockpit_control(
+    camera: Camera,
+    direction: Vec3,
+    pose: Presentation,
+) -> Option<CockpitControl> {
+    if pose.kind == ModelKind::Skyhawk {
+        return cockpit::pick(camera, direction, pose);
+    }
+    let frame = crate::aircraft::axes(pose.pose).transpose();
+    let origin = frame * (camera.position - pose.pose.position).as_vec3();
+    let ray = frame * direction;
+    let joints = pose.kind.joints(pose, Rig::flight(pose));
+    [
+        (
+            CockpitControl::LeftPower,
+            Part::Throttle,
+            Vec3::new(0.050, 0.024, 0.595),
+            0.036,
+        ),
+        (
+            CockpitControl::RightPower,
+            Part::Mixture,
+            Vec3::new(-0.050, 0.024, 0.595),
+            0.036,
+        ),
+        (
+            CockpitControl::Gear,
+            Part::Body,
+            Vec3::new(0.175, -0.13, 0.801),
+            0.036,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(control, part, center, radius)| {
+        let offset = joints[part as usize].transform_point3(center) - origin;
+        let t = ray.dot(offset);
+        (t > 0. && t < 2. && (offset - t * ray).length_squared() < radius * radius)
+            .then_some((t, control))
+    })
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+    .map(|(_, control)| control)
+}
+
 pub(super) fn fragment_part(
+    kind: ModelKind,
     cells: voxels::Voxels,
     part: Part,
     transform: Mat4,
@@ -651,13 +879,17 @@ pub(super) fn fragment_part(
     out.extend(voxels::mesh(cells).into_iter().map(|v| {
         let p = Vec3::from_array(v.position);
         let moved = transform.transform_point3(p);
-        let wing = match part {
-            Part::Body => p.x.abs() > 0.60 && (0.57..1.42).contains(&p.y) && p.z.abs() < 0.96,
-            Part::LeftAileron | Part::RightAileron | Part::LeftFlap | Part::RightFlap => true,
-            _ => false,
+        let wing = if kind == ModelKind::Da62 {
+            (1..17).contains(&crate::aircraft_damage::da62_owner(part, p))
+        } else {
+            match part {
+                Part::Body => p.x.abs() > 0.60 && (0.57..1.42).contains(&p.y) && p.z.abs() < 0.96,
+                Part::LeftAileron | Part::RightAileron | Part::LeftFlap | Part::RightFlap => true,
+                _ => false,
+            }
         };
         let point = if wing {
-            crate::aircraft_damage::flex_point(moved, p.x, flex)
+            crate::aircraft_damage::flex_point(kind, moved, p.x, flex)
         } else {
             moved
         };
@@ -677,14 +909,12 @@ fn turn(pivot: Vec3, rotation: Mat4) -> Mat4 {
 }
 
 pub(super) fn joints(pose: Presentation, rig: Rig) -> [Mat4; Part::COUNT] {
-    let [bank, pitch, throttle] = pose.controls.to_array();
+    let [bank, pitch, _] = pose.controls.to_array();
     let mut joints = [Mat4::IDENTITY; Part::COUNT];
     joints[Part::Prop as usize] = turn(
         Vec3::new(0., -0.06, PROP_Z),
         Mat4::from_rotation_z(pose.prop_angle),
     );
-    joints[Part::Yoke as usize] = Mat4::from_translation(Vec3::new(0., 0., -0.105 * pitch))
-        * turn(cabin::YOKE_PIVOT, Mat4::from_rotation_z(0.60 * bank));
     for (part, side) in [(Part::LeftDoor, 1.), (Part::RightDoor, -1.)] {
         let pivot = Vec3::new(cabin::DOOR_PIVOT.x * side, 0., cabin::DOOR_PIVOT.z);
         let amount = if side > 0. {
@@ -715,15 +945,6 @@ pub(super) fn joints(pose: Presentation, rig: Rig) -> [Mat4; Part::COUNT] {
             (pitch + pose.instruments.pitch_trim).clamp(-1., 1.),
         )),
     );
-    joints[Part::CopilotYoke as usize] = Mat4::from_translation(Vec3::new(0., 0., -0.105 * pitch))
-        * turn(
-            Vec3::new(
-                -cabin::YOKE_PIVOT.x,
-                cabin::YOKE_PIVOT.y,
-                cabin::YOKE_PIVOT.z,
-            ),
-            Mat4::from_rotation_z(0.60 * bank),
-        );
     for side in [-1., 1.] {
         let part = if side > 0. {
             Part::LeftFlap
@@ -738,17 +959,11 @@ pub(super) fn joints(pose: Presentation, rig: Rig) -> [Mat4; Part::COUNT] {
             ),
         );
     }
-    joints[Part::Throttle as usize] = turn(
-        Vec3::new(-0.094, -0.29, 0.406),
-        Mat4::from_rotation_x(0.37 * throttle),
-    );
+    cockpit::rig(&mut joints, pose);
     joints[Part::Rudder as usize] = turn(
         Vec3::new(0., 0., RUDDER_HINGE_Z),
         Mat4::from_rotation_y(RUDDER_TRAVEL * pose.rudder),
     );
-    for (part, side) in [(Part::LeftPedal, -1.), (Part::RightPedal, 1.)] {
-        joints[part as usize] = Mat4::from_translation(Vec3::Z * 0.075 * pose.rudder * side);
-    }
     for (index, (strut, wheel, pivot)) in [
         (
             Part::LeftStrut,
@@ -794,39 +1009,70 @@ pub(super) fn joints(pose: Presentation, rig: Rig) -> [Mat4; Part::COUNT] {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Rig {
     pub doors: [f32; 2],
+    pub rear_door: f32,
+    pub gear: f32,
     pub flaps: f32,
     pub cutaway: f32,
     pub glass_off: bool,
 }
 
-pub(crate) fn inspect() -> String {
-    let mesh = geometry();
-    let parts = Part::ALL.map(|part| {
-        let range = mesh.parts[part as usize].clone();
-        let mut lo = Vec3::splat(f32::INFINITY);
-        let mut hi = Vec3::splat(f32::NEG_INFINITY);
-        for v in &mesh.vertices[range.start as usize..range.end as usize] {
-            let p = Vec3::from_array(v.position);
-            lo = lo.min(p);
-            hi = hi.max(p);
+impl Rig {
+    pub(super) fn flight(plane: Presentation) -> Self {
+        Self {
+            doors: [plane.door; 2],
+            rear_door: if plane.kind == ModelKind::Da62 {
+                plane.rear_door
+            } else {
+                0.
+            },
+            flaps: plane.instruments.flaps_degrees / FLAP_TRAVEL.to_degrees(),
+            gear: plane.gear,
+            ..Default::default()
         }
-        let bounds = if range.is_empty() {
-            "null".into()
-        } else {
-            format!(r#"{{"min":{:?},"max":{:?}}}"#, lo.to_array(), hi.to_array())
-        };
-        format!(
-            r#"{{"name":"{}","voxels":{},"triangles":{},"bounds_m":{}}}"#,
-            part.name(),
-            mesh.volumes[part as usize],
-            range.len() / 3,
-            bounds
-        )
-    });
+    }
+}
+
+pub(crate) fn inspect(kind: ModelKind) -> String {
+    let mesh = kind.geometry();
+    let parts = Part::ALL
+        .into_iter()
+        .filter(|&part| kind.has_part(part))
+        .map(|part| {
+            let range = mesh.parts[part as usize].clone();
+            let mut lo = Vec3::splat(f32::INFINITY);
+            let mut hi = Vec3::splat(f32::NEG_INFINITY);
+            for v in &mesh.vertices[range.start as usize..range.end as usize] {
+                let p = Vec3::from_array(v.position);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            let bounds = if range.is_empty() {
+                "null".into()
+            } else {
+                format!(r#"{{"min":{:?},"max":{:?}}}"#, lo.to_array(), hi.to_array())
+            };
+            format!(
+                r#"{{"name":"{}","voxels":{},"triangles":{},"bounds_m":{}}}"#,
+                kind.part_name(part),
+                mesh.volumes[part as usize],
+                range.len() / 3,
+                bounds
+            )
+        })
+        .collect::<Vec<_>>();
+    let extra = match kind {
+        ModelKind::Skyhawk => format!(r#","cockpit_clearance":{}"#, cockpit::clearance_json()),
+        ModelKind::Da62 => format!(
+            r#","reference_dimensions_m":[14.55,2.82,9.19],"seats":7,"engines":2,"glazed_groups":{}"#,
+            mesh.panes.len()
+        ),
+    };
     format!(
-        r#"{{"model":"skyhawk","voxel_size_m":0.0625,"axes":"+X port, +Y up, +Z nose","triangles":{},"parts":[{}]}}"#,
+        r#"{{"model":"{}","voxel_size_m":0.0625,"cockpit_detail_voxel_size_m":0.0078125,"axes":"+X port, +Y up, +Z nose","triangles":{},"parts":[{}]{}}}"#,
+        kind.name().to_ascii_lowercase(),
         mesh.vertices.len() / 3,
-        parts.join(",")
+        parts.join(","),
+        extra,
     )
 }
 
@@ -845,6 +1091,7 @@ struct View {
     wind: [f32; 4],
     weather_display: [f32; 4],
     weather_profile: [f32; 4],
+    screen_pages: [u32; 4],
     inspection: [f32; 4],
     shadow_matrix: [[f32; 4]; 4],
 }
@@ -863,6 +1110,7 @@ const SAMPLE_SPACING: f64 = 32.;
 
 pub(crate) struct Model {
     pub samples: u32,
+    pub(crate) kind: ModelKind,
     chart: wgpu::Texture,
     chart_center: Option<[f64; 2]>,
     weather_chart: wgpu::Texture,
@@ -883,6 +1131,15 @@ pub(crate) struct Model {
 }
 impl Model {
     pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32) -> Self {
+        Self::new_for(device, format, samples, ModelKind::Skyhawk)
+    }
+
+    pub(crate) fn new_for(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        kind: ModelKind,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel aircraft and avionics"),
             source: wgpu::ShaderSource::Wgsl(include_str!("aircraft_model.wgsl").into()),
@@ -1013,7 +1270,7 @@ impl Model {
             multiview: None,
             cache: None,
         });
-        let mesh = geometry();
+        let mesh = kind.geometry();
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("voxel aircraft mesh"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -1070,6 +1327,7 @@ impl Model {
             ],
         });
         Self {
+            kind,
             chart,
             chart_center: None,
             weather_chart,
@@ -1093,40 +1351,51 @@ impl Model {
     }
 
     pub(super) fn set_structure(&mut self, device: &wgpu::Device, mask: u64) {
-        use crate::aircraft_damage::{live, owner, INTACT};
-        if mask == INTACT {
+        use crate::aircraft_damage::{intact, live, owner_for};
+        if mask == intact(self.kind) {
             self.damaged = None;
             return;
         }
         if self.damaged.as_ref().is_some_and(|m| m.mask == mask) {
             return;
         }
-        let original = geometry();
+        let original = self.kind.geometry();
         let mut vertices = Vec::new();
         let mut prop = 0..0;
         for part in Part::ALL {
             let first = vertices.len() as u32;
             let cells = original.solids[part as usize]
                 .iter()
-                .filter(|(p, _)| live(mask, owner(part, **p)))
+                .filter(|(p, _)| live(mask, owner_for(self.kind, part, **p)))
                 .map(|(&p, &paint)| (p, paint))
                 .collect();
-            vertices.extend(voxels::mesh(cells).into_iter().map(|v| ModelVertex {
-                position: v.position,
-                color: v.color,
-                normal: v.normal,
-                part: part as u32,
-                display: 0,
-                uv: [0.; 2],
-            }));
+            vertices.extend(
+                voxels::mesh(cells)
+                    .into_iter()
+                    .map(|v| solid_vertex(v, part as usize)),
+            );
+            if self.kind == ModelKind::Skyhawk && live(mask, 0) {
+                let fine = original.fine_parts[part as usize].clone();
+                vertices
+                    .extend_from_slice(&original.vertices[fine.start as usize..fine.end as usize]);
+            }
             if part == Part::Prop {
                 prop = first..vertices.len() as u32;
             }
         }
-        vertices.extend_from_slice(
-            &original.vertices[original.parts[Part::RightFlap as usize].end as usize
-                ..original.opaque_count as usize],
-        );
+        if self.kind == ModelKind::Da62 {
+            for (node, mesh) in da62_details().iter().enumerate() {
+                if live(mask, node) {
+                    vertices.extend_from_slice(mesh);
+                }
+            }
+        }
+        if live(mask, 0) {
+            vertices.extend_from_slice(
+                &original.vertices
+                    [original.displays_start as usize..original.opaque_count as usize],
+            );
+        }
         let opaque = vertices.len() as u32;
         let pane_starts = original
             .panes
@@ -1134,7 +1403,7 @@ impl Model {
             .map(|pane| {
                 let first = vertices.len() as u32;
                 vertices.extend_from_slice(
-                    &original.vertices[pane.first as usize..pane.first as usize + 6],
+                    &original.vertices[pane.first as usize..(pane.first + pane.count) as usize],
                 );
                 first
             })
@@ -1307,11 +1576,7 @@ impl Model {
             sun,
             time,
             None,
-            Rig {
-                doors: [plane.door; 2],
-                flaps: plane.instruments.flaps_degrees / FLAP_TRAVEL.to_degrees(),
-                ..Default::default()
-            },
+            Rig::flight(plane),
         );
     }
 
@@ -1328,11 +1593,11 @@ impl Model {
     ) {
         let axes = crate::aircraft::axes(plane.pose);
         self.prop_blur
-            .set(plane.engine_running && self.glass.is_some());
+            .set(self.kind == ModelKind::Skyhawk && plane.engine_running && self.glass.is_some());
         let eye = axes.transpose() * (camera.position - plane.pose.position).as_vec3();
         let forward = axes.transpose() * camera.direction();
-        let joints = joints(plane, rig);
-        let panes = &geometry().panes;
+        let joints = self.kind.joints(plane, rig);
+        let panes = &self.kind.geometry().panes;
         let depth = |i: usize| {
             (joints[panes[i].part as usize].transform_point3(panes[i].center) - eye).dot(forward)
         };
@@ -1361,10 +1626,29 @@ impl Model {
                 plane.wing_flex[0],
                 plane.wing_flex[1],
             ],
-            motion: [plane.turn_rate, meters.throttle, 0., 0.],
+            motion: [
+                if self.kind == ModelKind::Da62 {
+                    plane.right_power
+                } else {
+                    plane.mixture
+                },
+                if self.kind == ModelKind::Da62 {
+                    plane.controls.z
+                } else {
+                    meters.throttle
+                },
+                meters.flaps_degrees,
+                meters.pitch_trim,
+            ],
             wind: meters.wind.extend(0.).to_array(),
             weather_display: self.weather_display,
             weather_profile: self.weather_profile,
+            screen_pages: [
+                plane.displays[0] as u32,
+                plane.displays[1] as u32,
+                u32::from(plane.avionics),
+                u32::from(plane.engine_running),
+            ],
             chart: [
                 (plane.pose.position.x - center[0]) as f32,
                 (plane.pose.position.z - center[1]) as f32,
@@ -1374,7 +1658,9 @@ impl Model {
             matrix: (matrix * Mat4::from_mat3(axes)).to_cols_array_2d(),
             joints: joints.map(|joint| joint.to_cols_array_2d()),
             sun: (axes.transpose() * sun).extend(time).to_array(),
-            eye: eye.extend(0.).to_array(),
+            eye: eye
+                .extend(f32::from(self.kind == ModelKind::Da62))
+                .to_array(),
             flight: [
                 meters.speed_mps * 3.6,
                 meters.altitude_m as f32,
@@ -1391,7 +1677,17 @@ impl Model {
                 plane.radio_khz as f32,
                 if plane.hold { 1. } else { 0. },
                 if meters.stall_warning { 1. } else { 0. },
-                if meters.grounded { 1. } else { 0. },
+                if self.kind == ModelKind::Da62 {
+                    if rig.gear > 0.98 {
+                        0.
+                    } else if rig.gear > 0.03 || meters.gear_status == Some("Gear damaged") {
+                        2.
+                    } else {
+                        1.
+                    }
+                } else {
+                    f32::from(meters.grounded)
+                },
             ],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&data));
@@ -1424,7 +1720,7 @@ impl Model {
             occlusion_query_set: None,
         });
         let (vertices, opaque) = self.damaged.as_ref().map_or_else(
-            || (&self.vertices, geometry().opaque_count),
+            || (&self.vertices, self.kind.geometry().opaque_count),
             |mesh| (&mesh.buffer, mesh.opaque),
         );
         pass.set_pipeline(&self.shadow);
@@ -1438,7 +1734,7 @@ impl Model {
     }
 
     pub(crate) fn draw_part<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, part: Option<Part>) {
-        let mesh = geometry();
+        let mesh = self.kind.geometry();
         let damage = self.damaged.as_ref().filter(|_| part.is_none());
         let buffer = damage.map_or(&self.vertices, |m| &m.buffer);
         let opaque = damage.map_or(mesh.opaque_count, |m| m.opaque);
@@ -1451,10 +1747,7 @@ impl Model {
                 pass.draw(mesh.parts[part as usize].clone(), 0..1);
             }
             if part as usize == Part::Cabin as usize {
-                pass.draw(
-                    mesh.parts[Part::RightFlap as usize].end..mesh.opaque_count,
-                    0..1,
-                );
+                pass.draw(mesh.displays_start..mesh.opaque_count, 0..1);
             }
         } else if self.prop_blur.get() {
             pass.draw(0..prop.start, 0..1);
@@ -1470,7 +1763,7 @@ impl Model {
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.set_bind_group(0, &self.group, &[]);
             for &index in self.pane_order.borrow().iter() {
-                let is_prop = index + 1 == mesh.panes.len();
+                let is_prop = mesh.panes[index].prop_disc;
                 let owner = if is_prop {
                     Part::Prop
                 } else {
@@ -1481,7 +1774,8 @@ impl Model {
                     || damage.is_some_and(|m| {
                         !crate::aircraft_damage::live(
                             m.mask,
-                            crate::aircraft_damage::owner(
+                            crate::aircraft_damage::owner_for(
+                                self.kind,
                                 owner,
                                 (mesh.panes[index].center / cabin::EDGE).floor().as_ivec3(),
                             ),
@@ -1491,7 +1785,7 @@ impl Model {
                     continue;
                 }
                 let first = damage.map_or(mesh.panes[index].first, |m| m.pane_starts[index]);
-                pass.draw(first..first + 6, 0..1);
+                pass.draw(first..first + mesh.panes[index].count, 0..1);
             }
         }
     }

@@ -20,6 +20,7 @@ pub struct Options {
     pub capture: Option<PathBuf>,
     pub capture_on_exit: Option<PathBuf>,
     pub rolling_terrain: bool,
+    pub flight_aircraft: crate::aircraft_model::ModelKind,
     pub flight_chase: Option<bool>,
     pub flight_parked: bool,
     pub flight_altitude: Option<f64>,
@@ -149,6 +150,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     let mut capture = None;
     let mut capture_on_exit = None;
     let mut rolling_preference = None;
+    let mut flight_aircraft = crate::aircraft_model::ModelKind::default();
     let mut flight_chase = None;
     let mut flight_parked = false;
     let mut flight_altitude: Option<f64> = None;
@@ -912,6 +914,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 weather_center = Some(center);
             }
             "--airborne-radar" => airborne_radar = true,
+            "--aircraft" => {
+                flight_aircraft=crate::aircraft_model::ModelKind::parse(&args.next().ok_or("--aircraft needs skyhawk or da62")?)
+                    .ok_or("--aircraft needs skyhawk or da62")?;
+            },
             "--flight-parked" => flight_parked = true,
             "--flight-walkup" => { flight_walkup = true; flight_parked = true; },
             "--rolling-walk-frames" => {
@@ -942,8 +948,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
                 println!("--model-preview opens the aircraft studio. Run --model-preview --help for headless captures and pose controls.");
                 println!("--native-lattice selects the original Eroded voxel-column experiment. --native-detail selects the multiscale relief experiment. Both use 6.25 cm voxels and a 6 km maximum horizon.");
                 println!("Add --flight-view chase or --flight-view pilot to fly an aircraft over rolling terrain. Click to take control. Shift/Ctrl increase/decrease throttle, W/S pitch down/up, A/D roll, Q/E rudder and ground steering, Z/X extend/retract flaps, Page Up/Down pitch trim, Space brakes, C changes view.");
-                println!("--weather off|dynamic|regional|clear|rain|convective enables a world-space atmosphere. --weather-age SECONDS advances the simulation before spawn. --weather-day DAY --weather-hour HOUR choose the initial local time. --weather-center X,Z anchors the region. --weather-latitude DEG sets the regional Coriolis reference. --weather-save PATH resumes and saves regional weather. --weather-speed 0..64 sets the time multiplier. --day-length SECONDS sets the solar day. --day-night on|off controls celestial lighting (on with weather). F4 opens the live weather radar. In flight M changes the cockpit weather page, comma/period change range, semicolon/apostrophe change altitude or tilt. --airborne-radar adds the stabilized sweep and profile.");
-                println!("--flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, hold right mouse to look around the cabin, H toggles heading/altitude hold, and [ / ] tune COM.");
+                println!("--weather off|dynamic|regional|clear|rain|convective enables a world-space atmosphere. --weather-age SECONDS advances the simulation before spawn. --weather-day DAY --weather-hour HOUR choose the initial local time. --weather-center X,Z anchors the region. --weather-latitude DEG sets the regional Coriolis reference. --weather-save PATH resumes and saves regional weather. --weather-speed 0..64 sets the time multiplier. --day-length SECONDS sets the solar day. --day-night on|off controls celestial lighting (on with weather). F4 opens the live weather radar. In flight N/M cycle the left/right display, K cycles weather products, comma/period change range, semicolon/apostrophe change altitude or tilt. --airborne-radar adds the stabilized sweep and profile.");
+                println!("--aircraft skyhawk|da62 selects the aircraft. G cycles DA62 landing gear in flight. --flight-altitude METRES sets the airborne spawn height above terrain. --flight-heading DEGREES sets the spawn heading. --flight-wind X,Y,Z sets constant wind in world axes in m/s. --flight-parked starts seated on a flat dirt runway with rolling terrain. --flight-walkup starts beside the plane. V boards at either door or exits when stopped. O operates both doors while parked, L toggles freelook, Tab toggles the cockpit cursor, H toggles heading/altitude hold, and [ / ] tune COM.");
                 println!("Terrain detail: --preset eroded enables seed-wide dissected geological relief and denser middle coverage. --terrain-mid-detail on|off, --terrain-mid-cells 512|1024|2048, --terrain-mid-spacing 0.75|1|1.5|2|3|4 metres, --terrain-mid-strips on|off. Optional extra detail: --terrain-detail on --terrain-near-spacing 0.25|0.5|0.75|1|1.5 --terrain-near-cells 512|1024; --terrain-far-detail on|off. --terrain-depth-occlusion on|off reuses foreground depth before tracing the terrain. --natural-terrain-light on|off enables the shared terrain horizon and revised clouds. Experiments: --terrain-mid-error 0..4 pixels, --terrain-mid-tile-error 0..1 metres, --terrain-mid-boundary-ascent on|off, --terrain-gray, --formation-site X,Z (Landforms). For terrain-only captures, --capture-terrain-distance writes first-hit distance in metres to the float RGB readback.");
                 println!("--rolling-walk-frames DIR captures a deterministic Alpine trail walk. Use --route fly or bank-return with --eye and --target to capture flight and terrain ownership. The walking routes work with any terrain recipe.");
                 println!("--module-flora selects shared native trees and procedural native ground cover for the 6 km Eroded renderer.");
@@ -1348,6 +1354,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
     {
         flight_chase = Some(false);
     }
+    if flight_aircraft == crate::aircraft_model::ModelKind::Da62
+        && !flight_parked
+        && flight_chase.is_none()
+    {
+        flight_chase = Some(false);
+    }
     if flight_parked && flight_chase.is_none() {
         flight_chase = Some(true);
     }
@@ -1419,6 +1431,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>> {
         capture,
         capture_on_exit,
         rolling_terrain,
+        flight_aircraft,
         flight_chase,
         flight_parked,
         flight_altitude,

@@ -14,7 +14,7 @@ impl Viewer {
         let open = ui.owns_cursor();
         if open != was_open {
             self.keys.clear();
-            self.grab(!open);
+            self.grab(!open && !self.cockpit_cursor);
         }
         consumed
     }
@@ -33,6 +33,8 @@ impl Viewer {
             camera: self.display_camera(),
             aspect: self.width as f32 / self.height.max(1) as f32,
         };
+        let cockpit_pointer = self.cockpit_pointer();
+        let cockpit_control = cockpit_pointer.and_then(|p| self.cockpit_control(p));
         let (Some(ui), Some(gpu), Some(window)) = (&mut self.settings_ui, &self.gpu, &self.window)
         else {
             return Ok(());
@@ -43,18 +45,24 @@ impl Viewer {
             self.display_frame_ms * 0.9 + frame_ms * 0.1
         };
         let mut stats = SettingsStats {
-            can_board: self.parked_aircraft.as_ref().is_some_and(|(_, pose)| {
-                aircraft::Aircraft::can_board(&self.world, *pose, self.camera.position)
+            can_board: self.parked_aircraft.as_ref().is_some_and(|(plane, pose)| {
+                plane.can_board_here(&self.world, *pose, self.camera.position)
             }),
             flight: self
                 .aircraft
                 .as_ref()
                 .map(|plane| plane.instruments(plane.exterior_pose().unwrap_or(self.camera))),
+            cockpit_pointer,
+            cockpit_control,
             flight_audio: self.flight_audio.enabled,
             flight_camera_motion: self
                 .aircraft
                 .as_ref()
                 .is_some_and(|p| p.feedback.camera_motion),
+            cockpit_eye_offset: self
+                .aircraft
+                .as_ref()
+                .and_then(aircraft::Aircraft::cockpit_eye_offset),
             frame_ms: self.display_frame_ms,
             process_mib: self.resource_process_mib,
             available_mib: self.resource_available_mib,
@@ -108,7 +116,7 @@ impl Viewer {
         let mut settings = ui.settings().clone();
         if was_open != now_open {
             self.keys.clear();
-            self.grab(!now_open);
+            self.grab(!now_open && !self.cockpit_cursor);
         }
         if settings.day_night {
             settings.atmosphere = true;
@@ -155,6 +163,9 @@ impl Viewer {
             if let Some(plane) = &mut self.aircraft {
                 plane.toggle_camera_motion(&mut self.camera, &self.world);
             }
+        }
+        if let (Some(plane), Some(offset)) = (&mut self.aircraft, changes.cockpit_eye_offset) {
+            plane.set_cockpit_eye_offset(offset);
         }
         if let Some(gpu) = &mut self.gpu {
             if changes.naadf_rebuild {

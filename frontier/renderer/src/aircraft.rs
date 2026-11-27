@@ -1,5 +1,6 @@
 //! Aircraft controls, terrain contacts and camera presentation. All distances and rates use metres,
 //! seconds and radians independently of the native voxel size.
+use crate::aircraft_model::{da62, pick_cockpit_control, CockpitControl, ModelKind};
 use crate::flight_feedback::Feedback;
 use crate::Camera;
 use crate::{aircraft_damage, destruction};
@@ -38,7 +39,20 @@ fn apply_frame(pose: &mut Camera, frame: Mat3) {
 }
 
 /// Local collision volumes for an on-foot player around the stationary aircraft.
-pub(crate) fn parked_solid(p: Vec3) -> bool {
+pub(crate) fn parked_solid(kind: ModelKind, p: Vec3) -> bool {
+    if kind == ModelKind::Da62 {
+        let [lead, chord, y] = da62::surface(false, p.x.abs() / da62::SPAN);
+        return da62::hull(p, 0.)
+            || (p.x.abs() < da62::SPAN
+                && (lead - chord..lead).contains(&p.z)
+                && (p.y - y).abs() < 0.12)
+            || (p.x.abs() - da62::ENGINE).abs() < 0.32
+                && (-1.5..1.42).contains(&p.z)
+                && (-0.36..0.30).contains(&p.y)
+            || wheel_points(kind)
+                .into_iter()
+                .any(|t| (t.x - p.x).abs() < 0.11 && (t.y + 0.22 - p.y).hypot(t.z - p.z) < 0.22);
+    }
     let x = p.x.abs();
     let y = p.y;
     let z = p.z;
@@ -78,14 +92,40 @@ const BODY: [Vec3; 7] = [
     Vec3::new(-5.55, 1.12, 0.),
     Vec3::new(5.55, 1.12, 0.),
 ];
+const DIAMOND_HULL: [Vec3; 7] = [
+    Vec3::ZERO,
+    Vec3::new(0., -0.16, 3.24),
+    Vec3::new(0., -0.50, 0.4),
+    Vec3::new(0., 0.83, 0.),
+    Vec3::new(0., 1.40, -5.7),
+    Vec3::new(-7.25, 0.53, -0.56),
+    Vec3::new(7.25, 0.53, -0.56),
+];
+fn wheel_points(kind: ModelKind) -> [Vec3; 3] {
+    if kind == ModelKind::Da62 {
+        [da62::MAINS[0], da62::MAINS[1], da62::TREAD_NOSE]
+    } else {
+        [WHEELS[0], WHEELS[1], NOSE_WHEEL]
+    }
+}
+fn hull_points(kind: ModelKind) -> [Vec3; 7] {
+    if kind == ModelKind::Da62 {
+        DIAMOND_HULL
+    } else {
+        BODY
+    }
+}
 const CRUISE_SPEED: f32 = 56.;
 const CRUISE_POWER: f32 = 0.56;
 const STRUT_TRAVEL: f32 = 0.24;
-const PILOT_EYE: Vec3 = Vec3::new(0.28, 0.41, -0.48);
-const PILOT_VIEW_DOWN: f32 = 0.105;
+pub(crate) const PILOT_EYE: Vec3 = Vec3::new(0.28, 0.405, -0.61);
+pub(crate) const PILOT_VIEW_DOWN: f32 = 0.22;
+pub(crate) const COCKPIT_OFFSET_MIN: Vec3 = Vec3::new(-0.14, -0.08, -0.12);
+pub(crate) const COCKPIT_OFFSET_MAX: Vec3 = Vec3::new(0.14, 0.085, 0.16);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Instruments {
     pub speed_mps: f32,
+    pub true_speed_mps: f32,
     pub altitude_m: f64,
     pub climb_mps: f32,
     pub bank_degrees: f32,
@@ -99,21 +139,59 @@ pub(crate) struct Instruments {
     pub show_airflow: bool,
     pub grounded: bool,
     pub throttle: f32,
+    pub twin: Option<[f32; 2]>,
+    pub gear_status: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub(crate) enum DisplayPage {
+    Flight = 0,
+    Terrain = 1,
+    Weather = 2,
+    Systems = 3,
+}
+
+impl DisplayPage {
+    pub(crate) const ALL: [Self; 4] = [Self::Flight, Self::Terrain, Self::Weather, Self::Systems];
+    pub(crate) const INITIAL: [Self; 2] = [Self::Flight, Self::Terrain];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Flight => "Flight",
+            Self::Terrain => "Terrain",
+            Self::Weather => "Weather",
+            Self::Systems => "Systems",
+        }
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Presentation {
+    pub kind: ModelKind,
+    pub gear: f32,
+    pub right_power: f32,
+    pub right_prop_angle: f32,
+    pub rear_door: f32,
     pub pose: Camera,
     pub instruments: Instruments,
     pub controls: Vec3,
     pub door: f32,
     pub rudder: f32,
-    pub turn_rate: f32,
     pub prop_angle: f32,
     pub engine_running: bool,
+    pub mixture: f32,
+    pub ignition: bool,
+    pub avionics: bool,
+    pub flap_selector: f32,
     pub wheel_turn: [f32; 3],
     pub gear_compression: [f32; 3],
     pub radio_khz: u32,
+    pub displays: [DisplayPage; 2],
     pub home_relative_radians: f32,
     pub home_distance_km: f32,
     pub hold: bool,
@@ -135,14 +213,16 @@ fn swept_contact(
     start: Camera,
     end: Camera,
     wheel_clearance: f32,
+    kind: ModelKind,
+    gear_down: bool,
 ) -> Option<Contact> {
     let before = axes(start);
     let after = axes(end);
     let mut contact: Option<Contact> = None;
-    for (wheel, probe) in BODY.map(|p| (false, p)).into_iter().chain(
-        WHEELS
+    for (wheel, probe) in hull_points(kind).map(|p| (false, p)).into_iter().chain(
+        wheel_points(kind)
             .into_iter()
-            .chain([NOSE_WHEEL])
+            .filter(|_| gear_down)
             .map(|p| (true, p + Vec3::Y * wheel_clearance)),
     ) {
         let origin = start.position + (before * probe).as_dvec3();
@@ -176,7 +256,7 @@ fn swept_contact(
 
 // Probe both tracks in the canonical edited volume. This works on bridges,
 // raised runways and floors below an overhang as well as ordinary ground.
-fn runway_height(world: &World, mut pose: Camera) -> Option<f64> {
+fn runway_height(world: &World, mut pose: Camera, kind: ModelKind) -> Option<f64> {
     pose.pitch = 0.;
     pose.roll = 0.;
     let frame = axes(pose);
@@ -193,14 +273,15 @@ fn runway_height(world: &World, mut pose: Camera) -> Option<f64> {
         (world.material(above) != frontier_world::Material::Water)
             .then_some(above.y as f64 * voxel_size())
     };
-    let left = ground_at(WHEELS[0])?;
-    let right = ground_at(WHEELS[1])?;
+    let [left, right, nose] = wheel_points(kind);
+    let left = ground_at(left)?;
+    let right = ground_at(right)?;
     if (left - right).abs() > 0.22 {
         return None;
     }
     let mains = left.max(right);
-    let highest = ground_at(NOSE_WHEEL).unwrap_or(mains).max(mains);
-    (highest - mains <= 0.27).then_some(highest + 1.28)
+    let highest = ground_at(nose).unwrap_or(mains).max(mains);
+    (highest - mains <= 0.27).then_some(highest - f64::from(nose.y) - 0.04)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -227,6 +308,8 @@ fn slew_control(current: f32, target: f32, travel_seconds: f32, return_seconds: 
 }
 
 pub(crate) struct Airflow<'a> {
+    pub kind: ModelKind,
+    pub engine_wash: [f32; 2],
     pub relative_air: Vec3,
     pub angular_velocity: Vec3,
     pub center_of_gravity: Vec3,
@@ -238,17 +321,30 @@ pub(crate) fn engine_speed_rad_s(throttle: f32) -> f32 {
     72. + 210. * throttle
 }
 
+fn da62_engine_rate(power: f32) -> f32 {
+    (850. + 1450. * power.sqrt()) * std::f32::consts::TAU / 60.
+}
+
+const FUEL_CUTOFF: f32 = 0.075;
+
 pub(crate) struct Aircraft {
     dynamics: Dynamics,
+    gear: f32,
+    gear_up: bool,
+    right_power: f32,
+    right_engine_running: bool,
+    right_prop_angle: f32,
     time_pending: f32,
     throttle: f32,
+    mixture: f32,
+    ignition: bool,
+    avionics: bool,
     rudder: f32,
     brake_pressure: f32,
     prop_angle: f32,
     engine_running: bool,
     wheel_turn: [f32; 3],
     gear_compression: [f32; 3],
-    turn_rate: f32,
     grounded: bool,
     flap_detent: u8,
     flaps: f32,
@@ -258,6 +354,7 @@ pub(crate) struct Aircraft {
     pub(super) feedback: Feedback,
     pub(super) damage: Option<aircraft_damage::Damage>,
     pub(crate) radar: frontier_runtime::weather::radar::Controls,
+    displays: [DisplayPage; 2],
     show_airflow: bool,
     // In chase view the viewer camera follows this physical aircraft pose.
     pilot: Option<Camera>,
@@ -266,6 +363,8 @@ pub(crate) struct Aircraft {
     door_open: bool,
     look: [f32; 2],
     looking: bool,
+    cockpit_eye_offset: Vec3,
+    cockpit_drag: Option<CockpitControl>,
     home: DVec3,
     radio_khz: u32,
     hold: Option<FlightHold>,
@@ -275,15 +374,22 @@ impl Default for Aircraft {
     fn default() -> Self {
         Self {
             dynamics: Dynamics::default(),
+            gear: 0.,
+            gear_up: false,
+            right_power: CRUISE_POWER,
+            right_engine_running: true,
+            right_prop_angle: 0.58,
             time_pending: 0.,
             throttle: CRUISE_POWER,
+            mixture: 1.,
+            ignition: true,
+            avionics: true,
             rudder: 0.,
             brake_pressure: 0.,
             prop_angle: 0.,
             engine_running: true,
             wheel_turn: [0.; 3],
             gear_compression: [0.; 3],
-            turn_rate: 0.,
             grounded: false,
             flap_detent: 0,
             flaps: 0.,
@@ -293,13 +399,16 @@ impl Default for Aircraft {
             feedback: Feedback::default(),
             damage: None,
             radar: Default::default(),
+            displays: DisplayPage::INITIAL,
             show_airflow: false,
             pilot: None,
-            controls: Vec3::ZERO,
+            controls: Vec3::new(0., 0., CRUISE_POWER),
             door: 0.,
             door_open: false,
             look: [0.; 2],
             looking: false,
+            cockpit_eye_offset: Vec3::ZERO,
+            cockpit_drag: None,
             home: DVec3::ZERO,
             radio_khz: 118_000,
             hold: None,
@@ -385,8 +494,45 @@ pub(crate) fn find_dirt_runway(
 
 impl Aircraft {
     pub(super) fn enable_damage(&mut self) {
-        let _ = aircraft_damage::asset();
-        self.damage.get_or_insert_with(Default::default);
+        let kind = self.kind();
+        let _ = aircraft_damage::asset_for(kind);
+        let active = self.attached();
+        self.damage.get_or_insert_with(|| aircraft_damage::Damage {
+            active,
+            kind,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn kind(&self) -> ModelKind {
+        self.dynamics.kind
+    }
+
+    fn pilot_eye(&self) -> Vec3 {
+        if self.kind() == ModelKind::Da62 {
+            da62::PILOT_EYE
+        } else {
+            PILOT_EYE
+        }
+    }
+
+    pub(crate) fn toggle_gear(&mut self) {
+        if self.kind() == ModelKind::Da62 && !self.grounded {
+            self.gear_up = !self.gear_up;
+        }
+    }
+
+    pub(crate) fn toggle_twin_engine(&mut self, index: usize) {
+        if self.kind() != ModelKind::Da62
+            || !aircraft_damage::live(self.attached(), aircraft_damage::ENGINES + index)
+        {
+            return;
+        }
+        if index == 0 {
+            self.engine_running = !self.engine_running;
+        } else {
+            self.right_engine_running = !self.right_engine_running;
+        }
     }
 
     pub(super) fn attached(&self) -> u64 {
@@ -416,13 +562,14 @@ impl Aircraft {
         gear: &GearContact,
         impact: Option<destruction::Impact>,
     ) {
-        use aircraft_damage::{asset, live, section_node, GEAR_FIRST};
+        use aircraft_damage::{asset_for, live, section_node, ENGINES, GEAR_FIRST};
         use frontier_runtime::structure::Load;
         let pose = self.presentation(camera);
+        let kind = self.kind();
         let Some(damage) = &mut self.damage else {
             return;
         };
-        let asset = asset();
+        let asset = asset_for(kind);
         let axes = axes(camera);
         let cg = self.dynamics.loading.center;
         let omega = self.dynamics.angular_velocity;
@@ -449,9 +596,17 @@ impl Aircraft {
             );
             loads[group].moment += sample.moment;
         }
-        for (i, p) in WHEELS.into_iter().chain([NOSE_WHEEL]).enumerate() {
+        for (i, p) in wheel_points(kind).into_iter().enumerate() {
             let group = GEAR_FIRST + i;
             loads[group].apply(gear.forces[i], p - asset.structure[group].center);
+        }
+        if kind == ModelKind::Da62 {
+            for (i, thrust) in self.dynamics.engine_loads.iter().enumerate() {
+                let node = ENGINES + i;
+                let mount = da62::PROP.with_x(da62::ENGINE * if i == 0 { 1. } else { -1. });
+                loads[node].apply(thrust.force, mount - asset.structure[node].center);
+                loads[node].moment += thrust.moment;
+            }
         }
         if let Some(hit) = impact {
             let group = hit.contact.node;
@@ -466,14 +621,15 @@ impl Aircraft {
             }
         }
         let mut components = Vec::new();
-        let changed = damage.structure.solve(
+        let changed = damage.structure.solve_in_order(
             &asset.structure,
             damage.active,
             &loads,
             STEP,
             &mut components,
+            asset.order.iter().copied(),
         );
-        let target = aircraft_damage::wing_flex(&damage.structure, damage.active);
+        let target = aircraft_damage::wing_flex(kind, &damage.structure, damage.active);
         damage.flex = std::array::from_fn(|i| damage.flex[i] + (target[i] - damage.flex[i]) * 0.18);
         damage.peak_seen = damage.peak_seen.max(damage.structure.peak_utilization);
         if !changed {
@@ -489,7 +645,7 @@ impl Aircraft {
         let removed = damage.active & !components[0];
         damage.active = components[0];
         self.dynamics.attached = damage.active;
-        self.dynamics.loading.remove(removed);
+        self.dynamics.loading.remove(kind, removed);
         self.dynamics.velocity += axes * omega.cross(self.dynamics.loading.center - cg);
         self.hold = None;
     }
@@ -500,21 +656,21 @@ impl Aircraft {
         from: Camera,
         to: Camera,
     ) -> Option<destruction::Contact> {
-        use aircraft_damage::{asset, live, GEAR_FIRST};
+        use aircraft_damage::{asset_for, live, GEAR_FIRST};
+        let kind = self.kind();
         let pose = |p: Camera| destruction::Pose {
             center: p.position,
             orientation: Quat::from_mat3(&axes(p)),
         };
-        if self
-            .damage
-            .as_mut()
-            .unwrap()
-            .clearance
-            .sky(world, from.position, to.position, 6.3)
-        {
+        if self.damage.as_mut().unwrap().clearance.sky(
+            world,
+            from.position,
+            to.position,
+            if kind == ModelKind::Da62 { 7.8 } else { 6.3 },
+        ) {
             return None;
         }
-        let shape = asset();
+        let shape = asset_for(kind);
         let flex = self.damage.as_ref().unwrap().flex;
         let hull = shape
             .probes
@@ -524,44 +680,68 @@ impl Aircraft {
             .flat_map(|(i, points)| {
                 points.iter().map(move |p| {
                     let local = if (1..17).contains(&i) {
-                        aircraft_damage::flex_point(*p, p.x, flex)
+                        aircraft_damage::flex_point(kind, *p, p.x, flex)
                     } else {
                         *p
                     };
                     (i, local)
                 })
             });
-        let wheels = WHEELS
+        let wheels = wheel_points(kind)
             .into_iter()
-            .chain([NOSE_WHEEL])
+            .filter(|_| self.gear < 0.03)
             .enumerate()
             .filter(|(i, _)| live(self.attached(), GEAR_FIRST + i))
             .map(|(i, point)| (GEAR_FIRST + i, point + Vec3::Y * STRUT_TRAVEL));
         destruction::sweep(world, pose(from), pose(to), hull.chain(wheels))
     }
 
+    #[cfg(test)]
     pub(crate) fn enter(world: &World, camera: &mut Camera) -> Self {
-        let mut plane = Self::default();
-        if let Some(y) = runway_height(world, *camera) {
+        Self::enter_as(world, camera, ModelKind::Skyhawk)
+    }
+
+    pub(crate) fn enter_as(world: &World, camera: &mut Camera, kind: ModelKind) -> Self {
+        let mut plane = Self {
+            dynamics: Dynamics::for_kind(kind),
+            ..Self::default()
+        };
+        if kind == ModelKind::Da62 {
+            plane.throttle = 0.72;
+            plane.right_power = 0.72;
+            plane.controls.z = 0.72;
+        }
+        if let Some(y) = runway_height(world, *camera, kind) {
             let level = Camera {
                 position: DVec3::new(camera.position.x, y, camera.position.z),
                 pitch: 0.,
                 roll: 0.,
                 ..*camera
             };
-            if swept_contact(world, *camera, level, STRUT_TRAVEL).is_none() {
+            if swept_contact(world, *camera, level, STRUT_TRAVEL, kind, true).is_none() {
                 *camera = level;
                 plane.throttle = 0.;
+                plane.controls.z = 0.;
+                plane.right_power = 0.;
                 plane.grounded = true;
             }
         }
         if !plane.grounded {
             // Begin a cruise spawn with a small positive incidence on the wing
             // and a velocity along the requested view direction.
-            plane.dynamics.velocity = camera.direction() * CRUISE_SPEED;
-            plane.dynamics.airspeed = CRUISE_SPEED;
-            plane.dynamics.equivalent_airspeed = CRUISE_SPEED
-                * (dynamics::density(camera.position.y) / dynamics::SEA_LEVEL_DENSITY).sqrt();
+            let speed = if kind == ModelKind::Da62 {
+                82.
+            } else {
+                CRUISE_SPEED
+            };
+            if kind == ModelKind::Da62 {
+                plane.gear = 1.;
+                plane.gear_up = true;
+            }
+            plane.dynamics.velocity = camera.direction() * speed;
+            plane.dynamics.airspeed = speed;
+            plane.dynamics.equivalent_airspeed =
+                speed * (dynamics::density(camera.position.y) / dynamics::SEA_LEVEL_DENSITY).sqrt();
             camera.pitch = (camera.pitch + 0.025).clamp(-1.57, 1.57);
         }
         plane.home = camera.position;
@@ -571,6 +751,7 @@ impl Aircraft {
         world: &World,
         camera: &mut Camera,
         runway: frontier_world::DirtRunway,
+        kind: ModelKind,
     ) -> Option<Self> {
         use frontier_world::DirtRunway;
         let [x, z] = runway.center_m();
@@ -595,11 +776,16 @@ impl Aircraft {
         camera.yaw = forward.x.atan2(forward.z) as f32;
         camera.pitch = 0.;
         camera.roll = 0.;
-        let plane = Self::enter(world, camera);
+        let plane = Self::enter_as(world, camera, kind);
         plane.on_ground().then_some(plane)
     }
 
+    #[cfg(test)]
     pub(crate) fn park(world: &World, camera: &mut Camera) -> Option<Self> {
+        Self::park_as(world, camera, ModelKind::Skyhawk)
+    }
+
+    pub(crate) fn park_as(world: &World, camera: &mut Camera, kind: ModelKind) -> Option<Self> {
         let origin = *camera;
         // Select a dry, shallow departure corridor in the actual world. A dry
         // parking cell by itself can point straight into a river or a hillside.
@@ -653,9 +839,9 @@ impl Aircraft {
                             continue;
                         }
                         let mut pose = trial;
-                        let plane = Self::enter(world, &mut pose);
+                        let plane = Self::enter_as(world, &mut pose, kind);
                         if plane.on_ground()
-                            && BODY.iter().all(|p| {
+                            && hull_points(kind).iter().all(|p| {
                                 let point = pose.position + (frame * *p).as_dvec3();
                                 frontier_world::voxel_grid()
                                     .checked_cell(point.to_array())
@@ -690,7 +876,11 @@ impl Aircraft {
         self.radio_khz = (118_000 + 25 * (channel + direction).rem_euclid(760)) as u32;
     }
     pub(crate) fn toggle_hold(&mut self, camera: Camera) {
-        self.hold = if self.hold.is_none() && !self.grounded && self.airspeed_mps() > 34. {
+        self.hold = if self.avionics
+            && self.hold.is_none()
+            && !self.grounded
+            && self.airspeed_mps() > 34.
+        {
             let pose = self.pilot.unwrap_or(camera);
             Some(FlightHold {
                 yaw: pose.yaw,
@@ -704,41 +894,193 @@ impl Aircraft {
         self.looking = looking;
         if !self.looking {
             self.look = [0.; 2];
+            self.cockpit_drag = None;
         }
     }
+    pub(crate) fn toggle_look(&mut self) {
+        self.set_looking(!self.looking);
+    }
+
     pub(crate) fn look(&mut self, delta: (f64, f64)) {
         if self.looking {
             self.look[0] = (self.look[0] - delta.0 as f32 * 0.003).clamp(-2.45, 2.45);
             self.look[1] = (self.look[1] + delta.1 as f32 * 0.003).clamp(-0.75, 0.95);
         }
     }
+
+    pub(crate) fn drag_cockpit(&mut self, dy: f64) {
+        let pull = dy as f32 * 0.008;
+        match self.cockpit_drag {
+            Some(CockpitControl::Throttle | CockpitControl::LeftPower) => {
+                self.throttle = (self.throttle - pull).clamp(0., 1.);
+            }
+            Some(CockpitControl::RightPower) => {
+                self.right_power = (self.right_power - pull).clamp(0., 1.);
+            }
+            Some(CockpitControl::Mixture) => self.adjust_mixture(-pull),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn cockpit_eye_offset(&self) -> Option<Vec3> {
+        self.pilot.is_none().then_some(self.cockpit_eye_offset)
+    }
+
+    pub(crate) fn set_cockpit_eye_offset(&mut self, offset: Vec3) {
+        self.cockpit_eye_offset = offset.clamp(COCKPIT_OFFSET_MIN, COCKPIT_OFFSET_MAX);
+    }
+
     pub(crate) fn display_camera(&self, mut pose: Camera) -> Camera {
         if self.pilot.is_some() {
             return pose;
         }
         let body = axes(pose);
-        pose.position += (body * (PILOT_EYE + self.feedback.eye())).as_dvec3();
+        // The eye stays inside the cockpit's clear space even when inertia
+        // adds a transient offset to an adjusted seat position.
+        let offset = (self.cockpit_eye_offset + self.feedback.eye())
+            .clamp(COCKPIT_OFFSET_MIN, COCKPIT_OFFSET_MAX);
+        pose.position += (body * (self.pilot_eye() + offset)).as_dvec3();
         let head = self.feedback.frame(body)
             * Mat3::from_rotation_y(self.look[0])
             * Mat3::from_rotation_x(PILOT_VIEW_DOWN + self.look[1]);
         apply_frame(&mut pose, head);
         pose
     }
+    pub(crate) fn cycle_display(&mut self, index: usize) {
+        self.displays[index] = self.displays[index].next();
+    }
+
+    pub(crate) fn shows_weather(&self) -> bool {
+        self.avionics && self.displays.contains(&DisplayPage::Weather)
+    }
+
+    pub(crate) fn cockpit_control(
+        &self,
+        pose: Camera,
+        pointer: glam::Vec2,
+        aspect: f32,
+    ) -> Option<CockpitControl> {
+        if self.pilot.is_some() {
+            return None;
+        }
+        let camera = self.display_camera(pose);
+        self.cockpit_drag.or_else(|| {
+            pick_cockpit_control(
+                camera,
+                camera.pointer_ray(pointer, aspect),
+                self.presentation(pose),
+            )
+        })
+    }
+
+    pub(crate) fn set_cockpit_control(&mut self, control: Option<CockpitControl>) {
+        self.cockpit_drag = None;
+        match control {
+            Some(
+                control @ (CockpitControl::Throttle
+                | CockpitControl::Mixture
+                | CockpitControl::LeftPower
+                | CockpitControl::RightPower),
+            ) => {
+                self.cockpit_drag = Some(control);
+            }
+            Some(CockpitControl::Gear) => self.toggle_gear(),
+            Some(CockpitControl::Ignition) => self.toggle_ignition(),
+            Some(CockpitControl::Avionics) => self.toggle_avionics(),
+            Some(CockpitControl::Flaps) => self.flap_detent = (self.flap_detent + 1) % 4,
+            None => {}
+        }
+    }
+
+    pub(crate) fn adjust_mixture(&mut self, delta: f32) {
+        if self.kind() == ModelKind::Da62 {
+            self.right_power = (self.right_power + delta).clamp(0., 1.);
+            return;
+        }
+        self.mixture = (self.mixture + delta).clamp(0., 1.);
+        if self.mixture <= FUEL_CUTOFF {
+            self.engine_running = false;
+        }
+    }
+
+    pub(crate) fn toggle_ignition(&mut self) {
+        if self.kind() == ModelKind::Da62 {
+            let start = !(self.engine_running || self.right_engine_running);
+            self.engine_running =
+                start && aircraft_damage::live(self.attached(), aircraft_damage::ENGINES);
+            self.right_engine_running =
+                start && aircraft_damage::live(self.attached(), aircraft_damage::ENGINES + 1);
+            return;
+        }
+        self.ignition = !self.engine_running;
+        self.engine_running = self.ignition
+            && self.mixture > FUEL_CUTOFF
+            && aircraft_damage::live(self.attached(), aircraft_damage::NOSE);
+    }
+
+    pub(crate) fn toggle_avionics(&mut self) {
+        self.avionics = !self.avionics;
+        if !self.avionics {
+            self.hold = None;
+        }
+    }
+
+    pub(crate) fn engine_rates(&self, altitude: f64) -> [f32; 2] {
+        if self.kind() == ModelKind::Da62 {
+            [
+                da62_engine_rate(self.throttle) * f32::from(self.engine_running),
+                da62_engine_rate(self.right_power) * f32::from(self.right_engine_running),
+            ]
+        } else {
+            [
+                engine_speed_rad_s(self.effective_throttle(altitude, 1.))
+                    * f32::from(self.engine_running),
+                0.,
+            ]
+        }
+    }
+
+    pub(crate) fn effective_throttle(&self, altitude: f64, density_ratio: f32) -> f32 {
+        if !self.engine_running {
+            return 0.;
+        }
+        // Scale the lean side of the power curve with the amount of intake
+        // air. Full rich retains the existing calibrated full-power envelope.
+        let air = dynamics::density(altitude) * density_ratio / dynamics::SEA_LEVEL_DENSITY;
+        let rich = (0.87 * air).clamp(0.42, 0.87);
+        let fuel = ((self.mixture - FUEL_CUTOFF) / (rich - FUEL_CUTOFF)).clamp(0., 1.);
+        if self.kind() == ModelKind::Da62 {
+            self.throttle
+        } else {
+            self.throttle * fuel * fuel * (3. - 2. * fuel)
+        }
+    }
+
     pub(crate) fn presentation(&self, camera: Camera) -> Presentation {
         let pose = self.pilot.unwrap_or(camera);
         let offset = self.home - pose.position;
         Presentation {
+            kind: self.kind(),
+            gear: self.gear,
+            right_power: self.right_power,
+            right_prop_angle: self.right_prop_angle,
+            rear_door: self.door,
             pose,
             instruments: self.instruments(pose),
             controls: self.controls,
             door: self.door,
             rudder: self.rudder,
-            turn_rate: self.turn_rate,
             prop_angle: self.prop_angle,
-            engine_running: self.engine_running,
+            engine_running: self.engine_running
+                || (self.kind() == ModelKind::Da62 && self.right_engine_running),
+            mixture: self.mixture,
+            ignition: self.ignition,
+            avionics: self.avionics,
+            flap_selector: f32::from(self.flap_detent) / 3.,
             wheel_turn: self.wheel_turn,
             gear_compression: self.gear_compression,
             radio_khz: self.radio_khz,
+            displays: self.displays,
             home_relative_radians: -(offset.x.atan2(offset.z) as f32 - pose.yaw),
             home_distance_km: offset.x.hypot(offset.z) as f32 / 1_000.,
             hold: self.hold.is_some(),
@@ -747,7 +1089,23 @@ impl Aircraft {
     }
     pub(crate) fn instruments(&self, pose: Camera) -> Instruments {
         Instruments {
+            twin: (self.kind() == ModelKind::Da62).then_some([
+                self.throttle * f32::from(self.engine_running),
+                self.right_power * f32::from(self.right_engine_running),
+            ]),
+            gear_status: (self.kind() == ModelKind::Da62).then_some(if self.gear > 0.98 {
+                "Gear up"
+            } else if self.gear > 0.03 {
+                "Gear in transit"
+            } else if (0..3)
+                .all(|i| aircraft_damage::live(self.attached(), aircraft_damage::GEAR_FIRST + i))
+            {
+                "Gear down"
+            } else {
+                "Gear damaged"
+            }),
             speed_mps: self.dynamics.equivalent_airspeed,
+            true_speed_mps: self.dynamics.airspeed,
             altitude_m: pose.position.y,
             climb_mps: self.dynamics.velocity.y,
             bank_degrees: pose.roll.to_degrees(),
@@ -760,7 +1118,11 @@ impl Aircraft {
             wind: self.sampled_wind,
             show_airflow: self.show_airflow,
             grounded: self.grounded,
-            throttle: self.throttle,
+            throttle: if self.kind() == ModelKind::Da62 {
+                (self.throttle + self.right_power) * 0.5
+            } else {
+                self.throttle
+            },
         }
     }
     /// Find a standing position clear of canonical voxels beside either cabin door.
@@ -788,7 +1150,7 @@ impl Aircraft {
                 doorstep.z,
             );
             if crate::walking::aabb_blocked(eye.to_array(), |cell| world.blocking_material(cell))
-                || !Self::can_board(world, pose, eye)
+                || !self.can_board_here(world, pose, eye)
             {
                 continue;
             }
@@ -798,10 +1160,10 @@ impl Aircraft {
             self.dynamics.velocity = Vec3::ZERO;
             self.dynamics.angular_velocity = Vec3::ZERO;
             self.throttle = 0.;
+            self.right_power = 0.;
             self.controls = Vec3::ZERO;
             self.rudder = 0.;
             self.brake_pressure = 0.;
-            self.engine_running = false;
             self.gear_compression = [0.; 3];
             self.door_open = true;
             self.door = 1.;
@@ -819,10 +1181,25 @@ impl Aircraft {
         None
     }
 
+    #[cfg(test)]
     pub(crate) fn can_board(world: &World, pose: Camera, eye: DVec3) -> bool {
+        Self::default().can_board_here(world, pose, eye)
+    }
+
+    pub(crate) fn can_board_here(&self, world: &World, pose: Camera, eye: DVec3) -> bool {
         [-1., 1.].into_iter().any(|side| {
-            let door =
-                pose.position + (axes(pose) * Vec3::new(side * 0.71, 0.34, -0.35)).as_dvec3();
+            let door = pose.position
+                + (axes(pose)
+                    * Vec3::new(
+                        side * 0.71,
+                        0.34,
+                        if self.kind() == ModelKind::Da62 {
+                            0.04
+                        } else {
+                            -0.35
+                        },
+                    ))
+                .as_dvec3();
             let path = door - eye;
             path.length() <= 2.25
                 && (path.length() < 0.01
@@ -908,6 +1285,8 @@ impl Aircraft {
 
     pub(crate) fn airflow(&self) -> Option<Airflow<'_>> {
         self.show_airflow.then_some(Airflow {
+            kind: self.kind(),
+            engine_wash: self.dynamics.engine_wash,
             relative_air: self.dynamics.relative_air,
             angular_velocity: self.dynamics.angular_velocity,
             center_of_gravity: self.dynamics.loading.center,
@@ -967,21 +1346,20 @@ impl Aircraft {
         } else {
             false
         };
-        self.engine_running = aircraft_damage::live(self.attached(), aircraft_damage::NOSE);
+        if self.kind() == ModelKind::Da62 {
+            self.engine_running &= aircraft_damage::live(self.attached(), aircraft_damage::ENGINES);
+            self.right_engine_running &=
+                aircraft_damage::live(self.attached(), aircraft_damage::ENGINES + 1);
+        } else {
+            self.engine_running &= aircraft_damage::live(self.attached(), aircraft_damage::NOSE);
+        }
         self.time_pending += dt;
-        let start = *camera;
-        let mut elapsed = 0.;
         self.sampled_wind = wind(camera.position);
         while self.time_pending >= STEP {
             self.time_pending -= STEP;
-            elapsed += STEP;
             if !self.step_in_air(camera, world, input, &wind, density_ratio) {
                 return false;
             }
-        }
-        if elapsed > 0. {
-            let turn = start.yaw - camera.yaw;
-            self.turn_rate = turn.sin().atan2(turn.cos()) / elapsed;
         }
         if chase {
             self.follow(camera, world);
@@ -1010,7 +1388,20 @@ impl Aircraft {
     ) -> bool {
         let bank = input.roll;
         let pitch = input.pitch;
-        self.throttle = (self.throttle + input.throttle_rate * STEP * 0.55).clamp(0., 1.);
+        let throttle_change = input.throttle_rate * STEP * 0.55;
+        self.throttle = (self.throttle + throttle_change).clamp(0., 1.);
+        let twin = self.kind() == ModelKind::Da62;
+        if twin {
+            self.right_power = (self.right_power + throttle_change).clamp(0., 1.);
+            let target = f32::from(self.gear_up);
+            self.gear += (target - self.gear).clamp(-STEP * 0.4, STEP * 0.4);
+        }
+        let right_throttle = self.right_power * f32::from(twin && self.right_engine_running);
+        if twin && self.right_engine_running {
+            self.right_prop_angle = (self.right_prop_angle
+                + STEP * da62_engine_rate(right_throttle))
+            .rem_euclid(std::f32::consts::TAU);
+        }
         let flap_change = self.flap_detent as f32 / 3. - self.flaps;
         self.flaps += flap_change.clamp(-0.31 * STEP, 0.31 * STEP);
         let brake = f32::from(input.brake);
@@ -1021,8 +1412,15 @@ impl Aircraft {
             self.rudder += (input.rudder - self.rudder) * (1. - (-10. * STEP).exp());
             self.brake_pressure = brake;
         }
-        self.prop_angle = (self.prop_angle + STEP * engine_speed_rad_s(self.throttle))
-            .rem_euclid(std::f32::consts::TAU);
+        let effective_throttle = self.effective_throttle(camera.position.y, density_ratio);
+        if self.engine_running {
+            let rate = if twin {
+                da62_engine_rate(effective_throttle)
+            } else {
+                engine_speed_rad_s(effective_throttle)
+            };
+            self.prop_angle = (self.prop_angle + STEP * rate).rem_euclid(std::f32::consts::TAU);
+        }
 
         if self.grounded
             || self.airspeed_mps() < 32.
@@ -1065,7 +1463,9 @@ impl Aircraft {
             pitch: (self.controls.y + self.pitch_trim).clamp(-1., 1.),
             rudder: self.rudder,
             flaps: self.flaps,
-            throttle: self.throttle,
+            throttle: effective_throttle,
+            right_throttle,
+            gear: self.gear,
         };
         let mut loads =
             self.dynamics
@@ -1119,7 +1519,14 @@ impl Aircraft {
             if crash {
                 return false;
             }
-        } else if let Some(contact) = swept_contact(world, start, *camera, STRUT_TRAVEL) {
+        } else if let Some(contact) = swept_contact(
+            world,
+            start,
+            *camera,
+            STRUT_TRAVEL,
+            self.kind(),
+            self.gear < 0.03,
+        ) {
             *camera = start;
             camera.position += travel * contact.fraction;
             if self.grounded && !contact.wheel_on_top && self.dynamics.velocity.length() < 13. {
@@ -1134,7 +1541,7 @@ impl Aircraft {
             *phase = (*phase + spin * STEP).rem_euclid(std::f32::consts::TAU);
         }
         let omega = self.dynamics.angular_velocity;
-        let seat_arm = PILOT_EYE - center;
+        let seat_arm = self.pilot_eye() - center;
         let seat_acceleration = loads.force / self.dynamics.loading.mass
             + ((omega - old_omega) / STEP).cross(seat_arm)
             + omega.cross(omega.cross(seat_arm));
@@ -1157,7 +1564,12 @@ impl Aircraft {
     ) -> GearContact {
         let to_body = body.transpose();
         let mut contact = GearContact::default();
-        for (i, wheel) in WHEELS.into_iter().chain([NOSE_WHEEL]).enumerate() {
+        if self.gear >= 0.03 {
+            return contact;
+        }
+        let twin = self.kind() == ModelKind::Da62;
+        let weight_scale = if twin { 1.9 } else { 1. };
+        for (i, wheel) in wheel_points(self.kind()).into_iter().enumerate() {
             if !aircraft_damage::live(self.attached(), aircraft_damage::GEAR_FIRST + i) {
                 continue;
             }
@@ -1208,21 +1620,21 @@ impl Aircraft {
             } else {
                 (85_000., 7_000.)
             };
-            let normal = (spring * compression - damper * velocity.y).max(0.);
+            let normal = (spring * compression - damper * velocity.y).max(0.) * weight_scale;
             if normal == 0. {
                 continue;
             }
             let sideways = Vec3::Y.cross(forward);
             let rolling_speed = velocity.dot(forward);
             let side_speed = velocity.dot(sideways);
-            let lateral = -sideways * (3_800. * side_speed);
+            let lateral = -sideways * (3_800. * side_speed * weight_scale);
             let rolling = -0.027 * normal * (rolling_speed / 0.45).clamp(-1., 1.);
             let free = (forward * rolling + lateral).clamp_length_max(normal * 0.58);
             let friction = if self.brake_pressure > 0. {
                 let braking = if nose {
                     rolling
                 } else {
-                    -6_000. * rolling_speed
+                    -6_000. * rolling_speed * weight_scale
                 };
                 let braked = (forward * braking + lateral).clamp_length_max(normal * 0.67);
                 free.lerp(braked, self.brake_pressure)
@@ -1270,6 +1682,345 @@ mod tests {
         camera.pitch = 0.;
         camera.roll = 0.;
         (world, camera)
+    }
+
+    #[test]
+    fn off_center_cockpit_click_uses_the_display_camera() {
+        use crate::aircraft_model::{Part, Rig};
+        use glam::Vec2;
+
+        let (world, mut pose) = runway();
+        pose.position.y += 500.;
+        pose.yaw = 0.62;
+        pose.roll = 0.28;
+        let mut plane = Aircraft::enter_as(&world, &mut pose, ModelKind::Da62);
+        let aspect = 1.6;
+        let camera = plane.display_camera(pose);
+        let presentation = plane.presentation(pose);
+        let joints = plane.kind().joints(presentation, Rig::flight(presentation));
+        let pointer_at = |point: Vec3| {
+            let clip = camera.matrix(pose.position, aspect) * (axes(pose) * point).extend(1.);
+            let ndc = clip.truncate() / clip.w;
+            Vec2::new(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y)
+        };
+
+        let gear_pointer = pointer_at(Vec3::new(0.175, -0.13, 0.801));
+        assert!(gear_pointer.distance(Vec2::splat(0.5)) > 0.1);
+        let gear = plane.cockpit_control(pose, gear_pointer, aspect);
+        assert_eq!(gear, Some(CockpitControl::Gear));
+        plane.set_cockpit_control(gear);
+        assert!(!plane.gear_up);
+
+        let lever = joints[Part::Mixture as usize].transform_point3(Vec3::new(-0.05, 0.024, 0.595));
+        let control = plane.cockpit_control(pose, pointer_at(lever), aspect);
+        assert_eq!(control, Some(CockpitControl::RightPower));
+        let power = plane.right_power;
+        plane.set_cockpit_control(control);
+        plane.drag_cockpit(16.);
+        assert!(plane.right_power < power);
+        let power = plane.right_power;
+        plane.set_cockpit_control(None);
+        plane.drag_cockpit(16.);
+        assert_eq!(plane.right_power, power);
+    }
+
+    #[test]
+    fn da62_elevator_trailing_edge_matches_pitch_input() {
+        use crate::aircraft_model::{Part, Rig};
+        let (world, mut pose) = runway();
+        let mut plane = Aircraft::enter_as(&world, &mut pose, ModelKind::Da62);
+        let trailing_edge = Vec3::new(0., 1.42, -5.88);
+        for pitch in [-1., 1.] {
+            plane.controls.y = pitch;
+            let presentation = plane.presentation(pose);
+            let joints = plane.kind().joints(presentation, Rig::flight(presentation));
+            let elevator = joints[Part::Elevator as usize].transform_point3(trailing_edge);
+            assert!((elevator.y - trailing_edge.y) * pitch > 0.06);
+        }
+    }
+
+    #[test]
+    fn da62_stall_detector_uses_local_positive_angle_of_attack() {
+        let mut model = Dynamics::for_kind(ModelKind::Da62);
+        let mut evaluate = |pitch: f32, aoa: f32, speed: f32, roll: f32| {
+            let body = Mat3::from_rotation_x(-pitch);
+            model.velocity = body * (Vec3::new(0., -aoa.sin(), aoa.cos()) * speed);
+            for _ in 0..60 {
+                model.aerodynamic_loads(
+                    DVec3::Y * 1500.,
+                    body,
+                    Deflection {
+                        roll,
+                        ..Default::default()
+                    },
+                    |_| Vec3::ZERO,
+                    STEP,
+                );
+            }
+            model.stall_warning
+        };
+        assert!(!evaluate(25_f32.to_radians(), 0.02, 62., 0.));
+        assert!(!evaluate(0., 0.09, 60., 1.));
+        assert!(!evaluate(0., -0.30, 45., 0.));
+        assert!(evaluate(-6_f32.to_radians(), 0.19, 38., 0.));
+        assert!(evaluate(0., 0.19, 70., 0.));
+        assert!(!evaluate(0., 0.08, 45., 0.));
+    }
+
+    #[test]
+    fn da62_asymmetric_thrust_and_gear() {
+        let (world, mut pose) = runway();
+        pose.position.y += 500.;
+        let mut plane = Aircraft::enter_as(&world, &mut pose, ModelKind::Da62);
+        plane.enable_damage();
+        assert_eq!(plane.gear, 1.);
+        assert!(plane.dynamics.loading.mass > 1900.);
+        let eval = |left, right, gear| {
+            let mut model = Dynamics::for_kind(ModelKind::Da62);
+            model.velocity = Vec3::Z * 45.;
+            model.aerodynamic_loads(
+                DVec3::ZERO,
+                Mat3::IDENTITY,
+                Deflection {
+                    throttle: left,
+                    right_throttle: right,
+                    gear,
+                    ..Default::default()
+                },
+                |_| Vec3::ZERO,
+                STEP,
+            )
+        };
+        let both = eval(1., 1., 1.);
+        let left = eval(1., 0., 1.);
+        let right = eval(0., 1., 1.);
+        assert!((left.moment.y + right.moment.y).abs() < 10.);
+        assert!(left.moment.y < -1000. && right.moment.y > 1000.);
+        assert!(both.force.z > left.force.z && both.force.z > eval(1., 1., 0.).force.z);
+        plane.toggle_twin_engine(0);
+        assert_eq!(plane.engine_rates(pose.position.y)[0], 0.);
+        assert!(plane.engine_rates(pose.position.y)[1] > 0.);
+        plane.toggle_gear();
+        for _ in 0..330 {
+            assert!(plane.advance(&mut pose, &world, FlightInput::default(), STEP));
+        }
+        assert_eq!(plane.gear, 0.);
+    }
+
+    #[test]
+    fn da62_overload_breaks_the_model_and_conserves_mass() {
+        let (mut world, mut pose) = runway();
+        pose.position.y += 17.;
+        let mut plane = Aircraft::enter_as(&world, &mut pose, ModelKind::Da62);
+        plane.enable_damage();
+        let asset = aircraft_damage::asset_for(ModelKind::Da62);
+        let mass = plane.dynamics.loading.mass;
+        let intact = plane.attached();
+        for (i, section) in plane.dynamics.flow_samples.iter_mut().take(8).enumerate() {
+            section.origin = asset.structure[i + 1].center;
+            section.lift = Vec3::Y * 45_000.;
+        }
+        for _ in 0..45 {
+            plane.solve_structure(
+                pose,
+                Vec3::ZERO,
+                Vec3::Y * 38.,
+                &GearContact::default(),
+                None,
+            );
+            if plane.attached() != intact {
+                break;
+            }
+        }
+        assert_ne!(plane.attached(), intact);
+        assert!(aircraft_damage::live(
+            plane.attached(),
+            aircraft_damage::ENGINES + 1
+        ));
+        let damage = plane.damage.as_mut().unwrap();
+        assert!(damage
+            .fragments
+            .iter()
+            .any(|b| b.shape.mass > 5. && !b.shape.vertices.is_empty()));
+        assert!(
+            (mass
+                - plane.dynamics.loading.mass
+                - damage.fragments.iter().map(|b| b.shape.mass).sum::<f32>())
+            .abs()
+                < 0.02
+        );
+        let mut debris = destruction::Scene::default();
+        debris.receive(&mut world, damage);
+        assert!(!debris.bodies.is_empty());
+    }
+
+    fn da62_takeoff_input(plane: &Aircraft, pose: Camera, runway_yaw: f32) -> FlightInput {
+        let pitch = if plane.airspeed_mps() > 35. {
+            (0.54 + 2.5 * (0.15 - pose.pitch) + 0.76 * plane.dynamics.angular_velocity.x)
+                .clamp(-0.35, 0.88)
+        } else {
+            0.
+        };
+        let roll =
+            (-1.6 * pose.roll - 0.88 * plane.dynamics.angular_velocity.z).clamp(-0.6, 0.6);
+        let yaw_error = (pose.yaw - runway_yaw).sin();
+        let mut flight = input(roll, pitch, 1.);
+        flight.rudder =
+            (1.6 * yaw_error + 0.85 * plane.dynamics.angular_velocity.y).clamp(-0.45, 0.45);
+        flight
+    }
+
+    #[test]
+    fn da62_takes_off_from_the_native_detail_runway_with_module_flora() {
+        let terrain = frontier_world::FbmTerrain::new(
+            7,
+            FbmParams {
+                recipe: frontier_world::FbmRecipe::Eroded,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .with_native_detail();
+        let runway = find_dirt_runway(&terrain, [4096., 3072.]).expect("seed-7 runway");
+        let world = World::from_fbm_terrain(terrain.with_dirt_runway(runway))
+            .with_vegetation()
+            .with_module_flora(true);
+        let mut pose = Camera::fixture();
+        pose.far = 6000.;
+        let mut plane = Aircraft::park_on_runway(&world, &mut pose, runway, ModelKind::Da62)
+            .expect("DA62 starts on its landing gear");
+        let initial = pose;
+        let forward = initial.direction().as_dvec3();
+        plane.enable_damage();
+        let intact = plane.attached();
+        plane.select_flap(1);
+        let mut liftoff = None;
+        for _ in 0..3360 {
+            let flight = da62_takeoff_input(&plane, pose, initial.yaw);
+            assert!(plane.advance(&mut pose, &world, flight, STEP));
+            if !plane.on_ground() && pose.position.y > initial.position.y + 0.25 {
+                liftoff.get_or_insert((pose.position - initial.position).dot(forward));
+            }
+            if pose.position.y > runway.height_m() + 12. {
+                break;
+            }
+        }
+        let distance = liftoff.expect("DA62 leaves the graded runway under its own power");
+        assert!(
+            distance < 2. * frontier_world::DirtRunway::HALF_LENGTH_M - 22.,
+            "liftoff at {distance:.1} m must precede the runway end"
+        );
+        assert!(pose.position.y > runway.height_m() + 12.);
+        assert_eq!(plane.attached(), intact);
+        eprintln!("DA62 lifted off from the Eroded runway after {distance:.1} m");
+    }
+
+    #[test]
+    fn da62_takeoff_and_belly_impact_use_world_physics() {
+        let (mut world, mut pose) = runway();
+        let ground = world.height_m(0., 0.);
+        let mut plane = Aircraft::enter_as(&world, &mut pose, ModelKind::Da62);
+        plane.enable_damage();
+        assert!(plane.grounded);
+        let (parked, walker) = plane.step_out(&world, pose).expect("DA62 doorway");
+        assert!(plane.can_board_here(&world, parked, walker.position));
+        let intact = plane.attached();
+        plane.select_flap(1);
+        let mut liftoff = None;
+        for _ in 0..3360 {
+            let flight = da62_takeoff_input(&plane, pose, 0.);
+            assert!(
+                plane.advance(&mut pose, &world, flight, STEP),
+                "takeoff after {:.1} m at {:.1} m/s",
+                pose.position.z,
+                plane.airspeed_mps()
+            );
+            if !plane.grounded && pose.position.y > ground + 1.45 {
+                liftoff.get_or_insert((pose.position.z, plane.airspeed_mps()));
+            }
+            if pose.position.y > ground + 12. {
+                break;
+            }
+        }
+        assert!(
+            pose.position.y > ground + 12.,
+            "takeoff ended at {:?} at {:.1} m/s",
+            pose.position,
+            plane.airspeed_mps()
+        );
+        assert_eq!(plane.attached(), intact);
+
+        let (distance, speed) = liftoff.expect("DA62 must lift off under its own power");
+        assert!(distance < 450. && (33.0..43.0).contains(&speed));
+        eprintln!(
+            "DA62 liftoff at {:.0} kt after {:.0} m",
+            speed * 1.94384,
+            distance
+        );
+
+        // A stabilized final approach still goes through the normal contact
+        // and suspension solver, including flare and rolling touchdown.
+        pose.position.y = ground + 2.6;
+        pose.yaw = 0.;
+        pose.roll = 0.;
+        pose.pitch = 0.055;
+        plane.gear_up = false;
+        plane.gear = 0.;
+        plane.grounded = false;
+        plane.throttle = 0.12;
+        plane.right_power = 0.12;
+        plane.dynamics.angular_velocity = Vec3::ZERO;
+        plane.dynamics.velocity = Vec3::new(0., -1.85, 39.);
+        for _ in 0..360 {
+            let pitch =
+                (0.05 + 1.6 * (0.07 - pose.pitch) + 0.6 * plane.dynamics.angular_velocity.x)
+                    .clamp(-0.35, 0.35);
+            assert!(plane.advance(&mut pose, &world, input(0., pitch, 0.), STEP));
+            if plane.grounded {
+                break;
+            }
+        }
+        assert!(plane.grounded, "gear-down landing reached the ground");
+        assert_eq!(plane.attached(), intact);
+        pose.position.y = ground + 2.5;
+        pose.roll = 0.;
+        pose.pitch = -0.25;
+        plane.gear = 1.;
+        plane.gear_up = true;
+        plane.dynamics.angular_velocity = Vec3::ZERO;
+        plane.dynamics.velocity = Vec3::new(0., -28., 52.);
+        let crashed =
+            (0..120).any(|_| !plane.advance(&mut pose, &world, FlightInput::default(), STEP));
+        assert!(crashed);
+        plane.wreck(pose);
+        let mut debris = destruction::Scene::default();
+        debris.receive(&mut world, plane.damage.as_mut().unwrap());
+        assert!(!debris.bodies.is_empty());
+        assert!(debris.removed_cells > 0);
+    }
+
+    #[test]
+    fn mixture_cutoff_stays_stopped_until_ignition_restarts_it() {
+        let (world, mut camera) = runway();
+        let mut plane = Aircraft::enter(&world, &mut camera);
+        plane.throttle = 0.35;
+        assert_eq!(plane.effective_throttle(camera.position.y, 1.), 0.35);
+        plane.adjust_mixture(-0.60);
+        let lean = plane.effective_throttle(camera.position.y, 1.);
+        assert!(lean > 0. && lean < plane.throttle);
+
+        plane.adjust_mixture(-1.);
+        let stopped_phase = plane.prop_angle;
+        assert!(!plane.engine_running && plane.ignition);
+        assert!(plane.advance(&mut camera, &world, FlightInput::default(), 0.1));
+        assert_eq!(plane.prop_angle, stopped_phase);
+        assert_eq!(plane.effective_throttle(camera.position.y, 1.), 0.);
+        plane.adjust_mixture(1.);
+        assert!(!plane.engine_running);
+        plane.toggle_ignition();
+        assert!(plane.engine_running && plane.ignition);
+        plane.toggle_ignition();
+        assert!(!plane.engine_running && !plane.ignition);
     }
 
     #[test]
@@ -1877,37 +2628,131 @@ mod tests {
         assert!((49.0..56.0).contains(&stall_knots) && (8.0..17.0).contains(&peak_a));
     }
 
+    fn longitudinal_trim(
+        kind: ModelKind,
+        altitude: f64,
+        speed: f32,
+        throttle: f32,
+        climb_angle: f32,
+    ) -> f32 {
+        let mut model = Dynamics::for_kind(kind);
+        model.velocity = Vec3::Z * speed;
+        let weight = model.loading.mass * dynamics::GRAVITY;
+        let mut eval = |pitch: f32, elevator: f32| {
+            let body = Mat3::from_rotation_x(-pitch);
+            let controls = Deflection {
+                throttle,
+                pitch: elevator,
+                right_throttle: throttle,
+                gear: 1.,
+                ..Default::default()
+            };
+            let loads =
+                model.aerodynamic_loads(DVec3::Y * altitude, body, controls, |_| Vec3::ZERO, STEP);
+            let force = body * loads.force;
+            Vec3::new(
+                force.y - weight * climb_angle.cos(),
+                loads.moment.x,
+                force.z - weight * climb_angle.sin(),
+            )
+        };
+        let (mut pitch, mut elevator) = (0.025_f32, 0.0_f32);
+        for _ in 0..10 {
+            let balance = eval(pitch, elevator);
+            let d_pitch = (eval(pitch + 0.001, elevator) - balance) / 0.001;
+            let d_elevator = (eval(pitch, elevator + 0.001) - balance) / 0.001;
+            let determinant = d_pitch.x * d_elevator.y - d_elevator.x * d_pitch.y;
+            pitch -= (d_elevator.y * balance.x - d_elevator.x * balance.y) / determinant;
+            elevator -= (d_pitch.x * balance.y - d_pitch.y * balance.x) / determinant;
+        }
+        let balance = eval(pitch, elevator);
+        assert!(balance.x.abs() < 12. && balance.y.abs() < 12.);
+        balance.z
+    }
+
     #[test]
-    fn sea_level_level_flight_power_and_drag_balance() {
-        let trim = |speed, throttle| {
-            let mut model = Dynamics::default();
-            model.velocity = Vec3::Z * speed;
-            let weight = model.loading.mass * dynamics::GRAVITY;
-            let mut eval = |pitch: f32, elevator: f32| {
-                let body = Mat3::from_rotation_x(-pitch);
-                let controls = Deflection {
-                    throttle,
-                    pitch: elevator,
+    fn da62_cruise_trim_matches_published_conditions() {
+        // Diamond's 4,400 lb Canadian brochure matches the simulated payload.
+        for (altitude_ft, power, published_tas) in [(12_000., 0.60, 159.), (16_000., 0.87, 192.)] {
+            let altitude = altitude_ft * 0.3048;
+            let trim = |tas| longitudinal_trim(ModelKind::Da62, altitude, tas / 1.94384, power, 0.);
+            let (mut low, mut high) = (125., 220.);
+            assert!(trim(low) > 0. && trim(high) < 0.);
+            for _ in 0..16 {
+                let mid = 0.5 * (low + high);
+                if trim(mid) > 0. {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            let tas = 0.5 * (low + high);
+            let eas = tas * (dynamics::density(altitude) / dynamics::SEA_LEVEL_DENSITY).sqrt();
+            eprintln!("DA62 {altitude_ft:.0} ft at {:.0}%: {tas:.1} KTAS ({eas:.1} KEAS), Diamond {published_tas:.0} KTAS",power * 100.);
+            assert!((tas - published_tas).abs() < 5.);
+        }
+    }
+
+    #[test]
+    fn da62_clean_full_power_climb() {
+        let speed = 89. / 1.94384;
+        let (mut low, mut high) = (0., 0.24);
+        for _ in 0..16 {
+            let angle = 0.5 * (low + high);
+            if longitudinal_trim(ModelKind::Da62, 0., speed, 1., angle) > 0. {
+                low = angle;
+            } else {
+                high = angle;
+            }
+        }
+        let climb_fpm = speed * (0.5 * (low + high)).sin() * 196.85;
+        eprintln!("DA62 clean full-power climb at 89 kt: {climb_fpm:.0} ft/min");
+        assert!((1170.0..1450.0).contains(&climb_fpm));
+    }
+
+    #[test]
+    fn da62_landing_flaps_lower_stall_speed_and_horn_leads_the_break() {
+        let speed = 34.;
+        let mut stall_speed = [0.; 2];
+        for (index, flap) in [0., 1.].into_iter().enumerate() {
+            let mut peak: f32 = 0.;
+            let mut warning_lift = None;
+            for step in -10..66 {
+                let body = Mat3::from_rotation_x(-(step as f32) * 0.006);
+                let mut model = Dynamics::for_kind(ModelKind::Da62);
+                model.velocity = Vec3::Z * speed;
+                let control = Deflection {
+                    flaps: flap,
+                    gear: 1. - flap,
                     ..Default::default()
                 };
-                let loads =
-                    model.aerodynamic_loads(DVec3::ZERO, body, controls, |_| Vec3::ZERO, STEP);
-                let force = body * loads.force;
-                Vec3::new(force.y - weight, loads.moment.x, force.z)
-            };
-            let (mut pitch, mut elevator) = (0.025_f32, 0.0_f32);
-            for _ in 0..10 {
-                let balance = eval(pitch, elevator);
-                let d_pitch = (eval(pitch + 0.001, elevator) - balance) / 0.001;
-                let d_elevator = (eval(pitch, elevator + 0.001) - balance) / 0.001;
-                let determinant = d_pitch.x * d_elevator.y - d_elevator.x * d_pitch.y;
-                pitch -= (d_elevator.y * balance.x - d_elevator.x * balance.y) / determinant;
-                elevator -= (d_pitch.x * balance.y - d_pitch.y * balance.x) / determinant;
+                let mut lift = 0.;
+                for _ in 0..100 {
+                    let forces =
+                        model.aerodynamic_loads(DVec3::ZERO, body, control, |_| Vec3::ZERO, STEP);
+                    lift = (body * forces.force).y;
+                }
+                peak = peak.max(lift);
+                if model.stall_warning {
+                    warning_lift.get_or_insert(lift);
+                }
             }
-            let balance = eval(pitch, elevator);
-            assert!(balance.x.abs() < 12. && balance.y.abs() < 12.);
-            balance.z
-        };
+            // Convert the force sweep into an approximate 1 g stall speed.
+            let speed_from_lift =
+                |lift: f32| speed * 1.94384 * (2300. * dynamics::GRAVITY / lift).sqrt();
+            let stall = speed_from_lift(peak);
+            let horn = speed_from_lift(warning_lift.unwrap());
+            eprintln!("DA62 flap {flap}: stall {stall:.1} kt, horn {horn:.1} kt");
+            assert!((3.0..10.).contains(&(horn - stall)));
+            stall_speed[index] = stall;
+        }
+        assert!((65.0..73.0).contains(&stall_speed[1]));
+        assert!(stall_speed[0] > stall_speed[1] + 3.);
+    }
+
+    #[test]
+    fn sea_level_level_flight_power_and_drag_balance() {
+        let trim = |speed, throttle| longitudinal_trim(ModelKind::Skyhawk, 0., speed, throttle, 0.);
         assert!(trim(55., CRUISE_POWER).abs() < 240.);
         let (mut low, mut high) = (58., 71.);
         assert!(trim(low, 1.) > 0. && trim(high, 1.) < 0.);

@@ -509,7 +509,7 @@ impl Scene {
 
     pub fn receive(&mut self, world: &mut World, damage: &mut crate::aircraft_damage::Damage) {
         for impact in damage.impacts.drain(..) {
-            let span = crate::aircraft_damage::asset().probes[impact.contact.node]
+            let span = crate::aircraft_damage::asset_for(damage.kind).probes[impact.contact.node]
                 .iter()
                 .map(|p| p.distance(impact.contact.local))
                 .fold(0_f32, f32::max);
