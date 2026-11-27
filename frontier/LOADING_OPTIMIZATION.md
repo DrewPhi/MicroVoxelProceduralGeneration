@@ -831,3 +831,148 @@ Keep the packed terrain and exact near-field NAADF renderer as defaults.
 Keep box splats opt-in for bounded, frequently edited voxel volumes. A
 fully GPU-generated terrain hierarchy and an end-to-end comparison with
 incremental mesh updates remain outside these measurements.
+
+## Direct procedural Alpine rays
+
+The opt-in `--renderer procedural-terrain` evaluates the Alpine source in
+WGSL. A compute pass bounds 32 m squares, then reduces their upper bounds
+to 128 m and 512 m levels. The three levels hold 1,118,208 bytes of upper
+bounds. Rays skip a square only when the ray stays above its height bound.
+Remaining intervals subdivide front to back. A leaf walks 6.25 cm column
+boundaries, evaluates the seeded source at column centers, and intersects
+quantized roofs or side entries. The work limit produces a magenta diagnostic.
+There are zero generated terrain triangles and zero stored height samples.
+Temporary render attachments and driver allocations are additional.
+
+The second revision used analytic noise derivatives and a global Hessian
+bound to tighten the interval. The Alpine composition and the portable
+split-u32 hash follow `world/src/alpine.rs` and `world/src/terrain.rs`.
+The WGSL source uses f32 arithmetic with padding. The tests use an independent
+f64 native-column DDA and provide sampled evidence of agreement.
+
+The runs used Alpine seed 7, a 60° vertical field of view, a 6 km clip, MSAA1,
+and disabled vegetation, terrain shadows and atmosphere. The tracer is a
+read-only heightfield diagnostic with simple material shading. NAADF and
+edited volume ownership still belong to the normal hybrid. The diagnostic
+does not implement footprint filtering, temporal accumulation or selective
+supersampling. These measurements therefore establish geometry and cost at
+a common camera. Appearance parity remains open.
+
+| Radeon 760M, Vulkan | Resolution | GPU full span p95 | Frame p95 |
+| --- | ---: | ---: | ---: |
+| Packed quads + NAADF, settled (7.5 px target) | 1920 × 1080 | 15.21 ms | 18.45 ms |
+| Packed quads + NAADF, settled (1.25 px target) | 320 × 180 | 3.33 ms | 4.48 ms |
+| Procedural rays, stationary | 320 × 180 | 120.53 ms | 176.66 ms |
+| Procedural rays, turn and return | 320 × 180 | 119.57 ms | 120.01 ms |
+
+The loose-bound prototype's 1080p Radeon capture read back zeros. Its
+windowed run logged a RADV hard recovery. The diagnostic limits that adapter
+to the measured 57,600 pixels per submission. The revised shader produced
+a full 1080p image from 36 Radeon tiles and a single 1080p software capture
+on llvmpipe. The two procedural captures agreed on terrain coverage at every
+pixel, and the Radeon mosaic had zero unresolved pixels. The horizon images
+use the same camera. Skyline displacement between the settled packed and
+meshless captures was 2 pixels p95 and 3 pixels max. The f64 reference agreed on terrain versus sky
+for 1,235 sampled pixels at 1080p and 1,209 at 320 × 180. Among the matching
+terrain hits, absolute ray distance error was 0.60 mm p95 and 22.5 cm max
+at 1080p, and 0.95 mm p95 and 7.7 cm max at 320 × 180.
+
+The packed headless 1080p run published initial coverage at 17.7 ms and
+requested quality at 15.4 s after streaming started. Process to screenshot
+took 18.53 s. The procedural Radeon 320 × 180 headless run took 5.26 s
+including device and pipeline startup, the bounds compute, one render, readback
+and PNG output. It builds bounds once for the stationary and short-turn
+tests. Those elapsed times have different endpoints and output sizes. The
+packed terrain pool used 100 MiB in the 1080p capture, excluding NAADF.
+The procedural bound buffer used 1.07 MiB. Peak process RSS in the stationary
+320 × 180 runs was 544 MiB for the packed hybrid and 143 MiB for the tracer.
+These RSS figures include the device and frame resources.
+
+Keep the packed hybrid as the default. The direct tracer costs 36 times as
+much GPU time at the same reduced resolution, before appearance or volume
+integration. The output files and reports are under `output/procedural-terrain`.
+
+```sh
+WGPU_BACKEND=vulkan ./target/release/frontier --preset alpine --seed 7 \
+  --renderer procedural-terrain --width 320 --height 180 --msaa 1 \
+  --eye -43.625,75,-289.5625 --target 0,490,3300 --capture-far 6000 \
+  --vegetation off --terrain-shadows off --atmosphere off --beauty off \
+  --fog-density 0 --streaming-haze 0 --capture-linear --capture alpine.png
+```
+
+With `FRONTIER_PROCEDURAL_HIT_CAPTURE=1`, the float red channel records ray
+distance in meters, green records face orientation and blue distinguishes
+hits from sky. The example `procedural_terrain_oracle` compares a stratified
+sample and extra skyline probes from that capture to native f64 traversal.
+
+### Shared-work and cache experiments
+
+Alpine seed 7, a 6 km clip and the same 320 × 180 camera as the first
+procedural trial, except for the explicitly level-camera runs. Radeon 760M
+and RADV Mesa 25.2.8. Vegetation, atmosphere and terrain shadows are disabled.
+
+| Complete stationary capture | GPU full span p95 |
+| --- | ---: |
+| Packed quads + NAADF | 3.33 ms |
+| Original procedural tracer | 120.53 ms |
+| Cache the exact noise-gradient codes for nine bands | 60.99 ms |
+| Gradient cache and a 4 m / 0.5 m interval cache | 106.54 ms |
+| Gradient cache, interval cache and exact native-height cache | 63.26 ms |
+| Gradient cache and analytic material slope, independent rays | 61.94 ms |
+| Share a conservative ray prefix across 4 × 4 pixels | 59.17 ms |
+| Independent rays, level camera | 62.12 ms |
+| Reuse the previous row's distance, level camera | 76.33 ms |
+| Sweep the horizontal plane once per eight rows, level camera | 72.68 ms |
+
+The bound and height cache trials and both beam trials matched the corresponding
+independent ray capture in terrain mask and reported ray distances at every
+pixel in the tested view. The level-camera sweeps matched coverage and differed
+by up to 0.46 m on individual hit depths. The sweep applies to a level camera
+so the grouped rays have the same horizontal path. A pitched camera uses
+independent rays. Sharing one traversal across larger groups of 32, 128, or
+256 rows increased GPU p95 to 128.56, 217.94, and 226.44 ms, respectively.
+
+The shared-prefix experiment follows the approach in
+[A Flexible Architecture for Ray Tracing Terrain](https://vca.informatik.uni-rostock.de/~schumann/papers/2014%2B/VCSS15_paper_3.pdf).
+It computes how far every ray in a packet can advance through proven empty
+space. The hierarchy retains upper height bounds and never substitutes a
+coarse hit for a native column.
+
+A separate cache-only shader omits cold evaluations and marks every unresolved
+pixel magenta. It measures the cost of using warm entries. Its time can count
+toward a playable result only when final coverage is complete. One early test
+ran at 5.08 ms GPU p95, but left 20,309 of 57,600 pixels unresolved. Increasing
+the page pool reduced that to 412 at 320 × 180. At 640 × 360, the attempted
+0.5 m page allocations hit both shard limits. The replacement sparse cache
+uses two packed 4 m bounds per word and two exact-key hash tables for 0.5 m
+bounds and native heights. Capture metadata reports successful inserts and
+full-probe fallbacks for both tables.
+
+| Wider sparse cache-only probe | GPU p95 | Frame p95 | Unresolved pixels at capture |
+| --- | ---: | ---: | ---: |
+| 320 × 180, stationary | 17.98 ms | 19.94 ms | 0 / 57,600 |
+| 640 × 360, stationary | 57.50 ms | 60.34 ms | 1,960 / 230,400 |
+| 1920 × 1080, stationary | 159.62 ms | 163.14 ms | 1,179,683 / 2,073,600 |
+
+The wide cache reserved 224 MiB for bounds and native heights, plus the
+independent gradient and coarse-bound buffers. The 1080p probe warmed the
+cache by rendering 36 scissored tiles twice before measuring full-frame draws.
+It filled all 8,388,608 native-height slots and reached 14,649,167 bound inserts.
+The capture still had 56.9% unresolved pixels. These timings exclude warmup,
+and the full-frame timings at 640 × 360 and 1080p represent incomplete images.
+The complete 320 × 180 cache-only capture matched the 320 × 180 beam capture
+with on-demand evaluation byte for byte in RGB.
+
+A separate realtime-clock turn at 5 m/s used the gradient cache, shared ray
+prefixes and the complete independent tracer, including cold evaluations.
+Frame p95 was 61.73 ms at 320 × 180 and 25.50 ms at 160 × 90. The end capture
+of both runs had no unresolved pixels. The 1080p real-time target remains unmet.
+The experiments are opt-in and the packed hybrid remains the shipping path.
+
+Reports and captures are in `output/procedural-realtime`. Enable the gradient
+cache with `FRONTIER_PROCEDURAL_LATTICE=1` and packet traversal with
+`FRONTIER_PROCEDURAL_BEAMS=1`. The cache ceiling probe uses
+`FRONTIER_PROCEDURAL_FINE_CACHE=2 FRONTIER_PROCEDURAL_HOT_PROBE=1`, and
+`FRONTIER_PROCEDURAL_WIDE_CACHE=1` selects the larger tables. The separate
+level-camera sweep uses `FRONTIER_PROCEDURAL_SWEEP=2`. Magenta in a probe
+indicates a missing result.

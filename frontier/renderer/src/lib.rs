@@ -35,6 +35,7 @@ mod page_terrain;
 pub mod physical_pressure_gpu;
 mod playability;
 mod player_edit;
+mod procedural_terrain;
 mod procedural_water_live;
 mod settings;
 mod settings_ui;
@@ -259,6 +260,7 @@ struct Gpu {
     hybrid: Option<hybrid_gpu::HybridGpu>,
     pages: Option<page_terrain::PageGpu>,
     adaptive: Option<adaptive_gpu::AdaptiveGpu>,
+    procedural_terrain: Option<procedural_terrain::ProceduralTerrain>,
     vegetation: Option<vegetation_gpu::VegetationGpu>,
     vegetation_stream: Option<vegetation::VegetationStream>,
     vegetation_background_paused: bool,
@@ -520,6 +522,7 @@ impl Gpu {
             hybrid: None,
             pages: None,
             adaptive: None,
+            procedural_terrain: None,
             vegetation: None,
             vegetation_stream: None,
             vegetation_background_paused: false,
@@ -611,6 +614,24 @@ impl Gpu {
         ) * VOXEL_SIZE;
         Ok(())
     }
+    fn init_procedural_terrain(&mut self, world: &World, width: u32, height: u32) -> Result<()> {
+        // A full 1080p dispatch faulted the tested RADV context. Keep its
+        // diagnostic workload within the successfully benchmarked pixel count.
+        let pixels = u64::from(width) * u64::from(height);
+        if self.adapter_info.contains("Radeon 760M")
+            && pixels > 320 * 180
+            && !(pixels <= 1920 * 1080 && procedural_terrain::tiled_hot_probe_requested())
+        {
+            return Err("Radeon 760M procedural terrain requires at most 57,600 pixels per submission; use diagnostic capture tiles for larger images".into());
+        }
+        self.procedural_terrain = Some(procedural_terrain::ProceduralTerrain::new(
+            &self.device,
+            self.scene_format,
+            world.fbm_terrain().ok_or("procedural terrain requires Alpine fBm")?,
+        )?);
+        Ok(())
+    }
+
     /// Opt-in contention experiment. Startup checks exact parity; frames only
     /// enqueue resident compute and never wait for or consume its output.
     fn init_summary_contention(&mut self, world: &World) -> Result<()> {
@@ -890,6 +911,15 @@ impl Gpu {
                 }
             }
         }
+        if let Some(procedural) = &self.procedural_terrain {
+            procedural.prepare(
+                &self.queue,
+                encoder,
+                *camera,
+                [width, height],
+                self.visual_settings.as_ref(),
+            );
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("native fixture"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -970,6 +1000,10 @@ impl Gpu {
             if !self.volume_owner {
                 return;
             }
+        }
+        if let Some(procedural) = &self.procedural_terrain {
+            procedural.draw(&mut pass, [width, height]);
+            return;
         }
         if let Some(brick) = &self.brick {
             brick.draw(&mut pass);
@@ -1222,6 +1256,9 @@ impl Gpu {
         for scanline in mapped.chunks_exact(row as usize) {
             pixels.extend_from_slice(&scanline[..(width * bpp) as usize]);
         }
+        if self.procedural_terrain.is_some() && pixels.iter().all(|&byte| byte == 0) {
+            return Err("procedural terrain capture returned an empty GPU readback".into());
+        }
         if self.format == wgpu::TextureFormat::Bgra8UnormSrgb
             || self.format == wgpu::TextureFormat::Bgra8Unorm
         {
@@ -1377,6 +1414,14 @@ impl Gpu {
             ",\"naadf_gpu_stages\":{}}}",
             naadf::gpu_stages::json(self.naadf_gpu_stages.as_deref(), &self.device)
         ));
+        if let Some(procedural) = &self.procedural_terrain {
+            metadata.pop();
+            metadata.push_str(&format!(",\"procedural_terrain\":{}}}", procedural.json()));
+            if let Some(counters) = procedural.capture_cache_counters(&self.device, &self.queue)? {
+                metadata.pop();
+                metadata.push_str(&format!(",\"procedural_cache_counters\":{counters:?}}}"));
+            }
+        }
         if let Some(splats) = &self.box_splat {
             metadata.pop();
             metadata.push_str(&format!(",\"box_splat\":{}}}", splats.json()));
@@ -2813,6 +2858,7 @@ impl ApplicationHandler for Viewer {
                 event_loop.create_window(
                     Window::default_attributes()
                         .with_title("Frontier native fixture — click to capture mouse")
+                        .with_resizable(self.renderer != "procedural-terrain")
                         .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height)),
                 )?,
             );
@@ -2834,6 +2880,10 @@ impl ApplicationHandler for Viewer {
                 gpu.install_fixture_volume(&snapshot, &self.renderer)?;
             }
             gpu.configure_visuals(&self.world, &self.visual_settings);
+            if self.renderer == "procedural-terrain" {
+                let size = window.inner_size();
+                gpu.init_procedural_terrain(&self.world, size.width, size.height)?;
+            }
             self.gpu_probe = gpu_probe::GpuProbe::new(&gpu.device, &gpu.queue);
             if let Some(view) = &mut self.adaptive_view {
                 view.poll(&mut gpu, self.camera, self.width, self.height)?;
@@ -3184,8 +3234,22 @@ pub fn run() -> Result<()> {
     else {
         return Ok(());
     };
+    let procedural = renderer == "procedural-terrain";
+    if procedural
+        && (scene != "adaptive"
+            || params.recipe != frontier_world::FbmRecipe::Alpine
+            || msaa != 1
+            || capture_far.unwrap_or(20000.) > 6000.
+            || live_water_enabled
+            || player_edit_enabled
+            || teleport_test
+            || edit_test
+            || adaptive_wait_quality)
+    {
+        return Err("procedural-terrain requires a read-only Alpine adaptive scene, MSAA1, and --capture-far at most 6000".into());
+    }
     let visual_menu_enabled =
-        scene == "adaptive" && !benchmark_input_lock && !adaptive_wait_quality;
+        !procedural && scene == "adaptive" && !benchmark_input_lock && !adaptive_wait_quality;
     let visual_disk_cache = adaptive_disk_cache.clone();
     let mut visual_settings = settings::VisualSettings {
         pixel_error,
@@ -3204,6 +3268,11 @@ pub fn run() -> Result<()> {
         ),
         ..visual
     };
+    if procedural {
+        visual_settings.naadf_enabled = false;
+        visual_settings.vegetation = false;
+        visual_settings.terrain_shadows = false;
+    }
     if capture_linear {
         visual_settings.atmosphere = false;
         visual_settings.render_scale = 1.;
@@ -3332,21 +3401,23 @@ pub fn run() -> Result<()> {
         } else {
             world.clone()
         };
-        adaptive_view = Some(adaptive_view::AdaptiveView::new(
-            surface_world,
-            pixel_error,
-            adaptive_cache_mib * 1024 * 1024,
-            native_bins,
-            adaptive_workers,
-            adaptive_refinements,
-            adaptive_direct_native,
-            adaptive_build_mib * 1024 * 1024,
-            adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
-                path,
-                budget_bytes: (adaptive_disk_mib * 1024 * 1024) as u64,
-                max_entry_bytes: 64 * 1024 * 1024,
-            }),
-        )?);
+        if !procedural {
+            adaptive_view = Some(adaptive_view::AdaptiveView::new(
+                surface_world,
+                pixel_error,
+                adaptive_cache_mib * 1024 * 1024,
+                native_bins,
+                adaptive_workers,
+                adaptive_refinements,
+                adaptive_direct_native,
+                adaptive_build_mib * 1024 * 1024,
+                adaptive_disk_cache.map(|path| adaptive_stream::DiskCacheConfig {
+                    path,
+                    budget_bytes: (adaptive_disk_mib * 1024 * 1024) as u64,
+                    max_entry_bytes: 64 * 1024 * 1024,
+                }),
+            )?);
+        }
         if let Some(view) = &mut adaptive_view {
             view.reconfigure(adaptive_stream::StreamSettings {
                 native_radius_m: visual_settings.native_radius_m,
@@ -3696,6 +3767,9 @@ pub fn run() -> Result<()> {
             gpu.init_pages(&cover);
         }
         gpu.configure_visuals(&world, &visual_settings);
+        if renderer == "procedural-terrain" {
+            gpu.init_procedural_terrain(&world, width, height)?;
+        }
         if let Some(view) = &mut adaptive_view {
             if visual_settings.naadf_enabled {
                 view.poll(&mut gpu, camera, width, height)?;
@@ -4060,8 +4134,12 @@ pub fn run() -> Result<()> {
         json.pop();
         json.push_str(&format!(",\"source\":{{\"version\":{},\"native_voxel_m\":{},\"horizontal_scale_m\":{},\"amplitude_m\":{},\"octaves\":{},\"roughness\":{}}},\"representation\":{{\"name\":\"{}\",\"surface_only\":{},\"fixed_center\":{},\"half_extent_m\":{},\"finest_spacing_m\":{},\"levels\":{},\"triangles\":{},\"gpu_page_bytes\":{}}},\"route_height_policy\":\"FBM proxy routes clamp to canonical surface +10m; hybrid routes clamp +1.7m; freefly unconstrained\",\"route_step_seconds\":{},\"camera_start\":{{\"position\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}}}",
             viewer.world.fbm_terrain().map_or(frontier_world::SOURCE_VERSION, |source| source.source_version()),VOXEL_SIZE,params.horizontal_scale,params.amplitude,params.octaves,params.roughness,
-            if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer=="box-splat" {"exact_native_box_splats"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or_else(||g.box_splat.as_ref().map_or(g.index_count/3,|s|s.triangle_count()),|t|t.index_count/3),|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
+            if procedural {"meshless_alpine_native_column_rays"} else if scene.starts_with("pages") {"bounded_uniform_reusable_gpu_source_pages_with_native_collar"} else if scene.starts_with("adaptive") {"adaptive_pooled_canonical_clusters"} else if fbm {if viewer.surface_layout=="quadtree" {"bounded_adaptive_quadtree_probe"} else if terrain_static {"experimental_static_nested_surface_grids"} else {"experimental_moving_nested_surface_grids"}} else if scene.starts_with("hybrid") && scene!="hybrid-static" {"moving_chunked_native_64m_coherent_collar_gpu_proxy"} else if scene=="hybrid-static" {"fixed_native_64m_cpu_proxy_reference"} else if viewer.renderer=="box-splat" {"exact_native_box_splats"} else if viewer.renderer!="mesh" {"exact_native_brick_rays"} else {"exact_native_greedy"},scene=="adaptive" || scene=="pages" || fbm || (scene.starts_with("hybrid") && scene!="hybrid-topology"),(fbm && terrain_static) || scene=="hybrid-static" || (scene=="hybrid" && terrain_static),if scene.starts_with("pages") {page_terrain::HALF_EXTENT_M*page_spacing as f64} else if scene.starts_with("adaptive") {viewer.camera.far as f64} else if fbm || scene.starts_with("hybrid") {terrain::half_extent(view_levels)} else if scene=="fbm-native" {4.} else {8.},if fbm {0.5} else {VOXEL_SIZE},if fbm || scene.starts_with("hybrid") {view_levels} else {1},viewer.gpu.as_ref().map_or(0,|g|g.adaptive.as_ref().map_or_else(||g.surface_probe.as_ref().map_or_else(||g.pages.as_ref().map_or_else(||g.terrain.as_ref().map_or_else(||g.box_splat.as_ref().map_or(g.index_count/3,|s|s.triangle_count()),|t|t.index_count/3),|_|(page_terrain::MAX_PAGES*page_terrain::SIDE*page_terrain::SIDE*2) as u32)+g.hybrid.as_ref().map_or(0,|h|h.triangles())+if g.volume_owner {g.index_count/3}else{0},|p|p.stats().triangles),|_|viewer.adaptive_view.as_ref().map_or(0,|v|v.stats.triangles as u32)+if g.volume_owner {g.index_count/3}else{0})),if scene.starts_with("pages") {page_terrain::GPU_BYTES} else if fbm || scene.starts_with("hybrid") {terrain::page_bytes(view_levels)} else {0},route_step,viewer.initial_camera.position.x,viewer.initial_camera.position.y,viewer.initial_camera.position.z,viewer.initial_camera.yaw,viewer.initial_camera.pitch));
         if let Some(gpu) = &viewer.gpu {
+            if let Some(procedural) = &gpu.procedural_terrain {
+                json.pop();
+                json.push_str(&format!(",\"procedural_terrain\":{}}}", procedural.json()));
+            }
             json.pop();
             json.push_str(&format!(",{}}}", gpu.vegetation_json()));
         }
